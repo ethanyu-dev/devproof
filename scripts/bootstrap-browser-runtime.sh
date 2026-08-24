@@ -78,7 +78,7 @@ trap 'exit 143' TERM
 download() {
   local asset="$1"
   printf 'Downloading %s...\n' "$asset"
-  curl --fail --location --silent --show-error \
+  curl --ipv4 --fail --location --silent --show-error \
     --output "$temporary/$asset" "$release_base/$asset"
 }
 
