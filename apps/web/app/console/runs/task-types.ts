@@ -1,0 +1,155 @@
+export interface TaskRunSummary {
+  currentAttemptNumber: number;
+  evidenceCount: number;
+  executionDisposition: string | null;
+  interventionCount: number;
+  lifecycle: string;
+  maxAttempts: number;
+  runId: string;
+  verdict: string | null;
+}
+
+export interface TaskCaseExecution {
+  dispatch: {
+    attempts: number;
+    lastError: unknown;
+    requestedAt: string | null;
+    status: string;
+  };
+  executionOrdinal: number;
+  id: string;
+  run: TaskRunSummary | null;
+}
+
+export interface TaskCase {
+  definition: {
+    authRole: string;
+    evidence: Array<{ description: string; kind: string }>;
+    expected: string[];
+    name: string;
+    preconditions: string[];
+    steps: Array<{ action: string; order: number }>;
+  };
+  definitionHash: string;
+  executions: TaskCaseExecution[];
+  id: string;
+  name: string;
+  position: number;
+}
+
+export interface TaskStage {
+  attempts: Array<{
+    error: unknown;
+    finishedAt: string | null;
+    id: string;
+    number: number;
+    result: unknown;
+    startedAt: string | null;
+    status: string;
+  }>;
+  currentAttemptNumber: number;
+  finishedAt: string | null;
+  id: string;
+  lastError: unknown;
+  maxAttempts: number;
+  startedAt: string | null;
+  status: string;
+  type: "SPEC_ANALYSIS" | "PROFILE_RESOLUTION" | "SPEC_EXECUTION";
+  waitingReason: string | null;
+}
+
+export interface TaskDetail {
+  cancelRequestedAt: string | null;
+  cases: TaskCase[];
+  counts: {
+    blocked: number;
+    failed: number;
+    inconclusive: number;
+    passed: number;
+    running: number;
+    total: number;
+    waiting: number;
+  };
+  createdAt: string;
+  currentStage: string;
+  deadlineAt: string;
+  environment: unknown;
+  executionDisposition: string | null;
+  finishedAt: string | null;
+  id: string;
+  input: unknown;
+  kind: "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
+  lifecycle: string;
+  profileBinding: {
+    failureCode: string | null;
+    failureMessage: string | null;
+    profileOwnerUserId: string | null;
+    requestedProfile: {
+      displayName: string;
+      id: string;
+      owner: { id: string; name: string };
+      status: string;
+    } | null;
+    resolvedAt: string | null;
+    resolvedProfile: {
+      displayName: string;
+      id: string;
+      status: string;
+    } | null;
+    status: string;
+    strategy: string;
+    triggerSource: string | null;
+    unavailablePolicy: string;
+  } | null;
+  runs: TaskRunSummary[];
+  source: { kind: string; ref: string | null };
+  specification: {
+    completeness: string;
+    context: unknown;
+    diagnostics: Array<{
+      code: string;
+      level: "INFO" | "WARNING" | "ERROR";
+      message: string;
+      reference: string | null;
+      source: "LINEAR" | "GITHUB" | "KNOWLEDGE";
+    }>;
+    generatedAt: string;
+    generatorKind: string;
+    generatorVersion: string;
+    id: string;
+    primaryPullRequestUrl: string | null;
+    sourceHash: string;
+    summary: string;
+  } | null;
+  stages: TaskStage[];
+  startedAt: string | null;
+  title: string;
+  traceId: string;
+  updatedAt: string;
+  verdict: string | null;
+  waitingReason: string | null;
+}
+
+export type TaskSummary = Pick<
+  TaskDetail,
+  | "counts"
+  | "createdAt"
+  | "currentStage"
+  | "executionDisposition"
+  | "id"
+  | "kind"
+  | "lifecycle"
+  | "source"
+  | "title"
+  | "updatedAt"
+  | "verdict"
+  | "waitingReason"
+>;
+
+export interface TaskEvent {
+  actor: string;
+  kind: string;
+  occurredAt: string;
+  payload: unknown;
+  sequence: string;
+}

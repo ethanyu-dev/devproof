@@ -1,0 +1,37 @@
+{
+  "name": "devproof",
+  "version": "0.2.0",
+  "private": true,
+  "packageManager": "pnpm@10.30.2",
+  "pnpm": {
+    "overrides": {
+      "deepmerge-ts": "8.0.2",
+      "find-my-way@<=9.6.0": ">=9.7.0",
+      "nanoid": "3.3.18",
+      "postcss@<8.5.23": ">=8.5.23",
+      "sharp@<0.35.0": ">=0.35.0"
+    }
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "pnpm prisma:generate && pnpm build:packages && pnpm -r --filter './apps/*' --if-present build",
+    "build:packages": "pnpm --filter @devproof/runtime-protocol build && pnpm --filter @devproof/agent-runtime-protocol build && pnpm --filter @devproof/test-domain build && pnpm --filter @devproof/contracts build",
+    "deploy:browser-runtime": "bash scripts/deploy-browser-runtime.sh",
+    "dev": "pnpm prisma:generate && pnpm build:packages && node scripts/dev.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prisma:generate": "pnpm --filter @devproof/api prisma:generate",
+    "prisma:deploy": "pnpm --filter @devproof/api prisma:deploy",
+    "prisma:migrate": "pnpm --filter @devproof/api prisma:migrate",
+    "stats": "node scripts/code-stats.mjs",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm prisma:generate && pnpm build:packages && pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "@kitschpatrol/tokei": "2.0.2",
+    "prettier": "^3.5.3",
+    "typescript": "^6.0.3"
+  }
+}

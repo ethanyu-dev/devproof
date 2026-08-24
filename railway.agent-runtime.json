@@ -1,0 +1,29 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "apps/agent-runtime/Dockerfile",
+    "watchPatterns": [
+      "/.dockerignore",
+      "/apps/agent-runtime/**",
+      "/packages/agent-runtime-protocol/**",
+      "/packages/runtime-protocol/**",
+      "/package.json",
+      "/pnpm-lock.yaml",
+      "/pnpm-workspace.yaml",
+      "/railway.agent-runtime.json",
+      "/tsconfig.base.json"
+    ]
+  },
+  "deploy": {
+    "drainingSeconds": 30,
+    "multiRegionConfig": {
+      "asia-southeast1-eqsg3a": {
+        "numReplicas": 1
+      }
+    },
+    "restartPolicyMaxRetries": 10,
+    "restartPolicyType": "ON_FAILURE",
+    "sleepApplication": false
+  }
+}

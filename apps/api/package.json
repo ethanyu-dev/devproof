@@ -1,0 +1,50 @@
+{
+  "name": "@devproof/api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json && (tsc -p tsconfig.build.json --watch --preserveWatchOutput & node --watch dist/main.js)",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:data-smoke": "node scripts/test-data-smoke.mjs",
+    "test:verification-smoke": "node scripts/verification-smoke.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1089.0",
+    "@aws-sdk/s3-request-presigner": "^3.1089.0",
+    "@devproof/agent-runtime-protocol": "workspace:*",
+    "@devproof/contracts": "workspace:*",
+    "@devproof/runtime-protocol": "workspace:*",
+    "@devproof/test-domain": "workspace:*",
+    "@fastify/cookie": "11.0.2",
+    "@fastify/websocket": "^11.3.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@nestjs/common": "^11.1.27",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.1.27",
+    "@nestjs/platform-fastify": "^11.1.27",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.0.0",
+    "ioredis": "^5.10.1",
+    "prisma": "^7.8.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.1.27",
+    "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

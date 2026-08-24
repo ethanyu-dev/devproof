@@ -1,0 +1,13 @@
+scrape_configs:
+  - job_name: devproof-api
+    metrics_path: /metrics
+    scheme: https
+    authorization:
+      credentials_file: /etc/prometheus/secrets/devproof_metrics_token
+      type: Bearer
+    static_configs:
+      - targets:
+          - devproof-api.example.com
+
+rule_files:
+  - /etc/prometheus/rules/devproof-alerts.yml

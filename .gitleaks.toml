@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic lease token and idempotency fixtures"
+regexTarget = "match"
+regexes = [
+  '''70844616-602c-475b-95f6-393015b82ed1''',
+  '''verification-smoke-1''',
+]
+
+[[allowlists]]
+description = "Credential-shaped values used to test log redaction"
+paths = [
+  '''apps/api/src/observability/observability\.service\.spec\.ts''',
+]

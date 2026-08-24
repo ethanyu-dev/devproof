@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: devproof
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d devproof"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "55432:5432"
+    volumes:
+      - devproof-postgres:/var/lib/postgresql/data
+  redis:
+    image: redis:8-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - devproof-local-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devproof-local-redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "56379:6379"
+    volumes:
+      - devproof-redis:/data
+  object-storage:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: devproof-local-access
+      MINIO_ROOT_PASSWORD: devproof-local-secret-key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "59000:9000"
+      - "59001:9001"
+    volumes:
+      - devproof-objects:/data
+
+volumes:
+  devproof-postgres:
+  devproof-redis:
+  devproof-objects:

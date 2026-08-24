@@ -1,0 +1,1062 @@
+import { z } from "zod";
+
+export const RUNTIME_PROTOCOL = {
+  major: 1,
+  minor: 10,
+  name: "devproof-browser-runtime",
+} as const;
+export const USER_PROFILE_INACTIVITY_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+export const RUNTIME_HEARTBEAT_INTERVAL_MS = 15_000;
+export const RUNTIME_PREAUTH_TIMEOUT_MS = 10_000;
+export const RUNTIME_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+export const RUNTIME_MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+export const BROWSER_HUMAN_INPUT_LIMITS = {
+  maxBatchEvents: 32,
+  maxKeyLength: 64,
+  maxTextLength: 2_048,
+  maxWheelDelta: 2_000,
+} as const;
+
+const normalizedCoordinateSchema = z.number().finite().min(0).max(1);
+
+export const browserHumanInputEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    key: z.string().min(1).max(BROWSER_HUMAN_INPUT_LIMITS.maxKeyLength),
+    phase: z.enum(["down", "up"]),
+    type: z.literal("key"),
+  }),
+  z.object({
+    button: z.enum(["left", "middle", "none", "right"]),
+    phase: z.enum(["down", "move", "up"]),
+    type: z.literal("pointer"),
+    x: normalizedCoordinateSchema,
+    y: normalizedCoordinateSchema,
+  }),
+  z.object({ type: z.literal("release") }),
+  z.object({
+    text: z.string().min(1).max(BROWSER_HUMAN_INPUT_LIMITS.maxTextLength),
+    type: z.literal("text"),
+  }),
+  z.object({
+    deltaX: z
+      .number()
+      .finite()
+      .min(-BROWSER_HUMAN_INPUT_LIMITS.maxWheelDelta)
+      .max(BROWSER_HUMAN_INPUT_LIMITS.maxWheelDelta),
+    deltaY: z
+      .number()
+      .finite()
+      .min(-BROWSER_HUMAN_INPUT_LIMITS.maxWheelDelta)
+      .max(BROWSER_HUMAN_INPUT_LIMITS.maxWheelDelta),
+    type: z.literal("wheel"),
+    x: normalizedCoordinateSchema,
+    y: normalizedCoordinateSchema,
+  }),
+]);
+
+export const browserHumanInputEventsSchema = z
+  .array(browserHumanInputEventSchema)
+  .min(1)
+  .max(BROWSER_HUMAN_INPUT_LIMITS.maxBatchEvents);
+
+export const runtimeProtocolVersionSchema = z.object({
+  major: z.number().int().nonnegative(),
+  minor: z.number().int().nonnegative(),
+  name: z.literal(RUNTIME_PROTOCOL.name),
+});
+
+export const runtimeNetworkAllowlistEntrySchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(1)
+  .max(253)
+  .refine(
+    (value) => {
+      const hostname = value.startsWith("*.") ? value.slice(2) : value;
+      return (
+        !value.includes("*", 1) &&
+        hostname
+          .split(".")
+          .every(
+            (label) =>
+              label.length >= 1 &&
+              label.length <= 63 &&
+              /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+          )
+      );
+    },
+    {
+      message:
+        "Use an exact hostname or a leading wildcard such as *.example.com.",
+    },
+  );
+
+export const runtimeNetworkAllowlistSchema = z
+  .array(runtimeNetworkAllowlistEntrySchema)
+  .max(128)
+  .transform((entries) => [...new Set(entries)]);
+
+export const userProfileRetentionSchema = z
+  .object({
+    // Accepted only so a rolling upgrade can read sessions persisted by an
+    // older Runtime. Profile retention no longer carries a network policy.
+    allowedHostnamePatterns: z
+      .array(runtimeNetworkAllowlistEntrySchema)
+      .max(50)
+      .optional(),
+    inactivityTtlSeconds: z.literal(USER_PROFILE_INACTIVITY_TTL_SECONDS),
+    kind: z.literal("USER"),
+  })
+  .strict();
+
+export const localRuntimeSessionSchema = z
+  .object({
+    fencingToken: z.string().regex(/^\d+$/u),
+    leaseToken: z.string().uuid(),
+    profileKey: z.string().min(1).max(160),
+    profileMode: z.enum(["PERSISTENT", "EPHEMERAL"]),
+    profileRetention: userProfileRetentionSchema.optional(),
+    sessionId: z.string().uuid(),
+    state: z.enum(["OPEN", "HUMAN_CONTROL", "INTERRUPTED"]),
+  })
+  .superRefine((value, context) => {
+    if (value.profileRetention && value.profileMode !== "PERSISTENT") {
+      context.addIssue({
+        code: "custom",
+        message: "User Profile retention requires PERSISTENT profile mode.",
+        path: ["profileRetention"],
+      });
+    }
+  });
+
+export const runtimeHelloSchema = z.object({
+  activeSessions: z.array(localRuntimeSessionSchema).max(64).default([]),
+  instanceNonce: z.string().min(16).max(160),
+  protocol: runtimeProtocolVersionSchema,
+  runtimeId: z.string().uuid(),
+  runtimeToken: z.string().min(32).max(512),
+  sentAt: z.string().datetime(),
+  type: z.literal("runtime.hello"),
+  version: z.string().trim().min(1).max(64).optional(),
+});
+
+export const runtimeHeartbeatSchema = z.object({
+  activeSessions: z
+    .array(
+      z.object({
+        fencingToken: z.string().regex(/^\d+$/u),
+        leaseToken: z.string().uuid(),
+        sessionId: z.string().uuid(),
+        state: z.enum(["OPEN", "HUMAN_CONTROL", "INTERRUPTED"]),
+      }),
+    )
+    .max(64),
+  maxConcurrency: z.number().int().min(1).max(32),
+  sentAt: z.string().datetime(),
+  type: z.literal("runtime.heartbeat"),
+});
+
+export const runtimeArtifactPayloadSchema = z.object({
+  contentType: z.string().min(1).max(120),
+  dataBase64: z.string().min(1),
+  kind: z.enum(["SCREENSHOT", "DOM", "CONSOLE", "NETWORK", "VIDEO"]),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const runtimeCommandResultSchema = z.object({
+  artifacts: z.array(runtimeArtifactPayloadSchema).max(8).default([]),
+  commandId: z.string().uuid(),
+  error: z
+    .object({
+      code: z.string().min(1).max(80),
+      message: z.string().min(1).max(2000),
+      retryable: z.boolean().default(false),
+    })
+    .optional(),
+  fencingToken: z.string().regex(/^\d+$/u),
+  leaseToken: z.string().uuid(),
+  ok: z.boolean(),
+  result: z.record(z.string(), z.unknown()).optional(),
+  sessionId: z.string().uuid(),
+  type: z.literal("command.result"),
+});
+
+export const runtimeEventSchema = z.object({
+  eventId: z.string().uuid(),
+  fencingToken: z.string().regex(/^\d+$/u),
+  kind: z.enum([
+    "PAGE_CHANGED",
+    "CONSOLE_ERROR",
+    "NETWORK_ERROR",
+    "NETWORK_FAULT_HIT",
+    "HUMAN_INPUT",
+    "SESSION_INTERRUPTED",
+  ]),
+  leaseToken: z.string().uuid(),
+  payload: z.record(z.string(), z.unknown()).default({}),
+  sessionId: z.string().uuid(),
+  timestamp: z.string().datetime(),
+  type: z.literal("runtime.event"),
+});
+
+export const runtimeProfileLifecycleSchema = z.object({
+  eventId: z.string().uuid(),
+  kind: z.literal("PROFILE_EXPIRED"),
+  lastUsedAt: z.string().datetime(),
+  profileKey: z
+    .string()
+    .min(1)
+    .max(160)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
+  purgedAt: z.string().datetime(),
+  type: z.literal("profile.lifecycle"),
+});
+
+export const runtimeHumanPreviewFrameSchema = z.object({
+  capturedAt: z.string().datetime(),
+  dataBase64: z.string().min(1),
+  fencingToken: z.string().regex(/^\d+$/u),
+  height: z.number().int().positive(),
+  leaseToken: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  streamId: z.string().uuid(),
+  title: z.string().max(1000),
+  type: z.literal("human.preview.frame"),
+  url: z.string().max(4000),
+  width: z.number().int().positive(),
+});
+
+export const runtimeHumanInputResultSchema = z.object({
+  dispatchId: z.string().uuid(),
+  error: z.string().min(1).max(1000).optional(),
+  fencingToken: z.string().regex(/^\d+$/u),
+  leaseToken: z.string().uuid(),
+  ok: z.boolean(),
+  sessionId: z.string().uuid(),
+  type: z.literal("human.input.result"),
+});
+
+export const runtimeClientMessageSchema = z.discriminatedUnion("type", [
+  runtimeHelloSchema,
+  runtimeHeartbeatSchema,
+  runtimeCommandResultSchema,
+  runtimeEventSchema,
+  runtimeProfileLifecycleSchema,
+  runtimeHumanPreviewFrameSchema,
+  runtimeHumanInputResultSchema,
+]);
+
+export const reconcileActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("ADOPT"),
+    fencingToken: z.string().regex(/^\d+$/u),
+    leaseExpiresAt: z.string().datetime(),
+    leaseToken: z.string().uuid(),
+    sessionId: z.string().uuid(),
+  }),
+  z.object({
+    action: z.literal("RESTORE"),
+    allowedOrigins: z.array(z.string().url().max(2_048)).max(32).default([]),
+    fencingToken: z.string().regex(/^\d+$/u),
+    leaseExpiresAt: z.string().datetime(),
+    leaseToken: z.string().uuid(),
+    profileKey: z.string().min(1).max(160),
+    profileMode: z.literal("PERSISTENT"),
+    profileRetention: userProfileRetentionSchema.optional(),
+    sessionId: z.string().uuid(),
+  }),
+  z.object({
+    action: z.literal("CLOSE_LOCAL"),
+    reason: z.string().min(1).max(240),
+    sessionId: z.string().uuid(),
+  }),
+]);
+
+export const runtimeHelloAcceptedSchema = z.object({
+  heartbeatIntervalMs: z.number().int().positive(),
+  networkAllowlist: runtimeNetworkAllowlistSchema.default([]),
+  protocol: runtimeProtocolVersionSchema,
+  reconcile: z.array(reconcileActionSchema),
+  serverTime: z.string().datetime(),
+  type: z.literal("runtime.hello.accepted"),
+});
+
+export const runtimeNetworkPolicyUpdatedSchema = z.object({
+  networkAllowlist: runtimeNetworkAllowlistSchema,
+  type: z.literal("runtime.network_policy.updated"),
+});
+
+export const runtimeHelloRejectedSchema = z.object({
+  code: z.enum([
+    "AUTH_FAILED",
+    "PROTOCOL_MISMATCH",
+    "RUNTIME_DISABLED",
+    "INVALID_HELLO",
+  ]),
+  message: z.string().min(1).max(500),
+  supportedProtocol: runtimeProtocolVersionSchema,
+  type: z.literal("runtime.hello.rejected"),
+});
+
+export const runtimeCommandTypeSchema = z.enum([
+  "session.open",
+  "session.close",
+  "profile.purge",
+  "page.open",
+  "page.navigate",
+  "page.back",
+  "page.forward",
+  "page.reload",
+  "page.snapshot",
+  "page.get_text",
+  "page.get_url",
+  "page.get_title",
+  "page.errors",
+  "page.screenshot",
+  "page.dom",
+  "page.console",
+  "page.network",
+  "page.click",
+  "page.fill",
+  "page.type",
+  "page.press",
+  "page.check",
+  "page.uncheck",
+  "page.select",
+  "page.scroll",
+  "page.hover",
+  "page.drag",
+  "page.resize",
+  "page.wait",
+  "tab.new",
+  "tab.list",
+  "tab.switch",
+  "tab.close",
+  "frame.snapshot",
+  "frame.click",
+  "frame.fill",
+  "element.state",
+  "locator.count",
+  "network.arm",
+  "network.wait_for_hit",
+  "network.status",
+  "network.release",
+  "human.takeover",
+  "human.release",
+]);
+
+export function runtimeCommandMinimumMinor(
+  commandType: z.infer<typeof runtimeCommandTypeSchema>,
+): number {
+  if (["page.snapshot", "page.dom", "page.network"].includes(commandType)) {
+    return 7;
+  }
+  if (commandType === "profile.purge") return 6;
+  if (
+    [
+      "page.get_text",
+      "page.click",
+      "page.fill",
+      "page.type",
+      "page.press",
+      "page.check",
+      "page.uncheck",
+      "page.select",
+      "page.scroll",
+      "page.hover",
+      "page.drag",
+      "page.wait",
+      "frame.snapshot",
+      "frame.click",
+      "frame.fill",
+      "element.state",
+      "locator.count",
+    ].includes(commandType)
+  ) {
+    return 5;
+  }
+  return [
+    "session.open",
+    "session.close",
+    "human.takeover",
+    "human.release",
+  ].includes(commandType)
+    ? 1
+    : 2;
+}
+
+const emptyPayloadSchema = z.object({}).strict();
+const urlSchema = z
+  .string()
+  .trim()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), {
+    message: "Browser navigation only supports http and https URLs.",
+  })
+  .refine((value) => !/^https?:\/\/[^/?#]*@/iu.test(value), {
+    message: "Browser navigation URLs cannot contain credentials.",
+  });
+const selectorSchema = z.string().trim().min(1).max(2_048);
+// Playwright AI snapshots expose opaque aria-ref tokens. Top-level refs use
+// eN while refs scoped to a frame/page generation include an fN prefix.
+// Consumers must preserve the complete token returned by the snapshot.
+export const elementRefSchema = z.string().regex(/^(?:f\d+)?e\d+$/u);
+const cursorSchema = z.coerce.number().int().min(0).default(0);
+const maxCharsSchema = z.coerce
+  .number()
+  .int()
+  .min(1_000)
+  .max(256 * 1_024)
+  .default(96 * 1_024);
+const waitUntilSchema = z
+  .enum(["commit", "domcontentloaded", "load", "networkidle"])
+  .default("domcontentloaded");
+const loadStateSchema = z
+  .enum(["domcontentloaded", "load", "networkidle"])
+  .default("domcontentloaded");
+
+export const runtimeLocatorSchema = z.union([
+  z.object({ ref: elementRefSchema }).strict(),
+  z
+    .object({
+      frameSelector: selectorSchema.optional(),
+      selector: selectorSchema,
+    })
+    .strict(),
+]);
+
+const navigationPayloadSchema = z
+  .object({ url: urlSchema, waitUntil: waitUntilSchema.optional() })
+  .strict();
+const historyPayloadSchema = z
+  .object({ waitUntil: waitUntilSchema.optional() })
+  .strict();
+const pagedTextPayloadSchema = z
+  .object({
+    cursor: cursorSchema.optional(),
+    maxChars: maxCharsSchema.optional(),
+  })
+  .strict();
+const snapshotPayloadSchema = z
+  .object({
+    cursor: cursorSchema.optional(),
+    depth: z.coerce.number().int().min(1).max(50).default(12).optional(),
+    includeBoxes: z.boolean().default(false).optional(),
+    maxChars: maxCharsSchema.optional(),
+    target: runtimeLocatorSchema.optional(),
+  })
+  .strict();
+const networkEvidencePayloadSchema = pagedTextPayloadSchema
+  .extend({
+    includeResponseBodies: z.boolean().default(false).optional(),
+    urlIncludes: z.string().trim().min(1).max(2_048).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.includeResponseBodies && !value.urlIncludes) {
+      context.addIssue({
+        code: "custom",
+        message: "urlIncludes is required when response bodies are included.",
+        path: ["urlIncludes"],
+      });
+    }
+  });
+const targetPayloadSchema = z.object({ target: runtimeLocatorSchema }).strict();
+const textTargetPayloadSchema = z
+  .object({ target: runtimeLocatorSchema, text: z.string().max(64 * 1_024) })
+  .strict();
+const frameTargetSchema = runtimeLocatorSchema;
+
+const sessionCommandPayloadVariants = [
+  z.object({
+    commandType: z.literal("session.open"),
+    payload: z
+      .object({
+        allowedOrigins: z
+          .array(z.string().url().max(2_048))
+          .max(32)
+          .default([]),
+        profileKey: z.string().min(1).max(160),
+        profileMode: z.enum(["PERSISTENT", "EPHEMERAL"]),
+        profileRetention: userProfileRetentionSchema.optional(),
+      })
+      .strict()
+      .superRefine((value, context) => {
+        if (value.profileRetention && value.profileMode !== "PERSISTENT") {
+          context.addIssue({
+            code: "custom",
+            message: "User Profile retention requires PERSISTENT profile mode.",
+            path: ["profileRetention"],
+          });
+        }
+      }),
+  }),
+  z.object({
+    commandType: z.literal("session.close"),
+    payload: emptyPayloadSchema,
+  }),
+  z.object({
+    commandType: z.literal("profile.purge"),
+    payload: z
+      .object({
+        profileKey: z
+          .string()
+          .min(1)
+          .max(160)
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
+      })
+      .strict(),
+  }),
+] as const;
+
+const runtimeActionCommandPayloadVariants = [
+  ...(["page.open", "page.navigate"] as const).map((commandType) =>
+    z.object({
+      commandType: z.literal(commandType),
+      payload: navigationPayloadSchema,
+    }),
+  ),
+  ...(["page.back", "page.forward", "page.reload"] as const).map(
+    (commandType) =>
+      z.object({
+        commandType: z.literal(commandType),
+        payload: historyPayloadSchema,
+      }),
+  ),
+  z
+    .object({
+      commandType: z.literal("page.snapshot"),
+      payload: snapshotPayloadSchema,
+    })
+    .describe(
+      "Capture transient accessibility context and opaque refs for the Agent. This is observation only and does not create persistent DOM evidence; use page.dom for an artifact.",
+    ),
+  z
+    .object({
+      commandType: z.literal("page.get_text"),
+      payload: z
+        .object({
+          cursor: cursorSchema.optional(),
+          maxChars: maxCharsSchema.optional(),
+          target: runtimeLocatorSchema.optional(),
+        })
+        .strict(),
+    })
+    .describe(
+      "Read bounded visible text from the page or one target. This is the text command; do not invent page.content.",
+    ),
+  ...(["page.get_url", "page.get_title", "tab.list"] as const).map(
+    (commandType) =>
+      z.object({
+        commandType: z.literal(commandType),
+        payload: emptyPayloadSchema,
+      }),
+  ),
+  z
+    .object({
+      commandType: z.literal("page.errors"),
+      payload: z
+        .object({
+          cursor: cursorSchema.optional(),
+          kind: z.enum(["ALL", "CONSOLE", "NETWORK"]).default("ALL").optional(),
+          maxItems: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(500)
+            .default(100)
+            .optional(),
+        })
+        .strict(),
+    })
+    .describe(
+      "Read bounded console/network error summaries for diagnosis. Use page.console or page.network when persistent evidence is required.",
+    ),
+  z
+    .object({
+      commandType: z.literal("page.screenshot"),
+      payload: z
+        .object({
+          format: z.enum(["jpeg", "png"]).default("jpeg").optional(),
+          fullPage: z.boolean().default(false).optional(),
+          quality: z.coerce
+            .number()
+            .int()
+            .min(30)
+            .max(90)
+            .default(70)
+            .optional(),
+        })
+        .strict(),
+    })
+    .describe("Create persistent SCREENSHOT artifact evidence."),
+  ...(["page.dom", "page.console"] as const).map((commandType) =>
+    z
+      .object({
+        commandType: z.literal(commandType),
+        payload: pagedTextPayloadSchema,
+      })
+      .describe(
+        commandType === "page.dom"
+          ? "Create persistent DOM artifact evidence, including open Shadow DOM content. This is the HTML-content command; page.content does not exist."
+          : "Create persistent CONSOLE artifact evidence.",
+      ),
+  ),
+  z
+    .object({
+      commandType: z.literal("page.network"),
+      payload: networkEvidencePayloadSchema,
+    })
+    .describe(
+      "Create persistent NETWORK evidence. Set includeResponseBodies=true only when response JSON is required, and narrow it with urlIncludes. Bodies are same-origin JSON only, bounded and redacted.",
+    ),
+  z
+    .object({
+      commandType: z.literal("page.click"),
+      payload: z.union([
+        targetPayloadSchema,
+        z
+          .object({
+            point: z
+              .object({ x: z.number().finite(), y: z.number().finite() })
+              .strict(),
+          })
+          .strict(),
+      ]),
+    })
+    .describe(
+      "Click a target returned by page.snapshot/observe_browser. Preserve the complete eN/fNeN ref. element.click does not exist.",
+    ),
+  z.object({
+    commandType: z.literal("page.fill"),
+    payload: textTargetPayloadSchema,
+  }),
+  z.object({
+    commandType: z.literal("page.type"),
+    payload: z
+      .object({
+        delayMs: z.coerce
+          .number()
+          .int()
+          .min(0)
+          .max(1_000)
+          .default(0)
+          .optional(),
+        target: runtimeLocatorSchema,
+        text: z.string().max(64 * 1_024),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("page.press"),
+    payload: z
+      .object({
+        key: z.string().trim().min(1).max(80),
+        target: runtimeLocatorSchema.optional(),
+      })
+      .strict(),
+  }),
+  ...(["page.check", "page.uncheck", "page.hover"] as const).map(
+    (commandType) =>
+      z.object({
+        commandType: z.literal(commandType),
+        payload: targetPayloadSchema,
+      }),
+  ),
+  z.object({
+    commandType: z.literal("page.select"),
+    payload: z
+      .object({
+        target: runtimeLocatorSchema,
+        values: z.array(z.string().max(4_096)).min(1).max(100),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("page.scroll"),
+    payload: z
+      .object({
+        deltaX: z.number().finite().min(-100_000).max(100_000).default(0),
+        deltaY: z.number().finite().min(-100_000).max(100_000),
+        target: runtimeLocatorSchema.optional(),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("page.drag"),
+    payload: z
+      .object({ source: runtimeLocatorSchema, target: runtimeLocatorSchema })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("page.resize"),
+    payload: z
+      .object({
+        height: z.coerce.number().int().min(240).max(4_320),
+        width: z.coerce.number().int().min(320).max(7_680),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("page.wait"),
+    payload: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("selector"),
+          state: z
+            .enum(["attached", "detached", "visible", "hidden"])
+            .default("visible"),
+          target: runtimeLocatorSchema,
+          timeoutMs: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(300_000)
+            .default(30_000),
+        })
+        .strict(),
+      z
+        .object({
+          exact: z.boolean().default(false),
+          kind: z.literal("text"),
+          text: z.string().min(1).max(16_384),
+          timeoutMs: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(300_000)
+            .default(30_000),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("load"),
+          state: loadStateSchema,
+          timeoutMs: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(300_000)
+            .default(30_000),
+        })
+        .strict()
+        .describe(
+          "Wait for a document load state. Prefer selector or text waits for SPA and micro-frontend navigation; networkidle may never occur when background requests remain open.",
+        ),
+    ]),
+  }),
+  z.object({
+    commandType: z.literal("tab.new"),
+    payload: z.object({ url: urlSchema.optional() }).strict(),
+  }),
+  z.object({
+    commandType: z.literal("tab.switch"),
+    payload: z.union([
+      z.object({ index: z.coerce.number().int().min(0).max(100) }).strict(),
+      z.object({ tabId: z.string().uuid() }).strict(),
+    ]),
+  }),
+  z.object({
+    commandType: z.literal("tab.close"),
+    payload: z.object({ tabId: z.string().uuid().optional() }).strict(),
+  }),
+  z.object({
+    commandType: z.literal("frame.snapshot"),
+    payload: z
+      .object({
+        cursor: cursorSchema.optional(),
+        frame: frameTargetSchema,
+        maxChars: maxCharsSchema.optional(),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("frame.click"),
+    payload: z
+      .object({ frame: frameTargetSchema, target: runtimeLocatorSchema })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("frame.fill"),
+    payload: z
+      .object({
+        frame: frameTargetSchema,
+        target: runtimeLocatorSchema,
+        text: z.string().max(64 * 1_024),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("element.state"),
+    payload: targetPayloadSchema,
+  }),
+  z.object({
+    commandType: z.literal("locator.count"),
+    payload: z.object({ target: runtimeLocatorSchema }).strict(),
+  }),
+  z.object({
+    commandType: z.literal("network.arm"),
+    payload: z.discriminatedUnion("action", [
+      z
+        .object({
+          action: z.literal("PAUSE"),
+          maxPauseMs: z.coerce
+            .number()
+            .int()
+            .min(100)
+            .max(300_000)
+            .default(30_000),
+          method: z
+            .string()
+            .regex(/^[A-Z]+$/u)
+            .max(20)
+            .optional(),
+          policyId: z
+            .string()
+            .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+            .max(120),
+          urlPattern: z.string().min(1).max(2_048),
+        })
+        .strict(),
+      z
+        .object({
+          action: z.literal("ABORT"),
+          method: z
+            .string()
+            .regex(/^[A-Z]+$/u)
+            .max(20)
+            .optional(),
+          policyId: z
+            .string()
+            .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+            .max(120),
+          urlPattern: z.string().min(1).max(2_048),
+        })
+        .strict(),
+      z
+        .object({
+          action: z.literal("FULFILL_STATUS"),
+          method: z
+            .string()
+            .regex(/^[A-Z]+$/u)
+            .max(20)
+            .optional(),
+          policyId: z
+            .string()
+            .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+            .max(120),
+          status: z.coerce.number().int().min(100).max(599),
+          urlPattern: z.string().min(1).max(2_048),
+        })
+        .strict(),
+    ]),
+  }),
+  z.object({
+    commandType: z.literal("network.wait_for_hit"),
+    payload: z
+      .object({
+        policyId: z
+          .string()
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+          .max(120),
+        timeoutMs: z.coerce.number().int().min(1).max(300_000).default(30_000),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("network.status"),
+    payload: z
+      .object({
+        policyId: z
+          .string()
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+          .max(120)
+          .optional(),
+      })
+      .strict(),
+  }),
+  z.object({
+    commandType: z.literal("network.release"),
+    payload: z
+      .object({
+        policyId: z
+          .string()
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u)
+          .max(120),
+      })
+      .strict(),
+  }),
+] as const;
+
+const humanCommandPayloadVariants = [
+  ...(["human.takeover", "human.release"] as const).map((commandType) =>
+    z.object({
+      commandType: z.literal(commandType),
+      payload: z.record(z.string(), z.unknown()),
+    }),
+  ),
+] as const;
+
+const commandPayloadVariants = [
+  ...sessionCommandPayloadVariants,
+  ...runtimeActionCommandPayloadVariants,
+  ...humanCommandPayloadVariants,
+] as const;
+
+export const runtimeCommandPayloadSchema = z.discriminatedUnion(
+  "commandType",
+  commandPayloadVariants,
+);
+
+const commandInputVariants = commandPayloadVariants.map((variant) =>
+  variant
+    .extend({
+      timeoutSeconds: z.coerce.number().int().min(1).max(300).optional(),
+    })
+    .strict(),
+) as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]];
+
+type RuntimeCommandInputValue = z.infer<typeof runtimeCommandPayloadSchema> & {
+  timeoutSeconds?: number;
+};
+
+export const runtimeCommandInputSchema = z.union(
+  commandInputVariants,
+) as unknown as z.ZodType<RuntimeCommandInputValue>;
+
+const runtimeActionCommandInputVariants =
+  runtimeActionCommandPayloadVariants.map((variant) => {
+    const extended = variant
+      .extend({
+        timeoutSeconds: z.coerce.number().int().min(1).max(300).optional(),
+      })
+      .strict();
+    return variant.description
+      ? extended.describe(variant.description)
+      : extended;
+  }) as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]];
+
+type RuntimeActionCommandInputValue = Exclude<
+  RuntimeCommandInputValue,
+  {
+    commandType:
+      | "session.open"
+      | "session.close"
+      | "profile.purge"
+      | "human.takeover"
+      | "human.release";
+  }
+>;
+
+/** Browser actions exposed to Agents and console callers after acquisition. */
+export const runtimeActionCommandInputSchema = z
+  .union(runtimeActionCommandInputVariants)
+  .describe(
+    "Closed allow-list of Agent browser actions. Use only an exact commandType branch; never invent Playwright-style aliases.",
+  ) as unknown as z.ZodType<RuntimeActionCommandInputValue>;
+
+export const runtimeCommandSchema = z
+  .object({
+    commandId: z.string().uuid(),
+    commandType: runtimeCommandTypeSchema,
+    deadlineAt: z.string().datetime(),
+    fencingToken: z.string().regex(/^\d+$/u),
+    leaseToken: z.string().uuid(),
+    payload: z.record(z.string(), z.unknown()).default({}),
+    sessionId: z.string().uuid(),
+    type: z.literal("command.execute"),
+  })
+  .superRefine((value, context) => {
+    const parsed = runtimeCommandPayloadSchema.safeParse({
+      commandType: value.commandType,
+      payload: value.payload,
+    });
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        context.addIssue({ ...issue, path: issue.path });
+      }
+    }
+  });
+
+export const runtimeCommandCancelSchema = z.object({
+  commandId: z.string().uuid(),
+  reason: z.string().min(1).max(240),
+  sessionId: z.string().uuid(),
+  type: z.literal("command.cancel"),
+});
+
+export const runtimeHeartbeatAckSchema = z.object({
+  closeSessions: z.array(z.string().uuid()).default([]),
+  leaseExpiresAt: z.string().datetime(),
+  serverTime: z.string().datetime(),
+  type: z.literal("runtime.heartbeat.ack"),
+});
+
+export const runtimeDeliveryAckSchema = z.object({
+  messageId: z.string().uuid(),
+  messageType: z.enum([
+    "command.result",
+    "human.input.result",
+    "runtime.event",
+    "profile.lifecycle",
+  ]),
+  type: z.literal("runtime.delivery.ack"),
+});
+
+export const runtimeHumanPreviewSubscribeSchema = z.object({
+  fencingToken: z.string().regex(/^\d+$/u),
+  intervalMs: z.number().int().min(500).max(5000),
+  leaseToken: z.string().uuid(),
+  quality: z.number().int().min(30).max(85),
+  sessionId: z.string().uuid(),
+  streamId: z.string().uuid(),
+  type: z.literal("human.preview.subscribe"),
+});
+
+export const runtimeHumanPreviewUnsubscribeSchema = z.object({
+  sessionId: z.string().uuid(),
+  streamId: z.string().uuid(),
+  type: z.literal("human.preview.unsubscribe"),
+});
+
+export const runtimeHumanInputDispatchSchema = z.object({
+  dispatchId: z.string().uuid(),
+  events: browserHumanInputEventsSchema,
+  fencingToken: z.string().regex(/^\d+$/u),
+  leaseToken: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  type: z.literal("human.input.dispatch"),
+});
+
+export const runtimeServerMessageSchema = z.discriminatedUnion("type", [
+  runtimeHelloAcceptedSchema,
+  runtimeHelloRejectedSchema,
+  runtimeNetworkPolicyUpdatedSchema,
+  runtimeCommandSchema,
+  runtimeCommandCancelSchema,
+  runtimeHeartbeatAckSchema,
+  runtimeDeliveryAckSchema,
+  runtimeHumanPreviewSubscribeSchema,
+  runtimeHumanPreviewUnsubscribeSchema,
+  runtimeHumanInputDispatchSchema,
+]);
+
+export type RuntimeClientMessage = z.infer<typeof runtimeClientMessageSchema>;
+export type RuntimeServerMessage = z.infer<typeof runtimeServerMessageSchema>;
+export type RuntimeCommandType = z.infer<typeof runtimeCommandTypeSchema>;
+export type RuntimeCommandResult = z.infer<typeof runtimeCommandResultSchema>;
+export type RuntimeArtifactPayload = z.infer<
+  typeof runtimeArtifactPayloadSchema
+>;
+export type ReconcileAction = z.infer<typeof reconcileActionSchema>;
+export type BrowserHumanInputEvent = z.infer<
+  typeof browserHumanInputEventSchema
+>;
+export type RuntimeHumanPreviewFrame = z.infer<
+  typeof runtimeHumanPreviewFrameSchema
+>;
+export type RuntimeHumanInputResult = z.infer<
+  typeof runtimeHumanInputResultSchema
+>;

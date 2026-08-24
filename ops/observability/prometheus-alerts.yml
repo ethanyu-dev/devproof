@@ -1,0 +1,110 @@
+groups:
+  - name: devproof-availability
+    rules:
+      - alert: DevProofApiUnavailable
+        expr: up{job="devproof-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DevProof API metrics target is unavailable
+          runbook: docs/observability.md#devproofapiunavailable
+
+      - alert: DevProofDependencyDown
+        expr: devproof_dependency_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Required DevProof dependency is unavailable
+          description: "Dependency {{ $labels.dependency }} is failing readiness checks."
+          runbook: docs/observability.md#devproofdependencydown
+
+      - alert: DevProofWorkerStale
+        expr: devproof_worker_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DevProof background worker is stale
+          description: "Worker {{ $labels.worker }} has missed its expected success window."
+          runbook: docs/observability.md#devproofworkerstale
+
+  - name: devproof-agent-and-tools
+    rules:
+      - alert: DevProofToolFailureRatioHigh
+        expr: |
+          (
+            sum(rate(devproof_tool_invocations_total{status=~"failed|timed_out"}[15m]))
+            /
+            clamp_min(sum(rate(devproof_tool_invocations_total[15m])), 0.001)
+          ) > 0.10
+          and sum(rate(devproof_tool_invocations_total[15m])) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP or HTTP tool failure ratio is above 10%
+          runbook: docs/observability.md#devprooftoolfailureratiohigh
+
+      - alert: DevProofToolInvocationStuck
+        expr: devproof_tool_invocation_oldest_started_age_seconds > 1800
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A tool invocation is stuck in STARTED
+          runbook: docs/observability.md#devprooftoolinvocationstuck
+
+      - alert: DevProofAgentModelFailures
+        expr: increase(devproof_agent_operations_total{operation="model",status="failed"}[15m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent model requests are repeatedly failing
+          runbook: docs/observability.md#devproofagentmodelfailures
+
+      - alert: DevProofHttpErrorRatioHigh
+        expr: |
+          (
+            sum(rate(devproof_http_requests_total{status_class="5xx"}[10m]))
+            /
+            clamp_min(sum(rate(devproof_http_requests_total[10m])), 0.001)
+          ) > 0.05
+          and sum(rate(devproof_http_requests_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: DevProof API 5xx ratio is above 5%
+          runbook: docs/observability.md#devproofhttperrorratiohigh
+
+  - name: devproof-runtime-and-delivery
+    rules:
+      - alert: DevProofNotificationDeliveryDelayed
+        expr: devproof_notification_oldest_due_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A HITL notification is more than five minutes overdue
+          runbook: docs/observability.md#devproofnotificationdeliverydelayed
+
+      - alert: DevProofRuntimeProtocolErrors
+        expr: increase(devproof_runtime_gateway_protocol_closures_total[10m]) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Browser Runtime protocol errors are recurring
+          runbook: docs/observability.md#devproofruntimeprotocolerrors
+
+      - alert: DevProofRuntimeFramesRejected
+        expr: increase(devproof_runtime_frames_rejected_total[10m]) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Browser Runtime result or event frames are being rejected
+          runbook: docs/observability.md#devproofruntimeframesrejected

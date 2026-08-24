@@ -1,0 +1,25 @@
+{
+  "name": "@devproof/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json && (tsc -p tsconfig.build.json --watch --preserveWatchOutput & node --watch dist/main.js)",
+    "start": "node dist/main.js",
+    "test": "vitest run src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@devproof/agent-runtime-protocol": "workspace:*",
+    "@devproof/runtime-protocol": "workspace:*",
+    "dotenv": "^17.4.2",
+    "openai": "^6.49.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

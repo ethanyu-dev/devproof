@@ -1,0 +1,40 @@
+name: Release Browser Runtime
+
+on:
+  push:
+    tags:
+      - runtime-v*
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+          registry-url: https://npm.pkg.github.com
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @devproof/browser-runtime exec playwright install --with-deps chromium
+      - name: Verify runtime tag
+        run: test "runtime-v$(node -p "require('./apps/browser-runtime/package.json').version")" = "$GITHUB_REF_NAME"
+      - run: pnpm build:packages
+      - run: pnpm --filter @devproof/browser-runtime build
+      - run: pnpm --filter @devproof/browser-runtime test
+      - name: Pack runtime
+        run: pnpm --filter @devproof/browser-runtime pack --pack-destination release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-runtime
+          path: release/*.tgz
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.tgz --generate-notes --verify-tag

@@ -1,0 +1,35 @@
+{
+  "name": "@devproof/browser-runtime",
+  "version": "0.2.11",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "devproof-browser-runtime": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && esbuild src/index.ts --bundle --platform=node --format=esm --target=node24 --external:playwright --outfile=dist/index.js",
+    "install:browser": "node dist/index.js install",
+    "pair": "node dist/index.js pair",
+    "start": "node dist/index.js start",
+    "test": "vitest run src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ipaddr.js": "^2.2.0",
+    "playwright": "1.62.0-alpha-2026-06-29"
+  },
+  "devDependencies": {
+    "@devproof/runtime-protocol": "workspace:*",
+    "@types/node": "^24.10.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules
+.next
+dist
+coverage
+release
+.env
+.env.local
+apps/api/generated
+apps/browser-runtime/.devproof
+*.log
+*.tsbuildinfo
+.DS_Store

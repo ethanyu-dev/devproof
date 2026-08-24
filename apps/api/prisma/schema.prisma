@@ -1,0 +1,1894 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum TeamRole {
+  MEMBER
+  ADMIN
+}
+
+enum IdentityProvider {
+  FEISHU
+}
+
+enum RuntimeStatus {
+  ONLINE
+  OFFLINE
+  REVOKED
+}
+
+enum RuntimeRoutingFallbackPolicy {
+  WAIT
+  FAIL_FAST
+}
+
+enum RuntimeSessionStatus {
+  OPENING
+  ACTIVE
+  HUMAN_CONTROL
+  CLOSING
+  CLOSED
+  FAILED
+  LOST
+}
+
+enum RuntimeCommandStatus {
+  PENDING
+  DISPATCHED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum RuntimeCommandSource {
+  SYSTEM
+  AGENT
+  CONSOLE
+  HUMAN
+}
+
+enum BrowserProfileMode {
+  PERSISTENT
+  EPHEMERAL
+}
+
+enum BrowserRuntimeSessionPurpose {
+  EXECUTION
+  PROFILE_PREPARATION
+  PROFILE_VERIFICATION
+  PROFILE_PURGE
+}
+
+enum ExternalIdentityProvider {
+  FEISHU_OPEN_ID
+  FEISHU_UNION_ID
+  FEISHU_USER_ID
+  LINEAR
+}
+
+enum UserBrowserProfileStatus {
+  UNINITIALIZED
+  PREPARING
+  READY
+  REAUTH_REQUIRED
+  MIGRATION_REQUIRED
+  LOST
+  DISABLED
+}
+
+enum BrowserProfileTriggerSource {
+  CONSOLE
+  FEISHU
+  ISSUE_ASSIGNEE
+}
+
+enum TaskProfileStrategy {
+  EPHEMERAL
+  REQUESTER
+  ISSUE_ASSIGNEE
+  EXPLICIT_PROFILE
+}
+
+enum TaskProfileResolutionStatus {
+  PENDING
+  RESOLVED
+  WAITING_INPUT
+  REJECTED
+}
+
+enum ProfileUnavailablePolicy {
+  WAIT_FOR_PROFILE
+  FAIL
+  USE_EPHEMERAL
+}
+
+enum BrowserProfileReservationStatus {
+  QUEUED
+  ACTIVE
+  RELEASED
+  CANCELLED
+  EXPIRED
+}
+
+enum RequestActorKind {
+  USER
+  CREDENTIAL
+  INTEGRATION_EVENT
+  SYSTEM
+}
+
+enum IntegrationProvider {
+  FEISHU
+  LINEAR
+}
+
+enum IntegrationEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum RuntimeArtifactKind {
+  SCREENSHOT
+  DOM
+  CONSOLE
+  NETWORK
+  VIDEO
+}
+
+enum TestProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TestCaseStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum TestRunStatus {
+  QUEUED
+  RUNNING
+  WAITING_HUMAN
+  PASSED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum TestRunTrigger {
+  MANUAL
+  CI
+  REPLAY
+}
+
+enum TestTraceActor {
+  SYSTEM
+  BROWSER
+  HUMAN
+}
+
+enum TestTraceStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum TestRunCheckpointStatus {
+  PENDING
+  RESOLVED
+  EXPIRED
+  CANCELLED
+}
+
+enum AgentRuntimeProvider {
+  OPENAI
+  CODEX
+  CLAUDE
+  CUSTOM
+  GENERIC
+}
+
+enum VerificationRunStatus {
+  QUEUED
+  WAITING_EXECUTION
+  RUNNING
+  WAITING_HUMAN
+  PASSED
+  FAILED
+  INCONCLUSIVE
+  CANCELLED
+  TIMED_OUT
+}
+
+enum VerificationEventActor {
+  SYSTEM
+  AGENT
+  RUNNER
+  HUMAN
+  WORKER
+}
+
+enum VerificationCheckpointStatus {
+  PENDING
+  RESOLVED
+  EXPIRED
+  CANCELLED
+}
+
+enum VerificationAssertionStatus {
+  PASSED
+  FAILED
+  INCONCLUSIVE
+}
+
+enum NotificationChannel {
+  FEISHU
+  AGENT_WEBHOOK
+  GITHUB
+}
+
+enum NotificationOutboxStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+enum ToolInvocationStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum VerificationTraceStatus {
+  INFO
+  STARTED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum RunLifecycle {
+  QUEUED
+  PREPARING
+  RUNNING
+  WAITING_HUMAN
+  COMPLETED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum ExecutionDisposition {
+  EXECUTED
+  NOT_RUN
+  BLOCKED
+  AGENT_ERROR
+  PROVIDER_ERROR
+  BROWSER_UNAVAILABLE
+  RUNTIME_LOST
+}
+
+enum RunProductVerdict {
+  PASSED
+  FAILED
+  INCONCLUSIVE
+}
+
+enum RunAttemptStatus {
+  PENDING
+  RUNNING
+  WAITING_HUMAN
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum AgentRuntimeTaskStatus {
+  PENDING
+  RUNNING
+  WAITING_HUMAN
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum BrowserExecutionStatus {
+  REQUESTED
+  WAITING_CAPACITY
+  ACTIVE
+  HUMAN_CONTROL
+  RELEASING
+  RELEASED
+  FAILED
+  LOST
+  TIMED_OUT
+}
+
+enum RunInterventionStatus {
+  PENDING
+  RESOLVED
+  EXPIRED
+  CANCELLED
+}
+
+enum SpecificationTargetSource {
+  GITHUB
+  MANUAL
+}
+
+enum TaskExecutionKind {
+  ISSUE_SPEC
+  DIRECT_RUN
+  LEGACY_RUN
+}
+
+enum TaskExecutionLifecycle {
+  QUEUED
+  RUNNING
+  WAITING_INPUT
+  WAITING_HUMAN
+  COMPLETED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum TaskExecutionStageType {
+  SPEC_ANALYSIS
+  PROFILE_RESOLUTION
+  SPEC_EXECUTION
+}
+
+enum TaskExecutionStageStatus {
+  PENDING
+  RUNNING
+  WAITING_INPUT
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
+enum TaskStageAttemptStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+enum TaskCaseDispatchStatus {
+  PENDING
+  DISPATCHING
+  LINKED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id                              String                     @id @default(uuid()) @db.Uuid
+  name                            String?
+  email                           String?
+  avatarUrl                       String?                    @map("avatar_url")
+  status                          UserStatus                 @default(ACTIVE)
+  createdAt                       DateTime                   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                       DateTime                   @updatedAt @map("updated_at") @db.Timestamptz
+  identities                      AuthIdentity[]
+  sessions                        Session[]
+  memberships                     TeamMembership[]
+  auditEvents                     AuditEvent[]
+  controlledRuntimeSessions       BrowserRuntimeSession[]    @relation("RuntimeSessionHumanController")
+  createdTestCaseVersions         TestCaseVersion[]          @relation("TestCaseVersionCreator")
+  requestedTestRuns               TestRun[]                  @relation("TestRunRequester")
+  resolvedTestCheckpoints         TestRunHumanCheckpoint[]   @relation("TestRunCheckpointResolver")
+  createdToolCredentials          ToolCredential[]           @relation("ToolCredentialCreator")
+  resolvedVerificationCheckpoints VerificationCheckpoint[]   @relation("VerificationCheckpointResolver")
+  browserHumanControlLeases       BrowserHumanControlLease[] @relation("BrowserHumanControlLeaseController")
+  externalIdentities              UserExternalIdentity[]
+  ownedBrowserProfiles            UserBrowserProfile[]       @relation("BrowserProfileOwner")
+  consentedBrowserProfileGrants   BrowserProfileGrant[]      @relation("BrowserProfileGrantConsenter")
+  requestedTaskExecutions         TaskExecution[]            @relation("TaskExecutionRequester")
+  profileBindingOwnerships        TaskProfileBinding[]       @relation("TaskProfileBindingOwner")
+  browserProfileUsages            BrowserProfileUsage[]      @relation("BrowserProfileUsageRequester")
+
+  @@map("users")
+}
+
+model AuthIdentity {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  provider       IdentityProvider
+  providerUserId String           @map("provider_user_id")
+  tenantKey      String           @map("tenant_key")
+  rawProfile     Json             @default("{}") @map("raw_profile")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([tenantKey])
+  @@map("auth_identities")
+}
+
+model Session {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("sessions")
+}
+
+model Team {
+  id                         String                       @id @default(uuid()) @db.Uuid
+  slug                       String                       @unique
+  name                       String
+  feishuTenantKey            String                       @unique @map("feishu_tenant_key")
+  createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                  DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  memberships                TeamMembership[]
+  runtimeSettings            RuntimeSettings?
+  browserRuntimes            BrowserRuntime[]
+  runtimeProfileLeases       BrowserRuntimeProfileLease[]
+  runtimeRoutingRules        RuntimeRoutingRule[]
+  pairingTokens              BrowserRuntimePairingToken[]
+  runtimeSessions            BrowserRuntimeSession[]
+  testProjects               TestProject[]
+  testEnvironments           TestEnvironment[]
+  testCases                  TestCase[]
+  testCaseVersions           TestCaseVersion[]
+  testRuns                   TestRun[]
+  testTraceEvents            TestRunTraceEvent[]
+  testRunArtifacts           TestRunArtifact[]
+  testRunCheckpoints         TestRunHumanCheckpoint[]
+  toolCredentials            ToolCredential[]
+  verificationRuns           VerificationRun[]
+  verificationEvents         VerificationEvent[]
+  verificationArtifacts      VerificationArtifact[]
+  verificationCheckpoints    VerificationCheckpoint[]
+  verificationAssertions     VerificationAssertion[]
+  notificationOutbox         NotificationOutbox[]
+  browserHumanControlLeases  BrowserHumanControlLease[]
+  auditEvents                AuditEvent[]
+  toolInvocations            ToolInvocation[]
+  executionRuns              ExecutionRun[]
+  runEvents                  RunEvent[]
+  runEvidences               RunEvidence[]
+  runCriterionResults        RunCriterionResult[]
+  runInterventions           HumanIntervention[]
+  testSpecifications         TestSpecification[]
+  generatedTestCases         GeneratedTestCase[]
+  taskExecutions             TaskExecution[]
+  taskExecutionEvents        TaskExecutionEvent[]
+  externalIdentities         UserExternalIdentity[]
+  userBrowserProfiles        UserBrowserProfile[]
+  browserProfileGrants       BrowserProfileGrant[]
+  browserProfileReservations BrowserProfileReservation[]
+  browserProfileUsages       BrowserProfileUsage[]
+  inboundIntegrationEvents   InboundIntegrationEvent[]
+
+  @@map("teams")
+}
+
+model TeamMembership {
+  id        String   @id @default(uuid()) @db.Uuid
+  teamId    String   @map("team_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      TeamRole @default(MEMBER)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId])
+  @@map("team_memberships")
+}
+
+model ToolCredential {
+  id                 String              @id @default(uuid()) @db.Uuid
+  teamId             String              @map("team_id") @db.Uuid
+  name               String
+  tokenHash          String              @unique @map("token_hash")
+  tokenHint          String              @map("token_hint")
+  scopes             String[]            @default([])
+  expiresAt          DateTime?           @map("expires_at") @db.Timestamptz
+  lastUsedAt         DateTime?           @map("last_used_at") @db.Timestamptz
+  revokedAt          DateTime?           @map("revoked_at") @db.Timestamptz
+  createdByUserId    String              @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+  team               Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy          User                @relation("ToolCredentialCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  verificationRuns   VerificationRun[]
+  verificationEvents VerificationEvent[]
+  toolInvocations    ToolInvocation[]
+
+  @@unique([teamId, name])
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("tool_credentials")
+}
+
+model RuntimeSettings {
+  id          String   @id @default(uuid()) @db.Uuid
+  teamId      String   @unique @map("team_id") @db.Uuid
+  hitlEnabled Boolean  @default(true) @map("hitl_enabled")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@map("runtime_settings")
+}
+
+model BrowserRuntime {
+  id                   String                       @id @default(uuid()) @db.Uuid
+  teamId               String                       @map("team_id") @db.Uuid
+  instanceKey          String                       @map("instance_key")
+  name                 String
+  version              String                       @default("")
+  deviceInfo           String                       @default("") @map("device_info")
+  status               RuntimeStatus                @default(OFFLINE)
+  capabilities         Json                         @default("[]")
+  maxConcurrency       Int                          @default(1) @map("max_concurrency")
+  networkAllowlist     String[]                     @default([]) @map("network_allowlist")
+  tokenHash            String                       @unique @map("token_hash")
+  tokenHint            String                       @map("token_hint")
+  protocolMajor        Int?                         @map("protocol_major")
+  protocolMinor        Int?                         @map("protocol_minor")
+  gatewayInstanceId    String?                      @map("gateway_instance_id")
+  enabled              Boolean                      @default(true)
+  lastSeenAt           DateTime?                    @map("last_seen_at") @db.Timestamptz
+  connectedAt          DateTime?                    @map("connected_at") @db.Timestamptz
+  revokedAt            DateTime?                    @map("revoked_at") @db.Timestamptz
+  createdAt            DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  team                 Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  sessions             BrowserRuntimeSession[]
+  slots                BrowserRuntimeSlot[]
+  fenceCounter         BrowserRuntimeFenceCounter?
+  profileLeases        BrowserRuntimeProfileLease[]
+  routingRules         RuntimeRoutingRule[]
+  assignedUserProfiles UserBrowserProfile[]
+
+  @@unique([teamId, instanceKey])
+  @@index([teamId, updatedAt(sort: Desc)])
+  @@index([status, lastSeenAt])
+  @@map("browser_runtimes")
+}
+
+model RuntimeRoutingRule {
+  id              String                       @id @default(uuid()) @db.Uuid
+  teamId          String                       @map("team_id") @db.Uuid
+  hostnamePattern String                       @map("hostname_pattern")
+  runtimeId       String                       @map("runtime_id") @db.Uuid
+  priority        Int                          @default(100)
+  fallbackPolicy  RuntimeRoutingFallbackPolicy @default(WAIT) @map("fallback_policy")
+  enabled         Boolean                      @default(true)
+  createdAt       DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  team            Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runtime         BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, hostnamePattern])
+  @@index([teamId, enabled, priority(sort: Desc)])
+  @@index([runtimeId])
+  @@map("runtime_routing_rules")
+}
+
+model BrowserRuntimeSession {
+  id                    String                       @id @default(uuid()) @db.Uuid
+  teamId                String                       @map("team_id") @db.Uuid
+  runtimeId             String                       @map("runtime_id") @db.Uuid
+  status                RuntimeSessionStatus         @default(OPENING)
+  profileMode           BrowserProfileMode           @map("profile_mode")
+  profileKey            String                       @map("profile_key")
+  userBrowserProfileId  String?                      @map("user_browser_profile_id") @db.Uuid
+  purpose               BrowserRuntimeSessionPurpose @default(EXECUTION)
+  slotNumber            Int                          @map("slot_number")
+  leaseToken            String                       @map("lease_token") @db.Uuid
+  fencingToken          BigInt                       @map("fencing_token")
+  leaseExpiresAt        DateTime                     @map("lease_expires_at") @db.Timestamptz
+  protocolMajor         Int                          @map("protocol_major")
+  protocolMinor         Int                          @map("protocol_minor")
+  humanControllerUserId String?                      @map("human_controller_user_id") @db.Uuid
+  humanControlExpiresAt DateTime?                    @map("human_control_expires_at") @db.Timestamptz
+  lastError             Json?                        @map("last_error")
+  openedAt              DateTime?                    @map("opened_at") @db.Timestamptz
+  closedAt              DateTime?                    @map("closed_at") @db.Timestamptz
+  createdAt             DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  team                  Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runtime               BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Restrict)
+  humanController       User?                        @relation("RuntimeSessionHumanController", fields: [humanControllerUserId], references: [id], onDelete: SetNull)
+  slot                  BrowserRuntimeSlot?
+  profileLease          BrowserRuntimeProfileLease?
+  commands              BrowserRuntimeCommand[]
+  artifacts             BrowserRuntimeArtifact[]
+  events                BrowserRuntimeEvent[]
+  testRuns              TestRun[]
+  verificationRuns      VerificationRun[]
+  humanControlLease     BrowserHumanControlLease?
+  browserExecutions     BrowserExecution[]
+  userBrowserProfile    UserBrowserProfile?          @relation(fields: [userBrowserProfileId], references: [id], onDelete: SetNull)
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([runtimeId, status])
+  @@index([leaseExpiresAt])
+  @@index([userBrowserProfileId, status], map: "browser_runtime_sessions_user_profile_status_idx")
+  @@map("browser_runtime_sessions")
+}
+
+model BrowserRuntimeSlot {
+  id           String                @id @default(uuid()) @db.Uuid
+  runtimeId    String                @map("runtime_id") @db.Uuid
+  sessionId    String                @unique @map("session_id") @db.Uuid
+  slotNumber   Int                   @map("slot_number")
+  leaseToken   String                @map("lease_token") @db.Uuid
+  fencingToken BigInt                @map("fencing_token")
+  expiresAt    DateTime              @map("expires_at") @db.Timestamptz
+  createdAt    DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime              @updatedAt @map("updated_at") @db.Timestamptz
+  runtime      BrowserRuntime        @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  session      BrowserRuntimeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([runtimeId, slotNumber])
+  @@index([expiresAt])
+  @@map("browser_runtime_slots")
+}
+
+model BrowserRuntimeFenceCounter {
+  runtimeId String         @id @map("runtime_id") @db.Uuid
+  value     BigInt         @default(0)
+  updatedAt DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+  runtime   BrowserRuntime @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+
+  @@map("browser_runtime_fence_counters")
+}
+
+model BrowserRuntimeProfileLease {
+  id           String                @id @default(uuid()) @db.Uuid
+  teamId       String                @map("team_id") @db.Uuid
+  runtimeId    String                @map("runtime_id") @db.Uuid
+  sessionId    String                @unique @map("session_id") @db.Uuid
+  profileKey   String                @map("profile_key")
+  leaseToken   String                @map("lease_token") @db.Uuid
+  fencingToken BigInt                @map("fencing_token")
+  expiresAt    DateTime              @map("expires_at") @db.Timestamptz
+  createdAt    DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime              @updatedAt @map("updated_at") @db.Timestamptz
+  team         Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runtime      BrowserRuntime        @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  session      BrowserRuntimeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, profileKey])
+  @@index([runtimeId, profileKey])
+  @@index([expiresAt])
+  @@map("browser_runtime_profile_leases")
+}
+
+model BrowserRuntimeCommand {
+  id           String                   @id @default(uuid()) @db.Uuid
+  sessionId    String                   @map("session_id") @db.Uuid
+  commandType  String                   @map("command_type")
+  source       RuntimeCommandSource     @default(CONSOLE)
+  status       RuntimeCommandStatus     @default(PENDING)
+  payload      Json                     @default("{}")
+  result       Json?
+  error        Json?
+  leaseToken   String                   @map("lease_token") @db.Uuid
+  fencingToken BigInt                   @map("fencing_token")
+  deadlineAt   DateTime                 @map("deadline_at") @db.Timestamptz
+  dispatchedAt DateTime?                @map("dispatched_at") @db.Timestamptz
+  completedAt  DateTime?                @map("completed_at") @db.Timestamptz
+  createdAt    DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  session      BrowserRuntimeSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  artifacts    BrowserRuntimeArtifact[]
+
+  @@index([sessionId, createdAt])
+  @@index([status, deadlineAt])
+  @@map("browser_runtime_commands")
+}
+
+model BrowserRuntimeArtifact {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  sessionId             String                 @map("session_id") @db.Uuid
+  commandId             String?                @map("command_id") @db.Uuid
+  kind                  RuntimeArtifactKind
+  storageKey            String                 @unique @map("storage_key")
+  contentType           String                 @map("content_type")
+  byteSize              Int                    @map("byte_size")
+  sha256                String
+  metadata              Json                   @default("{}")
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  session               BrowserRuntimeSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  command               BrowserRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  testRunArtifacts      TestRunArtifact[]
+  verificationArtifacts VerificationArtifact[]
+  runEvidences          RunEvidence[]
+
+  @@index([sessionId, createdAt])
+  @@index([commandId])
+  @@map("browser_runtime_artifacts")
+}
+
+model BrowserRuntimeEvent {
+  id           String                @id @default(uuid()) @db.Uuid
+  sessionId    String                @map("session_id") @db.Uuid
+  kind         String
+  payload      Json                  @default("{}")
+  leaseToken   String                @map("lease_token") @db.Uuid
+  fencingToken BigInt                @map("fencing_token")
+  occurredAt   DateTime              @map("occurred_at") @db.Timestamptz
+  createdAt    DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  session      BrowserRuntimeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, occurredAt])
+  @@map("browser_runtime_events")
+}
+
+model BrowserRuntimePairingToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  teamId    String    @map("team_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  usedAt    DateTime? @map("used_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("browser_runtime_pairing_tokens")
+}
+
+model TestProject {
+  id           String            @id @default(uuid()) @db.Uuid
+  teamId       String            @map("team_id") @db.Uuid
+  name         String
+  slug         String
+  description  String            @default("")
+  status       TestProjectStatus @default(ACTIVE)
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz
+  team         Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  environments TestEnvironment[]
+  testCases    TestCase[]
+  testRuns     TestRun[]
+
+  @@unique([teamId, slug])
+  @@index([teamId, updatedAt(sort: Desc)])
+  @@map("test_projects")
+}
+
+model TestEnvironment {
+  id         String      @id @default(uuid()) @db.Uuid
+  teamId     String      @map("team_id") @db.Uuid
+  projectId  String      @map("project_id") @db.Uuid
+  name       String
+  slug       String
+  baseUrl    String      @map("base_url")
+  variables  Json        @default("{}")
+  secretsEnc String?     @map("secrets_enc")
+  secretKeys Json        @default("[]") @map("secret_keys")
+  enabled    Boolean     @default(true)
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime    @updatedAt @map("updated_at") @db.Timestamptz
+  team       Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project    TestProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testRuns   TestRun[]
+
+  @@unique([projectId, slug])
+  @@index([teamId, projectId, updatedAt(sort: Desc)])
+  @@map("test_environments")
+}
+
+model TestCase {
+  id                  String            @id @default(uuid()) @db.Uuid
+  teamId              String            @map("team_id") @db.Uuid
+  projectId           String            @map("project_id") @db.Uuid
+  name                String
+  slug                String
+  description         String            @default("")
+  status              TestCaseStatus    @default(DRAFT)
+  latestVersionNumber Int               @default(0) @map("latest_version_number")
+  createdAt           DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime          @updatedAt @map("updated_at") @db.Timestamptz
+  team                Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project             TestProject       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions            TestCaseVersion[]
+  testRuns            TestRun[]
+
+  @@unique([projectId, slug])
+  @@index([teamId, projectId, updatedAt(sort: Desc)])
+  @@map("test_cases")
+}
+
+model TestCaseVersion {
+  id               String    @id @default(uuid()) @db.Uuid
+  teamId           String    @map("team_id") @db.Uuid
+  caseId           String    @map("case_id") @db.Uuid
+  version          Int
+  definition       Json
+  definitionSha256 String    @map("definition_sha256")
+  changeSummary    String    @default("") @map("change_summary")
+  createdByUserId  String    @map("created_by_user_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  team             Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  testCase         TestCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  createdBy        User      @relation("TestCaseVersionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  testRuns         TestRun[]
+
+  @@unique([caseId, version])
+  @@index([teamId, caseId, version(sort: Desc)])
+  @@index([definitionSha256])
+  @@map("test_case_versions")
+}
+
+model TestRun {
+  id                  String                   @id @default(uuid()) @db.Uuid
+  teamId              String                   @map("team_id") @db.Uuid
+  projectId           String                   @map("project_id") @db.Uuid
+  caseId              String                   @map("case_id") @db.Uuid
+  caseVersionId       String                   @map("case_version_id") @db.Uuid
+  environmentId       String                   @map("environment_id") @db.Uuid
+  runtimeSessionId    String?                  @map("runtime_session_id") @db.Uuid
+  requestedByUserId   String                   @map("requested_by_user_id") @db.Uuid
+  status              TestRunStatus            @default(QUEUED)
+  trigger             TestRunTrigger           @default(MANUAL)
+  idempotencyKey      String?                  @map("idempotency_key")
+  definitionSnapshot  Json                     @map("definition_snapshot")
+  environmentSnapshot Json                     @map("environment_snapshot")
+  traceSchemaVersion  Int                      @default(1) @map("trace_schema_version")
+  error               Json?
+  queuedAt            DateTime                 @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt           DateTime?                @map("started_at") @db.Timestamptz
+  finishedAt          DateTime?                @map("finished_at") @db.Timestamptz
+  createdAt           DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  team                Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project             TestProject              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  testCase            TestCase                 @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  caseVersion         TestCaseVersion          @relation(fields: [caseVersionId], references: [id], onDelete: Restrict)
+  environment         TestEnvironment          @relation(fields: [environmentId], references: [id], onDelete: Restrict)
+  runtimeSession      BrowserRuntimeSession?   @relation(fields: [runtimeSessionId], references: [id], onDelete: SetNull)
+  requestedBy         User                     @relation("TestRunRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  traceEvents         TestRunTraceEvent[]
+  artifacts           TestRunArtifact[]
+  checkpoints         TestRunHumanCheckpoint[]
+
+  @@unique([teamId, idempotencyKey])
+  @@index([teamId, projectId, status, createdAt(sort: Desc)])
+  @@index([teamId, caseId, createdAt(sort: Desc)])
+  @@index([runtimeSessionId])
+  @@map("test_runs")
+}
+
+model TestRunTraceEvent {
+  id           String                   @id @default(uuid()) @db.Uuid
+  teamId       String                   @map("team_id") @db.Uuid
+  runId        String                   @map("run_id") @db.Uuid
+  sequence     BigInt                   @default(autoincrement())
+  actor        TestTraceActor
+  kind         String
+  status       TestTraceStatus
+  stepId       String?                  @map("step_id")
+  payload      Json                     @default("{}")
+  inputRef     String?                  @map("input_ref")
+  outputRef    String?                  @map("output_ref")
+  durationMs   Int?                     @map("duration_ms")
+  errorCode    String?                  @map("error_code")
+  errorMessage String?                  @map("error_message")
+  occurredAt   DateTime                 @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt    DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  team         Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  testRun      TestRun                  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  artifacts    TestRunArtifact[]
+  checkpoints  TestRunHumanCheckpoint[]
+
+  @@unique([runId, sequence])
+  @@index([teamId, runId, sequence])
+  @@index([runId, stepId])
+  @@map("test_run_trace_events")
+}
+
+model TestRunArtifact {
+  id                String                  @id @default(uuid()) @db.Uuid
+  teamId            String                  @map("team_id") @db.Uuid
+  runId             String                  @map("run_id") @db.Uuid
+  traceEventId      String?                 @map("trace_event_id") @db.Uuid
+  runtimeArtifactId String?                 @map("runtime_artifact_id") @db.Uuid
+  kind              String
+  label             String                  @default("")
+  storageKey        String?                 @map("storage_key")
+  metadata          Json                    @default("{}")
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  team              Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  testRun           TestRun                 @relation(fields: [runId], references: [id], onDelete: Cascade)
+  traceEvent        TestRunTraceEvent?      @relation(fields: [traceEventId], references: [id], onDelete: SetNull)
+  runtimeArtifact   BrowserRuntimeArtifact? @relation(fields: [runtimeArtifactId], references: [id], onDelete: SetNull)
+
+  @@unique([runId, runtimeArtifactId])
+  @@index([teamId, runId, createdAt])
+  @@index([traceEventId])
+  @@map("test_run_artifacts")
+}
+
+model TestRunHumanCheckpoint {
+  id               String                  @id @default(uuid()) @db.Uuid
+  teamId           String                  @map("team_id") @db.Uuid
+  runId            String                  @map("run_id") @db.Uuid
+  traceEventId     String?                 @map("trace_event_id") @db.Uuid
+  stepId           String                  @map("step_id")
+  status           TestRunCheckpointStatus @default(PENDING)
+  prompt           String
+  context          Json                    @default("{}")
+  response         Json?
+  expiresAt        DateTime?               @map("expires_at") @db.Timestamptz
+  resolvedByUserId String?                 @map("resolved_by_user_id") @db.Uuid
+  requestedAt      DateTime                @default(now()) @map("requested_at") @db.Timestamptz
+  resolvedAt       DateTime?               @map("resolved_at") @db.Timestamptz
+  team             Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  testRun          TestRun                 @relation(fields: [runId], references: [id], onDelete: Cascade)
+  traceEvent       TestRunTraceEvent?      @relation(fields: [traceEventId], references: [id], onDelete: SetNull)
+  resolvedBy       User?                   @relation("TestRunCheckpointResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([teamId, runId, status])
+  @@index([status, expiresAt])
+  @@map("test_run_human_checkpoints")
+}
+
+model VerificationRun {
+  id                         String                   @id @default(uuid()) @db.Uuid
+  teamId                     String                   @map("team_id") @db.Uuid
+  callerCredentialId         String                   @map("caller_credential_id") @db.Uuid
+  status                     VerificationRunStatus    @default(QUEUED)
+  goal                       String
+  agentProvider              AgentRuntimeProvider     @default(GENERIC) @map("agent_provider")
+  externalAgentRunId         String?                  @map("external_agent_run_id")
+  runnerKind                 String                   @default("BROWSER") @map("runner_kind")
+  runnerId                   String?                  @map("runner_id") @db.Uuid
+  runtimeSessionId           String?                  @map("runtime_session_id") @db.Uuid
+  idempotencyKey             String                   @map("idempotency_key")
+  traceId                    String                   @map("trace_id") @db.VarChar(32)
+  requestSnapshot            Json                     @map("request_snapshot")
+  requestSha256              String                   @map("request_sha256")
+  result                     Json?
+  error                      Json?
+  executionClaimOwner        String?                  @map("execution_claim_owner")
+  executionClaimToken        String?                  @map("execution_claim_token") @db.Uuid
+  executionClaimExpiresAt    DateTime?                @map("execution_claim_expires_at") @db.Timestamptz
+  executionWaitStartedAt     DateTime?                @map("execution_wait_started_at") @db.Timestamptz
+  executionAcquireDeadlineAt DateTime?                @map("execution_acquire_deadline_at") @db.Timestamptz
+  queuedAt                   DateTime                 @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt                  DateTime?                @map("started_at") @db.Timestamptz
+  finishedAt                 DateTime?                @map("finished_at") @db.Timestamptz
+  retentionUntil             DateTime                 @map("retention_until") @db.Timestamptz
+  purgedAt                   DateTime?                @map("purged_at") @db.Timestamptz
+  cancelledAt                DateTime?                @map("cancelled_at") @db.Timestamptz
+  createdAt                  DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                  DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  team                       Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  callerCredential           ToolCredential           @relation(fields: [callerCredentialId], references: [id], onDelete: Restrict)
+  runtimeSession             BrowserRuntimeSession?   @relation(fields: [runtimeSessionId], references: [id], onDelete: SetNull)
+  events                     VerificationEvent[]
+  artifacts                  VerificationArtifact[]
+  checkpoints                VerificationCheckpoint[]
+  assertions                 VerificationAssertion[]
+  notificationOutbox         NotificationOutbox[]
+  toolInvocations            ToolInvocation[]
+
+  @@unique([teamId, idempotencyKey])
+  @@unique([teamId, agentProvider, externalAgentRunId], map: "verification_runs_external_agent_run_key")
+  @@index([teamId, status, createdAt(sort: Desc)])
+  @@index([callerCredentialId, createdAt(sort: Desc)])
+  @@index([status, executionClaimExpiresAt])
+  @@index([status, executionAcquireDeadlineAt])
+  @@index([runtimeSessionId])
+  @@index([retentionUntil, purgedAt])
+  @@map("verification_runs")
+}
+
+/// The v2 aggregate root shared by manual, CI, MCP, and agent-driven tests.
+/// Browser resource lifecycle and product verdict deliberately remain separate.
+model ExecutionRun {
+  id                     String                @id @default(uuid()) @db.Uuid
+  teamId                 String                @map("team_id") @db.Uuid
+  taskExecutionId        String?               @map("task_execution_id") @db.Uuid
+  browserProfileId       String?               @map("browser_profile_id") @db.Uuid
+  sourceKind             String                @default("API") @map("source_kind")
+  sourceId               String?               @map("source_id")
+  idempotencyKey         String                @map("idempotency_key")
+  goal                   String
+  lifecycle              RunLifecycle          @default(QUEUED)
+  executionDisposition   ExecutionDisposition? @map("execution_disposition")
+  verdict                RunProductVerdict?
+  criteriaSnapshot       Json                  @map("criteria_snapshot")
+  environmentSnapshot    Json                  @default("{}") @map("environment_snapshot")
+  executionPolicy        Json                  @default("{}") @map("execution_policy")
+  currentAttemptNumber   Int                   @default(0) @map("current_attempt_number")
+  maxAttempts            Int                   @default(3) @map("max_attempts")
+  traceId                String                @map("trace_id") @db.VarChar(32)
+  initialDeadlineAt      DateTime              @map("initial_deadline_at") @db.Timestamptz
+  deadlineAt             DateTime              @map("deadline_at") @db.Timestamptz
+  hardDeadlineAt         DateTime              @map("hard_deadline_at") @db.Timestamptz
+  deadlineExtensionCount Int                   @default(0) @map("deadline_extension_count")
+  deadlineExtendedMs     Int                   @default(0) @map("deadline_extended_ms")
+  cancelRequestedAt      DateTime?             @map("cancel_requested_at") @db.Timestamptz
+  queuedAt               DateTime              @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt              DateTime?             @map("started_at") @db.Timestamptz
+  finishedAt             DateTime?             @map("finished_at") @db.Timestamptz
+  createdAt              DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime              @updatedAt @map("updated_at") @db.Timestamptz
+  team                   Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution          TaskExecution?        @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
+  browserProfile         UserBrowserProfile?   @relation(fields: [browserProfileId], references: [id], onDelete: SetNull)
+  attempts               RunAttempt[]
+  tasks                  AgentRuntimeTask[]
+  events                 RunEvent[]
+  evidences              RunEvidence[]
+  criterionResults       RunCriterionResult[]
+  interventions          HumanIntervention[]
+  browserExecutions      BrowserExecution[]
+  notificationOutbox     NotificationOutbox[]
+  browserProfileUsages   BrowserProfileUsage[]
+  generatedTestCase      GeneratedTestCase?    @relation("GeneratedCaseExecutionRun")
+  taskCaseExecution      TaskCaseExecution?    @relation("TaskCaseExecutionRun")
+
+  @@unique([teamId, idempotencyKey])
+  @@index([teamId, lifecycle, createdAt(sort: Desc)])
+  @@index([sourceKind, sourceId])
+  @@index([taskExecutionId, lifecycle])
+  @@index([browserProfileId, lifecycle], map: "execution_runs_browser_profile_lifecycle_idx")
+  @@index([lifecycle, deadlineAt])
+  @@map("execution_runs")
+}
+
+/// A user-visible execution request. Issue-driven tasks own two durable stages;
+/// concrete browser verification remains in child ExecutionRun records.
+model TaskExecution {
+  id                       String                      @id @default(uuid()) @db.Uuid
+  teamId                   String                      @map("team_id") @db.Uuid
+  requestedByUserId        String?                     @map("requested_by_user_id") @db.Uuid
+  requestedByKind          RequestActorKind            @default(CREDENTIAL) @map("requested_by_kind")
+  kind                     TaskExecutionKind
+  sourceKind               String                      @map("source_kind")
+  sourceRef                String?                     @map("source_ref")
+  idempotencyKey           String                      @map("idempotency_key")
+  title                    String
+  lifecycle                TaskExecutionLifecycle      @default(QUEUED)
+  currentStage             TaskExecutionStageType      @default(SPEC_ANALYSIS) @map("current_stage")
+  waitingReason            String?                     @map("waiting_reason")
+  executionDisposition     ExecutionDisposition?       @map("execution_disposition")
+  verdict                  RunProductVerdict?
+  inputSnapshot            Json                        @map("input_snapshot")
+  environmentSnapshot      Json                        @default("{}") @map("environment_snapshot")
+  notificationContext      Json                        @default("{}") @map("notification_context")
+  traceId                  String                      @map("trace_id") @db.VarChar(32)
+  deadlineAt               DateTime                    @map("deadline_at") @db.Timestamptz
+  cancelRequestedAt        DateTime?                   @map("cancel_requested_at") @db.Timestamptz
+  projectionNeededAt       DateTime?                   @map("projection_needed_at") @db.Timestamptz
+  projectedAt              DateTime?                   @map("projected_at") @db.Timestamptz
+  legacySpecificationId    String?                     @map("legacy_specification_id") @db.Uuid
+  migrationSource          String                      @default("NATIVE") @map("migration_source")
+  sourceSnapshotComplete   Boolean                     @default(true) @map("source_snapshot_complete")
+  queuedAt                 DateTime                    @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt                DateTime?                   @map("started_at") @db.Timestamptz
+  finishedAt               DateTime?                   @map("finished_at") @db.Timestamptz
+  createdAt                DateTime                    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                DateTime                    @updatedAt @map("updated_at") @db.Timestamptz
+  team                     Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  requestedBy              User?                       @relation("TaskExecutionRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  stages                   TaskExecutionStage[]
+  specificationSnapshots   TaskSpecificationSnapshot[]
+  caseExecutions           TaskCaseExecution[]
+  executionRuns            ExecutionRun[]
+  events                   TaskExecutionEvent[]
+  profileBinding           TaskProfileBinding?
+  profileReservations      BrowserProfileReservation[]
+  browserProfileUsages     BrowserProfileUsage[]
+  inboundIntegrationEvents InboundIntegrationEvent[]
+  notifications            NotificationOutbox[]
+
+  @@unique([teamId, idempotencyKey])
+  @@index([teamId, lifecycle, createdAt(sort: Desc)])
+  @@index([teamId, sourceKind, sourceRef])
+  @@index([requestedByUserId, createdAt(sort: Desc)], map: "task_executions_requested_by_created_idx")
+  @@index([projectionNeededAt])
+  @@index([legacySpecificationId])
+  @@map("task_executions")
+}
+
+model TaskExecutionStage {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  taskExecutionId      String                   @map("task_execution_id") @db.Uuid
+  type                 TaskExecutionStageType
+  status               TaskExecutionStageStatus @default(PENDING)
+  currentAttemptNumber Int                      @default(0) @map("current_attempt_number")
+  maxAttempts          Int                      @default(3) @map("max_attempts")
+  waitingReason        String?                  @map("waiting_reason")
+  lastError            Json?                    @map("last_error")
+  startedAt            DateTime?                @map("started_at") @db.Timestamptz
+  finishedAt           DateTime?                @map("finished_at") @db.Timestamptz
+  createdAt            DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  taskExecution        TaskExecution            @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  attempts             TaskStageAttempt[]
+
+  @@unique([taskExecutionId, type])
+  @@index([status, updatedAt])
+  @@map("task_execution_stages")
+}
+
+model TaskStageAttempt {
+  id                    String                     @id @default(uuid()) @db.Uuid
+  stageId               String                     @map("stage_id") @db.Uuid
+  number                Int
+  status                TaskStageAttemptStatus     @default(PENDING)
+  inputSnapshot         Json                       @map("input_snapshot")
+  result                Json?
+  error                 Json?
+  leaseOwner            String?                    @map("lease_owner")
+  leaseToken            String?                    @map("lease_token") @db.Uuid
+  leaseExpiresAt        DateTime?                  @map("lease_expires_at") @db.Timestamptz
+  fencingToken          BigInt                     @default(0) @map("fencing_token")
+  startedAt             DateTime?                  @map("started_at") @db.Timestamptz
+  finishedAt            DateTime?                  @map("finished_at") @db.Timestamptz
+  createdAt             DateTime                   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime                   @updatedAt @map("updated_at") @db.Timestamptz
+  stage                 TaskExecutionStage         @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  specificationSnapshot TaskSpecificationSnapshot?
+
+  @@unique([stageId, number])
+  @@index([status, leaseExpiresAt, createdAt])
+  @@map("task_stage_attempts")
+}
+
+model TaskSpecificationSnapshot {
+  id                    String                  @id @default(uuid()) @db.Uuid
+  taskExecutionId       String                  @map("task_execution_id") @db.Uuid
+  stageAttemptId        String                  @unique @map("stage_attempt_id") @db.Uuid
+  sourceHash            String                  @map("source_hash") @db.Char(64)
+  generatorKind         String                  @map("generator_kind")
+  generatorVersion      String                  @map("generator_version")
+  context               Json
+  completeness          String
+  diagnostics           Json                    @default("[]")
+  summary               String
+  primaryPullRequestUrl String?                 @map("primary_pull_request_url")
+  generatedAt           DateTime                @default(now()) @map("generated_at") @db.Timestamptz
+  createdAt             DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  taskExecution         TaskExecution           @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  stageAttempt          TaskStageAttempt        @relation(fields: [stageAttemptId], references: [id], onDelete: Restrict)
+  cases                 TaskGeneratedTestCase[]
+
+  @@unique([taskExecutionId, sourceHash, generatorVersion])
+  @@index([taskExecutionId, generatedAt(sort: Desc)])
+  @@map("task_specification_snapshots")
+}
+
+model TaskGeneratedTestCase {
+  id             String                    @id @default(uuid()) @db.Uuid
+  snapshotId     String                    @map("snapshot_id") @db.Uuid
+  position       Int
+  name           String
+  definition     Json
+  definitionHash String                    @map("definition_hash") @db.Char(64)
+  generatedAt    DateTime                  @default(now()) @map("generated_at") @db.Timestamptz
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz
+  snapshot       TaskSpecificationSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  executions     TaskCaseExecution[]
+
+  @@unique([snapshotId, position])
+  @@index([snapshotId, generatedAt])
+  @@map("task_generated_test_cases")
+}
+
+model TaskCaseExecution {
+  id                  String                 @id @default(uuid()) @db.Uuid
+  taskExecutionId     String                 @map("task_execution_id") @db.Uuid
+  caseId              String                 @map("case_id") @db.Uuid
+  executionOrdinal    Int                    @default(1) @map("execution_ordinal")
+  runId               String?                @unique @map("run_id") @db.Uuid
+  dispatchStatus      TaskCaseDispatchStatus @default(PENDING) @map("dispatch_status")
+  dispatchAttempts    Int                    @default(0) @map("dispatch_attempts")
+  dispatchLastError   Json?                  @map("dispatch_last_error")
+  dispatchRequestedAt DateTime?              @map("dispatch_requested_at") @db.Timestamptz
+  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  taskExecution       TaskExecution          @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  testCase            TaskGeneratedTestCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  run                 ExecutionRun?          @relation("TaskCaseExecutionRun", fields: [runId], references: [id], onDelete: SetNull)
+
+  @@unique([taskExecutionId, caseId, executionOrdinal])
+  @@index([taskExecutionId, dispatchStatus])
+  @@index([caseId, executionOrdinal])
+  @@index([dispatchRequestedAt])
+  @@map("task_case_executions")
+}
+
+model TaskExecutionEvent {
+  id              String        @id @default(uuid()) @db.Uuid
+  teamId          String        @map("team_id") @db.Uuid
+  taskExecutionId String        @map("task_execution_id") @db.Uuid
+  sequence        BigInt        @default(autoincrement())
+  actor           String
+  kind            String
+  payload         Json          @default("{}")
+  occurredAt      DateTime      @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  team            Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution   TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
+  @@unique([taskExecutionId, sequence])
+  @@index([teamId, taskExecutionId, sequence])
+  @@map("task_execution_events")
+}
+
+model UserExternalIdentity {
+  id              String                   @id @default(uuid()) @db.Uuid
+  teamId          String                   @map("team_id") @db.Uuid
+  userId          String                   @map("user_id") @db.Uuid
+  provider        ExternalIdentityProvider
+  issuerKey       String                   @map("issuer_key")
+  externalUserId  String                   @map("external_user_id")
+  normalizedEmail String?                  @map("normalized_email")
+  verifiedAt      DateTime?                @map("verified_at") @db.Timestamptz
+  metadata        Json                     @default("{}")
+  createdAt       DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  team            Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, issuerKey, externalUserId], map: "user_external_identities_provider_issuer_external_key")
+  @@index([teamId, userId, provider], map: "user_external_identities_team_user_provider_idx")
+  @@index([teamId, normalizedEmail], map: "user_external_identities_team_email_idx")
+  @@map("user_external_identities")
+}
+
+model UserBrowserProfile {
+  id                    String                      @id @default(uuid()) @db.Uuid
+  teamId                String                      @map("team_id") @db.Uuid
+  ownerUserId           String                      @map("owner_user_id") @db.Uuid
+  assignedRuntimeId     String?                     @map("assigned_runtime_id") @db.Uuid
+  runtimeProfileKey     String                      @map("runtime_profile_key")
+  displayName           String                      @map("display_name")
+  scopeKey              String                      @map("scope_key")
+  environmentKey        String                      @default("default") @map("environment_key")
+  authRole              String                      @default("default") @map("auth_role")
+  status                UserBrowserProfileStatus    @default(UNINITIALIZED)
+  verificationUrl       String?                     @map("verification_url")
+  verificationRules     Json                        @default("{}") @map("verification_rules")
+  lastPreparedAt        DateTime?                   @map("last_prepared_at") @db.Timestamptz
+  lastVerifiedAt        DateTime?                   @map("last_verified_at") @db.Timestamptz
+  lastUsedAt            DateTime?                   @map("last_used_at") @db.Timestamptz
+  inactivityExpiresAt   DateTime?                   @map("inactivity_expires_at") @db.Timestamptz
+  verificationError     Json?                       @map("verification_error")
+  version               Int                         @default(1)
+  createdAt             DateTime                    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime                    @updatedAt @map("updated_at") @db.Timestamptz
+  team                  Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  owner                 User                        @relation("BrowserProfileOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  assignedRuntime       BrowserRuntime?             @relation(fields: [assignedRuntimeId], references: [id], onDelete: SetNull)
+  grants                BrowserProfileGrant[]
+  taskBindings          TaskProfileBinding[]        @relation("ResolvedTaskProfile")
+  requestedTaskBindings TaskProfileBinding[]        @relation("RequestedTaskProfile")
+  reservations          BrowserProfileReservation[]
+  usages                BrowserProfileUsage[]
+  runtimeSessions       BrowserRuntimeSession[]
+  executionRuns         ExecutionRun[]
+
+  @@unique([teamId, ownerUserId, scopeKey], map: "user_browser_profiles_team_owner_scope_key")
+  @@unique([teamId, runtimeProfileKey], map: "user_browser_profiles_team_runtime_key_key")
+  @@index([teamId, status, lastUsedAt], map: "user_browser_profiles_team_status_last_used_idx")
+  @@index([assignedRuntimeId, status], map: "user_browser_profiles_runtime_status_idx")
+  @@index([inactivityExpiresAt, status], map: "user_browser_profiles_inactivity_status_idx")
+  @@map("user_browser_profiles")
+}
+
+model BrowserProfileGrant {
+  id                String                      @id @default(uuid()) @db.Uuid
+  teamId            String                      @map("team_id") @db.Uuid
+  profileId         String                      @map("profile_id") @db.Uuid
+  triggerSource     BrowserProfileTriggerSource @map("trigger_source")
+  hostnamePattern   String                      @map("hostname_pattern")
+  consentedByUserId String                      @map("consented_by_user_id") @db.Uuid
+  consentedAt       DateTime                    @default(now()) @map("consented_at") @db.Timestamptz
+  revokedAt         DateTime?                   @map("revoked_at") @db.Timestamptz
+  createdAt         DateTime                    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime                    @updatedAt @map("updated_at") @db.Timestamptz
+  team              Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  profile           UserBrowserProfile          @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  consentedBy       User                        @relation("BrowserProfileGrantConsenter", fields: [consentedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([profileId, triggerSource, hostnamePattern], map: "browser_profile_grants_profile_source_hostname_key")
+  @@index([teamId, triggerSource, revokedAt], map: "browser_profile_grants_team_source_revoked_idx")
+  @@map("browser_profile_grants")
+}
+
+model TaskProfileBinding {
+  id                       String                       @id @default(uuid()) @db.Uuid
+  taskExecutionId          String                       @unique @map("task_execution_id") @db.Uuid
+  strategy                 TaskProfileStrategy
+  status                   TaskProfileResolutionStatus  @default(PENDING)
+  unavailablePolicy        ProfileUnavailablePolicy     @default(WAIT_FOR_PROFILE) @map("unavailable_policy")
+  requestedProfileId       String?                      @map("requested_profile_id") @db.Uuid
+  resolvedProfileId        String?                      @map("resolved_profile_id") @db.Uuid
+  profileOwnerUserId       String?                      @map("profile_owner_user_id") @db.Uuid
+  scopeKey                 String?                      @map("scope_key")
+  triggerSource            BrowserProfileTriggerSource? @map("trigger_source")
+  externalIdentitySnapshot Json                         @default("{}") @map("external_identity_snapshot")
+  failureCode              String?                      @map("failure_code")
+  failureMessage           String?                      @map("failure_message")
+  resolvedAt               DateTime?                    @map("resolved_at") @db.Timestamptz
+  version                  Int                          @default(1)
+  createdAt                DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  taskExecution            TaskExecution                @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  requestedProfile         UserBrowserProfile?          @relation("RequestedTaskProfile", fields: [requestedProfileId], references: [id], onDelete: SetNull)
+  resolvedProfile          UserBrowserProfile?          @relation("ResolvedTaskProfile", fields: [resolvedProfileId], references: [id], onDelete: SetNull)
+  profileOwner             User?                        @relation("TaskProfileBindingOwner", fields: [profileOwnerUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, updatedAt], map: "task_profile_bindings_status_updated_idx")
+  @@index([resolvedProfileId, status], map: "task_profile_bindings_profile_status_idx")
+  @@map("task_profile_bindings")
+}
+
+model BrowserProfileReservation {
+  id              String                          @id @default(uuid()) @db.Uuid
+  teamId          String                          @map("team_id") @db.Uuid
+  profileId       String                          @map("profile_id") @db.Uuid
+  taskExecutionId String                          @map("task_execution_id") @db.Uuid
+  status          BrowserProfileReservationStatus @default(QUEUED)
+  leaseOwner      String?                         @map("lease_owner")
+  leaseToken      String?                         @map("lease_token") @db.Uuid
+  leaseExpiresAt  DateTime?                       @map("lease_expires_at") @db.Timestamptz
+  queuedAt        DateTime                        @default(now()) @map("queued_at") @db.Timestamptz
+  activatedAt     DateTime?                       @map("activated_at") @db.Timestamptz
+  releasedAt      DateTime?                       @map("released_at") @db.Timestamptz
+  createdAt       DateTime                        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime                        @updatedAt @map("updated_at") @db.Timestamptz
+  team            Team                            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  profile         UserBrowserProfile              @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  taskExecution   TaskExecution                   @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, taskExecutionId], map: "browser_profile_reservations_profile_task_key")
+  @@index([profileId, status, queuedAt], map: "browser_profile_reservations_profile_status_queue_idx")
+  @@index([status, leaseExpiresAt], map: "browser_profile_reservations_status_lease_idx")
+  @@map("browser_profile_reservations")
+}
+
+model BrowserProfileUsage {
+  id              String                      @id @default(uuid()) @db.Uuid
+  teamId          String                      @map("team_id") @db.Uuid
+  profileId       String?                     @map("profile_id") @db.Uuid
+  taskExecutionId String?                     @map("task_execution_id") @db.Uuid
+  executionRunId  String?                     @map("execution_run_id") @db.Uuid
+  requesterUserId String?                     @map("requester_user_id") @db.Uuid
+  triggerSource   BrowserProfileTriggerSource @map("trigger_source")
+  hostname        String
+  outcome         String?
+  startedAt       DateTime                    @default(now()) @map("started_at") @db.Timestamptz
+  finishedAt      DateTime?                   @map("finished_at") @db.Timestamptz
+  createdAt       DateTime                    @default(now()) @map("created_at") @db.Timestamptz
+  profile         UserBrowserProfile?         @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  team            Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution   TaskExecution?              @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
+  executionRun    ExecutionRun?               @relation(fields: [executionRunId], references: [id], onDelete: SetNull)
+  requester       User?                       @relation("BrowserProfileUsageRequester", fields: [requesterUserId], references: [id], onDelete: SetNull)
+
+  @@index([profileId, startedAt(sort: Desc)], map: "browser_profile_usages_profile_started_idx")
+  @@index([taskExecutionId], map: "browser_profile_usages_task_idx")
+  @@index([executionRunId], map: "browser_profile_usages_run_idx")
+  @@map("browser_profile_usages")
+}
+
+model InboundIntegrationEvent {
+  id              String                 @id @default(uuid()) @db.Uuid
+  teamId          String?                @map("team_id") @db.Uuid
+  taskExecutionId String?                @map("task_execution_id") @db.Uuid
+  provider        IntegrationProvider
+  issuerKey       String                 @map("issuer_key")
+  externalEventId String                 @map("external_event_id")
+  payloadHash     String                 @map("payload_hash") @db.Char(64)
+  metadata        Json                   @default("{}")
+  status          IntegrationEventStatus @default(RECEIVED)
+  attempts        Int                    @default(0)
+  nextAttemptAt   DateTime?              @map("next_attempt_at") @db.Timestamptz
+  error           Json?
+  receivedAt      DateTime               @default(now()) @map("received_at") @db.Timestamptz
+  processedAt     DateTime?              @map("processed_at") @db.Timestamptz
+  createdAt       DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  team            Team?                  @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  taskExecution   TaskExecution?         @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, issuerKey, externalEventId], map: "inbound_integration_events_provider_issuer_event_key")
+  @@index([status, nextAttemptAt, receivedAt], map: "inbound_integration_events_status_retry_idx")
+  @@index([teamId, provider, receivedAt(sort: Desc)], map: "inbound_integration_events_team_provider_received_idx")
+  @@map("inbound_integration_events")
+}
+
+/// Versioned issue-first business specification. Source context is immutable by
+/// hash; a changed snapshot appends a new GeneratedTestCase generation.
+model TestSpecification {
+  id                    String                     @id @default(uuid()) @db.Uuid
+  teamId                String                     @map("team_id") @db.Uuid
+  issueId               String                     @map("issue_id")
+  issueIdentifier       String                     @map("issue_identifier")
+  issueTitle            String                     @map("issue_title")
+  issueUrl              String                     @map("issue_url")
+  issueState            String                     @default("") @map("issue_state")
+  currentVersion        Int                        @default(1) @map("current_version")
+  sourceHash            String                     @map("source_hash") @db.Char(64)
+  context               Json
+  summary               String
+  primaryPullRequestUrl String?                    @map("primary_pull_request_url")
+  targetUrl             String?                    @map("target_url")
+  targetSource          SpecificationTargetSource? @map("target_source")
+  targetProvidedBy      String?                    @map("target_provided_by")
+  targetProvidedAt      DateTime?                  @map("target_provided_at") @db.Timestamptz
+  generatedAt           DateTime                   @default(now()) @map("generated_at") @db.Timestamptz
+  createdAt             DateTime                   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime                   @updatedAt @map("updated_at") @db.Timestamptz
+  team                  Team                       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  cases                 GeneratedTestCase[]
+
+  @@unique([teamId, issueId])
+  @@index([teamId, updatedAt(sort: Desc)])
+  @@index([teamId, issueIdentifier])
+  @@map("test_specifications")
+}
+
+model GeneratedTestCase {
+  id                   String            @id @default(uuid()) @db.Uuid
+  teamId               String            @map("team_id") @db.Uuid
+  specificationId      String            @map("specification_id") @db.Uuid
+  generationVersion    Int               @map("generation_version")
+  position             Int
+  name                 String
+  definition           Json
+  executionRunId       String?           @unique @map("execution_run_id") @db.Uuid
+  executionAttempts    Int               @default(0) @map("execution_attempts")
+  executionLastError   Json?             @map("execution_last_error")
+  executionRequestedAt DateTime?         @map("execution_requested_at") @db.Timestamptz
+  generatedAt          DateTime          @default(now()) @map("generated_at") @db.Timestamptz
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  team                 Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  specification        TestSpecification @relation(fields: [specificationId], references: [id], onDelete: Cascade)
+  executionRun         ExecutionRun?     @relation("GeneratedCaseExecutionRun", fields: [executionRunId], references: [id], onDelete: SetNull)
+
+  @@unique([specificationId, generationVersion, position])
+  @@index([teamId, specificationId, generationVersion])
+  @@index([executionRequestedAt])
+  @@map("generated_test_cases")
+}
+
+model RunAttempt {
+  id               String               @id @default(uuid()) @db.Uuid
+  runId            String               @map("run_id") @db.Uuid
+  number           Int
+  status           RunAttemptStatus     @default(PENDING)
+  inputSnapshot    Json                 @map("input_snapshot")
+  result           Json?
+  error            Json?
+  failureClass     String?              @map("failure_class")
+  startedAt        DateTime?            @map("started_at") @db.Timestamptz
+  finishedAt       DateTime?            @map("finished_at") @db.Timestamptz
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz
+  run              ExecutionRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task             AgentRuntimeTask?
+  events           RunEvent[]
+  evidences        RunEvidence[]
+  criterionResults RunCriterionResult[]
+  interventions    HumanIntervention[]
+  browserExecution BrowserExecution?
+
+  @@unique([runId, number])
+  @@index([status, createdAt])
+  @@map("run_attempts")
+}
+
+model AgentRuntimeTask {
+  id                                String                 @id @default(uuid()) @db.Uuid
+  runId                             String                 @map("run_id") @db.Uuid
+  attemptId                         String                 @unique @map("attempt_id") @db.Uuid
+  capability                        String
+  provider                          AgentRuntimeProvider   @default(CODEX)
+  status                            AgentRuntimeTaskStatus @default(PENDING)
+  snapshot                          Json
+  result                            Json?
+  error                             Json?
+  leaseOwner                        String?                @map("lease_owner")
+  leaseToken                        String?                @map("lease_token") @db.Uuid
+  leaseExpiresAt                    DateTime?              @map("lease_expires_at") @db.Timestamptz
+  fencingToken                      BigInt                 @default(0) @map("fencing_token")
+  lastHeartbeatAt                   DateTime?              @map("last_heartbeat_at") @db.Timestamptz
+  activeOperation                   String?                @map("active_operation")
+  activeOperationKey                String?                @map("active_operation_key")
+  activeOperationStartedAt          DateTime?              @map("active_operation_started_at") @db.Timestamptz
+  lastProgressAt                    DateTime?              @map("last_progress_at") @db.Timestamptz
+  lastModelCompletedAt              DateTime?              @map("last_model_completed_at") @db.Timestamptz
+  lastModelLatencyMs                Int?                   @map("last_model_latency_ms")
+  modelLatencyEwmaMs                Int?                   @map("model_latency_ewma_ms")
+  modelLatencyMaxMs                 Int                    @default(0) @map("model_latency_max_ms")
+  lastModelOperationKey             String?                @map("last_model_operation_key")
+  lastDeadlineExtensionOperationKey String?                @map("last_deadline_extension_operation_key")
+  completionId                      String?                @unique @map("completion_id") @db.Uuid
+  cancelRequestedAt                 DateTime?              @map("cancel_requested_at") @db.Timestamptz
+  deadlineAt                        DateTime               @map("deadline_at") @db.Timestamptz
+  startedAt                         DateTime?              @map("started_at") @db.Timestamptz
+  finishedAt                        DateTime?              @map("finished_at") @db.Timestamptz
+  createdAt                         DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                         DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  run                               ExecutionRun           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt                           RunAttempt             @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  events                            RunEvent[]
+  interventions                     HumanIntervention[]
+
+  @@index([status, leaseExpiresAt, createdAt])
+  @@index([runId, status])
+  @@map("agent_runtime_tasks")
+}
+
+model RunEvent {
+  id         String            @id @default(uuid()) @db.Uuid
+  teamId     String            @map("team_id") @db.Uuid
+  runId      String            @map("run_id") @db.Uuid
+  attemptId  String?           @map("attempt_id") @db.Uuid
+  taskId     String?           @map("task_id") @db.Uuid
+  sequence   BigInt            @default(autoincrement())
+  actor      String
+  kind       String
+  payload    Json              @default("{}")
+  occurredAt DateTime          @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  team       Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run        ExecutionRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt    RunAttempt?       @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  task       AgentRuntimeTask? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@unique([runId, sequence])
+  @@index([teamId, runId, sequence])
+  @@index([taskId, occurredAt])
+  @@map("run_events")
+}
+
+model RunCriterionResult {
+  id           String            @id @default(uuid()) @db.Uuid
+  teamId       String            @map("team_id") @db.Uuid
+  runId        String            @map("run_id") @db.Uuid
+  attemptId    String            @map("attempt_id") @db.Uuid
+  criterionId  String            @map("criterion_id")
+  status       RunProductVerdict
+  summary      String
+  evidenceRefs String[]          @default([]) @map("evidence_refs")
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz
+  team         Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run          ExecutionRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt      RunAttempt        @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, criterionId])
+  @@index([teamId, runId])
+  @@map("run_criterion_results")
+}
+
+model RunEvidence {
+  id                String                  @id @default(uuid()) @db.Uuid
+  teamId            String                  @map("team_id") @db.Uuid
+  runId             String                  @map("run_id") @db.Uuid
+  attemptId         String                  @map("attempt_id") @db.Uuid
+  runtimeArtifactId String?                 @map("runtime_artifact_id") @db.Uuid
+  externalId        String                  @map("external_id")
+  kind              String
+  label             String                  @default("")
+  metadata          Json                    @default("{}")
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  team              Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run               ExecutionRun            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt           RunAttempt              @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  runtimeArtifact   BrowserRuntimeArtifact? @relation(fields: [runtimeArtifactId], references: [id], onDelete: SetNull)
+
+  @@unique([attemptId, externalId])
+  @@index([teamId, runId, createdAt])
+  @@index([runtimeArtifactId])
+  @@map("run_evidences")
+}
+
+model HumanIntervention {
+  id                         String                    @id @default(uuid()) @db.Uuid
+  teamId                     String                    @map("team_id") @db.Uuid
+  runId                      String                    @map("run_id") @db.Uuid
+  attemptId                  String                    @map("attempt_id") @db.Uuid
+  taskId                     String                    @map("task_id") @db.Uuid
+  kind                       String
+  status                     RunInterventionStatus     @default(PENDING)
+  prompt                     String
+  context                    Json                      @default("{}")
+  responseSchema             Json                      @default("{}") @map("response_schema")
+  response                   Json?
+  expiresAt                  DateTime?                 @map("expires_at") @db.Timestamptz
+  pausedExecutionRemainingMs Int?                      @map("paused_execution_remaining_ms")
+  resolvedBy                 String?                   @map("resolved_by")
+  requestedAt                DateTime                  @default(now()) @map("requested_at") @db.Timestamptz
+  resolvedAt                 DateTime?                 @map("resolved_at") @db.Timestamptz
+  createdAt                  DateTime                  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                  DateTime                  @updatedAt @map("updated_at") @db.Timestamptz
+  team                       Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run                        ExecutionRun              @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt                    RunAttempt                @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  task                       AgentRuntimeTask          @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  notifications              NotificationOutbox[]
+  browserControlLease        BrowserHumanControlLease?
+
+  @@index([teamId, runId, status])
+  @@index([status, expiresAt])
+  @@map("human_interventions")
+}
+
+model BrowserExecution {
+  id               String                 @id @default(uuid()) @db.Uuid
+  runId            String                 @map("run_id") @db.Uuid
+  attemptId        String                 @unique @map("attempt_id") @db.Uuid
+  runtimeSessionId String?                @map("runtime_session_id") @db.Uuid
+  status           BrowserExecutionStatus @default(REQUESTED)
+  input            Json                   @default("{}")
+  output           Json?
+  error            Json?
+  startedAt        DateTime?              @map("started_at") @db.Timestamptz
+  finishedAt       DateTime?              @map("finished_at") @db.Timestamptz
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  run              ExecutionRun           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt          RunAttempt             @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  runtimeSession   BrowserRuntimeSession? @relation(fields: [runtimeSessionId], references: [id], onDelete: SetNull)
+
+  @@index([runId, status])
+  @@index([runtimeSessionId])
+  @@map("browser_executions")
+}
+
+model VerificationAssertion {
+  id           String                      @id @default(uuid()) @db.Uuid
+  teamId       String                      @map("team_id") @db.Uuid
+  runId        String                      @map("run_id") @db.Uuid
+  criterionId  String                      @map("criterion_id")
+  status       VerificationAssertionStatus
+  summary      String
+  evidenceRefs String[]                    @default([]) @map("evidence_refs")
+  createdAt    DateTime                    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime                    @updatedAt @map("updated_at") @db.Timestamptz
+  team         Team                        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run          VerificationRun             @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, criterionId])
+  @@index([teamId, runId])
+  @@map("verification_assertions")
+}
+
+model VerificationEvent {
+  id               String                  @id @default(uuid()) @db.Uuid
+  teamId           String                  @map("team_id") @db.Uuid
+  runId            String                  @map("run_id") @db.Uuid
+  sequence         BigInt                  @default(autoincrement())
+  actor            VerificationEventActor
+  kind             String
+  status           VerificationTraceStatus @default(INFO)
+  payload          Json                    @default("{}")
+  durationMs       Int?                    @map("duration_ms")
+  errorCode        String?                 @map("error_code")
+  errorMessage     String?                 @map("error_message")
+  requestId        String?                 @map("request_id")
+  traceId          String                  @map("trace_id") @db.VarChar(32)
+  spanId           String?                 @map("span_id") @db.VarChar(16)
+  credentialId     String?                 @map("credential_id") @db.Uuid
+  toolInvocationId String?                 @map("tool_invocation_id") @db.Uuid
+  runtimeCommandId String?                 @map("runtime_command_id") @db.Uuid
+  occurredAt       DateTime                @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  team             Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run              VerificationRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  credential       ToolCredential?         @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+  toolInvocation   ToolInvocation?         @relation(fields: [toolInvocationId], references: [id], onDelete: SetNull)
+  artifacts        VerificationArtifact[]
+
+  @@unique([runId, sequence])
+  @@index([teamId, runId, sequence])
+  @@index([traceId, occurredAt])
+  @@index([credentialId, occurredAt])
+  @@index([toolInvocationId])
+  @@index([runtimeCommandId])
+  @@map("verification_events")
+}
+
+model ToolInvocation {
+  id            String               @id @default(uuid()) @db.Uuid
+  teamId        String               @map("team_id") @db.Uuid
+  credentialId  String               @map("credential_id") @db.Uuid
+  runId         String?              @map("run_id") @db.Uuid
+  transport     String
+  toolName      String               @map("tool_name")
+  status        ToolInvocationStatus @default(STARTED)
+  requestId     String               @map("request_id")
+  mcpRequestId  String?              @map("mcp_request_id")
+  traceId       String               @map("trace_id") @db.VarChar(32)
+  spanId        String               @map("span_id") @db.VarChar(16)
+  clientName    String?              @map("client_name")
+  clientVersion String?              @map("client_version")
+  inputSummary  Json                 @default("{}") @map("input_summary")
+  outputSummary Json?                @map("output_summary")
+  errorCode     String?              @map("error_code")
+  errorMessage  String?              @map("error_message")
+  startedAt     DateTime             @default(now()) @map("started_at") @db.Timestamptz
+  completedAt   DateTime?            @map("completed_at") @db.Timestamptz
+  durationMs    Int?                 @map("duration_ms")
+  team          Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  credential    ToolCredential       @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  run           VerificationRun?     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  events        VerificationEvent[]
+
+  @@index([teamId, startedAt(sort: Desc)])
+  @@index([runId, startedAt])
+  @@index([credentialId, startedAt(sort: Desc)])
+  @@index([toolName, status, startedAt])
+  @@index([traceId, startedAt])
+  @@map("tool_invocations")
+}
+
+model ObjectStorageDeletionTask {
+  id             String    @id @default(uuid()) @db.Uuid
+  storageKey     String    @unique @map("storage_key")
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz
+  leaseToken     String?   @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz
+  lastError      String?   @map("last_error")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([nextAttemptAt, leaseExpiresAt])
+  @@map("object_storage_deletion_tasks")
+}
+
+model VerificationArtifact {
+  id                String                  @id @default(uuid()) @db.Uuid
+  teamId            String                  @map("team_id") @db.Uuid
+  runId             String                  @map("run_id") @db.Uuid
+  eventId           String?                 @map("event_id") @db.Uuid
+  runtimeArtifactId String?                 @map("runtime_artifact_id") @db.Uuid
+  kind              String
+  label             String                  @default("")
+  storageKey        String?                 @map("storage_key")
+  metadata          Json                    @default("{}")
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  team              Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run               VerificationRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  event             VerificationEvent?      @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  runtimeArtifact   BrowserRuntimeArtifact? @relation(fields: [runtimeArtifactId], references: [id], onDelete: SetNull)
+
+  @@unique([runId, runtimeArtifactId])
+  @@index([teamId, runId, createdAt])
+  @@index([eventId])
+  @@map("verification_artifacts")
+}
+
+model VerificationCheckpoint {
+  id                  String                       @id @default(uuid()) @db.Uuid
+  teamId              String                       @map("team_id") @db.Uuid
+  runId               String                       @map("run_id") @db.Uuid
+  status              VerificationCheckpointStatus @default(PENDING)
+  prompt              String
+  context             Json                         @default("{}")
+  responseSchema      Json                         @default("{}") @map("response_schema")
+  response            Json?
+  expiresAt           DateTime                     @map("expires_at") @db.Timestamptz
+  resolvedByUserId    String?                      @map("resolved_by_user_id") @db.Uuid
+  requestedAt         DateTime                     @default(now()) @map("requested_at") @db.Timestamptz
+  resolvedAt          DateTime?                    @map("resolved_at") @db.Timestamptz
+  team                Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run                 VerificationRun              @relation(fields: [runId], references: [id], onDelete: Cascade)
+  resolvedBy          User?                        @relation("VerificationCheckpointResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+  notifications       NotificationOutbox[]
+  browserControlLease BrowserHumanControlLease?
+
+  @@index([teamId, runId, status])
+  @@index([status, expiresAt])
+  @@map("verification_checkpoints")
+}
+
+model BrowserHumanControlLease {
+  id               String                  @id @default(uuid()) @db.Uuid
+  teamId           String                  @map("team_id") @db.Uuid
+  sessionId        String                  @unique @map("session_id") @db.Uuid
+  checkpointId     String?                 @unique @map("checkpoint_id") @db.Uuid
+  interventionId   String?                 @unique @map("intervention_id") @db.Uuid
+  controllerUserId String                  @map("controller_user_id") @db.Uuid
+  expiresAt        DateTime                @map("expires_at") @db.Timestamptz
+  createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime                @updatedAt @map("updated_at") @db.Timestamptz
+  team             Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  session          BrowserRuntimeSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  checkpoint       VerificationCheckpoint? @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+  intervention     HumanIntervention?      @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  controller       User                    @relation("BrowserHumanControlLeaseController", fields: [controllerUserId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, expiresAt])
+  @@index([controllerUserId, expiresAt])
+  @@map("browser_human_control_leases")
+}
+
+model NotificationOutbox {
+  id              String                   @id @default(uuid()) @db.Uuid
+  teamId          String                   @map("team_id") @db.Uuid
+  runId           String?                  @map("run_id") @db.Uuid
+  executionRunId  String?                  @map("execution_run_id") @db.Uuid
+  taskExecutionId String?                  @map("task_execution_id") @db.Uuid
+  checkpointId    String?                  @map("checkpoint_id") @db.Uuid
+  interventionId  String?                  @map("intervention_id") @db.Uuid
+  channel         NotificationChannel      @default(FEISHU)
+  eventType       String                   @map("event_type")
+  dedupeKey       String                   @unique @map("dedupe_key")
+  payload         Json
+  status          NotificationOutboxStatus @default(PENDING)
+  attempts        Int                      @default(0)
+  nextAttemptAt   DateTime                 @default(now()) @map("next_attempt_at") @db.Timestamptz
+  leaseToken      String?                  @map("lease_token") @db.Uuid
+  leaseExpiresAt  DateTime?                @map("lease_expires_at") @db.Timestamptz
+  lastError       String?                  @map("last_error")
+  deliveredAt     DateTime?                @map("delivered_at") @db.Timestamptz
+  createdAt       DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  team            Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run             VerificationRun?         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  executionRun    ExecutionRun?            @relation(fields: [executionRunId], references: [id], onDelete: Cascade)
+  taskExecution   TaskExecution?           @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  checkpoint      VerificationCheckpoint?  @relation(fields: [checkpointId], references: [id], onDelete: SetNull)
+  intervention    HumanIntervention?       @relation(fields: [interventionId], references: [id], onDelete: SetNull)
+
+  @@index([status, nextAttemptAt, leaseExpiresAt])
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([taskExecutionId, createdAt(sort: Desc)], map: "notification_outbox_task_execution_created_idx")
+  @@map("notification_outbox")
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  teamId      String   @map("team_id") @db.Uuid
+  actorUserId String   @map("actor_user_id") @db.Uuid
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id")
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  actor       User     @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@map("audit_events")
+}
