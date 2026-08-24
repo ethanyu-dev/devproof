@@ -44,7 +44,7 @@ jobs:
               install-browser-runtime.sh \
               install.sh > SHA256SUMS
           )
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: browser-runtime
           path: release/*
