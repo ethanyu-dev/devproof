@@ -272,6 +272,8 @@ describe("BrowserSessionManager E2E", () => {
       expect(video?.dataBase64?.length).toBeGreaterThan(100);
       expect(video?.metadata).toMatchObject({
         format: "STEP_SCREENSHOT_SLIDESHOW",
+        height: 720,
+        width: 1280,
       });
     } finally {
       if (!closed) await execute("session.close", {}).catch(() => undefined);

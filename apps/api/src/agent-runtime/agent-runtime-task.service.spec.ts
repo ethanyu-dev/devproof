@@ -151,7 +151,39 @@ describe("adaptive Runtime deadline decisions", () => {
       activeModelElapsedMs: 75_000,
       extendedByMs: 180_000,
       operationKey: "segment-1:4",
+      trigger: "ACTIVE_SLOW_MODEL",
     });
+  });
+
+  it("extends a near deadline after recent model progress below the slow threshold", () => {
+    const state = adaptiveState({
+      activeOperation: null,
+      activeOperationKey: null,
+      activeOperationStartedAtMs: null,
+      deadlineAtMs: Date.parse("2026-08-24T01:02:00.000Z"),
+      lastModelCompletedAtMs: Date.parse("2026-08-24T00:59:59.000Z"),
+      lastModelLatencyMs: 42_000,
+      lastModelOperationKey: "segment-1:5",
+    });
+
+    expect(decideAdaptiveDeadlineExtension(state)).toMatchObject({
+      extendedByMs: 180_000,
+      operationKey: "segment-1:5",
+      trigger: "RECENT_MODEL_PROGRESS",
+    });
+  });
+
+  it("does not extend for stale completed model progress", () => {
+    const state = adaptiveState({
+      activeOperation: null,
+      activeOperationKey: null,
+      activeOperationStartedAtMs: null,
+      lastModelCompletedAtMs: Date.parse("2026-08-24T00:54:59.000Z"),
+      lastModelLatencyMs: 42_000,
+      lastModelOperationKey: "segment-1:5",
+    });
+
+    expect(decideAdaptiveDeadlineExtension(state)).toBeNull();
   });
 
   it("does not spend extension budget when there is ample time", () => {
