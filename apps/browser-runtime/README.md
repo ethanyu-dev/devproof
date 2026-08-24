@@ -4,14 +4,18 @@ Browser Runtime is DevProof's independently deployable Playwright execution host
 
 ## Install
 
-From this repository:
+Install or upgrade the latest release directly on a Linux Runtime host. A
+repository checkout and preinstalled Node.js are not required:
 
 ```bash
-pnpm --filter @devproof/browser-runtime build
-pnpm --filter @devproof/browser-runtime install:browser
+curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 ```
 
-To install a packaged release tarball:
+The bootstrap verifies the release checksum, installs Node.js 24 and Chromium
+when needed, and configures `devproof-browser-runtime.service` as a systemd user
+service. The first installation leaves the service stopped until pairing.
+
+Maintainers can still install a locally built release tarball with:
 
 ```bash
 npm install --global ./devproof-browser-runtime-<version>.tgz
@@ -22,11 +26,15 @@ The install command downloads the Chromium build pinned by Playwright. Browser R
 
 ## Pair and start
 
-Generate a one-time pairing token in Console → Access → Execution Runtime, then run:
+After the installer finishes, generate a one-time pairing command in Console →
+Access → Execution Runtime and run it on the same host. The generated command
+uses the following form and starts the installed service after pairing:
 
 ```bash
-devproof-browser-runtime pair --api https://devproof.example.com --token TOKEN
-devproof-browser-runtime start
+$HOME/.local/bin/devproof-browser-runtime pair \
+  --api https://devproof.example.com \
+  --token TOKEN && \
+  systemctl --user restart devproof-browser-runtime.service
 ```
 
 The default state directory is `~/.devproof-browser-runtime`. Supported environment variables include:
@@ -60,3 +68,16 @@ A user Profile directory includes `.devproof-user-profile.json` with only its ki
 Lifecycle events persist locally and replay until acknowledged by the control plane. Unmarked legacy persistent directories and active Profiles are never removed by automatic retention. Network access remains governed by the Runtime-wide policy; a Profile does not carry its own network allowlist.
 
 This cleanup runs inside `devproof-browser-runtime start`. It needs no cron job, and its 30-day limit cannot be increased through configuration. Restart Browser Runtime after upgrading so it can negotiate the latest supported protocol.
+
+## Upgrade
+
+Run the same release command again. Existing credentials, Browser Profiles,
+configuration, and service state are retained:
+
+```bash
+curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+```
+
+The installer refuses to switch packages while persisted sessions are active.
+Use `bash -s -- --version MAJOR.MINOR.PATCH` to pin a release, or
+`bash -s -- --force-active` only when session interruption is acceptable.

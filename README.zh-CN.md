@@ -142,14 +142,19 @@ Web 会把 /auth 请求同源代理到 API。API 使用 OAuth v2 换取 user_acc
 
 ## 注册 Browser Runtime
 
-先完整构建 daemon，并在 Runtime 机器安装经过版本锁定的 Chromium：
+Browser Runtime 直接从 GitHub Release 安装，Runtime 主机无需 clone DevProof
+仓库，也无需预装 Node.js 或 pnpm。请使用最终运行 Runtime 的普通 Linux 用户执行：
 
-    pnpm --filter @devproof/browser-runtime build
-    pnpm --filter @devproof/browser-runtime install:browser
+    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
-在 Console 的“接入配置 → 执行 Runtime”点击“注册”，复制生成的一次性命令并在目标机器执行。配对成功后启动：
+引导脚本从 GitHub Releases 下载最新 Runtime 包、本机安装器和
+`SHA256SUMS`，校验两个文件后安装用户态 Node.js 24、Chromium 与 systemd
+用户服务。全新 Ubuntu/Debian 主机首次安装 Chromium 系统依赖和启用
+systemd linger 时需要免交互 sudo。
 
-    pnpm --filter @devproof/browser-runtime start
+安装完成后，在 Console 的“接入配置 → 执行 Runtime”点击“注册”，并在同一
+主机执行生成的一次性配对命令；该命令会完成设备配对并启动服务。配对 Token
+有效期为 10 分钟，因此应在初次安装完成后再生成。
 
 daemon 默认把长期凭证以 0600 权限写入用户目录下的 .devproof-browser-runtime/runtime.json。可通过 DEVPROOF_RUNTIME_HOME 改变位置。
 
@@ -157,25 +162,24 @@ daemon 通过 outbound WebSocket 连接 Runtime Gateway，支持协议协商、�
 
 ### Browser Runtime 一键安装与升级
 
-从开发机运行以下命令。脚本会构建一次 Runtime、校验安装包并通过 SSH 分发；已有设备会保留 `runtime.json` 和原 systemd 配置，在旧服务在线期间预热新包和浏览器，切换前确认没有活跃 Browser Session，再原地升级并验证重新上线：
+以后在每台 Runtime 主机重复执行同一条安装命令即可升级：
 
-    pnpm deploy:browser-runtime -- \
-      --identity ~/.ssh/devproof-browser-runtime \
-      ppuser@runtime-host-1 ppuser@runtime-host-2
+    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
-全新 Linux 设备使用 Console 生成的一次性配对 Token，并在首次安装时传入 API 地址。Token 通过 SSH 标准输入传递，不写入命令行、安装包或远端磁盘：
+已有设备会保留 `runtime.json`、Browser Profile 和 systemd 配置，在旧服务
+在线期间下载并预热新包与浏览器，切换前确认没有活跃 Browser Session，随后
+原地升级、重启并确认重新上线。可用 `--version` 固定版本；只有明确接受会话
+中断风险时才使用 `--force-active`：
 
-    pnpm deploy:browser-runtime -- \
-      --identity ~/.ssh/devproof-browser-runtime \
-      --pair-api https://devproof.example.com \
-      --pair-token \
-      ppuser@new-runtime-host
+    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
+      bash -s -- --version 0.2.11
 
-全新 Ubuntu/Debian 设备需要能够以普通用户通过 SSH 密钥登录、使用 systemd user manager，并可访问 Node.js 下载源、npm registry、Playwright CDN、DevProof API 与 Runtime Gateway。首次连接会记录新的 SSH 主机密钥，已记录的主机密钥如果发生变化仍会拒绝连接。脚本会在需要时安装 Node.js 24 的用户态发行包、Chromium、系统依赖和 Runtime 服务；首次安装要求该用户具有免交互 sudo 权限。已有设备检测到活跃会话时默认拒绝升级；只有明确接受中断风险时才能加 `--force-active`。
+Runtime 主机需要能够使用 systemd user manager，并访问 GitHub Releases、
+Node.js 下载源、npm registry、Playwright CDN、DevProof API 与 Runtime
+Gateway。已有设备检测到活跃会话时默认拒绝升级，除非显式传入
+`--force-active`。
 
-新设备可在 `~/.config/devproof/browser-runtime.env` 配置 `DEVPROOF_RUNTIME_NAME`、`DEVPROOF_MAX_CONCURRENCY` 和 `DEVPROOF_HEADLESS`，然后重新运行部署命令；其中 `DEVPROOF_MAX_CONCURRENCY` 只作为设备首次注册时的初始容量。每次成功安装的包哈希与时间记录在 `~/.devproof-browser-runtime/install.json`。节点绑定后，在“接入配置 → Runtime 访问与容量”为各 Runtime 设置控制台权威并发容量和允许访问的内网主机；未配置白名单时继续执行默认拦截。
-
-私网设备可使用 `~/.ssh/config` 中的主机别名，或重复传入 `--ssh-option`，例如 `--ssh-option ProxyJump=user@bastion`、`--ssh-option Port=2222`；这些选项会同时传给 `ssh` 和 `scp`。
+新设备应在配对前通过 `~/.config/devproof/browser-runtime.env` 配置 `DEVPROOF_RUNTIME_NAME`、`DEVPROOF_MAX_CONCURRENCY` 和 `DEVPROOF_HEADLESS`；后续修改后重启服务即可。其中 `DEVPROOF_MAX_CONCURRENCY` 只作为设备首次注册时的初始容量。每次成功安装的包哈希与时间记录在 `~/.devproof-browser-runtime/install.json`。节点绑定后，在“接入配置 → Runtime 访问与容量”为各 Runtime 设置控制台权威并发容量和允许访问的内网主机；未配置白名单时继续执行默认拦截。
 
 多个 Runtime 注册后，可在“接入配置 → 执行 Runtime → 域名路由策略”配置目标域名。DevProof 使用 `execution.targetUrl`（兼容 `inputs.targetUrl`）匹配精确域名或 `*.example.com` 规则；重叠规则按优先级、精确程度和匹配长度决定。命中规则后只使用规则指定的 Runtime，并按规则选择等待或立即失败；未命中规则时，从在线且能力匹配的 Runtime 中随机分配。
 

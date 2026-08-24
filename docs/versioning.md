@@ -12,7 +12,16 @@ DevProof has three independent version surfaces.
 
 Browser Runtime releases use `runtime-vMAJOR.MINOR.PATCH`. API records the installed Runtime version for operations, but compatibility is determined by the negotiated Runtime protocol.
 
-The tag must exactly match `apps/browser-runtime/package.json`. The release workflow builds and tests the package, uploads the tarball, and creates a GitHub release.
+The tag must exactly match `apps/browser-runtime/package.json`. The release
+workflow builds and tests the package, then publishes a stable asset set:
+
+- `install.sh`: public bootstrap used for both installation and upgrades;
+- `install-browser-runtime.sh`: verified local package installer;
+- `devproof-browser-runtime.tgz`: versioned Runtime package under a stable name;
+- `SHA256SUMS`: checksums verified before installation.
+
+Runtime hosts download only these release assets. They do not clone the
+repository or build the monorepo.
 
 ## Runtime protocol
 

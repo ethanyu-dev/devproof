@@ -16,7 +16,10 @@ DevProof keeps its complete Prisma migration chain so an existing installation c
 2. Deploy API and verify `/live`, `/ready`, and worker health.
 3. Deploy Web and verify `/health` and authenticated Console proxy routes.
 4. Roll Agent Runtime workers and confirm claims and heartbeats recover.
-5. Roll Browser Runtime hosts. The deployment script rejects active sessions unless `--force-active` is explicitly supplied.
+5. Upgrade each Browser Runtime host with the release installer. It rejects active sessions unless `--force-active` is explicitly supplied:
+
+       curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+
 6. Confirm the expected Runtime protocol is negotiated before routing tasks that require new capabilities.
 
 Never use `pnpm prisma:migrate` in production; it is for creating development migrations. Do not edit, delete, reorder, or squash a migration that may already have been applied.

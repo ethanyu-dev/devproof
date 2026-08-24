@@ -29,12 +29,26 @@ jobs:
       - run: pnpm --filter @devproof/browser-runtime build
       - run: pnpm --filter @devproof/browser-runtime test
       - name: Pack runtime
-        run: pnpm --filter @devproof/browser-runtime pack --pack-destination release
+        run: |
+          pnpm --filter @devproof/browser-runtime pack --pack-destination release
+          package="$(find release -maxdepth 1 -name 'devproof-browser-runtime-*.tgz' -print -quit)"
+          test -n "$package"
+          mv "$package" release/devproof-browser-runtime.tgz
+          cp scripts/install-browser-runtime.sh release/install-browser-runtime.sh
+          cp scripts/bootstrap-browser-runtime.sh release/install.sh
+          chmod 0755 release/install-browser-runtime.sh release/install.sh
+          (
+            cd release
+            sha256sum \
+              devproof-browser-runtime.tgz \
+              install-browser-runtime.sh \
+              install.sh > SHA256SUMS
+          )
       - uses: actions/upload-artifact@v4
         with:
           name: browser-runtime
-          path: release/*.tgz
+          path: release/*
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.tgz --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" release/* --generate-notes --verify-tag

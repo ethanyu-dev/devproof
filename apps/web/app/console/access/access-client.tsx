@@ -120,6 +120,12 @@ const runtimeScopes: Scope[] = ["runtime:lease"];
 const runtimeApiUrl =
   process.env.NEXT_PUBLIC_RUNTIME_API_URL ?? "http://localhost:4433";
 const mcpEndpoint = `${runtimeApiUrl.replace(/\/$/, "")}/mcp`;
+const runtimeInstallCommand =
+  "curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash";
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 
 function runtimeTone(status: BrowserRuntime["status"]) {
   if (status === "ONLINE") return "success" as const;
@@ -270,10 +276,11 @@ export function AccessClient() {
         pairingToken: string;
       }>("/browser-runtimes/pairing-tokens", { method: "POST" });
       const command =
-        "pnpm --filter @devproof/browser-runtime pair -- --api " +
-        runtimeApiUrl +
+        "$HOME/.local/bin/devproof-browser-runtime pair --api " +
+        shellQuote(runtimeApiUrl) +
         " --token " +
-        result.pairingToken;
+        shellQuote(result.pairingToken) +
+        " && systemctl --user restart devproof-browser-runtime.service";
       setPairing({ command, expiresAt: result.expiresAt });
       setRuntimeMessage({
         text: "一次性配对命令已生成，请在 10 分钟内使用。",
@@ -567,6 +574,30 @@ export function AccessClient() {
                 />
               </div>
             ) : null}
+
+            <Card className="dp-pairing-panel">
+              <div>
+                <p>安装或升级命令</p>
+                <code>{runtimeInstallCommand}</code>
+                <small>
+                  首次注册先在 Linux Runtime
+                  主机执行；后续升级重复执行同一命令即可。
+                </small>
+              </div>
+              <Button
+                onClick={() =>
+                  void copy(
+                    runtimeInstallCommand,
+                    "Runtime 安装命令已复制。",
+                    "runtime",
+                  )
+                }
+                variant="secondary"
+              >
+                <Clipboard />
+                复制
+              </Button>
+            </Card>
 
             {pairing ? (
               <Card className="dp-pairing-panel" ref={pairingRef} tabIndex={-1}>
