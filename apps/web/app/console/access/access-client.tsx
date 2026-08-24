@@ -121,7 +121,7 @@ const runtimeApiUrl =
   process.env.NEXT_PUBLIC_RUNTIME_API_URL ?? "http://localhost:4433";
 const mcpEndpoint = `${runtimeApiUrl.replace(/\/$/, "")}/mcp`;
 const runtimeInstallCommand =
-  "curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash";
+  "curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash";
 
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;

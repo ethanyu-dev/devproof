@@ -15,7 +15,7 @@ usage() {
 Download, verify, and install or upgrade DevProof Browser Runtime on Linux.
 
 Usage:
-  curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+  curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 Options:
   --version VERSION     Install a specific runtime-vVERSION release.

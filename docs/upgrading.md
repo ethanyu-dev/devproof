@@ -18,7 +18,7 @@ DevProof keeps its complete Prisma migration chain so an existing installation c
 4. Roll Agent Runtime workers and confirm claims and heartbeats recover.
 5. Upgrade each Browser Runtime host with the release installer. It rejects active sessions unless `--force-active` is explicitly supplied:
 
-       curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+       curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 6. Confirm the expected Runtime protocol is negotiated before routing tasks that require new capabilities.
 

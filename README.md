@@ -146,7 +146,7 @@ Browser Runtime is installed directly from checksummed GitHub Release assets; th
 Runtime host does not need a DevProof repository checkout, Node.js, or pnpm.
 Run this as the regular Linux user that will own the Runtime:
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 The bootstrap downloads the latest Runtime package, package installer, and
 `SHA256SUMS` from GitHub Releases, verifies both files, installs user-local
@@ -167,7 +167,7 @@ The daemon connects to Runtime Gateway over an outbound WebSocket and supports p
 
 Upgrade each Runtime host with the same command used for installation:
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 Existing hosts preserve `runtime.json`, Browser Profiles, and systemd
 configuration. The installer downloads and warms the new package and browser
@@ -176,7 +176,7 @@ active before switching, upgrades in place, restarts the service, and confirms
 that Runtime reconnects. Use `--version` to pin a release or `--force-active`
 only when interruption risk is explicitly accepted:
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
       bash -s -- --version 0.2.12
 
 A Runtime host must be able to use its systemd user manager and reach GitHub

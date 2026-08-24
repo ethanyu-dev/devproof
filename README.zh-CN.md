@@ -145,7 +145,7 @@ Web 会把 /auth 请求同源代理到 API。API 使用 OAuth v2 换取 user_acc
 Browser Runtime 直接从 GitHub Release 安装，Runtime 主机无需 clone DevProof
 仓库，也无需预装 Node.js 或 pnpm。请使用最终运行 Runtime 的普通 Linux 用户执行：
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 引导脚本从 GitHub Releases 下载最新 Runtime 包、本机安装器和
 `SHA256SUMS`，校验两个文件后安装用户态 Node.js 24、Chromium 与 systemd
@@ -164,14 +164,14 @@ daemon 通过 outbound WebSocket 连接 Runtime Gateway，支持协议协商、�
 
 以后在每台 Runtime 主机重复执行同一条安装命令即可升级：
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 
 已有设备会保留 `runtime.json`、Browser Profile 和 systemd 配置，在旧服务
 在线期间下载并预热新包与浏览器，切换前确认没有活跃 Browser Session，随后
 原地升级、重启并确认重新上线。可用 `--version` 固定版本；只有明确接受会话
 中断风险时才使用 `--force-active`：
 
-    curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
+    curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
       bash -s -- --version 0.2.12
 
 Runtime 主机需要能够使用 systemd user manager，并访问 GitHub Releases、

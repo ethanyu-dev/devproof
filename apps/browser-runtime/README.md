@@ -8,7 +8,7 @@ Install or upgrade the latest release directly on a Linux Runtime host. A
 repository checkout and preinstalled Node.js are not required:
 
 ```bash
-curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 ```
 
 The bootstrap verifies the release checksum, installs Node.js 24 and Chromium
@@ -75,7 +75,7 @@ Run the same release command again. Existing credentials, Browser Profiles,
 configuration, and service state are retained:
 
 ```bash
-curl -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
+curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | bash
 ```
 
 The installer refuses to switch packages while persisted sessions are active.
