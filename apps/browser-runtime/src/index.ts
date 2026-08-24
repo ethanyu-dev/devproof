@@ -2338,7 +2338,7 @@ export class BrowserSessionManager {
     const composer = await session.context.newPage();
     try {
       const encoded = await composer.evaluate(
-        async ({ frameDurationMs, frames }) => {
+        async ({ durationMs, frameDurationMs, frames }) => {
           if (typeof MediaRecorder === "undefined") {
             throw new Error("Chromium MediaRecorder is unavailable.");
           }
@@ -2349,17 +2349,38 @@ export class BrowserSessionManager {
           ].find((candidate) => MediaRecorder.isTypeSupported(candidate));
           if (!mimeType) throw new Error("No WebM encoder is available.");
 
-          const width = 960;
-          const height = 540;
+          const loadImage = async (dataBase64: string) => {
+            const image = new Image();
+            image.src = `data:image/jpeg;base64,${dataBase64}`;
+            await image.decode();
+            return image;
+          };
+          const firstImage = await loadImage(frames[0]!.dataBase64);
+          const width = firstImage.naturalWidth;
+          const height = firstImage.naturalHeight;
+          if (width <= 0 || height <= 0) {
+            throw new Error("Step video frame dimensions are invalid.");
+          }
           const canvas = document.createElement("canvas");
           canvas.width = width;
           canvas.height = height;
           const context = canvas.getContext("2d");
           if (!context) throw new Error("Canvas 2D context is unavailable.");
           const stream = canvas.captureStream(10);
+          const maximumEncodedBytes = 8 * 1024 * 1024;
+          const videoBitsPerSecond = Math.min(
+            6_000_000,
+            Math.max(
+              800_000,
+              Math.floor(
+                (maximumEncodedBytes * 8 * 0.9) /
+                  Math.max(0.7, durationMs / 1_000),
+              ),
+            ),
+          );
           const recorder = new MediaRecorder(stream, {
             mimeType,
-            videoBitsPerSecond: 600_000,
+            videoBitsPerSecond,
           });
           const chunks: Blob[] = [];
           recorder.ondataavailable = (event) => {
@@ -2374,44 +2395,23 @@ export class BrowserSessionManager {
             new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
           recorder.start(250);
 
-          for (const frame of frames) {
-            const image = new Image();
-            image.src = `data:image/jpeg;base64,${frame.dataBase64}`;
-            await image.decode();
+          for (const [index, frame] of frames.entries()) {
+            const image =
+              index === 0 ? firstImage : await loadImage(frame.dataBase64);
             context.fillStyle = "#070b12";
             context.fillRect(0, 0, width, height);
-            const availableHeight = height - 52;
             const scale = Math.min(
               width / image.naturalWidth,
-              availableHeight / image.naturalHeight,
+              height / image.naturalHeight,
             );
             const renderedWidth = image.naturalWidth * scale;
             const renderedHeight = image.naturalHeight * scale;
             context.drawImage(
               image,
               (width - renderedWidth) / 2,
-              (availableHeight - renderedHeight) / 2,
+              (height - renderedHeight) / 2,
               renderedWidth,
               renderedHeight,
-            );
-            context.fillStyle = "rgba(7, 11, 18, 0.94)";
-            context.fillRect(0, height - 52, width, 52);
-            context.fillStyle = "#f8fafc";
-            context.font =
-              "600 19px ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif";
-            context.fillText(
-              `Step ${frame.index} · ${frame.commandType}`,
-              20,
-              height - 29,
-            );
-            context.fillStyle = "#94a3b8";
-            context.font =
-              "13px ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif";
-            const detail = `${frame.title || "Browser"} · ${frame.url}`;
-            context.fillText(
-              detail.length > 118 ? `${detail.slice(0, 117)}…` : detail,
-              20,
-              height - 10,
             );
             await sleep(
               frames.length === 1
@@ -2435,17 +2435,19 @@ export class BrowserSessionManager {
           }
           return {
             dataBase64: btoa(binary),
+            height,
             mimeType: blob.type || "video/webm",
+            width,
           };
         },
         {
+          durationMs: Math.max(
+            700,
+            session.stepFrames.length * frameDurationMs,
+          ),
           frameDurationMs,
           frames: session.stepFrames.map((frame) => ({
-            commandType: frame.commandType,
             dataBase64: frame.data.toString("base64"),
-            index: frame.index,
-            title: frame.title,
-            url: frame.url,
           })),
         },
       );
@@ -2463,8 +2465,8 @@ export class BrowserSessionManager {
         durationMs: Math.max(700, session.stepFrames.length * frameDurationMs),
         format: "STEP_SCREENSHOT_SLIDESHOW",
         frameCount: session.stepFrames.length,
-        height: 540,
-        width: 960,
+        height: encoded.height,
+        width: encoded.width,
       });
     } finally {
       await composer.close().catch(() => undefined);

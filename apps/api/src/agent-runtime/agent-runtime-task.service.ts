@@ -72,6 +72,7 @@ export interface AdaptiveDeadlineExtension {
   observedModelLatencyMs: number;
   operationKey: string;
   reserveMs: number;
+  trigger: "ACTIVE_SLOW_MODEL" | "RECENT_MODEL_PROGRESS";
 }
 
 export function decideAdaptiveDeadlineExtension(
@@ -98,15 +99,18 @@ export function decideAdaptiveDeadlineExtension(
     state.lastModelCompletedAtMs !== null &&
     state.nowMs - state.lastModelCompletedAtMs <=
       Math.max(300_000, slowThresholdMs * 4);
-  const completedModelIsSlow =
+  const completedModelHasProgress =
     completedModelIsRecent &&
-    (state.lastModelLatencyMs ?? 0) >= slowThresholdMs &&
+    state.lastModelLatencyMs !== null &&
     Boolean(state.lastModelOperationKey);
   const operationKey = activeModelIsSlow
     ? state.activeOperationKey
-    : completedModelIsSlow
+    : completedModelHasProgress
       ? state.lastModelOperationKey
       : null;
+  const trigger = activeModelIsSlow
+    ? "ACTIVE_SLOW_MODEL"
+    : "RECENT_MODEL_PROGRESS";
   if (
     !operationKey ||
     operationKey === state.lastDeadlineExtensionOperationKey
@@ -141,6 +145,7 @@ export function decideAdaptiveDeadlineExtension(
     observedModelLatencyMs,
     operationKey,
     reserveMs,
+    trigger,
   };
 }
 
@@ -359,6 +364,7 @@ export class AgentRuntimeTaskService {
                 operationKey: extension.operationKey,
                 reason: "SLOW_MODEL",
                 reserveMs: extension.reserveMs,
+                trigger: extension.trigger,
               }),
               runId: task.runId,
               taskId: task.id,
