@@ -177,7 +177,7 @@ that Runtime reconnects. Use `--version` to pin a release or `--force-active`
 only when interruption risk is explicitly accepted:
 
     curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
-      bash -s -- --version 0.2.12
+      bash -s -- --version 0.2.13
 
 A Runtime host must be able to use its systemd user manager and reach GitHub
 Releases, the Node.js download source, npm registry, Playwright CDN, DevProof

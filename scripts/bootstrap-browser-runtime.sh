@@ -79,6 +79,8 @@ download() {
   local asset="$1"
   printf 'Downloading %s...\n' "$asset"
   curl --ipv4 --fail --location --silent --show-error \
+    --connect-timeout 10 --max-time 60 \
+    --retry 3 --retry-delay 2 --retry-all-errors \
     --output "$temporary/$asset" "$release_base/$asset"
 }
 

@@ -172,7 +172,7 @@ daemon 通过 outbound WebSocket 连接 Runtime Gateway，支持协议协商、�
 中断风险时才使用 `--force-active`：
 
     curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
-      bash -s -- --version 0.2.12
+      bash -s -- --version 0.2.13
 
 Runtime 主机需要能够使用 systemd user manager，并访问 GitHub Releases、
 Node.js 下载源、npm registry、Playwright CDN、DevProof API 与 Runtime
