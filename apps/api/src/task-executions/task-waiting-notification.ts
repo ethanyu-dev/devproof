@@ -186,37 +186,37 @@ export function taskWaitingPrompt(reason: string) {
     case "DEPLOYMENT_TARGET_REQUIRED":
       return "请打开任务并填写可访问的 Deployment URL，然后提交执行全部 Case。";
     case "PROFILE_ACCESS_APPROVAL_REQUIRED":
-      return "请由 Profile 所有人打开 Profile 页面，确认允许本次任务使用该登录身份。";
+      return "请由浏览器身份所有人打开浏览器身份页面，确认允许本次任务使用该登录状态。";
     case "PROFILE_AUTHORIZATION_CHANGED":
-      return "Profile 授权已发生变化，请由所有人重新登录或确认本次任务入口授权。";
+      return "浏览器身份授权已发生变化，请由所有人重新登录或确认本次任务入口授权。";
     case "PROFILE_EXPLICIT_NOT_FOUND":
-      return "原先指定的 Profile 已不存在，请打开任务选择另一个 READY Profile，或改用其他策略。";
+      return "原先指定的浏览器身份已不存在，请打开任务选择另一个可用浏览器身份，或改用其他策略。";
     case "PROFILE_INACTIVITY_EXPIRED":
-      return "Profile 登录状态已过期，请由所有人重新完成网页登录并验证保存。";
+      return "浏览器身份的登录状态已过期，请由所有人重新完成网页登录并验证保存。";
     case "PROFILE_ISSUE_ASSIGNEE_ISSUER_CONFLICT":
-      return "Linear 负责人身份已关联到其他团队，请联系管理员修正身份关联，或改选其他 Profile 策略。";
+      return "Linear 负责人身份已关联到其他团队，请联系管理员修正身份关联，或改选其他浏览器身份策略。";
     case "PROFILE_LOGIN_REQUIRED":
-      return "请由 Profile 所有人打开 Profile 页面，完成网页登录后点击“验证并保存”。";
+      return "请由浏览器身份所有人打开浏览器身份页面，完成网页登录后点击“验证并保存”。";
     case "PROFILE_REQUESTER_UNKNOWN":
-      return "请打开任务并重新选择 Profile 策略；选择“使用我的 Profile”可将当前登录用户认领为任务请求人。";
+      return "请打开任务并重新选择浏览器身份策略；选择“使用我的浏览器身份”可将当前登录用户认领为任务请求人。";
     case "PROFILE_ISSUE_ASSIGNEE_UNMAPPED":
-      return "请让 Linear Issue 负责人先登录 DevProof 完成身份关联，或在任务中改选其他 Profile 策略。";
+      return "请让 Linear Issue 负责人先登录 DevProof 完成身份关联，或在任务中改选其他浏览器身份策略。";
     case "PROFILE_ISSUE_ASSIGNEE_IS_AGENT":
-      return "Linear Issue 当前由 Agent 负责，无法持有用户 Profile；请改选“使用我的 Profile”或临时会话。";
+      return "Linear Issue 当前由 Agent 负责，无法持有用户浏览器身份；请改选“使用我的浏览器身份”或临时会话。";
     case "PROFILE_ISSUE_UNASSIGNED":
-      return "请先为 Linear Issue 指定负责人，或在任务中改选其他 Profile 策略。";
+      return "请先为 Linear Issue 指定负责人，或在任务中改选其他浏览器身份策略。";
     case "PROFILE_ISSUE_CONTEXT_MISSING":
-      return "当前任务缺少 Linear Issue 上下文，请重试 Spec 分析，或改选“使用我的 Profile”。";
+      return "当前任务缺少 Linear Issue 上下文，请重试 Spec 分析，或改选“使用我的浏览器身份”。";
     case "PROFILE_NOT_READY_OR_NOT_AUTHORIZED":
-      return "请打开任务选择可用 Profile，或由 Profile 所有人完成登录和授权。";
+      return "请打开任务选择可用浏览器身份，或由身份所有人完成登录和授权。";
     case "PROFILE_OWNER_DELETED":
-      return "原 Profile 已被删除，请打开任务重新选择策略；使用请求人 Profile 时系统会自动重建。";
+      return "原浏览器身份已被删除，请打开任务重新选择策略；使用请求人身份时系统会自动重建。";
     case "PROFILE_OWNER_DISABLED":
-      return "原 Profile 已停用，请由所有人恢复登录，或在任务中改选其他 Profile 策略。";
+      return "原浏览器身份已停用，请由所有人恢复登录，或在任务中改选其他浏览器身份策略。";
     case "PROFILE_OWNER_OFFBOARDED":
-      return "Profile 所有人已不在当前团队，请在任务中改选其他 Profile 策略。";
+      return "浏览器身份所有人已不在当前团队，请在任务中改选其他浏览器身份策略。";
     case "PROFILE_TARGET_REQUIRED":
-      return "请打开任务填写可访问的 Deployment URL，然后继续解析 Profile。";
+      return "请打开任务填写可访问的 Deployment URL，然后继续解析浏览器身份。";
     default:
       return "请打开任务查看等待原因，并完成页面提示的人工操作。";
   }

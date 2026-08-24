@@ -121,7 +121,7 @@ describe("task waiting notifications", () => {
       "认领为任务请求人",
     );
     expect(taskWaitingPrompt("PROFILE_EXPLICIT_NOT_FOUND")).toContain(
-      "另一个 READY Profile",
+      "另一个可用浏览器身份",
     );
   });
 });

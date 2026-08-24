@@ -27,8 +27,9 @@ The install command downloads the Chromium build pinned by Playwright. Browser R
 ## Pair and start
 
 After the installer finishes, generate a one-time pairing command in Console →
-Access → Execution Runtime and run it on the same host. The generated command
-uses the following form and starts the installed service after pairing:
+Access Configuration → Browser Execution Nodes and run it on the same host. The
+generated command uses the following form and starts the installed service after
+pairing:
 
 ```bash
 $HOME/.local/bin/devproof-browser-runtime pair \

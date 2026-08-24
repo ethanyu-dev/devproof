@@ -154,7 +154,7 @@ function tone(
 }
 
 function compactRunTitle(run: RunSummary | null, limit = 108) {
-  if (!run) return "任务详情";
+  if (!run) return "执行详情";
   const goal = run.goal.replace(/\s+/gu, " ").trim();
   const summary = goal.split(/(?:Preconditions|Steps|Expected):/iu)[0]?.trim();
   const title = summary || goal;
@@ -232,7 +232,7 @@ function summarizeTaskFailures(tasks: RunDetail["tasks"]): FailureSummary[] {
         ? error.message
         : typeof task.error === "string"
           ? task.error
-          : "Runtime Task 执行失败。";
+          : "执行任务失败。";
     const invalidToolSchema =
       /invalid schema for function|is not a valid format/iu.test(detail);
     const code =
@@ -247,7 +247,7 @@ function summarizeTaskFailures(tasks: RunDetail["tasks"]): FailureSummary[] {
       code,
       detail,
       message: invalidToolSchema
-        ? "Agent Runtime 的 browser_command 工具 Schema 不兼容，模型请求在执行浏览器命令前就被拒绝了；这不是 Browser Runtime 不可用。"
+        ? "Agent Runtime 的 browser_command 工具 Schema 不兼容，模型请求在执行浏览器命令前就被拒绝了；这不是浏览器执行节点不可用。"
         : detail,
       occurrences: 1,
       raw: JSON.stringify(task.error, null, 2),
@@ -550,7 +550,7 @@ function RunDetailClient({ id }: { id: string }) {
 
   async function cancel() {
     if (
-      !window.confirm("确认取消这个任务？浏览器与 Runtime 资源会由控制面回收。")
+      !window.confirm("确认取消这次执行？浏览器与执行节点资源会由控制面回收。")
     ) {
       return;
     }
@@ -637,7 +637,7 @@ function RunDetailClient({ id }: { id: string }) {
                 variant="danger"
               >
                 <XCircle />
-                {cancelling ? "取消中…" : "取消任务"}
+                {cancelling ? "取消中…" : "取消执行"}
               </Button>
             ) : null}
             {runtimeIsRunning ? (
@@ -660,7 +660,7 @@ function RunDetailClient({ id }: { id: string }) {
             </Button>
           </>
         }
-        title="任务详情"
+        title="执行详情"
       />
       <Link className="dp-back-link" href="/console/runs">
         <ArrowLeft /> 返回任务列表
@@ -805,8 +805,8 @@ function RunDetailClient({ id }: { id: string }) {
                 <span>
                   <b>本次执行没有生成操作视频</b>
                   <small>
-                    需要 Browser Runtime protocol v1.10 或更新版本；升级后请重启
-                    Runtime。
+                    需要浏览器执行节点协议 v1.10
+                    或更新版本；升级后请重启执行节点。
                   </small>
                 </span>
               </Card>
@@ -857,7 +857,7 @@ function RunDetailClient({ id }: { id: string }) {
               <summary>
                 <span>
                   <Activity />
-                  <b>查看尝试、全部证据与 Runtime 详情</b>
+                  <b>查看尝试、全部证据与技术详情</b>
                 </span>
                 <small>
                   {detail.attempts.length} 次尝试 · {detail.evidences.length}{" "}
@@ -907,7 +907,7 @@ function RunDetailClient({ id }: { id: string }) {
                         return (
                           <div key={attempt.id}>
                             <strong>#{attempt.number}</strong>
-                            <span>{task?.provider ?? "Runtime"}</span>
+                            <span>{task?.provider ?? "Agent Runtime"}</span>
                             <Badge tone={tone(task?.status ?? attempt.status)}>
                               {displayLabel(task?.status ?? attempt.status)}
                             </Badge>
@@ -984,7 +984,7 @@ function RunDetailClient({ id }: { id: string }) {
 
                 <Card className="dp-verification-detail dp-run-card dp-run-runtime-workspace">
                   <div
-                    aria-label="Runtime 详情视图"
+                    aria-label="执行技术详情视图"
                     className="dp-run-runtime-tabs"
                     role="tablist"
                   >
@@ -996,7 +996,7 @@ function RunDetailClient({ id }: { id: string }) {
                       type="button"
                     >
                       <Monitor />
-                      Browser Runtime
+                      浏览器执行节点
                       <span>{detail.browserExecutions.length}</span>
                     </button>
                     <button
@@ -1007,7 +1007,7 @@ function RunDetailClient({ id }: { id: string }) {
                       type="button"
                     >
                       <Activity />
-                      Runtime 轨迹
+                      执行轨迹
                       <span>{trajectoryPage.records.length}</span>
                     </button>
                   </div>
@@ -1018,9 +1018,7 @@ function RunDetailClient({ id }: { id: string }) {
                       role="tabpanel"
                     >
                       {detail.browserExecutions.length === 0 ? (
-                        <p className="dp-run-card-copy">
-                          尚未创建 Browser Runtime 执行。
-                        </p>
+                        <p className="dp-run-card-copy">尚未创建浏览器执行。</p>
                       ) : (
                         detail.browserExecutions.map((execution) => (
                           <section
@@ -1031,12 +1029,12 @@ function RunDetailClient({ id }: { id: string }) {
                               <span>
                                 <b>
                                   {execution.runtimeSession?.runtime.name ??
-                                    "等待分配 Runtime"}
+                                    "等待分配执行节点"}
                                 </b>
                                 <small>
                                   {execution.runtimeSession
-                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · Session ${displayLabel(execution.runtimeSession.status)}`
-                                    : "尚未分配 Browser Runtime Session"}
+                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · 会话 ${displayLabel(execution.runtimeSession.status)}`
+                                    : "尚未分配浏览器执行会话"}
                                 </small>
                               </span>
                               <Badge tone={tone(execution.status)}>

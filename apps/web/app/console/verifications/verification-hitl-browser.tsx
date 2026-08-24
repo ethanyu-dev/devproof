@@ -318,7 +318,7 @@ function BrowserHitl({
         <p>{checkpoint.prompt}</p>
         <small>
           <ShieldCheck />
-          输入只会通过临时控制通道发送到 Browser Runtime，不会进入 Agent
+          输入只会通过临时控制通道发送到浏览器执行节点，不会进入 Agent
           提示词、验证追踪记录或制品。
         </small>
       </div>
@@ -350,8 +350,8 @@ function BrowserHitl({
           <span>
             <b>
               {handoff.runtimeSession?.profileId
-                ? "用户 Browser Profile"
-                : `${displayLabel(handoff.runtimeSession?.profileMode)} Profile`}
+                ? "用户浏览器身份"
+                : `${displayLabel(handoff.runtimeSession?.profileMode)} · 浏览器身份`}
             </b>
             <small>
               {displayLabel(handoff.runtimeSession?.profileMode)} ·
@@ -375,7 +375,7 @@ function BrowserHitl({
         <div className="dp-browser-handoff-session">
           <div className="dp-browser-frame">
             <div
-              aria-label="远程 Browser Runtime，可使用键盘和指针操作"
+              aria-label="远程浏览器执行节点，可使用键盘和指针操作"
               className={`dp-browser-viewport ${streamStatus === "live" ? "is-controllable" : ""}`}
               onContextMenu={(event) => event.preventDefault()}
               onFocus={(event) => {
@@ -433,7 +433,7 @@ function BrowserHitl({
               <RemoteKeyboard ref={keyboardRef} send={send} />
               {frame ? (
                 <img
-                  alt="Browser Runtime 实时画面"
+                  alt="浏览器执行节点实时画面"
                   draggable={false}
                   ref={imageRef}
                   src={`data:image/jpeg;base64,${frame.dataBase64}`}
@@ -670,8 +670,8 @@ function formatRemaining(expiresAt: string) {
 function unavailableCopy(handoff: BrowserHandoffStatus) {
   if (handoff.unavailableReason === "PROTOCOL_UNSUPPORTED") {
     return {
-      detail: "请重新构建并重启 Browser Runtime，然后重新发起验证。",
-      title: "Browser Runtime 版本不支持网页内人工控制",
+      detail: "请重新构建并重启浏览器执行节点，然后重新发起验证。",
+      title: "浏览器执行节点版本不支持网页内人工控制",
     };
   }
   if (handoff.unavailableReason === "SESSION_UNAVAILABLE") {
@@ -681,7 +681,7 @@ function unavailableCopy(handoff: BrowserHandoffStatus) {
     };
   }
   return {
-    detail: "当前 HITL 没有关联可接管的浏览器会话。",
+    detail: "当前人工接管任务没有关联可接管的浏览器会话。",
     title: "没有可用的浏览器会话",
   };
 }

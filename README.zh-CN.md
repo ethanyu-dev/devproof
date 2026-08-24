@@ -122,7 +122,7 @@ Docker 中的 PostgreSQL、Redis、MinIO API 分别映射到宿主机 55432、56
 
 ## 可观测性
 
-API 提供 `/live`、`/ready` 和带 Bearer 保护的 `/metrics`；Web 使用 API 的真实依赖 Readiness。Console 的“可观测性”页面可查看依赖、Worker、业务积压、MCP/HTTP Tool 调用和控制面审计。生产环境必须配置 `OBSERVABILITY_METRICS_TOKEN`。
+API 提供 `/live`、`/ready` 和带 Bearer 保护的 `/metrics`；Web 使用 API 的真实依赖 Readiness。Console 的“系统监控”页面可查看依赖、Worker、业务积压、MCP/HTTP Tool 调用和控制面操作记录。生产环境必须配置 `OBSERVABILITY_METRICS_TOKEN`。
 
 Prometheus 抓取、告警、Grafana Dashboard、日志字段、数据保留和逐项告警处置见 [docs/observability.md](docs/observability.md)。
 
@@ -152,7 +152,7 @@ Browser Runtime 直接从 GitHub Release 安装，Runtime 主机无需 clone Dev
 用户服务。全新 Ubuntu/Debian 主机首次安装 Chromium 系统依赖和启用
 systemd linger 时需要免交互 sudo。
 
-安装完成后，在 Console 的“接入配置 → 执行 Runtime”点击“注册”，并在同一
+安装完成后，在 Console 的“接入配置 → 浏览器执行节点”点击“注册”，并在同一
 主机执行生成的一次性配对命令；该命令会完成设备配对并启动服务。配对 Token
 有效期为 10 分钟，因此应在初次安装完成后再生成。
 
@@ -181,7 +181,7 @@ Gateway。已有设备检测到活跃会话时默认拒绝升级，除非显式�
 
 新设备应在配对前通过 `~/.config/devproof/browser-runtime.env` 配置 `DEVPROOF_RUNTIME_NAME`、`DEVPROOF_MAX_CONCURRENCY` 和 `DEVPROOF_HEADLESS`；后续修改后重启服务即可。其中 `DEVPROOF_MAX_CONCURRENCY` 只作为设备首次注册时的初始容量。每次成功安装的包哈希与时间记录在 `~/.devproof-browser-runtime/install.json`。节点绑定后，在“接入配置 → Runtime 访问与容量”为各 Runtime 设置控制台权威并发容量和允许访问的内网主机；未配置白名单时继续执行默认拦截。
 
-多个 Runtime 注册后，可在“接入配置 → 执行 Runtime → 域名路由策略”配置目标域名。DevProof 使用 `execution.targetUrl`（兼容 `inputs.targetUrl`）匹配精确域名或 `*.example.com` 规则；重叠规则按优先级、精确程度和匹配长度决定。命中规则后只使用规则指定的 Runtime，并按规则选择等待或立即失败；未命中规则时，从在线且能力匹配的 Runtime 中随机分配。
+多个 Runtime 注册后，可在“接入配置 → 浏览器执行节点 → 域名路由策略”配置目标域名。DevProof 使用 `execution.targetUrl`（兼容 `inputs.targetUrl`）匹配精确域名或 `*.example.com` 规则；重叠规则按优先级、精确程度和匹配长度决定。命中规则后只使用规则指定的 Runtime，并按规则选择等待或立即失败；未命中规则时，从在线且能力匹配的 Runtime 中随机分配。
 
 ## Agent 工具接入
 
@@ -199,7 +199,7 @@ Console 的 Playground 是端到端集成入口。Issue 模式先创建 Task，�
 
 ## 用户级 Browser Profile
 
-Task 需要用户登录态但没有可用 Profile 时，控制面会根据目标 URL、环境、角色和触发来源自动创建逻辑 Profile；用户在 Console 的“浏览器 Profile”中只负责完成远程登录并确认入口授权，不填写域名、URL pattern 或 selector。Cookie、localStorage 和浏览器目录只保存在指定 Browser Runtime；控制面只保存随机逻辑 key、状态、授权与使用审计，API 不向 Console、飞书或 Agent 返回底层 key。
+Task 需要用户登录态但没有可用 Profile 时，控制面会根据目标 URL、环境、角色和触发来源自动创建逻辑 Profile；用户在 Console 的“浏览器身份”中只负责完成远程登录并确认入口授权，不填写域名、URL pattern 或 selector。Cookie、localStorage 和浏览器目录只保存在指定 Browser Runtime；控制面只保存随机逻辑 key、状态、授权与使用审计，API 不向 Console、飞书或 Agent 返回底层 key。
 
 Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制台或飞书发起人的 Profile；`ISSUE_ASSIGNEE` 通过 Linear workspace + stable user id 映射 owner；`EXPLICIT_PROFILE` 只允许已登录用户指定自己名下的 Profile。Profile 不可用时可等待、失败或显式降级为临时会话。完整模型、状态机、清理与上线方案见 [docs/user-browser-profiles.md](docs/user-browser-profiles.md)。
 

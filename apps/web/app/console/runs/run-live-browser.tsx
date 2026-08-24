@@ -192,7 +192,7 @@ export function RunLiveBrowser({
     const watchdog = window.setInterval(() => {
       if (Date.now() - lastFrameAt.current > STALE_FRAME_MS) {
         setStreamStatus("interrupted");
-        setStreamError("暂时没有收到新画面，正在等待 Browser Runtime 恢复。");
+        setStreamError("暂时没有收到新画面，正在等待浏览器执行节点恢复。");
       }
     }, 1_000);
     return () => {
@@ -382,7 +382,7 @@ export function RunLiveBrowser({
   const error = streamError ?? statusError;
   const panel = (
     <section
-      aria-label="Runtime 实时运行状态"
+      aria-label="浏览器执行节点实时运行状态"
       className={`dp-run-live-preview${dragging ? " is-dragging" : ""}${resizing ? " is-resizing" : ""}`}
       ref={panelRef}
       style={
@@ -413,7 +413,7 @@ export function RunLiveBrowser({
           <span>
             <b>实时运行状态</b>
             <small>
-              {status?.runtimeSession?.runtime.name ?? "Browser Runtime"}
+              {status?.runtimeSession?.runtime.name ?? "浏览器执行节点"}
             </small>
           </span>
         </span>
@@ -435,14 +435,14 @@ export function RunLiveBrowser({
       <div className="dp-run-live-preview-frame">
         {frame ? (
           <img
-            alt="Browser Runtime 只读实时画面"
+            alt="浏览器执行节点只读实时画面"
             draggable={false}
             src={`data:image/jpeg;base64,${frame.dataBase64}`}
           />
         ) : !status ? (
           <div className="dp-run-live-preview-placeholder">
             <LoaderCircle className="dp-run-live-preview-spinner" />
-            正在检查 Browser Runtime…
+            正在检查浏览器执行节点…
           </div>
         ) : !status.ready ? (
           <div className="dp-run-live-preview-placeholder">
@@ -523,14 +523,14 @@ function unavailableCopy(status: BrowserPreviewStatus) {
   }
   if (status.unavailableReason === "PROTOCOL_UNSUPPORTED") {
     return {
-      detail: "请更新并重启 Browser Runtime 后重新发起任务。",
-      title: "当前 Runtime 不支持实时预览",
+      detail: "请更新并重启浏览器执行节点后重新发起任务。",
+      title: "当前执行节点不支持实时预览",
     };
   }
   if (status.unavailableReason === "RUNTIME_OFFLINE") {
     return {
-      detail: "Runtime 重新上线后会自动恢复画面。",
-      title: "Browser Runtime 当前离线",
+      detail: "执行节点重新上线后会自动恢复画面。",
+      title: "浏览器执行节点当前离线",
     };
   }
   return {

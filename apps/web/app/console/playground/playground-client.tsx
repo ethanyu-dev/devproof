@@ -310,7 +310,7 @@ export function PlaygroundClient() {
           <Bot />
           <span>
             <b>SPEC 执行</b>
-            <small>Case → Runtime Run</small>
+            <small>Case → 执行</small>
           </span>
         </div>
         <ArrowRight />
@@ -364,7 +364,7 @@ export function PlaygroundClient() {
               }
             />
             <ReadinessLine
-              label="Browser Runtime"
+              label="浏览器执行节点"
               ready={
                 readinessStatus === "error"
                   ? false
@@ -421,20 +421,20 @@ export function PlaygroundClient() {
                     value={profileStrategy}
                   >
                     <option value="EPHEMERAL">临时会话（不保留登录）</option>
-                    <option value="REQUESTER">使用我的 Profile</option>
+                    <option value="REQUESTER">使用我的浏览器身份</option>
                     <option value="ISSUE_ASSIGNEE">
-                      使用 Issue owner 的 Profile
+                      使用 Issue 负责人的浏览器身份
                     </option>
-                    <option value="EXPLICIT_PROFILE">指定我的 Profile</option>
+                    <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
                   </Select>
                 </Field>
                 {profileStrategy === "EXPLICIT_PROFILE" ? (
-                  <Field label="选择 Profile">
+                  <Field label="选择浏览器身份">
                     <Select
                       onChange={(event) => setProfileId(event.target.value)}
                       value={profileId}
                     >
-                      <option value="">请选择 READY Profile</option>
+                      <option value="">请选择可用的浏览器身份</option>
                       {profiles
                         .filter((profile) => profile.status === "READY")
                         .map((profile) => (
@@ -484,7 +484,7 @@ export function PlaygroundClient() {
                 </Field>
                 <Toggle
                   checked={hitlEnabled}
-                  label="允许 HITL"
+                  label="允许人工接管"
                   onChange={setHitlEnabled}
                 />
                 <Button
@@ -527,7 +527,7 @@ export function PlaygroundClient() {
             <div className="dp-playground-empty">
               <Bot />
               <b>等待一次任务执行</b>
-              <span>分析、Profile 解析和 Case 执行会显示在这里。</span>
+              <span>分析、浏览器身份解析和 Case 执行会显示在这里。</span>
             </div>
           ) : (
             <>

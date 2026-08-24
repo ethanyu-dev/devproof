@@ -842,7 +842,7 @@ class StateStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(
-          "Browser Runtime is not paired. Open DevProof Console > 执行环境 > 注册 Runtime, run the generated pair command, then start again. Expected state file: " +
+          "Browser Runtime is not paired. Open DevProof Console > 接入配置 > 浏览器执行节点, select 注册, run the generated pair command, then start again. Expected state file: " +
             statePath,
         );
       }
