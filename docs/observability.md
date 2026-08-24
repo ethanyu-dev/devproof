@@ -1,6 +1,6 @@
 # Observability and operations
 
-DevProof combines structured process logs, Prometheus metrics, and durable audit events. The Console Observability page is the primary team-scoped troubleshooting view.
+DevProof combines structured process logs, Prometheus metrics, and durable audit events. The Console System Monitoring page is the primary team-scoped troubleshooting view.
 
 ## Correlation identifiers
 

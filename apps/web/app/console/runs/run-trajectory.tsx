@@ -76,7 +76,7 @@ export function RunTrajectory({
   }
 
   return (
-    <section className={css.root} aria-label="Agent Runtime trajectory">
+    <section className={css.root} aria-label="Agent Runtime 执行轨迹">
       <div className={css.toolbar} role="toolbar" aria-label="轨迹工具栏">
         <div className={css.actions}>
           <button
@@ -161,7 +161,7 @@ export function RunTrajectory({
                     type="button"
                   >
                     <span>
-                      Attempt {record.attemptNumber ?? "?"} · Runtime segment
+                      尝试 {record.attemptNumber ?? "?"} · Agent Runtime 执行段
                     </span>
                     <small>{shortSegment(record.segmentId!)}</small>
                   </button>

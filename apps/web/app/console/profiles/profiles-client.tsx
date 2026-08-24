@@ -118,9 +118,9 @@ export function ProfilesClient() {
       setMessage({
         text:
           name === "verify"
-            ? "登录状态验证成功，Profile 已可用于任务。"
+            ? "登录状态验证成功，浏览器身份已可用于任务。"
             : name === "approve"
-              ? "已授权本次任务入口使用该 Profile。"
+              ? "已授权本次任务入口使用该浏览器身份。"
               : "操作已提交。",
         tone: "success",
       });
@@ -144,7 +144,7 @@ export function ProfilesClient() {
       });
       await load(selected.id);
       setMessage({
-        text: "Profile 及其 Browser Runtime 登录数据已删除。",
+        text: "浏览器身份及其执行节点登录数据已删除。",
         tone: "success",
       });
     } catch (error) {
@@ -156,7 +156,7 @@ export function ProfilesClient() {
 
   return (
     <>
-      <PageHeader title="浏览器 Profile" />
+      <PageHeader title="浏览器身份" />
       {message ? (
         <div className="dp-runtime-message">
           <FormMessage message={message.text} tone={message.tone} />
@@ -182,7 +182,7 @@ export function ProfilesClient() {
         <div className="dp-settings-grid dp-profile-settings">
           <section className="dp-resource-list">
             <div className="dp-list-head">
-              <strong>我的 Profile</strong>
+              <strong>我的浏览器身份</strong>
               <span>{profiles.length} 个</span>
             </div>
             <div className="dp-list-items">
@@ -204,8 +204,8 @@ export function ProfilesClient() {
               ))}
               {!profiles.length ? (
                 <div className="dp-profile-empty">
-                  暂无登录任务。任务选择“使用我的 Profile”或“Issue owner
-                  Profile”后，系统会按目标站点自动创建。
+                  暂无登录任务。任务选择“使用我的浏览器身份”或“Issue
+                  负责人的浏览器身份”后，系统会按目标站点自动创建。
                 </div>
               ) : null}
             </div>
@@ -218,7 +218,7 @@ export function ProfilesClient() {
                     <h2>{selected.displayName}</h2>
                     <p>
                       目标站点和验证规则已由任务自动生成。Cookie、localStorage
-                      和登录态只保存在分配的 Browser Runtime。
+                      和登录态只保存在分配的执行节点。
                     </p>
                   </div>
                   <Badge tone={profileTone(selected.status)}>
@@ -313,7 +313,7 @@ export function ProfilesClient() {
               </div>
             ) : (
               <div className="dp-profile-empty">
-                Profile 会由需要登录态的任务自动创建，无需提前配置。
+                浏览器身份会由需要登录态的任务自动创建，无需提前配置。
               </div>
             )}
           </section>
@@ -329,7 +329,7 @@ export function ProfilesClient() {
         <Card className="dp-profile-status-card">
           <ShieldCheck />
           <span>
-            <b>Profile 状态：{displayLabel(selected.status)}</b>
+            <b>身份状态：{displayLabel(selected.status)}</b>
             <small>
               最近验证：{formatDate(selected.lastVerifiedAt)} · 最近使用：
               {formatDate(selected.lastUsedAt)} · 自动清理：
@@ -382,7 +382,7 @@ function ProfileBrowser({
       try {
         event = JSON.parse(message.data) as typeof event;
       } catch {
-        setError("Browser Runtime 返回了无法识别的实时画面事件。");
+        setError("浏览器执行节点返回了无法识别的实时画面事件。");
         return;
       }
       if (
@@ -400,8 +400,7 @@ function ProfileBrowser({
         });
       if (event.type === "error") setError(event.error ?? "实时画面连接中断。");
     };
-    source.onerror = () =>
-      setError("实时画面连接中断，正在等待 Runtime 恢复。");
+    source.onerror = () => setError("实时画面连接中断，正在等待执行节点恢复。");
     return () => source.close();
   }, [profile.id]);
 
@@ -426,7 +425,7 @@ function ProfileBrowser({
         </Button>
       </header>
       <div
-        aria-label="远程 Profile 登录浏览器，可使用键盘和指针操作"
+        aria-label="远程浏览器身份登录窗口，可使用键盘和指针操作"
         className="dp-profile-browser-frame"
         onContextMenu={(event) => event.preventDefault()}
         onFocus={(event) => {
@@ -475,7 +474,7 @@ function ProfileBrowser({
       >
         {frame ? (
           <img
-            alt="用户 Profile 登录浏览器"
+            alt="用户浏览器身份登录窗口"
             draggable={false}
             ref={image}
             src={`data:image/jpeg;base64,${frame.dataBase64}`}
@@ -483,7 +482,7 @@ function ProfileBrowser({
         ) : (
           <div>
             <LoaderCircle />
-            正在加载 Browser Runtime…
+            正在加载浏览器执行节点…
           </div>
         )}
         <RemoteKeyboard inputRef={keyboard} send={send} />

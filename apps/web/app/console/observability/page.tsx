@@ -130,7 +130,7 @@ const overviewStatusGroups = [
 ] as const;
 
 const successRateChartConfig = {
-  rate: { color: "var(--ek-success)", label: "成功率" },
+  rate: { color: "var(--ek-success)", label: "完成 / 正常占比" },
 } satisfies ChartConfig;
 
 const verificationChartConfig = {
@@ -367,8 +367,8 @@ function StatusOverview({ overview }: { overview: Overview }) {
       <div className="dp-observe-chart-grid">
         <section>
           <header>
-            <b>各模块成功率</b>
-            <small>成功状态 / 当前总量</small>
+            <b>各模块完成 / 正常占比</b>
+            <small>完成或正常状态 / 全部记录</small>
           </header>
           <ChartContainer
             className="dp-observe-rate-chart"
@@ -515,7 +515,7 @@ export default function ObservabilityPage() {
       <PageHeader
         actions={
           <Button
-            aria-label={isRefreshing ? "正在刷新可观测数据" : "刷新可观测数据"}
+            aria-label={isRefreshing ? "正在刷新监控数据" : "刷新监控数据"}
             className={
               "dp-observability-refresh" + (isRefreshing ? " is-loading" : "")
             }
@@ -527,14 +527,14 @@ export default function ObservabilityPage() {
             {isRefreshing ? "刷新中" : "刷新"}
           </Button>
         }
-        title="可观测性"
+        title="系统监控"
       />
       {error && !initialLoadFailed ? (
         <FormMessage message={error} tone="error" />
       ) : null}
       <div aria-busy={isRefreshing} className="dp-observability-panel">
         <span className="dp-observability-loading-label">
-          {isRefreshing ? "正在加载可观测数据" : "可观测数据已更新"}
+          {isRefreshing ? "正在加载监控数据" : "监控数据已更新"}
         </span>
         {initialLoadFailed ? (
           <Card>
@@ -556,7 +556,7 @@ export default function ObservabilityPage() {
               <div className="dp-observe-card-head">
                 <span>
                   <b>工具调用</b>
-                  <small>最近的 Agent 工具请求</small>
+                  <small>最近的 MCP / HTTP 工具调用</small>
                 </span>
                 {invocations ? (
                   <span className="dp-count">{invocations.length}</span>
@@ -619,8 +619,8 @@ export default function ObservabilityPage() {
             <Card className="dp-observe-section">
               <div className="dp-observe-card-head">
                 <span>
-                  <b>审计事件</b>
-                  <small>配置与任务操作记录</small>
+                  <b>操作记录</b>
+                  <small>配置与任务操作</small>
                 </span>
                 {audit ? (
                   <span className="dp-count">{audit.length}</span>
@@ -636,8 +636,8 @@ export default function ObservabilityPage() {
                 ) : null
               ) : audit.length === 0 ? (
                 <EmptyState
-                  description="团队配置和任务操作会自动写入审计记录。"
-                  title="暂无审计事件"
+                  description="团队配置和任务操作会自动记录在这里。"
+                  title="暂无操作记录"
                 />
               ) : (
                 <div className="dp-observe-table dp-observe-loaded">

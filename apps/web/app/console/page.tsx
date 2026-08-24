@@ -24,14 +24,14 @@ export const metadata: Metadata = { title: "使用指南" };
 
 const configSteps = [
   {
-    detail: "运行一次性配对命令，让 Runtime 上线。",
+    detail: "运行一次性配对命令，让执行节点上线。",
     icon: MonitorUp,
     link: "/console/access#runtime",
-    linkLabel: "注册 Runtime",
-    title: "接入 Runtime",
+    linkLabel: "注册执行节点",
+    title: "接入执行节点",
   },
   {
-    detail: "设置域名路由、不可用策略和 HITL 开关。",
+    detail: "设置域名路由、不可用策略和人工接管开关。",
     icon: Settings2,
     link: "/console/access#runtime",
     linkLabel: "配置策略",
@@ -100,7 +100,7 @@ export default function ConsoleIndexPage() {
                 <h3>DevProof</h3>
               </div>
             </header>
-            <p>持有 Task、Run、重试、租约、HITL 与证据的唯一业务状态。</p>
+            <p>持有 Task、Run、重试、租约、人工接管与证据的唯一业务状态。</p>
             <div className="dp-guide-core-grid">
               <span>
                 <FileCheck2 />
@@ -119,7 +119,7 @@ export default function ConsoleIndexPage() {
               </span>
               <span>
                 <Pause />
-                <b>HITL 检查点</b>
+                <b>人工接管检查点</b>
                 <small>暂停 + 通知 + 恢复</small>
               </span>
             </div>
@@ -166,7 +166,7 @@ export default function ConsoleIndexPage() {
               </span>
               <div>
                 <small>04 / 执行环境</small>
-                <h3>Execution Runner</h3>
+                <h3>执行节点</h3>
               </div>
             </header>
             <p>执行具体环境动作，并把制品和运行事件交回控制面。</p>
@@ -178,7 +178,7 @@ export default function ConsoleIndexPage() {
             </div>
             <ul>
               <li>页面导航与检查</li>
-              <li>持久化 Profile</li>
+              <li>持久化浏览器身份</li>
               <li>截图证据</li>
             </ul>
           </article>
@@ -189,14 +189,14 @@ export default function ConsoleIndexPage() {
             <header>
               <CircleHelp />
               <span>
-                <small>DEVPROOF HITL</small>
+                <small>DEVPROOF 人工接管</small>
                 <h3>暂停、接管、恢复同一个 Run</h3>
               </span>
             </header>
             <p>
               Agent 调用 request_human_input 后，DevProof 创建一次性检查点，将
-              Run 置为 WAITING_HUMAN，并保留原 Browser Session、Slot 与 Profile
-              租约。
+              Run 置为
+              WAITING_HUMAN，并保留原浏览器会话、执行槽位与浏览器身份租约。
             </p>
             <div className="dp-guide-state-line">
               <span>
@@ -239,8 +239,7 @@ export default function ConsoleIndexPage() {
               <span>
                 <b>不用于执行故障</b>
                 <small>
-                  Runtime
-                  离线、页面异常或证据不足应等待、重试、失败或标记不确定。
+                  执行节点离线、页面异常或证据不足应等待、重试、失败或标记不确定。
                 </small>
               </span>
             </div>

@@ -418,7 +418,7 @@ function VerificationDetailClient({ id }: { id: string }) {
               <>
                 <section className="dp-observe-section">
                   <h3>
-                    Runtime 命令 · {detail.runtimeSession.runtime.name} ·{" "}
+                    执行节点命令 · {detail.runtimeSession.runtime.name} ·{" "}
                     {displayLabel(detail.runtimeSession.status)}
                   </h3>
                   <div className="dp-observe-table">
@@ -441,7 +441,7 @@ function VerificationDetailClient({ id }: { id: string }) {
                 {detail.runtimeSession.events.length > 0 ? (
                   <TraceDetails
                     items={detail.runtimeSession.events}
-                    label="Runtime 事件"
+                    label="执行节点事件"
                   />
                 ) : null}
               </>

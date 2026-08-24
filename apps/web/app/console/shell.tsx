@@ -35,8 +35,8 @@ const sections = [
   { href: "/console/playground", icon: FlaskConical, label: "集成试验场" },
   { href: "/console/access", icon: Cable, label: "接入配置" },
   { href: "/console/runs", icon: Activity, label: "任务执行" },
-  { href: "/console/profiles", icon: UserRoundCheck, label: "浏览器 Profile" },
-  { href: "/console/observability", icon: Gauge, label: "可观测性" },
+  { href: "/console/profiles", icon: UserRoundCheck, label: "浏览器身份" },
+  { href: "/console/observability", icon: Gauge, label: "系统监控" },
 ];
 
 export function ConsoleShell({ children }: { children: ReactNode }) {

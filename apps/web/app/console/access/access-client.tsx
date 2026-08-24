@@ -327,10 +327,10 @@ export function AccessClient() {
       setNetworkAllowlistText(runtime.networkAllowlist.join("\n"));
       const successText =
         runtime.status === "ONLINE" && (runtime.protocolMinor ?? 0) >= 4
-          ? "Runtime 配置已保存；并发容量已生效，网络白名单已下发。"
+          ? "执行节点配置已保存；并发容量已生效，网络白名单已下发。"
           : (runtime.protocolMinor ?? 0) >= 4
-            ? "Runtime 配置已保存；并发容量已生效，网络白名单将在 Runtime 上线后同步。"
-            : "Runtime 配置已保存；并发容量已生效，升级并重新连接 Runtime 后网络白名单生效。";
+            ? "执行节点配置已保存；并发容量已生效，网络白名单将在节点上线后同步。"
+            : "执行节点配置已保存；并发容量已生效，升级并重新连接节点后网络白名单生效。";
       setRuntimeConfigurationMessage({
         text: successText,
         tone: "success",
@@ -345,7 +345,7 @@ export function AccessClient() {
 
   async function revokeRuntime(runtime: BrowserRuntime) {
     if (pendingItem) return;
-    if (!window.confirm(`撤销 Runtime“${runtime.name}”的连接凭证？`)) {
+    if (!window.confirm(`撤销执行节点“${runtime.name}”的连接凭证？`)) {
       return;
     }
     setPendingItem(`runtime:${runtime.id}`);
@@ -354,7 +354,7 @@ export function AccessClient() {
       await consoleApi(`/browser-runtimes/${runtime.id}`, { method: "DELETE" });
       await load();
       setRuntimeMessage({
-        text: "Runtime 连接凭证已撤销。",
+        text: "执行节点连接凭证已撤销。",
         tone: "success",
       });
     } catch (error) {
@@ -384,7 +384,7 @@ export function AccessClient() {
         await consoleApi<RuntimeRoutingRule[]>("/runtime-routing-rules"),
       );
       setRoutingMessage({
-        text: "Runtime 域名路由规则已创建。",
+        text: "执行节点域名路由规则已创建。",
         tone: "success",
       });
     } catch (error) {
@@ -444,7 +444,7 @@ export function AccessClient() {
         await consoleApi<RuntimeRoutingRule[]>("/runtime-routing-rules"),
       );
       setRoutingMessage({
-        text: "Runtime 域名路由规则已删除。",
+        text: "执行节点域名路由规则已删除。",
         tone: "success",
       });
     } catch (error) {
@@ -564,7 +564,7 @@ export function AccessClient() {
       ) : (
         <>
           <section className="dp-access-module" id="runtime">
-            <h2 className="dp-console-section-title">执行 Runtime</h2>
+            <h2 className="dp-console-section-title">浏览器执行节点</h2>
 
             {runtimeMessage ? (
               <div className="dp-runtime-message">
@@ -580,15 +580,15 @@ export function AccessClient() {
                 <p>安装或升级命令</p>
                 <code>{runtimeInstallCommand}</code>
                 <small>
-                  首次注册先在 Linux Runtime
-                  主机执行；后续升级重复执行同一命令即可。
+                  首次注册先在 Linux
+                  执行机器上运行；后续升级重复执行同一命令即可。
                 </small>
               </div>
               <Button
                 onClick={() =>
                   void copy(
                     runtimeInstallCommand,
-                    "Runtime 安装命令已复制。",
+                    "执行节点安装命令已复制。",
                     "runtime",
                   )
                 }
@@ -613,7 +613,7 @@ export function AccessClient() {
                   onClick={() =>
                     void copy(
                       pairing.command,
-                      "Runtime 配对命令已复制。",
+                      "执行节点配对命令已复制。",
                       "runtime",
                     )
                   }
@@ -637,8 +637,7 @@ export function AccessClient() {
                   </div>
                   <div className="dp-section-body dp-form">
                     <p className="dp-section-note">
-                      Runtime 只负责浏览器执行、证据采集与人工接管。Runtime
-                      选择由域名规则决定，浏览器 Profile 由每次验证显式指定。
+                      执行节点只负责浏览器执行、证据采集与人工接管。节点选择由域名规则决定，浏览器身份由每次验证显式指定。
                     </p>
                     <div className="dp-form-grid">
                       <Toggle
@@ -651,7 +650,7 @@ export function AccessClient() {
                     </div>
                     <div className="dp-config-actions">
                       <span>
-                        <ShieldCheck /> 团队级配置会写入审计记录
+                        <ShieldCheck /> 团队级配置会写入操作记录
                       </span>
                       <Button disabled={savingRuntime} onClick={saveRuntime}>
                         <Save />
@@ -667,18 +666,33 @@ export function AccessClient() {
                   <div className="dp-section-head">
                     <span>
                       <MonitorUp />
-                      <b>可用 Runtime</b>
+                      <b>可用执行节点</b>
                     </span>
-                    <Button
-                      disabled={pendingItem !== null}
-                      onClick={createPairingToken}
-                      variant="secondary"
-                    >
-                      <Link2 />
-                      {pendingItem === "pairing" ? "生成中…" : "注册"}
-                    </Button>
+                    <span>
+                      <span className="dp-count">
+                        {
+                          runtimes.filter(
+                            (runtime) => runtime.status !== "REVOKED",
+                          ).length
+                        }{" "}
+                        个可用
+                      </span>
+                      <Button
+                        disabled={pendingItem !== null}
+                        onClick={createPairingToken}
+                        variant="secondary"
+                      >
+                        <Link2 />
+                        {pendingItem === "pairing" ? "生成中…" : "注册"}
+                      </Button>
+                    </span>
                   </div>
-                  <div className="dp-runtime-list">
+                  <div
+                    aria-label="浏览器执行节点列表"
+                    className="dp-runtime-list"
+                    role="region"
+                    tabIndex={0}
+                  >
                     {runtimes.length ? (
                       runtimes.map((runtime) => (
                         <div className="dp-runtime-item" key={runtime.id}>
@@ -731,7 +745,7 @@ export function AccessClient() {
                     ) : (
                       <div className="dp-runtime-empty">
                         <MonitorUp />
-                        <strong>尚未注册 Runtime</strong>
+                        <strong>尚未注册执行节点</strong>
                         <span>生成一次性命令并在执行机器运行。</span>
                       </div>
                     )}
@@ -744,21 +758,20 @@ export function AccessClient() {
               <div className="dp-section-head">
                 <span>
                   <ShieldCheck />
-                  <b>Runtime 访问与容量</b>
+                  <b>执行节点访问与容量</b>
                 </span>
                 <Badge tone="warning">默认拦截内网</Badge>
               </div>
               <div className="dp-section-body">
                 <p className="dp-section-note">
-                  每个 Runtime
-                  独立维护并发容量与允许访问的内网主机。容量由控制台控制，网络策略实时下发；未配置白名单的
-                  Runtime 继续拒绝私网、loopback、link-local 与 metadata 地址。
+                  每个执行节点独立维护并发容量与允许访问的内网主机。容量由控制台控制，网络策略实时下发；未配置白名单的节点继续拒绝私网、loopback、link-local
+                  与 metadata 地址。
                 </p>
                 <form
                   className="dp-network-policy-form"
                   onSubmit={saveRuntimeConfiguration}
                 >
-                  <Field label="目标 Runtime">
+                  <Field label="目标执行节点">
                     <Select
                       onChange={(event) => {
                         setPolicyRuntimeId(event.target.value);
@@ -767,7 +780,7 @@ export function AccessClient() {
                       required
                       value={policyRuntimeId}
                     >
-                      <option value="">选择 Runtime</option>
+                      <option value="">选择执行节点</option>
                       {runtimes
                         .filter((runtime) => runtime.status !== "REVOKED")
                         .map((runtime) => (
@@ -818,7 +831,7 @@ export function AccessClient() {
                     {policyRuntimeId &&
                     (runtimes.find((row) => row.id === policyRuntimeId)
                       ?.protocolMinor ?? 0) < 4 ? (
-                      <Badge tone="warning">Runtime 需升级后生效</Badge>
+                      <Badge tone="warning">执行节点需升级后生效</Badge>
                     ) : null}
                     <Button
                       disabled={savingRuntimeConfiguration || !policyRuntimeId}
@@ -853,7 +866,7 @@ export function AccessClient() {
               </div>
               <div className="dp-section-body">
                 <p className="dp-section-note">
-                  DevProof 完全根据验证目标域名选择 Runtime。精确域名优先于
+                  DevProof 完全根据验证目标域名选择执行节点。精确域名优先于
                   同优先级的通配规则；未命中规则时从可用节点中随机分配。
                 </p>
                 {routingMessage ? (
@@ -877,7 +890,7 @@ export function AccessClient() {
                       value={routePattern}
                     />
                   </Field>
-                  <Field label="目标 Runtime">
+                  <Field label="目标执行节点">
                     <Select
                       onChange={(event) =>
                         setRouteRuntimeId(event.target.value)
@@ -885,7 +898,7 @@ export function AccessClient() {
                       required
                       value={routeRuntimeId}
                     >
-                      <option value="">选择 Runtime</option>
+                      <option value="">选择执行节点</option>
                       {runtimes
                         .filter((runtime) => runtime.status !== "REVOKED")
                         .map((runtime) => (
@@ -904,7 +917,7 @@ export function AccessClient() {
                       }
                       value={routeFallback}
                     >
-                      <option value="WAIT">等待目标 Runtime</option>
+                      <option value="WAIT">等待目标执行节点</option>
                       <option value="FAIL_FAST">立即失败</option>
                     </Select>
                   </Field>
@@ -974,7 +987,7 @@ export function AccessClient() {
                   </div>
                 ) : (
                   <div className="dp-routing-empty">
-                    尚无域名规则；验证会从在线且能力匹配的 Runtime 中随机分配。
+                    尚无域名规则；验证会从在线且能力匹配的执行节点中随机分配。
                   </div>
                 )}
               </div>
@@ -1067,8 +1080,8 @@ export function AccessClient() {
                       <CheckCircle2 />
                       <span>
                         {credentialPurpose === "AGENT_RUNTIME"
-                          ? "仅包含 Runtime 租约权限，不能读取、创建或取消 Run。"
-                          : "包含 Run 的读取、创建与取消权限；不包含 Runtime 租约。"}
+                          ? "仅包含 Agent Runtime 租约权限，不能读取、创建或取消 Run。"
+                          : "包含 Run 的读取、创建与取消权限；不包含 Agent Runtime 租约。"}
                       </span>
                     </div>
                     <div className="dp-config-actions">
@@ -1096,7 +1109,12 @@ export function AccessClient() {
                       {activeCredentials.length} 个可用
                     </span>
                   </div>
-                  <div className="dp-runtime-list">
+                  <div
+                    aria-label="访问 Token 列表"
+                    className="dp-runtime-list"
+                    role="region"
+                    tabIndex={0}
+                  >
                     {credentials.length ? (
                       credentials.map((row) => (
                         <div className="dp-runtime-item" key={row.id}>
@@ -1175,11 +1193,11 @@ function credentialPurposeLabel(credential: Pick<ToolCredential, "scopes">) {
 
 function scopeLabel(scopes: Scope[]) {
   const labels: Record<Scope, string> = {
-    "profile:delete": "删除 Profile",
+    "profile:delete": "删除浏览器身份",
     "run:cancel": "取消 Run",
     "run:read": "读取 Run",
     "run:write": "创建/更新 Run",
-    "runtime:lease": "领取 Runtime 租约",
+    "runtime:lease": "领取 Agent Runtime 租约",
     "verification:cancel": "取消验证",
     "verification:read": "读取验证",
     "verification:write": "创建/更新验证",

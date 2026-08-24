@@ -22,7 +22,7 @@ The physical `runtimeProfileKey` is opaque and never returned to Console, Feishu
 
 1. A Task selects `REQUESTER` or `ISSUE_ASSIGNEE`. If no usable state exists and policy is `WAIT_FOR_PROFILE`, the API creates a logical Profile from the target URL, environment, role, and trigger source.
 2. The API generates the display name, exact hostname, verification URL, success rule, and an unguessable Runtime key.
-3. The owner opens Console → Browser Profiles and starts a preparation session.
+3. The owner opens Console → Browser Identities and starts a preparation session.
 4. The owner completes login, MFA, or CAPTCHA in the live remote page. Frames and input use an ephemeral channel and are not stored.
 5. The API verifies the configured success rule, records approval, and changes the Profile to `READY`.
 6. A later trigger source can request a separate grant without requiring another login.

@@ -122,7 +122,7 @@ The local `DATABASE_URL` should use port 55432 shown above. If you intentionally
 
 ## Observability
 
-The API exposes `/live`, `/ready`, and a Bearer-protected `/metrics` endpoint. Web readiness reflects the API's real dependencies. The Console observability page shows dependencies, workers, business backlogs, MCP/HTTP tool invocations, and control-plane audit events. Production requires `OBSERVABILITY_METRICS_TOKEN`.
+The API exposes `/live`, `/ready`, and a Bearer-protected `/metrics` endpoint. Web readiness reflects the API's real dependencies. The Console System Monitoring page shows dependencies, workers, business backlogs, MCP/HTTP tool invocations, and control-plane operation records. Production requires `OBSERVABILITY_METRICS_TOKEN`.
 
 Prometheus scraping, alerts, the Grafana dashboard, log fields, data retention, and alert runbooks are documented in [docs/observability.md](docs/observability.md).
 
@@ -154,7 +154,7 @@ Node.js 24, Chromium, and a systemd user service, then leaves a new service
 ready to pair. Initial Ubuntu/Debian installation requires passwordless sudo
 for Chromium system dependencies and systemd linger.
 
-After installation, open Console → Access → Execution Runtime, select Register,
+After installation, open Console → Access Configuration → Browser Execution Nodes, select Register,
 and run the generated one-time pairing command on the same host. The command
 pairs the device and starts its service. Generate the token only after the
 initial installation because it expires after ten minutes.
@@ -186,7 +186,7 @@ detected unless `--force-active` is supplied.
 
 Before pairing, configure `DEVPROOF_RUNTIME_NAME`, `DEVPROOF_MAX_CONCURRENCY`, and `DEVPROOF_HEADLESS` in `~/.config/devproof/browser-runtime.env`; restart the service after later changes. `DEVPROOF_MAX_CONCURRENCY` is used only as the host's initial capacity during first registration. Every successful installation records the package hash and timestamp in `~/.devproof-browser-runtime/install.json`. After the node is bound, use Console → Access → Runtime Access and Capacity to set the authoritative concurrency and allowed private-network hosts for each Runtime. The default block policy remains active when the allowlist is empty.
 
-With multiple Runtimes registered, configure target domains under Console → Access → Execution Runtime → Domain Routing Policies. DevProof matches `execution.targetUrl`, with `inputs.targetUrl` retained for compatibility, against exact domains or `*.example.com` rules. Overlapping rules are ordered by priority, exactness, and match length. A matching rule restricts execution to its selected Runtimes and chooses whether to wait or fail immediately. Without a match, DevProof selects randomly from online, capability-compatible Runtimes.
+With multiple Runtimes registered, configure target domains under Console → Access Configuration → Browser Execution Nodes → Domain Routing Policies. DevProof matches `execution.targetUrl`, with `inputs.targetUrl` retained for compatibility, against exact domains or `*.example.com` rules. Overlapping rules are ordered by priority, exactness, and match length. A matching rule restricts execution to its selected Runtimes and chooses whether to wait or fail immediately. Without a match, DevProof selects randomly from online, capability-compatible Runtimes.
 
 ## Agent integration
 
@@ -204,7 +204,7 @@ When an Agent requests HITL on a still-live Browser Session, the Task Execution 
 
 ## User-level Browser Profiles
 
-When a Task requires authenticated user state but has no suitable Profile, the control plane creates a logical Profile from the target URL, environment, role, and trigger source. In Console → Browser Profiles, the user only completes remote login and confirms entry authorization; they do not enter domains, URL patterns, or selectors. Cookies, local storage, and browser directories remain only on the selected Browser Runtime. The control plane stores a random logical key, status, grants, and usage audit, and never returns the underlying key to Console, Feishu, or an Agent.
+When a Task requires authenticated user state but has no suitable Profile, the control plane creates a logical Profile from the target URL, environment, role, and trigger source. In Console → Browser Identities, the user only completes remote login and confirms entry authorization; they do not enter domains, URL patterns, or selectors. Cookies, local storage, and browser directories remain only on the selected Browser Runtime. The control plane stores a random logical key, status, grants, and usage audit, and never returns the underlying key to Console, Feishu, or an Agent.
 
 Issue Tasks support four strategies: `EPHEMERAL` by default; `REQUESTER` uses the Profile of the Console or Feishu requester; `ISSUE_ASSIGNEE` maps the owner through a Linear workspace and stable user ID; and `EXPLICIT_PROFILE` allows a signed-in user to select only their own Profile. When a Profile is unavailable, the Task may wait, fail, or explicitly fall back to an ephemeral session. The full model, state machine, cleanup, and rollout plan are documented in [docs/user-browser-profiles.md](docs/user-browser-profiles.md).
 

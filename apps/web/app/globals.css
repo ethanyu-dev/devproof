@@ -5054,6 +5054,18 @@ a {
   display: grid;
 }
 
+.dp-runtime-aside .dp-runtime-list {
+  max-height: clamp(320px, 52vh, 480px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.dp-runtime-aside .dp-runtime-list:focus-visible {
+  outline: 2px solid var(--ek-fg);
+  outline-offset: -2px;
+}
+
 .dp-runtime-item {
   display: grid;
   gap: 12px;
@@ -5402,6 +5414,12 @@ a {
 
   .dp-runtime-aside {
     position: static;
+  }
+
+  .dp-runtime-aside .dp-runtime-list {
+    max-height: none;
+    overflow-y: visible;
+    scrollbar-gutter: auto;
   }
 
   .dp-routing-form {

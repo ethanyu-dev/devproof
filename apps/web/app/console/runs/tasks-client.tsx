@@ -76,11 +76,11 @@ const defaultFilters: TaskFilters = {
 const profileStrategyDescriptions = {
   EPHEMERAL: "使用全新临时会话，不读取或保留任何持久化登录状态。",
   EXPLICIT_PROFILE:
-    "从你自己的 READY Profile 中明确指定一个；系统不会自动创建。",
+    "从你自己的可用浏览器身份中明确指定一个；系统不会自动创建。",
   ISSUE_ASSIGNEE:
-    "使用 Linear Issue 当前负责人的 Profile；负责人需要已关联 DevProof 用户。",
+    "使用 Linear Issue 当前负责人的浏览器身份；负责人需要已关联 DevProof 用户。",
   REQUESTER:
-    "使用任务请求人的 Profile；如果当前任务没有请求人，你将认领该任务并自动创建所需 Profile。",
+    "使用任务请求人的浏览器身份；如果当前任务没有请求人，你将认领该任务并自动创建所需身份。",
 } as const;
 
 function tone(
@@ -565,9 +565,7 @@ function TaskRow({
 
   async function cancel() {
     if (
-      !window.confirm(
-        "确认取消整个任务？Spec 分析与所有未完成的 Runtime 执行都会停止。",
-      )
+      !window.confirm("确认取消整个任务？Spec 分析与所有未完成的执行都会停止。")
     )
       return;
     await mutate("/cancel");
@@ -691,7 +689,7 @@ function TaskRow({
                     <span>
                       <b>Spec 生成阶段</b>
                       仅展示 Issue 分析与 Spec 生成轨迹；每个 Spec
-                      的执行明细请从 Runtime 链接下钻查看。
+                      的执行明细请从执行链接下钻查看。
                     </span>
                   </div>
                   {detail.kind === "ISSUE_SPEC" ? (
@@ -795,7 +793,7 @@ function TaskStatusPanel({
       <div className="dp-task-status-toolbar">
         <span>
           <b>完整任务日志</b>
-          <small>包含 Spec 分析和每个 Spec 的全部 Runtime 日志。</small>
+          <small>包含 Spec 分析和每个 Spec 的全部执行日志。</small>
         </span>
         <Button
           disabled={exporting}
@@ -918,11 +916,11 @@ function TaskStatusPanel({
               <PlayCircle />
               <b>完成网页登录</b>
             </span>
-            <Badge tone="warning">等待 Profile 所有人</Badge>
+            <Badge tone="warning">等待浏览器身份所有人</Badge>
           </div>
           <div className="dp-playground-form">
             <p>
-              系统已根据任务目标自动准备 Profile「
+              系统已根据任务目标自动准备浏览器身份「
               {detail.profileBinding.requestedProfile.displayName}
               」。无需填写域名或验证规则，
               {detail.profileBinding.requestedProfile.owner.name}
@@ -943,12 +941,12 @@ function TaskStatusPanel({
               <PlayCircle />
               <b>选择浏览器登录身份</b>
             </span>
-            <Badge tone="warning">等待 Profile</Badge>
+            <Badge tone="warning">等待浏览器身份</Badge>
           </div>
           <div className="dp-playground-form">
             <Field
               description={profileStrategyDescriptions[profileStrategy]}
-              label="Profile 策略"
+              label="浏览器身份策略"
             >
               <Select
                 onChange={(event) =>
@@ -958,16 +956,16 @@ function TaskStatusPanel({
                 }
                 value={profileStrategy}
               >
-                <option value="REQUESTER">使用我的 Profile</option>
+                <option value="REQUESTER">使用我的浏览器身份</option>
                 <option value="ISSUE_ASSIGNEE">
-                  使用 Issue 负责人的 Profile
+                  使用 Issue 负责人的浏览器身份
                 </option>
-                <option value="EXPLICIT_PROFILE">指定我的 Profile</option>
+                <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
                 <option value="EPHEMERAL">改用临时会话</option>
               </Select>
             </Field>
             {profileStrategy === "EXPLICIT_PROFILE" ? (
-              <Field label="READY Profile">
+              <Field label="可用浏览器身份">
                 <Select
                   value={profileId}
                   onChange={(event) => setProfileId(event.target.value)}
@@ -1000,7 +998,7 @@ function TaskStatusPanel({
                 })
               }
             >
-              提交 Profile 选择
+              提交身份选择
             </Button>
           </div>
         </Card>
@@ -1151,7 +1149,7 @@ function CaseCard({ testCase }: { testCase: TaskCase }) {
           </Badge>
         </span>
         <span>
-          Runtime{" "}
+          执行{" "}
           <Badge tone={tone(run?.lifecycle ?? "PENDING")}>
             {displayLabel(run?.lifecycle ?? "PENDING")}
           </Badge>
@@ -1186,7 +1184,7 @@ function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
   if (execution.run) {
     return (
       <Link href={`/console/executions/${execution.run.runId}`}>
-        查看 Runtime 执行 #{execution.executionOrdinal} <ExternalLink />
+        查看执行详情 #{execution.executionOrdinal} <ExternalLink />
       </Link>
     );
   }
@@ -1224,7 +1222,7 @@ function StageCard({
           {stage.type === "SPEC_ANALYSIS"
             ? "分析 Issue 并生成 Spec Case"
             : stage.type === "PROFILE_RESOLUTION"
-              ? "解析用户、授权域名并预约 Profile"
+              ? "解析用户、授权域名并预约浏览器身份"
               : "派发 Case 并聚合执行结果"}
         </b>
         <span>
@@ -1270,7 +1268,7 @@ function RunLinkCard({
           {run.interventionCount}
         </small>
         <Link href={`/console/executions/${run.runId}`}>
-          查看 Runtime 执行 <ExternalLink />
+          查看执行详情 <ExternalLink />
         </Link>
       </div>
     </Card>

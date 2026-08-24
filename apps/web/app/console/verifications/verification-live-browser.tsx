@@ -129,7 +129,7 @@ export function VerificationLiveBrowser({ runId }: { runId: string }) {
     const watchdog = window.setInterval(() => {
       if (Date.now() - lastFrameAt.current > STALE_FRAME_MS) {
         setStreamStatus("interrupted");
-        setError("暂时没有收到新画面，正在等待 Browser Runtime 恢复。");
+        setError("暂时没有收到新画面，正在等待浏览器执行节点恢复。");
       }
     }, 1_000);
     return () => {
@@ -188,7 +188,7 @@ export function VerificationLiveBrowser({ runId }: { runId: string }) {
 
       {!status ? (
         <div className="dp-live-browser-placeholder">
-          <LoaderCircle /> 正在检查 Browser Runtime…
+          <LoaderCircle /> 正在检查浏览器执行节点…
         </div>
       ) : !status.ready ? (
         <div className="dp-live-browser-placeholder">
@@ -219,13 +219,13 @@ export function VerificationLiveBrowser({ runId }: { runId: string }) {
         <div className="dp-live-browser-viewport">
           {frame ? (
             <img
-              alt="Browser Runtime 实时画面"
+              alt="浏览器执行节点实时画面"
               draggable={false}
               src={`data:image/jpeg;base64,${frame.dataBase64}`}
             />
           ) : (
             <div className="dp-browser-viewport-waiting">
-              <LoaderCircle /> 正在连接 Browser Runtime…
+              <LoaderCircle /> 正在连接浏览器执行节点…
             </div>
           )}
           {frame ? (
@@ -283,14 +283,14 @@ function unavailableCopy(status: BrowserPreviewStatus) {
   }
   if (status.unavailableReason === "PROTOCOL_UNSUPPORTED") {
     return {
-      detail: "请更新并重启 Browser Runtime 后重新发起验证。",
-      title: "Browser Runtime 版本不支持实时预览",
+      detail: "请更新并重启浏览器执行节点后重新发起验证。",
+      title: "浏览器执行节点版本不支持实时预览",
     };
   }
   if (status.unavailableReason === "RUNTIME_OFFLINE") {
     return {
-      detail: "Browser Runtime 重新上线后可继续查看。",
-      title: "Browser Runtime 当前离线",
+      detail: "浏览器执行节点重新上线后可继续查看。",
+      title: "浏览器执行节点当前离线",
     };
   }
   return {
