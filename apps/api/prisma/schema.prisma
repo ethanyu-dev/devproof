@@ -490,6 +490,7 @@ model Team {
   generatedTestCases         GeneratedTestCase[]
   taskExecutions             TaskExecution[]
   taskExecutionEvents        TaskExecutionEvent[]
+  taskAnalysisSources        TaskAnalysisSource[]
   externalIdentities         UserExternalIdentity[]
   userBrowserProfiles        UserBrowserProfile[]
   browserProfileGrants       BrowserProfileGrant[]
@@ -1173,6 +1174,7 @@ model TaskExecution {
   caseExecutions           TaskCaseExecution[]
   executionRuns            ExecutionRun[]
   events                   TaskExecutionEvent[]
+  analysisSources          TaskAnalysisSource[]
   profileBinding           TaskProfileBinding?
   profileReservations      BrowserProfileReservation[]
   browserProfileUsages     BrowserProfileUsage[]
@@ -1227,10 +1229,35 @@ model TaskStageAttempt {
   updatedAt             DateTime                   @updatedAt @map("updated_at") @db.Timestamptz
   stage                 TaskExecutionStage         @relation(fields: [stageId], references: [id], onDelete: Cascade)
   specificationSnapshot TaskSpecificationSnapshot?
+  analysisSources       TaskAnalysisSource[]
 
   @@unique([stageId, number])
   @@index([status, leaseExpiresAt, createdAt])
   @@map("task_stage_attempts")
+}
+
+model TaskAnalysisSource {
+  id              String           @id @default(uuid()) @db.Uuid
+  teamId          String           @map("team_id") @db.Uuid
+  taskExecutionId String           @map("task_execution_id") @db.Uuid
+  stageAttemptId  String           @map("stage_attempt_id") @db.Uuid
+  externalId      String           @unique @map("external_id")
+  kind            String
+  label           String
+  uri             String
+  revision        String?
+  locator         Json             @default("{}")
+  content         Json
+  contentHash     String           @map("content_hash") @db.Char(64)
+  byteSize        Int              @map("byte_size")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  team            Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution   TaskExecution    @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  stageAttempt    TaskStageAttempt @relation(fields: [stageAttemptId], references: [id], onDelete: Cascade)
+
+  @@index([taskExecutionId, stageAttemptId, createdAt])
+  @@index([stageAttemptId, kind])
+  @@map("task_analysis_sources")
 }
 
 model TaskSpecificationSnapshot {

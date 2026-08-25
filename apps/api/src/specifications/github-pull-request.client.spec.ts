@@ -72,4 +72,59 @@ describe("GithubPullRequestClient credential fallback", () => {
       title: "Test PR",
     });
   });
+
+  it("pins code-search snippets to the pull request head SHA", async () => {
+    const access = {
+      candidatesForRepository: vi
+        .fn()
+        .mockResolvedValue([
+          { id: "primary", name: "Primary", token: "token-primary" },
+        ]),
+      configured: vi.fn(),
+    };
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.endsWith("/pulls/7")) {
+          return Response.json({ head: { sha: "abc123" } });
+        }
+        if (url.includes("/search/code?")) {
+          return Response.json({ items: [{ path: "src/refund.ts" }] });
+        }
+        if (url.includes("/contents/src/refund.ts?ref=abc123")) {
+          return Response.json({
+            content: Buffer.from(
+              "export function refundOrder() { return 'REFUNDED'; }",
+            ).toString("base64"),
+            encoding: "base64",
+          });
+        }
+        return new Response(null, { status: 404 });
+      }),
+    );
+    const client = new GithubPullRequestClient(access as never);
+
+    const result = await client.searchPullRequestCode({
+      pullRequestUrl: "https://github.com/organization-a/core-api/pull/7",
+      query: "refundOrder",
+      teamId: "team-1",
+    });
+
+    expect(result).toMatchObject({
+      matches: [
+        expect.objectContaining({
+          path: "src/refund.ts",
+          revision: "abc123",
+          snippet: expect.stringContaining("refundOrder"),
+        }),
+      ],
+      revision: "abc123",
+    });
+    expect(requested).toContainEqual(
+      expect.stringContaining("/contents/src/refund.ts?ref=abc123"),
+    );
+  });
 });

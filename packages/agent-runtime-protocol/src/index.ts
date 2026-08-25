@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 2,
+  minor: 3,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -108,6 +108,118 @@ export const runtimeModelCandidateSchema = z.object({
   modelId: z.string().trim().min(1).max(160),
 });
 
+export const runtimeSpecSourceRefSchema = z.object({
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  excerpt: z.string().max(2_000).default(""),
+  externalId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .regex(/^analysis-source:\/\//u),
+  kind: z.enum([
+    "LINEAR_ISSUE",
+    "GITHUB_PULL_REQUEST",
+    "GITHUB_DIFF",
+    "GITHUB_FILE",
+    "KNOWLEDGE",
+  ]),
+  label: z.string().trim().min(1).max(500),
+  locator: z.record(z.string(), z.unknown()).default({}),
+  revision: z.string().trim().max(200).nullable().default(null),
+  uri: z.string().trim().min(1).max(2_000),
+});
+
+export const runtimeSpecCriterionSchema = z.object({
+  description: z.string().trim().min(1).max(5_000),
+  id: z.string().trim().min(1).max(160),
+  required: z.boolean().default(true),
+  requiredEvidenceKinds: z.array(runtimeEvidenceKindSchema).min(1).max(6),
+  sourceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
+});
+
+export const runtimeGeneratedSpecCaseSchema = z.object({
+  authRole: z.string().trim().min(1).max(120).default("default"),
+  cleanup: z.array(z.string().trim().min(1).max(5_000)).max(50).default([]),
+  criteria: z.array(runtimeSpecCriterionSchema).min(1).max(100),
+  name: z.string().trim().min(1).max(500),
+  preconditions: z.array(z.string().trim().min(1).max(5_000)).min(1).max(100),
+  priority: z.enum(["HIGH", "MEDIUM", "LOW"]).default("MEDIUM"),
+  rationale: z.string().trim().min(1).max(5_000),
+  sourceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
+  steps: z
+    .array(
+      z.object({
+        action: z.string().trim().min(1).max(5_000),
+        expectedObservation: z.string().trim().min(1).max(5_000),
+        order: z.number().int().positive(),
+      }),
+    )
+    .min(1)
+    .max(100),
+  testData: z.array(z.string().trim().min(1).max(5_000)).max(100).default([]),
+});
+
+export const runtimeGeneratedSpecSchema = z.object({
+  assumptions: z
+    .array(z.string().trim().min(1).max(5_000))
+    .max(100)
+    .default([]),
+  cases: z.array(runtimeGeneratedSpecCaseSchema).min(1).max(100),
+  risks: z.array(z.string().trim().min(1).max(5_000)).max(100).default([]),
+  scope: z.object({
+    inScope: z.array(z.string().trim().min(1).max(5_000)).min(1).max(100),
+    outOfScope: z
+      .array(z.string().trim().min(1).max(5_000))
+      .max(100)
+      .default([]),
+  }),
+  summary: z.string().trim().min(1).max(8_000),
+});
+
+export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
+  attemptNumber: z.number().int().positive(),
+  deadlineAt: z.string().datetime(),
+  issueRef: z.string().trim().min(1).max(500),
+  modelCandidates: z.array(runtimeModelCandidateSchema).min(1).max(10),
+  stageAttemptId: z.string().uuid(),
+  targetUrl: z.string().url().max(2_048).optional(),
+  taskExecutionId: z.string().uuid(),
+  teamId: z.string().uuid(),
+  traceId: z.string().regex(/^[a-f0-9]{32}$/u),
+});
+
+export const runtimeSpecAnalysisTaskLeaseSchema = z.object({
+  fencingToken: z.string().regex(/^\d+$/u),
+  leaseExpiresAt: z.string().datetime(),
+  leaseToken: z.string().uuid(),
+  snapshot: runtimeSpecAnalysisTaskSnapshotSchema,
+  taskId: z.string().uuid(),
+});
+
+export const runtimeSpecAnalysisClaimInputSchema = z.object({
+  protocol: runtimeProtocolVersionSchema,
+  workerId: z.string().trim().min(1).max(200),
+});
+
+export const runtimeSpecAnalysisClaimOutputSchema = z.object({
+  task: runtimeSpecAnalysisTaskLeaseSchema.nullable(),
+});
+
+export const runtimeSpecAnalysisToolNameSchema = z.enum([
+  "linear_get_issue",
+  "github_get_pull_request",
+  "github_list_changed_files",
+  "github_read_file",
+  "github_search_code",
+  "knowledge_search",
+]);
+
+export const runtimeSpecAnalysisToolOutputSchema = z.object({
+  result: z.unknown(),
+  sourceRefs: z.array(runtimeSpecSourceRefSchema).max(100).default([]),
+});
+
 export const runtimeTaskSnapshotSchema = z.object({
   attemptId: z.string().uuid(),
   attemptNumber: z.number().int().positive(),
@@ -160,6 +272,12 @@ const leasedTaskInputSchema = z.object({
   fencingToken: z.string().regex(/^\d+$/u),
   leaseToken: z.string().uuid(),
   workerId: z.string().trim().min(1).max(200),
+});
+
+export const runtimeSpecAnalysisToolInputSchema = leasedTaskInputSchema.extend({
+  arguments: z.record(z.string(), z.unknown()),
+  callId: z.string().trim().min(1).max(240),
+  name: runtimeSpecAnalysisToolNameSchema,
 });
 
 export const runtimeTaskHeartbeatInputSchema = leasedTaskInputSchema;
@@ -234,6 +352,17 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
     }),
   }),
   z.object({
+    kind: z.literal("agent.analysis.completed"),
+    payload: runtimeTraceStepContextSchema.extend({
+      callId: z.string().trim().min(1).max(240).optional(),
+      sourceRefs: z
+        .array(z.string().trim().min(1).max(500))
+        .max(100)
+        .default([]),
+      summary: z.string().trim().min(1).max(4_000),
+    }),
+  }),
+  z.object({
     kind: z.literal("agent.tool.started"),
     payload: runtimeTraceStepContextSchema.extend({
       callId: z.string().trim().min(1).max(240),
@@ -249,6 +378,10 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
       inputPreview: z.unknown(),
       name: z.string().trim().min(1).max(160),
       outputPreview: z.unknown(),
+      sourceRefs: z
+        .array(z.string().trim().min(1).max(500))
+        .max(500)
+        .default([]),
       status: z.enum(["SUCCEEDED", "FAILED"]),
     }),
   }),
@@ -260,6 +393,21 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
       errorMessage: z.string().max(4_000),
       inputPreview: z.unknown(),
       name: z.string().trim().min(1).max(160),
+    }),
+  }),
+  z.object({
+    kind: z.literal("agent.spec.validation_failed"),
+    payload: runtimeTraceStepContextSchema.extend({
+      errorMessage: z.string().trim().min(1).max(4_000),
+      outputPreview: z.unknown(),
+    }),
+  }),
+  z.object({
+    kind: z.literal("agent.spec.generated"),
+    payload: runtimeTraceStepContextSchema.extend({
+      caseCount: z.number().int().positive(),
+      outputPreview: z.unknown(),
+      sourceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(500),
     }),
   }),
 ]);
@@ -406,6 +554,33 @@ const fatalFailureOutcomeSchema = failureBaseSchema.extend({
   kind: z.literal("FATAL_FAILURE"),
 });
 
+const specGeneratedOutcomeSchema = z.object({
+  kind: z.literal("SPEC_GENERATED"),
+  sourceRefs: z.array(runtimeSpecSourceRefSchema).min(1).max(500),
+  spec: runtimeGeneratedSpecSchema,
+  summary: z.string().trim().min(1).max(8_000),
+});
+
+export const runtimeSpecAnalysisOutcomeSchema = z.discriminatedUnion("kind", [
+  specGeneratedOutcomeSchema,
+  retryableFailureOutcomeSchema,
+  fatalFailureOutcomeSchema,
+]);
+
+export const runtimeSpecAnalysisTaskOutcomeInputSchema =
+  leasedTaskInputSchema.extend({
+    completedAt: z.string().datetime(),
+    completionId: z.string().uuid(),
+    outcome: runtimeSpecAnalysisOutcomeSchema,
+  });
+
+export const runtimeSpecAnalysisTaskOutcomeOutputSchema = z.object({
+  accepted: z.boolean(),
+  attemptNumber: z.number().int().positive(),
+  nextAttemptScheduled: z.boolean(),
+  stageStatus: z.enum(["PENDING", "SUCCEEDED", "FAILED", "TIMED_OUT"]),
+});
+
 export const runtimeOutcomeSchema = z.discriminatedUnion("kind", [
   verificationCompletedOutcomeSchema,
   waitingHumanOutcomeSchema,
@@ -464,6 +639,20 @@ export type RuntimeEvidenceKind = z.infer<typeof runtimeEvidenceKindSchema>;
 export type RuntimeEvidenceRef = z.infer<typeof runtimeEvidenceRefSchema>;
 export type RuntimeOutcome = z.infer<typeof runtimeOutcomeSchema>;
 export type RuntimeModelCandidate = z.infer<typeof runtimeModelCandidateSchema>;
+export type RuntimeGeneratedSpec = z.infer<typeof runtimeGeneratedSpecSchema>;
+export type RuntimeSpecAnalysisOutcome = z.infer<
+  typeof runtimeSpecAnalysisOutcomeSchema
+>;
+export type RuntimeSpecAnalysisTaskLease = z.infer<
+  typeof runtimeSpecAnalysisTaskLeaseSchema
+>;
+export type RuntimeSpecAnalysisTaskOutcomeInput = z.infer<
+  typeof runtimeSpecAnalysisTaskOutcomeInputSchema
+>;
+export type RuntimeSpecAnalysisToolInput = z.infer<
+  typeof runtimeSpecAnalysisToolInputSchema
+>;
+export type RuntimeSpecSourceRef = z.infer<typeof runtimeSpecSourceRefSchema>;
 export type RuntimeTaskClaimInput = z.infer<typeof runtimeTaskClaimInputSchema>;
 export type RuntimeTaskLease = z.infer<typeof runtimeTaskLeaseSchema>;
 export type RuntimeTaskOutcomeInput = z.infer<

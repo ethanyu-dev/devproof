@@ -45,6 +45,7 @@ export class KnowledgeContextClient {
 
   async resolve(
     issue: SpecificationIssueContext,
+    queryOverride?: string,
   ): Promise<KnowledgeResolution> {
     const configuration = env();
     if (!configuration.KNOWLEDGE_MCP_URL) {
@@ -90,7 +91,7 @@ export class KnowledgeContextClient {
       );
       const result = await client.callTool(
         {
-          arguments: knowledgeArguments(tool, issue),
+          arguments: knowledgeArguments(tool, issue, queryOverride),
           name: tool.name,
         },
         undefined,
@@ -154,20 +155,23 @@ function selectKnowledgeTool(tools: KnowledgeTool[], configuredName?: string) {
 function knowledgeArguments(
   tool: KnowledgeTool,
   issue: SpecificationIssueContext,
+  queryOverride?: string,
 ) {
   const configuration = env();
   const properties = tool.inputSchema.properties ?? {};
   const result = parseStaticArguments(
     configuration.KNOWLEDGE_MCP_STATIC_ARGUMENTS,
   );
-  const query = [
-    `${issue.identifier} ${issue.title}`,
-    issue.description,
-    issue.labels.join(", "),
-  ]
-    .filter(Boolean)
-    .join("\n")
-    .slice(0, 20_000);
+  const query = (
+    queryOverride?.trim() ||
+    [
+      `${issue.identifier} ${issue.title}`,
+      issue.description,
+      issue.labels.join(", "),
+    ]
+      .filter(Boolean)
+      .join("\n")
+  ).slice(0, 20_000);
   const queryKey = [
     "query",
     "question",

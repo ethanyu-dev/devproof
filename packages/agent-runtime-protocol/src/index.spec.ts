@@ -7,6 +7,7 @@ import {
   runtimeCriterionSchema,
   runtimeModelCandidateSchema,
   runtimeOutcomeSchema,
+  runtimeSpecAnalysisOutcomeSchema,
   runtimeTaskSnapshotSchema,
   runtimeTraceEventSchema,
 } from "./index.js";
@@ -176,5 +177,54 @@ describe("agent runtime protocol", () => {
         payload: { attemptNumber: 1, segmentId: "task-1:4", step: 0 },
       }).success,
     ).toBe(false);
+  });
+
+  it("validates a source-traceable Agent-generated Spec", () => {
+    const source = {
+      contentHash: "a".repeat(64),
+      excerpt: "Refunds must restore the order state.",
+      externalId:
+        "analysis-source://cc61de8d-cf29-4561-b2cd-c67c304668a5/source-1",
+      kind: "LINEAR_ISSUE",
+      label: "ENG-123 · Refund flow",
+      locator: { issueId: "issue-1" },
+      revision: null,
+      uri: "https://linear.app/acme/issue/ENG-123/refund-flow",
+    };
+    const outcome = runtimeSpecAnalysisOutcomeSchema.parse({
+      kind: "SPEC_GENERATED",
+      sourceRefs: [source],
+      spec: {
+        cases: [
+          {
+            authRole: "member",
+            criteria: [
+              {
+                description: "The refunded order is displayed as refunded.",
+                id: "order-refunded",
+                requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
+                sourceRefs: [source.externalId],
+              },
+            ],
+            name: "Refunded order state",
+            preconditions: ["A paid order exists."],
+            rationale: "Covers the Issue acceptance requirement.",
+            sourceRefs: [source.externalId],
+            steps: [
+              {
+                action: "Refund the paid order.",
+                expectedObservation: "The order status becomes Refunded.",
+                order: 1,
+              },
+            ],
+          },
+        ],
+        scope: { inScope: ["Order refund state"] },
+        summary: "Verify the refund state transition.",
+      },
+      summary: "Verify the refund state transition.",
+    });
+
+    expect(outcome.kind).toBe("SPEC_GENERATED");
   });
 });

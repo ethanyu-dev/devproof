@@ -81,8 +81,8 @@ describe("Agent Runtime browser verification executor", () => {
         functionCall(
           "request_human_input",
           {
-            prompt: "Please approve access.",
-            summary: "Approval is required.",
+            prompt: "请批准访问。",
+            summary: "当前需要人工批准。",
           },
           1,
         ),
@@ -114,6 +114,18 @@ describe("Agent Runtime browser verification executor", () => {
         expect.objectContaining({ name: "browser_command", strict: false }),
       ]),
     );
+    const firstRequest = create.mock.calls[0]?.[0] as {
+      input: Array<{ content?: string; role?: string }>;
+      tools: Array<{ description: string }>;
+    };
+    expect(firstRequest.input[0]?.content).toContain(
+      "所有用户可见的生成内容必须使用简体中文",
+    );
+    expect(
+      firstRequest.tools.every((tool) =>
+        /[\u3400-\u9fff]/u.test(tool.description),
+      ),
+    ).toBe(true);
   });
 
   it("redacts secrets before trace previews cross the control plane", async () => {
@@ -131,8 +143,8 @@ describe("Agent Runtime browser verification executor", () => {
           "request_human_input",
           {
             context: { apiKey: "tool-secret-value" },
-            prompt: "Please approve access.",
-            summary: "Approval is required.",
+            prompt: "请批准访问。",
+            summary: "当前需要人工批准。",
           },
           1,
         ),
@@ -172,7 +184,7 @@ describe("Agent Runtime browser verification executor", () => {
         output: [
           functionCall(
             "finish_verification",
-            { summary: "Looks good.", verdict: "PASSED" },
+            { summary: "看起来正常。", verdict: "PASSED" },
             1,
           ),
         ],
@@ -199,7 +211,7 @@ describe("Agent Runtime browser verification executor", () => {
               criterionId: "page-visible",
               evidenceRefs: [],
               status: "PASSED",
-              summary: "The page loaded.",
+              summary: "页面已加载。",
             },
             3,
           ),
@@ -210,7 +222,7 @@ describe("Agent Runtime browser verification executor", () => {
         output: [
           functionCall(
             "finish_verification",
-            { summary: "The required page loaded.", verdict: "PASSED" },
+            { summary: "所需页面已加载。", verdict: "PASSED" },
             4,
           ),
         ],
@@ -251,7 +263,7 @@ describe("Agent Runtime browser verification executor", () => {
     const secondInput = create.mock.calls[1]?.[0].input as unknown[];
     expect(secondInput).toContainEqual(
       expect.objectContaining({
-        output: expect.stringContaining("At least one browser command"),
+        output: expect.stringContaining("至少需要执行一次浏览器命令"),
         type: "function_call_output",
       }),
     );
@@ -297,7 +309,7 @@ describe("Agent Runtime browser verification executor", () => {
               criterionId: "page-visible",
               evidenceRefs: [],
               status: "PASSED",
-              summary: "The page loaded.",
+              summary: "页面已加载。",
             },
             2,
           ),
@@ -348,8 +360,8 @@ describe("Agent Runtime browser verification executor", () => {
           functionCall(
             "request_human_input",
             {
-              prompt: "Please approve access.",
-              summary: "Approval is required.",
+              prompt: "请批准访问。",
+              summary: "当前需要人工批准。",
             },
             2,
           ),
@@ -426,8 +438,8 @@ describe("Agent Runtime browser verification executor", () => {
           functionCall(
             "request_human_input",
             {
-              prompt: "Please approve access.",
-              summary: "Approval is required.",
+              prompt: "请批准访问。",
+              summary: "当前需要人工批准。",
             },
             2,
           ),
@@ -479,8 +491,8 @@ describe("Agent Runtime browser verification executor", () => {
         functionCall(
           "request_human_input",
           {
-            prompt: "Please approve access.",
-            summary: "Approval is required.",
+            prompt: "请批准访问。",
+            summary: "当前需要人工批准。",
           },
           1,
         ),
@@ -571,8 +583,8 @@ describe("Agent Runtime browser verification executor", () => {
         functionCall(
           "request_human_input",
           {
-            prompt: "Need another approval.",
-            summary: "Waiting again.",
+            prompt: "请再次批准。",
+            summary: "正在等待再次批准。",
           },
           1,
         ),
@@ -645,7 +657,7 @@ describe("Agent Runtime browser verification executor", () => {
               criterionId: "page-visible",
               evidenceRefs: [screenshotRef],
               status: "PASSED",
-              summary: "The page is visible.",
+              summary: "页面当前可见。",
             },
             2,
           ),
@@ -660,7 +672,7 @@ describe("Agent Runtime browser verification executor", () => {
               criterionId: "page-visible",
               evidenceRefs: [screenshotRef, "reference://spec/spec-1/issue"],
               status: "PASSED",
-              summary: "The page matches the source requirement.",
+              summary: "页面符合来源中的要求。",
             },
             3,
           ),
@@ -671,7 +683,7 @@ describe("Agent Runtime browser verification executor", () => {
         output: [
           functionCall(
             "finish_verification",
-            { summary: "Verified.", verdict: "PASSED" },
+            { summary: "验证已完成。", verdict: "PASSED" },
             4,
           ),
         ],

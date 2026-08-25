@@ -18,12 +18,10 @@ describe("Runtime protocol", () => {
       z.toJSONSchema(runtimeActionCommandInputSchema),
     );
 
-    expect(publicSchema).toContain("element.click does not exist");
-    expect(publicSchema).toContain("page.content does not exist");
-    expect(publicSchema).toContain(
-      "observation only and does not create persistent DOM evidence",
-    );
-    expect(publicSchema).toContain("Create persistent NETWORK evidence");
+    expect(publicSchema).toContain("不存在 element.click");
+    expect(publicSchema).toContain("不存在 page.content");
+    expect(publicSchema).toContain("仅用于观察，不会创建持久化 DOM 证据");
+    expect(publicSchema).toContain("创建持久化的 NETWORK 证据");
   });
 
   it("parses a valid authenticated hello", () => {

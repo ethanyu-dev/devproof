@@ -87,7 +87,7 @@ export class BrowserVerificationExecutor {
     });
     const modelCandidates = task.snapshot.modelCandidates ?? [];
     if (modelCandidates.length === 0) {
-      throw new Error("No Agent model is configured for this team.");
+      throw new Error("当前团队尚未配置 Agent 模型。");
     }
     await this.controlPlane.appendEvent(lease, "executor.started", {
       executor: "browser-verification",
@@ -248,8 +248,7 @@ export class BrowserVerificationExecutor {
         if (calls.length === 0) {
           history.push({
             role: "user",
-            content:
-              "Continue with one of the available tools. A text-only answer cannot complete verification.",
+            content: "请继续调用一个可用工具。仅返回文本无法完成验证。",
           });
           continue;
         }
@@ -307,6 +306,7 @@ export class BrowserVerificationExecutor {
               name: call.name,
               outputPreview: tracePreview(result.output),
               segmentId,
+              sourceRefs: [],
               status: traceToolFailed(result.output) ? "FAILED" : "SUCCEEDED",
               step,
             },
@@ -331,14 +331,13 @@ export class BrowserVerificationExecutor {
         error: {
           code: "AGENT_TOOL_LIMIT_EXCEEDED",
           failureClass: "TOOL_EXECUTION",
-          message: `Browser verification exceeded ${this.toolLimit} tool calls.`,
+          message: `浏览器验证超过 ${this.toolLimit} 次工具调用上限。`,
           phase: "browser_verification",
         },
         executionDisposition:
           browserCommandCount > 0 ? "AGENT_ERROR" : "NOT_RUN",
         kind: "RETRYABLE_FAILURE",
-        summary:
-          "The agent did not finish verification within its tool budget.",
+        summary: "Agent 未能在工具调用预算内完成验证。",
       });
     } catch (error) {
       segmentErrorMessage = traceErrorMessage(error);
@@ -394,7 +393,7 @@ export class BrowserVerificationExecutor {
         Date.parse(task.snapshot.deadlineAt)
       ) {
         throw new Error(
-          `Browser acquisition deadline exceeded while waiting for capacity (${result.reason}).`,
+          `等待浏览器容量时超过获取截止时间（${result.reason}）。`,
         );
       }
       await abortableDelay(result.retryAfterMs, signal);
@@ -416,7 +415,7 @@ export class BrowserVerificationExecutor {
     } catch {
       return correction(
         input.browserCommandCount,
-        "Tool arguments must be valid JSON.",
+        "工具参数必须是有效的 JSON。",
       );
     }
 
@@ -449,13 +448,20 @@ export class BrowserVerificationExecutor {
       if (!parsed.success) {
         return correction(input.browserCommandCount, parsed.error.message);
       }
+      const chineseError = requireChineseText(
+        parsed.data.summary,
+        "record_criterion.summary",
+      );
+      if (chineseError) {
+        return correction(input.browserCommandCount, chineseError);
+      }
       const criterion = input.task.snapshot.criteria.find(
         (item) => item.id === parsed.data.criterionId,
       );
       if (!criterion) {
         return correction(
           input.browserCommandCount,
-          `Unknown criterion: ${parsed.data.criterionId}.`,
+          `未知的验收标准：${parsed.data.criterionId}。`,
         );
       }
       const unavailable = parsed.data.evidenceRefs.filter(
@@ -464,7 +470,7 @@ export class BrowserVerificationExecutor {
       if (unavailable.length > 0) {
         return correction(
           input.browserCommandCount,
-          `Criterion references unobserved evidence: ${unavailable.join(", ")}.`,
+          `验收标准引用了尚未观察到的证据：${unavailable.join(", ")}。`,
         );
       }
       if (parsed.data.status === "PASSED") {
@@ -476,7 +482,7 @@ export class BrowserVerificationExecutor {
         if (missingKinds.length > 0) {
           return correction(
             input.browserCommandCount,
-            `A passing criterion is missing required evidence kinds: ${missingKinds.join(", ")}. Capture or cite that evidence, or record the criterion as INCONCLUSIVE.`,
+            `通过的验收标准缺少必需证据类型：${missingKinds.join(", ")}。请采集或引用对应证据，否则将该标准记录为 INCONCLUSIVE。`,
           );
         }
       }
@@ -495,12 +501,18 @@ export class BrowserVerificationExecutor {
       if (!hitlPolicy.enabled) {
         return correction(
           input.browserCommandCount,
-          "HITL is disabled for this Run. Continue autonomously or finish with an inconclusive verdict.",
+          "当前 Run 已禁用 HITL。请继续自主执行，或以 INCONCLUSIVE 结论结束。",
         );
       }
       const parsed = humanInputSchema.safeParse(raw);
       if (!parsed.success) {
         return correction(input.browserCommandCount, parsed.error.message);
+      }
+      const chineseError =
+        requireChineseText(parsed.data.prompt, "request_human_input.prompt") ??
+        requireChineseText(parsed.data.summary, "request_human_input.summary");
+      if (chineseError) {
+        return correction(input.browserCommandCount, chineseError);
       }
       return {
         browserCommandCount: input.browserCommandCount,
@@ -536,10 +548,17 @@ export class BrowserVerificationExecutor {
       if (!parsed.success) {
         return correction(input.browserCommandCount, parsed.error.message);
       }
+      const chineseError = requireChineseText(
+        parsed.data.summary,
+        "finish_verification.summary",
+      );
+      if (chineseError) {
+        return correction(input.browserCommandCount, chineseError);
+      }
       if (input.browserCommandCount === 0) {
         return correction(
           input.browserCommandCount,
-          "At least one browser command is required before completion.",
+          "完成验证前至少需要执行一次浏览器命令。",
         );
       }
       const missing = input.task.snapshot.criteria
@@ -548,9 +567,9 @@ export class BrowserVerificationExecutor {
       if (missing.length > 0) {
         return correction(
           input.browserCommandCount,
-          `Record every required criterion before completion: ${missing
+          `完成验证前必须记录所有必需的验收标准：${missing
             .map((criterion) => criterion.id)
-            .join(", ")}.`,
+            .join(", ")}。`,
         );
       }
       const criteria = input.task.snapshot.criteria
@@ -581,7 +600,7 @@ export class BrowserVerificationExecutor {
 
     return correction(
       input.browserCommandCount,
-      `Unknown tool: ${input.call.name}.`,
+      `未知工具：${input.call.name}。`,
     );
   }
 }
@@ -591,6 +610,14 @@ function correction(browserCommandCount: number, message: string) {
     browserCommandCount,
     output: { accepted: false, error: message },
   };
+}
+
+const CHINESE_TEXT = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
+
+function requireChineseText(value: string, field: string) {
+  return CHINESE_TEXT.test(value)
+    ? null
+    : `${field} 必须使用简体中文；标识符、URL 和代码符号可以保持原样。`;
 }
 
 const SENSITIVE_TRACE_KEY =
@@ -847,7 +874,7 @@ function deadlineFinalizationOutcome(input: {
       ? "INCONCLUSIVE"
       : "PASSED";
   const summary = [
-    "Verification finalized from recorded criteria before the execution deadline.",
+    "已在执行截止时间前根据记录的验收标准完成验证。",
     ...criteria.map(
       (criterion) => `${criterion.criterionId}: ${criterion.summary}`,
     ),
@@ -875,9 +902,7 @@ function abortScope(parent: AbortSignal, timeoutMs: number | null) {
       : setTimeout(
           () =>
             controller.abort(
-              new Error(
-                `Model response exceeded ${Math.round(timeoutMs / 1_000)} seconds.`,
-              ),
+              new Error(`模型响应超过 ${Math.round(timeoutMs / 1_000)} 秒。`),
             ),
           timeoutMs,
         );
@@ -932,7 +957,7 @@ function toolDefinitions(hitlEnabled = true) {
       type: "function",
       name: "browser_command",
       description:
-        "Execute one browser action. Start with page.navigate and page.snapshot, use returned refs, and capture persistent evidence before judging criteria. For SPA transitions prefer a selector/text wait over networkidle. When NETWORK evidence requires response data, use page.network with includeResponseBodies and a narrow urlIncludes filter.",
+        "执行一次浏览器操作。先使用 page.navigate 和 page.snapshot，并复用返回的 ref；判断验收标准前要采集持久化证据。SPA 跳转优先等待特定 selector 或文本，不要优先使用 networkidle。NETWORK 证据需要响应数据时，调用 page.network，并设置 includeResponseBodies 和尽可能精确的 urlIncludes。",
       parameters: openAiFunctionSchema(runtimeActionCommandInputSchema),
       strict: false,
     },
@@ -940,7 +965,7 @@ function toolDefinitions(hitlEnabled = true) {
       type: "function",
       name: "record_criterion",
       description:
-        "Record the result for one declared criterion using only observed browser evidence.",
+        "仅根据实际观察到的浏览器证据，用简体中文记录一条已声明验收标准的结果。",
       parameters: openAiFunctionSchema(recordCriterionInputSchema),
       strict: false,
     },
@@ -950,7 +975,7 @@ function toolDefinitions(hitlEnabled = true) {
             type: "function",
             name: "request_human_input",
             description:
-              "Pause the run when human input is genuinely required, such as a CAPTCHA or approval.",
+              "仅在确实需要人工操作（例如验证码或审批）时暂停 Run；面向用户的提示和摘要必须使用简体中文。",
             parameters: openAiFunctionSchema(humanInputSchema),
             strict: false,
           },
@@ -960,7 +985,7 @@ function toolDefinitions(hitlEnabled = true) {
       type: "function",
       name: "finish_verification",
       description:
-        "Finish only after browser interaction and after every required criterion has been recorded.",
+        "只有在完成浏览器交互并记录全部必需验收标准后才能结束验证；最终摘要必须使用简体中文。",
       parameters: openAiFunctionSchema(finishInputSchema),
       strict: false,
     },
@@ -1003,6 +1028,8 @@ function taskPrompt(task: RuntimeTaskLease, targetUrl?: string) {
       availableBusinessReferences: task.snapshot.businessReferences,
       goal: task.snapshot.goal,
       humanResume: readHumanResume(task.snapshot.executionPolicy),
+      languageRequirement:
+        "所有用户可见的分析、验收标准结果、人工接管提示和最终摘要必须使用简体中文。",
       targetUrl: targetUrl ?? null,
     },
     null,
@@ -1043,14 +1070,15 @@ function readHumanResume(policy: Record<string, unknown>) {
 }
 
 function systemPrompt() {
-  return `You are the Browser Verification Executor inside DevProof.
-You own browser reasoning only; DevProof owns run lifecycle, retries, leases, cancellation, HITL, and cleanup.
-Use browser_command to inspect and interact with the real page. Never claim an observation you did not receive from a tool.
-Use record_criterion exactly once or update it for every declared criterion. Evidence references must come from browser_command output.
-Business references supplied in the task are immutable observed evidence; cite their exact externalId when they support a criterion.
-For client-side navigation, wait for a specific selector or text. Avoid networkidle unless the application is known to become fully idle.
-When the page contains a wujie-app micro-frontend, scope snapshot and text targets inside wujie-app instead of using a generic body or #root selector.
-If NETWORK evidence requires a response payload, capture page.network with includeResponseBodies=true and the narrowest useful urlIncludes value.
-Use request_human_input only when autonomous progress is impossible. Use finish_verification only after at least one browser action and all required criteria are recorded.
-Never call session lifecycle operations and never expose credentials.`;
+  return `你是 DevProof 内部的浏览器验证执行 Agent。
+你只负责浏览器内的分析和操作；Run 生命周期、重试、租约、取消、HITL 和清理由 DevProof 管理。
+使用 browser_command 检查并操作真实页面。绝不能声称观察到了工具未返回的内容。
+对每条已声明的验收标准调用 record_criterion；如需修正，可以更新同一条标准。证据引用必须来自 browser_command 的输出。
+任务提供的业务引用是不可变的已观察证据；支持某条验收标准时，必须引用其准确的 externalId。
+客户端导航后要等待明确的 selector 或文本。除非确定应用最终会完全空闲，否则避免使用 networkidle。
+页面包含 wujie-app 微前端时，snapshot 和文本目标应限定在 wujie-app 内，不要使用通用 body 或 #root selector。
+NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
+只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并记录所有必需验收标准后，才能调用 finish_verification。
+所有用户可见的生成内容必须使用简体中文，包括验收标准摘要、HITL 提示、等待摘要和最终验证摘要。标识符、URL、代码符号、API 路径、工具名、枚举值和 evidence reference 保持原样，不要翻译。
+绝不能调用会话生命周期操作，也绝不能泄露凭据。`;
 }

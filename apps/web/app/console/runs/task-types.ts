@@ -24,11 +24,22 @@ export interface TaskCaseExecution {
 export interface TaskCase {
   definition: {
     authRole: string;
-    evidence: Array<{ description: string; kind: string }>;
-    expected: string[];
+    criteria?: Array<{
+      description: string;
+      id: string;
+      required: boolean;
+      requiredEvidenceKinds: string[];
+      sourceRefs: string[];
+    }>;
+    evidence?: Array<{ description: string; kind: string }>;
+    expected?: string[];
     name: string;
     preconditions: string[];
-    steps: Array<{ action: string; order: number }>;
+    steps: Array<{
+      action: string;
+      expectedObservation?: string;
+      order: number;
+    }>;
   };
   definitionHash: string;
   executions: TaskCaseExecution[];

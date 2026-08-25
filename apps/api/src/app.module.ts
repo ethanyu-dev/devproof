@@ -4,6 +4,8 @@ import { APP_INTERCEPTOR } from "@nestjs/core";
 import { AgentRuntimeTaskController } from "./agent-runtime/agent-runtime-task.controller.js";
 import { AgentRuntimeTaskService } from "./agent-runtime/agent-runtime-task.service.js";
 import { UnifiedBrowserExecutionService } from "./agent-runtime/unified-browser-execution.service.js";
+import { SpecAnalysisRuntimeController } from "./agent-runtime/spec-analysis-runtime.controller.js";
+import { SpecAnalysisRuntimeService } from "./agent-runtime/spec-analysis-runtime.service.js";
 
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthGuard } from "./auth/auth.guard.js";
@@ -86,6 +88,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
 @Module({
   controllers: [
     AgentRuntimeTaskController,
+    SpecAnalysisRuntimeController,
     AuthController,
     UserBrowserProfilesController,
     ConsoleController,
@@ -112,6 +115,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
   providers: [
     AgentModelConfigurationService,
     AgentRuntimeTaskService,
+    SpecAnalysisRuntimeService,
     UnifiedBrowserExecutionService,
     AuditService,
     AuthGuard,

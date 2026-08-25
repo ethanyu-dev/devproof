@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   runtimeOutcomeSchema,
+  runtimeSpecAnalysisOutcomeSchema,
   type RuntimeOutcome,
+  type RuntimeSpecAnalysisOutcome,
+  type RuntimeSpecAnalysisTaskLease,
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
@@ -16,9 +19,12 @@ import {
   ControlPlaneError,
 } from "./control-plane.client.js";
 import type { RuntimeConfig } from "./config.js";
+import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 
 export class AgentRuntimeWorker {
   private readonly executor: BrowserVerificationExecutor;
+  private readonly specExecutor: SpecAnalysisExecutor;
+  private preferSpec = true;
 
   constructor(
     private readonly config: RuntimeConfig,
@@ -26,6 +32,11 @@ export class AgentRuntimeWorker {
     modelClient: ResponsesClientFactory,
   ) {
     this.executor = new BrowserVerificationExecutor(
+      modelClient,
+      controlPlane,
+      config.DEVPROOF_AGENT_TOOL_LIMIT,
+    );
+    this.specExecutor = new SpecAnalysisExecutor(
       modelClient,
       controlPlane,
       config.DEVPROOF_AGENT_TOOL_LIMIT,
@@ -38,21 +49,41 @@ export class AgentRuntimeWorker {
     });
     while (!signal.aborted) {
       try {
-        const task = await this.controlPlane.claim(
-          this.config.DEVPROOF_AGENT_WORKER_ID,
-          signal,
-        );
+        const task = await this.claimNext(signal);
         if (!task) {
           await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
           continue;
         }
-        await this.executeTask(task, signal);
+        if (task.kind === "SPEC_ANALYSIS") {
+          await this.executeSpecTask(task.task, signal);
+        } else {
+          await this.executeTask(task.task, signal);
+        }
       } catch (error) {
         if (signal.aborted) return;
         log("runtime.poll.failed", { error: errorMessage(error) });
         await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
       }
     }
+  }
+
+  private async claimNext(signal: AbortSignal) {
+    const workerId = this.config.DEVPROOF_AGENT_WORKER_ID;
+    const first = this.preferSpec ? "SPEC_ANALYSIS" : "BROWSER_VERIFICATION";
+    this.preferSpec = !this.preferSpec;
+    if (first === "SPEC_ANALYSIS") {
+      const spec = await this.controlPlane.claimSpec(workerId, signal);
+      if (spec) return { kind: "SPEC_ANALYSIS" as const, task: spec };
+      const browser = await this.controlPlane.claim(workerId, signal);
+      return browser
+        ? { kind: "BROWSER_VERIFICATION" as const, task: browser }
+        : null;
+    }
+    const browser = await this.controlPlane.claim(workerId, signal);
+    if (browser)
+      return { kind: "BROWSER_VERIFICATION" as const, task: browser };
+    const spec = await this.controlPlane.claimSpec(workerId, signal);
+    return spec ? { kind: "SPEC_ANALYSIS" as const, task: spec } : null;
   }
 
   private async executeTask(task: RuntimeTaskLease, shutdown: AbortSignal) {
@@ -114,6 +145,67 @@ export class AgentRuntimeWorker {
     }
   }
 
+  private async executeSpecTask(
+    task: RuntimeSpecAnalysisTaskLease,
+    shutdown: AbortSignal,
+  ) {
+    const lease = activeLease(task, this.config.DEVPROOF_AGENT_WORKER_ID);
+    const controller = new AbortController();
+    const deadline = new RuntimeDeadlineController(
+      controller,
+      task.snapshot.deadlineAt,
+    );
+    const abortFromShutdown = () => controller.abort(shutdown.reason);
+    shutdown.addEventListener("abort", abortFromShutdown, { once: true });
+    const heartbeat = setInterval(() => {
+      void this.controlPlane
+        .heartbeatSpec(lease)
+        .then((response) => {
+          if (response.deadlineAt) deadline.rearm(response.deadlineAt);
+          if (response.directive === "CANCEL") {
+            controller.abort(
+              new Error("Spec analysis cancellation requested."),
+            );
+          }
+        })
+        .catch((error: unknown) => controller.abort(error));
+    }, 15_000);
+
+    try {
+      let outcome: RuntimeSpecAnalysisOutcome;
+      try {
+        outcome = await this.specExecutor.execute(
+          task,
+          lease,
+          controller.signal,
+        );
+      } catch (error) {
+        if (controller.signal.aborted && isCancellation(error)) {
+          log("runtime.spec.cancelled", { taskId: task.taskId });
+          return;
+        }
+        outcome = classifySpecFailure(error, task);
+      }
+      try {
+        await this.submitSpecOutcomeReliably(lease, outcome);
+        log("runtime.spec.completed", {
+          kind: outcome.kind,
+          taskExecutionId: task.snapshot.taskExecutionId,
+          taskId: task.taskId,
+        });
+      } catch (submitError) {
+        log("runtime.spec.outcome.failed", {
+          error: errorMessage(submitError),
+          taskId: task.taskId,
+        });
+      }
+    } finally {
+      clearInterval(heartbeat);
+      deadline.dispose();
+      shutdown.removeEventListener("abort", abortFromShutdown);
+    }
+  }
+
   private async submitOutcomeReliably(
     lease: ReturnType<typeof activeLease>,
     outcome: RuntimeOutcome,
@@ -123,6 +215,28 @@ export class AgentRuntimeWorker {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         return await this.controlPlane.submitOutcome(
+          lease,
+          outcome,
+          completionId,
+        );
+      } catch (error) {
+        lastError = error;
+        if (error instanceof ControlPlaneError && error.status < 500)
+          throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async submitSpecOutcomeReliably(
+    lease: ReturnType<typeof activeLease>,
+    outcome: RuntimeSpecAnalysisOutcome,
+  ) {
+    const completionId = randomUUID();
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.controlPlane.submitSpecOutcome(
           lease,
           outcome,
           completionId,
@@ -230,7 +344,48 @@ export function classifyFailure(
             ? "RUNTIME_LOST"
             : "AGENT_ERROR",
     kind: deadline || invalidToolSchema ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
-    summary: `Attempt ${task.snapshot.attemptNumber} did not produce a product verdict.`,
+    summary: `第 ${task.snapshot.attemptNumber} 次尝试未生成产品验证结论。`,
+  });
+}
+
+export function classifySpecFailure(
+  error: unknown,
+  task: RuntimeSpecAnalysisTaskLease,
+): RuntimeSpecAnalysisOutcome {
+  const message = errorMessage(error);
+  const deadline = /deadline|timed? out|timeout/iu.test(message);
+  const provider = /openai|provider|response|rate limit|429/iu.test(message);
+  const staleLease =
+    error instanceof ControlPlaneError && error.status === 409
+      ? /lease|terminal|no longer accepts/iu.test(JSON.stringify(error.body))
+      : false;
+  return runtimeSpecAnalysisOutcomeSchema.parse({
+    error: {
+      code: deadline
+        ? "SPEC_ANALYSIS_DEADLINE_EXCEEDED"
+        : provider
+          ? "PROVIDER_FAILED"
+          : staleLease
+            ? "RUNTIME_LEASE_LOST"
+            : "SPEC_ANALYSIS_FAILED",
+      details: {},
+      failureClass: deadline
+        ? "TIMEOUT"
+        : provider
+          ? "PROVIDER"
+          : staleLease
+            ? "RUNTIME_LOST"
+            : "TOOL_EXECUTION",
+      message,
+      phase: "spec_analysis",
+    },
+    executionDisposition: provider
+      ? "PROVIDER_ERROR"
+      : staleLease
+        ? "RUNTIME_LOST"
+        : "AGENT_ERROR",
+    kind: deadline ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
+    summary: `第 ${task.snapshot.attemptNumber} 次 Spec 分析未生成有效 Spec。`,
   });
 }
 

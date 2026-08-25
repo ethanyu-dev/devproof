@@ -106,6 +106,9 @@ const envSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+    SPEC_ANALYSIS_MODE: z
+      .enum(["DETERMINISTIC", "AGENT", "SHADOW"])
+      .default("AGENT"),
     REDIS_URL: z
       .string()
       .url()

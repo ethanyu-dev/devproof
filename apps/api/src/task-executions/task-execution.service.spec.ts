@@ -448,6 +448,22 @@ describe("TaskExecutionService log export", () => {
       verdict: "PASSED",
     };
     const task = {
+      analysisSources: [
+        {
+          byteSize: 42,
+          content: "Issue description",
+          contentHash: "analysis-source-hash",
+          createdAt: occurredAt,
+          externalId: "ENG-124",
+          id: "analysis-source-1",
+          kind: "LINEAR_ISSUE",
+          label: "ENG-124",
+          locator: null,
+          revision: "updated-at-1",
+          stageAttemptId: "attempt-1",
+          uri: "https://linear.app/acme/issue/ENG-124",
+        },
+      ],
       cancelRequestedAt: null,
       caseExecutions: [
         {
@@ -596,6 +612,13 @@ describe("TaskExecutionService log export", () => {
     });
     expect(exported.specAnalysis.events).toEqual([
       expect.objectContaining({ kind: "task.stage.succeeded" }),
+    ]);
+    expect(exported.specAnalysis.sources).toEqual([
+      expect.objectContaining({
+        content: "Issue description",
+        contentHash: "analysis-source-hash",
+        id: "analysis-source-1",
+      }),
     ]);
     expect(exported.specRuns[0]).toMatchObject({
       case: { id: "case-1", name: "Open dashboard" },

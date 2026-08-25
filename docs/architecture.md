@@ -66,7 +66,7 @@ The runner boundary is intentionally capability-based so HTTP, shell, container,
 
 `TaskExecution` is the user-facing aggregate. An Issue Task has three durable stages:
 
-1. `SPEC_ANALYSIS` resolves issue, pull-request, and optional knowledge context into an immutable Task Specification Snapshot.
+1. `SPEC_ANALYSIS` is leased to Agent Runtime with the `ISSUE_ANALYSIS` capability. Its Spec Analysis Executor adaptively reads the issue, linked pull requests, diffs, code pinned to the PR head SHA, and optional knowledge through read-only control-plane tools, then writes a source-cited immutable `agent-spec-v2` Task Specification Snapshot. Model, analysis-summary, tool, validation, and terminal events share the Task trajectory.
 2. `PROFILE_RESOLUTION` selects an ephemeral or authorized user Browser Profile without opening a browser session.
 3. `SPEC_EXECUTION` dispatches deterministic Cases as `ExecutionRun` records.
 

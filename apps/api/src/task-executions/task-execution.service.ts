@@ -10,6 +10,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { runtimeGeneratedSpecCaseSchema } from "@devproof/agent-runtime-protocol";
 import {
   generatedTestCaseDefinitionSchema,
   taskExecutionCreateInputSchema,
@@ -50,6 +51,7 @@ const DISPATCH_RETRY_DELAY_MS = 5_000;
 const MINIMUM_CHILD_RUN_WINDOW_MS = 30_000;
 
 const taskDetailInclude = {
+  analysisSources: { orderBy: { createdAt: "asc" as const } },
   caseExecutions: {
     include: {
       run: {
@@ -434,7 +436,6 @@ export class TaskExecutionService {
     await this.requireTask(current.team.id, id);
     const rows = await this.prisma.taskExecutionEvent.findMany({
       orderBy: { sequence: "asc" },
-      take: 500,
       where: {
         taskExecutionId: id,
         teamId: current.team.id,
@@ -497,6 +498,20 @@ export class TaskExecutionService {
         events: taskEventLogs.filter((eventLog) =>
           specAnalysisEvent(eventLog.kind, eventLog.payload, analysis?.status),
         ),
+        sources: task.analysisSources.map((source) => ({
+          byteSize: source.byteSize,
+          content: source.content,
+          contentHash: source.contentHash,
+          createdAt: source.createdAt.toISOString(),
+          externalId: source.externalId,
+          id: source.id,
+          kind: source.kind,
+          label: source.label,
+          locator: source.locator,
+          revision: source.revision,
+          stageAttemptId: source.stageAttemptId,
+          uri: source.uri,
+        })),
         specificationSnapshots: [...task.specificationSnapshots]
           .reverse()
           .map(toExportSpecificationSnapshot),
@@ -917,14 +932,16 @@ export class TaskExecutionService {
   /** Called by the durable worker; one poll is safe across multiple API replicas. */
   async reconcile(limit = 25) {
     let analyzed = 0;
-    for (let index = 0; index < limit; index += 1) {
-      const claimed = await this.claimAnalysisAttempt();
-      if (!claimed) break;
-      analyzed += 1;
-      try {
-        await this.executeAnalysis(claimed.id, claimed.leaseToken!);
-      } catch (error) {
-        await this.failAnalysis(claimed.id, claimed.leaseToken!, error);
+    if (env().SPEC_ANALYSIS_MODE === "DETERMINISTIC") {
+      for (let index = 0; index < limit; index += 1) {
+        const claimed = await this.claimAnalysisAttempt();
+        if (!claimed) break;
+        analyzed += 1;
+        try {
+          await this.executeAnalysis(claimed.id, claimed.leaseToken!);
+        } catch (error) {
+          await this.failAnalysis(claimed.id, claimed.leaseToken!, error);
+        }
       }
     }
     const exhaustedDispatches = await this.expireExhaustedDispatches(limit * 4);
@@ -2000,7 +2017,9 @@ export class TaskExecutionService {
     const dispatchDeadline = new Date(Date.now() + MINIMUM_CHILD_RUN_WINDOW_MS);
     const candidates = await this.prisma.taskCaseExecution.findMany({
       include: {
-        taskExecution: { include: { profileBinding: true, team: true } },
+        taskExecution: {
+          include: { analysisSources: true, profileBinding: true, team: true },
+        },
         testCase: { include: { snapshot: true } },
       },
       orderBy: { createdAt: "asc" },
@@ -2237,16 +2256,25 @@ export class TaskExecutionService {
 function taskCaseRunRequest(
   item: Prisma.TaskCaseExecutionGetPayload<{
     include: {
-      taskExecution: { include: { profileBinding: true; team: true } };
+      taskExecution: {
+        include: {
+          analysisSources: true;
+          profileBinding: true;
+          team: true;
+        };
+      };
       testCase: { include: { snapshot: true } };
     };
   }>,
   targetUrl: string,
   runtimeProfileKey: string | null,
 ): ExecutionRunCreateInput {
-  const definition = generatedTestCaseDefinitionSchema.parse(
+  const agentDefinition = runtimeGeneratedSpecCaseSchema.safeParse(
     item.testCase.definition,
   );
+  const legacyDefinition = agentDefinition.success
+    ? null
+    : generatedTestCaseDefinitionSchema.parse(item.testCase.definition);
   const context = testGenerationContextSchema.parse(
     item.testCase.snapshot.context,
   );
@@ -2259,6 +2287,28 @@ function taskCaseRunRequest(
     );
   }
   const target = new URL(targetUrl);
+  const agentBusinessReferences = agentDefinition.success
+    ? taskAnalysisBusinessReferences(
+        item.taskExecutionId,
+        Array.from(
+          new Set([
+            ...agentDefinition.data.sourceRefs,
+            ...agentDefinition.data.criteria.flatMap(
+              (criterion) => criterion.sourceRefs,
+            ),
+          ]),
+        ),
+        item.taskExecution.analysisSources,
+      )
+    : null;
+  const runtimeReferenceByAnalysisSource = new Map(
+    (agentBusinessReferences ?? []).flatMap((reference) => {
+      const sourceRef = reference.metadata?.analysisSourceRef;
+      return typeof sourceRef === "string"
+        ? [[sourceRef, reference.externalId] as const]
+        : [];
+    }),
+  );
   return {
     browserPolicy: runtimeProfileKey
       ? {
@@ -2266,19 +2316,41 @@ function taskCaseRunRequest(
           profile: { key: runtimeProfileKey, mode: "PERSISTENT" },
         }
       : input.browserPolicy,
-    businessReferences: taskBusinessReferences(
-      item.taskExecutionId,
-      item.testCase.snapshot.id,
-      context,
-    ),
-    criteria: definition.expected.map((expected, index) => ({
-      description: expected,
-      id: `expected-${index + 1}`,
-      required: true,
-      requiredEvidenceKinds: Array.from(
-        new Set(definition.evidence.map((evidence) => evidence.kind)),
-      ),
-    })),
+    businessReferences: agentDefinition.success
+      ? agentBusinessReferences!
+      : taskBusinessReferences(
+          item.taskExecutionId,
+          item.testCase.snapshot.id,
+          context,
+        ),
+    criteria: agentDefinition.success
+      ? agentDefinition.data.criteria.map((criterion) => ({
+          description: [
+            criterion.description,
+            `Spec 来源：${criterion.sourceRefs
+              .map((sourceRef) =>
+                runtimeReferenceByAnalysisSource.get(sourceRef),
+              )
+              .filter((sourceRef): sourceRef is string => Boolean(sourceRef))
+              .join(", ")}`,
+          ]
+            .filter(Boolean)
+            .join("\n")
+            .slice(0, 4_000),
+          id: criterion.id,
+          required: criterion.required,
+          requiredEvidenceKinds: criterion.requiredEvidenceKinds,
+        }))
+      : legacyDefinition!.expected.map((expected, index) => ({
+          description: expected,
+          id: `expected-${index + 1}`,
+          required: true,
+          requiredEvidenceKinds: Array.from(
+            new Set(
+              legacyDefinition!.evidence.map((evidence) => evidence.kind),
+            ),
+          ),
+        })),
     deadlineSeconds: Math.max(
       30,
       Math.min(
@@ -2291,7 +2363,9 @@ function taskCaseRunRequest(
     deadlinePolicy: input.runDeadlinePolicy,
     environment: {
       allowedHosts: [target.hostname],
-      authRole: definition.authRole,
+      authRole: agentDefinition.success
+        ? agentDefinition.data.authRole
+        : legacyDefinition!.authRole,
       caseId: item.caseId,
       specificationSnapshotId: item.testCase.snapshot.id,
       targetUrl,
@@ -2299,13 +2373,41 @@ function taskCaseRunRequest(
     },
     goal: [
       `${context.issue.identifier} · ${context.issue.title}`,
-      definition.name,
-      "Preconditions:",
-      ...definition.preconditions.map((value) => `- ${value}`),
-      "Steps:",
-      ...definition.steps.map((step) => `${step.order}. ${step.action}`),
-      "Expected:",
-      ...definition.expected.map((value) => `- ${value}`),
+      agentDefinition.success
+        ? agentDefinition.data.name
+        : legacyDefinition!.name,
+      "前置条件：",
+      ...(agentDefinition.success
+        ? agentDefinition.data.preconditions
+        : legacyDefinition!.preconditions
+      ).map((value) => `- ${value}`),
+      ...(agentDefinition.success && agentDefinition.data.testData.length
+        ? [
+            "测试数据：",
+            ...agentDefinition.data.testData.map((value) => `- ${value}`),
+          ]
+        : []),
+      "操作步骤：",
+      ...(agentDefinition.success
+        ? agentDefinition.data.steps.map(
+            (step) =>
+              `${step.order}. ${step.action}\n   预期现象：${step.expectedObservation}`,
+          )
+        : legacyDefinition!.steps.map(
+            (step) => `${step.order}. ${step.action}`,
+          )),
+      "验收标准：",
+      ...(agentDefinition.success
+        ? agentDefinition.data.criteria.map(
+            (criterion) => `- ${criterion.description}`,
+          )
+        : legacyDefinition!.expected.map((value) => `- ${value}`)),
+      ...(agentDefinition.success && agentDefinition.data.cleanup.length
+        ? [
+            "清理步骤：",
+            ...agentDefinition.data.cleanup.map((value) => `- ${value}`),
+          ]
+        : []),
     ].join("\n"),
     hitlPolicy: input.hitlPolicy,
     idempotencyKey: `task:${item.taskExecutionId}:snapshot:${item.testCase.snapshot.id}:case:${item.caseId}:execution:${item.executionOrdinal}`,
@@ -2313,6 +2415,39 @@ function taskCaseRunRequest(
     retryPolicy: input.retryPolicy,
     source: { id: item.id, kind: "TASK_CASE" },
   };
+}
+
+function taskAnalysisBusinessReferences(
+  taskId: string,
+  requestedSourceRefs: string[],
+  sources: Array<{
+    content: Prisma.JsonValue;
+    externalId: string;
+    id: string;
+    kind: string;
+    label: string;
+    locator: Prisma.JsonValue;
+    revision: string | null;
+    uri: string;
+  }>,
+): ExecutionRunCreateInput["businessReferences"] {
+  const requested = new Set(requestedSourceRefs);
+  return sources
+    .filter((source) => requested.has(source.externalId))
+    .slice(0, 100)
+    .map((source) => ({
+      externalId: `reference://task/${taskId}/analysis/${source.id}`,
+      kind: "BUSINESS_REFERENCE" as const,
+      label: source.label,
+      metadata: {
+        analysisSourceRef: source.externalId,
+        excerpt: referenceExcerpt(JSON.stringify(source.content)),
+        kind: source.kind,
+        locator: source.locator,
+        revision: source.revision,
+        url: safeReferenceUrl(source.uri),
+      },
+    }));
 }
 
 function directRunRequest(
@@ -2557,7 +2692,7 @@ function toTaskDetail(row: TaskDetailRow) {
     executionsByCase.set(execution.caseId, current);
   }
   const caseDetails = cases.map((testCase) => ({
-    definition: generatedTestCaseDefinitionSchema.parse(testCase.definition),
+    definition: parseGeneratedCaseDefinition(testCase.definition),
     definitionHash: testCase.definitionHash,
     executions: (executionsByCase.get(testCase.id) ?? []).map(toCaseExecution),
     id: testCase.id,
@@ -2662,6 +2797,13 @@ function toTaskDetail(row: TaskDetailRow) {
     verdict: row.verdict,
     waitingReason: row.waitingReason,
   };
+}
+
+function parseGeneratedCaseDefinition(value: unknown) {
+  const agent = runtimeGeneratedSpecCaseSchema.safeParse(value);
+  return agent.success
+    ? agent.data
+    : generatedTestCaseDefinitionSchema.parse(value);
 }
 
 function toTaskSummary(

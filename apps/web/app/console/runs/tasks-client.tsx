@@ -1166,10 +1166,25 @@ function CaseCard({ testCase }: { testCase: TaskCase }) {
         </span>
       </div>
       <div className="dp-specification-case-body">
-        <p>{testCase.definition.expected.join("；")}</p>
+        <p>
+          {(
+            testCase.definition.criteria?.map(
+              (criterion) => criterion.description,
+            ) ??
+            testCase.definition.expected ??
+            []
+          ).join("；")}
+        </p>
         <small>
           {testCase.definition.steps
-            .map((step) => `${step.order}. ${step.action}`)
+            .map(
+              (step) =>
+                `${step.order}. ${step.action}${
+                  step.expectedObservation
+                    ? `（预期：${step.expectedObservation}）`
+                    : ""
+                }`,
+            )
             .join(" → ")}
         </small>
         {testCase.executions.map((item) => (
@@ -1285,6 +1300,9 @@ function projectSpecGenerationTrajectory(
   const eventRecords = events
     .filter((event) => specGenerationEvent(event, analysis?.status))
     .map((event): RunTrajectoryRecord => {
+      if (event.kind.startsWith("agent.")) {
+        return projectAgentTaskEvent(event);
+      }
       const payload = isRecord(event.payload) ? event.payload : {};
       const attemptNumber =
         typeof payload.attemptNumber === "number" && payload.attemptNumber > 0
@@ -1351,13 +1369,19 @@ function projectSpecGenerationTrajectory(
 
 function specGenerationEvent(event: TaskEvent, analysisStatus?: string) {
   if (
-    ["task.created", "task.rerun.created", "task.rerun.linked"].includes(
-      event.kind,
-    )
+    [
+      "task.created",
+      "task.rerun.created",
+      "task.rerun.linked",
+      "task.spec.shadow_compared",
+    ].includes(event.kind)
   ) {
     return true;
   }
   const payload = isRecord(event.payload) ? event.payload : {};
+  if (event.kind.startsWith("agent.") && payload.stage === "SPEC_ANALYSIS") {
+    return true;
+  }
   if (
     event.kind.startsWith("task.stage.") &&
     payload.stage === "SPEC_ANALYSIS"
@@ -1370,6 +1394,115 @@ function specGenerationEvent(event: TaskEvent, analysisStatus?: string) {
       event.kind,
     )
   );
+}
+
+function projectAgentTaskEvent(event: TaskEvent): RunTrajectoryRecord {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const durationMs =
+    typeof payload.durationMs === "number" && payload.durationMs >= 0
+      ? Math.floor(payload.durationMs)
+      : null;
+  const completed = /(?:completed|failed|generated|validation_failed)$/u.test(
+    event.kind,
+  );
+  const occurredAtMs = Date.parse(event.occurredAt);
+  const startedAt = new Date(
+    Math.max(0, occurredAtMs - (completed ? (durationMs ?? 0) : 0)),
+  ).toISOString();
+  const isAnalysis = event.kind === "agent.analysis.completed";
+  const isModel = event.kind.startsWith("agent.model.");
+  const isTool = event.kind.startsWith("agent.tool.");
+  const input =
+    payload.inputPreview ??
+    (isAnalysis
+      ? null
+      : event.kind === "agent.segment.started"
+        ? payload
+        : null);
+  const output = isAnalysis
+    ? {
+        sourceRefs: payload.sourceRefs ?? [],
+        summary: payload.summary ?? null,
+      }
+    : (payload.outputPreview ??
+      (event.kind === "agent.spec.generated"
+        ? {
+            caseCount: payload.caseCount,
+            sourceRefs: payload.sourceRefs,
+          }
+        : null));
+  return {
+    actor: event.actor,
+    attemptNumber:
+      typeof payload.attemptNumber === "number" && payload.attemptNumber > 0
+        ? Math.floor(payload.attemptNumber)
+        : null,
+    callId: typeof payload.callId === "string" ? payload.callId : null,
+    completedAt: completed ? event.occurredAt : null,
+    durationMs,
+    error:
+      typeof payload.errorMessage === "string" ? payload.errorMessage : null,
+    id: `task:${event.sequence}`,
+    input,
+    kind: isAnalysis
+      ? "ANALYSIS"
+      : isModel
+        ? "MODEL"
+        : isTool
+          ? "TOOL"
+          : "RUNTIME",
+    lane: isAnalysis
+      ? "ANALYSIS"
+      : isModel
+        ? "MODEL"
+        : isTool
+          ? "TOOLS"
+          : "INPUT",
+    metadata: {
+      ...(typeof payload.model === "string" ? { model: payload.model } : {}),
+      ...(typeof payload.provider === "string"
+        ? { provider: payload.provider }
+        : {}),
+      ...(payload.usage ? { usage: payload.usage } : {}),
+      stage: "SPEC_ANALYSIS",
+      stageAttemptId: payload.stageAttemptId ?? null,
+      taskEventSequence: event.sequence,
+    },
+    output,
+    segmentId: typeof payload.segmentId === "string" ? payload.segmentId : null,
+    sequence: event.sequence,
+    startedAt,
+    status:
+      payload.status === "FAILED" ||
+      /failed|validation_failed/iu.test(event.kind)
+        ? "FAILED"
+        : payload.status === "WAITING_HUMAN"
+          ? "WAITING_HUMAN"
+          : /started/iu.test(event.kind)
+            ? "RUNNING"
+            : "SUCCEEDED",
+    step:
+      typeof payload.step === "number" && payload.step > 0
+        ? Math.floor(payload.step)
+        : null,
+    title: agentEventTitle(event.kind, payload),
+  };
+}
+
+function agentEventTitle(kind: string, payload: Record<string, unknown>) {
+  if (kind === "agent.analysis.completed") return "Agent 分析";
+  if (kind.startsWith("agent.model.")) {
+    return `模型 ${displayLabel(kind.split(".").at(-1) ?? kind)}`;
+  }
+  if (kind.startsWith("agent.tool.")) {
+    const name = typeof payload.name === "string" ? payload.name : "Tool";
+    return `${name} · ${displayLabel(kind.split(".").at(-1) ?? kind)}`;
+  }
+  if (kind === "agent.spec.validation_failed") return "Spec 校验失败";
+  if (kind === "agent.spec.generated") return "Spec 已生成";
+  if (kind === "agent.segment.started") return "Spec Agent 开始";
+  if (kind === "agent.segment.completed") return "Spec Agent 完成";
+  return displayLabel(kind);
 }
 
 function trajectoryError(error: unknown) {

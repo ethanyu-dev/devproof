@@ -12,6 +12,7 @@ import css from "./run-trajectory.module.css";
 
 const LANES: Array<{ id: RunTrajectoryRecord["lane"]; label: string }> = [
   { id: "INPUT", label: "Input" },
+  { id: "ANALYSIS", label: "Analysis" },
   { id: "MODEL", label: "Model" },
   { id: "TOOLS", label: "Tools" },
 ];

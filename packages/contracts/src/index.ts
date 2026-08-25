@@ -667,9 +667,15 @@ export const runInterventionResolveInputSchema = z
     );
   });
 
-export const runTrajectoryLaneSchema = z.enum(["INPUT", "MODEL", "TOOLS"]);
+export const runTrajectoryLaneSchema = z.enum([
+  "INPUT",
+  "ANALYSIS",
+  "MODEL",
+  "TOOLS",
+]);
 export const runTrajectoryRecordKindSchema = z.enum([
   "INPUT",
+  "ANALYSIS",
   "MODEL",
   "TOOL",
   "RUNTIME",

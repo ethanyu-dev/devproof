@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_RUNTIME_PROTOCOL,
   runtimeBrowserAcquireOutputSchema,
+  runtimeSpecAnalysisClaimOutputSchema,
+  runtimeSpecAnalysisTaskOutcomeOutputSchema,
+  runtimeSpecAnalysisToolOutputSchema,
   runtimeTaskClaimOutputSchema,
   runtimeTaskHeartbeatOutputSchema,
   runtimeTaskOutcomeOutputSchema,
   type RuntimeBrowserAcquireInput,
   type RuntimeBrowserCommandInput,
   type RuntimeOutcome,
+  type RuntimeSpecAnalysisOutcome,
+  type RuntimeSpecAnalysisTaskLease,
+  type RuntimeSpecAnalysisToolInput,
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
@@ -38,9 +44,25 @@ export class ControlPlaneClient {
     return runtimeTaskClaimOutputSchema.parse(result).task;
   }
 
+  async claimSpec(workerId: string, signal?: AbortSignal) {
+    const result = await this.request("/internal/v2/runtime/spec-tasks/claim", {
+      body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
+      ...(signal ? { signal } : {}),
+    });
+    return runtimeSpecAnalysisClaimOutputSchema.parse(result).task;
+  }
+
   async heartbeat(lease: ActiveLease, signal?: AbortSignal) {
     const result = await this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/heartbeat`,
+      { body: this.identity(lease), ...(signal ? { signal } : {}) },
+    );
+    return runtimeTaskHeartbeatOutputSchema.parse(result);
+  }
+
+  async heartbeatSpec(lease: ActiveLease, signal?: AbortSignal) {
+    const result = await this.request(
+      `/internal/v2/runtime/spec-tasks/${lease.taskId}/heartbeat`,
       { body: this.identity(lease), ...(signal ? { signal } : {}) },
     );
     return runtimeTaskHeartbeatOutputSchema.parse(result);
@@ -62,6 +84,42 @@ export class ControlPlaneClient {
         },
       },
     });
+  }
+
+  async appendSpecEvent(
+    lease: ActiveLease,
+    kind: string,
+    payload: Record<string, unknown>,
+  ) {
+    return this.request(
+      `/internal/v2/runtime/spec-tasks/${lease.taskId}/events`,
+      {
+        body: {
+          ...this.identity(lease),
+          event: {
+            eventId: randomUUID(),
+            kind,
+            occurredAt: new Date().toISOString(),
+            payload,
+          },
+        },
+      },
+    );
+  }
+
+  async executeSpecTool(
+    lease: ActiveLease,
+    input: Pick<RuntimeSpecAnalysisToolInput, "arguments" | "callId" | "name">,
+    signal?: AbortSignal,
+  ) {
+    const result = await this.request(
+      `/internal/v2/runtime/spec-tasks/${lease.taskId}/tools`,
+      {
+        body: { ...this.identity(lease), ...input },
+        ...(signal ? { signal } : {}),
+      },
+    );
+    return runtimeSpecAnalysisToolOutputSchema.parse(result);
   }
 
   async acquireBrowser(
@@ -115,6 +173,25 @@ export class ControlPlaneClient {
     return runtimeTaskOutcomeOutputSchema.parse(result);
   }
 
+  async submitSpecOutcome(
+    lease: ActiveLease,
+    outcome: RuntimeSpecAnalysisOutcome,
+    completionId = randomUUID(),
+  ) {
+    const result = await this.request(
+      `/internal/v2/runtime/spec-tasks/${lease.taskId}/outcome`,
+      {
+        body: {
+          ...this.identity(lease),
+          completedAt: new Date().toISOString(),
+          completionId,
+          outcome,
+        },
+      },
+    );
+    return runtimeSpecAnalysisTaskOutcomeOutputSchema.parse(result);
+  }
+
   private identity(lease: ActiveLease) {
     return {
       fencingToken: lease.fencingToken,
@@ -166,7 +243,7 @@ function safeJson(text: string): unknown {
 }
 
 export function activeLease(
-  task: RuntimeTaskLease,
+  task: RuntimeTaskLease | RuntimeSpecAnalysisTaskLease,
   workerId: string,
 ): ActiveLease {
   return {

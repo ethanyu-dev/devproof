@@ -531,7 +531,7 @@ const runtimeActionCommandPayloadVariants = [
       payload: snapshotPayloadSchema,
     })
     .describe(
-      "Capture transient accessibility context and opaque refs for the Agent. This is observation only and does not create persistent DOM evidence; use page.dom for an artifact.",
+      "为 Agent 采集临时的无障碍上下文和不透明 ref。此命令仅用于观察，不会创建持久化 DOM 证据；需要证据产物时使用 page.dom。",
     ),
   z
     .object({
@@ -545,7 +545,7 @@ const runtimeActionCommandPayloadVariants = [
         .strict(),
     })
     .describe(
-      "Read bounded visible text from the page or one target. This is the text command; do not invent page.content.",
+      "从页面或指定目标读取有界的可见文本。这是文本读取命令；不要编造 page.content。",
     ),
   ...(["page.get_url", "page.get_title", "tab.list"] as const).map(
     (commandType) =>
@@ -572,7 +572,7 @@ const runtimeActionCommandPayloadVariants = [
         .strict(),
     })
     .describe(
-      "Read bounded console/network error summaries for diagnosis. Use page.console or page.network when persistent evidence is required.",
+      "读取有界的控制台或网络错误摘要用于诊断。需要持久化证据时使用 page.console 或 page.network。",
     ),
   z
     .object({
@@ -591,7 +591,7 @@ const runtimeActionCommandPayloadVariants = [
         })
         .strict(),
     })
-    .describe("Create persistent SCREENSHOT artifact evidence."),
+    .describe("创建持久化的 SCREENSHOT 证据产物。"),
   ...(["page.dom", "page.console"] as const).map((commandType) =>
     z
       .object({
@@ -600,8 +600,8 @@ const runtimeActionCommandPayloadVariants = [
       })
       .describe(
         commandType === "page.dom"
-          ? "Create persistent DOM artifact evidence, including open Shadow DOM content. This is the HTML-content command; page.content does not exist."
-          : "Create persistent CONSOLE artifact evidence.",
+          ? "创建持久化的 DOM 证据产物，包括开放的 Shadow DOM 内容。这是 HTML 内容命令；不存在 page.content。"
+          : "创建持久化的 CONSOLE 证据产物。",
       ),
   ),
   z
@@ -610,7 +610,7 @@ const runtimeActionCommandPayloadVariants = [
       payload: networkEvidencePayloadSchema,
     })
     .describe(
-      "Create persistent NETWORK evidence. Set includeResponseBodies=true only when response JSON is required, and narrow it with urlIncludes. Bodies are same-origin JSON only, bounded and redacted.",
+      "创建持久化的 NETWORK 证据。仅在需要响应 JSON 时设置 includeResponseBodies=true，并使用 urlIncludes 缩小范围。响应体仅支持同源 JSON，且会进行限长和脱敏。",
     ),
   z
     .object({
@@ -627,7 +627,7 @@ const runtimeActionCommandPayloadVariants = [
       ]),
     })
     .describe(
-      "Click a target returned by page.snapshot/observe_browser. Preserve the complete eN/fNeN ref. element.click does not exist.",
+      "点击 page.snapshot/observe_browser 返回的目标。必须保留完整的 eN/fNeN ref；不存在 element.click。",
     ),
   z.object({
     commandType: z.literal("page.fill"),
@@ -743,7 +743,7 @@ const runtimeActionCommandPayloadVariants = [
         })
         .strict()
         .describe(
-          "Wait for a document load state. Prefer selector or text waits for SPA and micro-frontend navigation; networkidle may never occur when background requests remain open.",
+          "等待文档加载状态。SPA 和微前端导航应优先等待 selector 或文本；存在持续后台请求时，networkidle 可能永远不会发生。",
         ),
     ]),
   }),
@@ -954,7 +954,7 @@ type RuntimeActionCommandInputValue = Exclude<
 export const runtimeActionCommandInputSchema = z
   .union(runtimeActionCommandInputVariants)
   .describe(
-    "Closed allow-list of Agent browser actions. Use only an exact commandType branch; never invent Playwright-style aliases.",
+    "Agent 浏览器操作的封闭允许列表。只能使用准确的 commandType 分支；不要编造 Playwright 风格的别名。",
   ) as unknown as z.ZodType<RuntimeActionCommandInputValue>;
 
 export const runtimeCommandSchema = z
