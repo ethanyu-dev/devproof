@@ -288,8 +288,8 @@ describe("UserBrowserProfilesService", () => {
       });
       if (status === "ACTIVE") {
         expect(takeover).toHaveBeenCalledOnce();
-        expect(execute.mock.invocationCallOrder[0]).toBeLessThan(
-          takeover.mock.invocationCallOrder[0]!,
+        expect(takeover.mock.invocationCallOrder[0]).toBeLessThan(
+          execute.mock.invocationCallOrder[0]!,
         );
       } else {
         expect(takeover).not.toHaveBeenCalled();

@@ -418,16 +418,16 @@ export class UserBrowserProfilesService {
           sessionId: existing.id,
         };
       }
-      await this.openVerificationPage(
-        current,
-        existing.id,
-        profile.verificationUrl,
-      );
       if (existing.status === "ACTIVE") {
         await this.sessions.takeover(current, existing.id, {
           ttlSeconds: input.ttlSeconds,
         });
       }
+      await this.openVerificationPage(
+        current,
+        existing.id,
+        profile.verificationUrl,
+      );
       await this.prisma.userBrowserProfile.update({
         data: {
           inactivityExpiresAt: new Date(Date.now() + PROFILE_TTL_MS),
