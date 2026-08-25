@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 
-import type OpenAI from "openai";
 import {
   runtimeOutcomeSchema,
   type RuntimeOutcome,
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
-import { BrowserVerificationExecutor } from "./browser-verification.executor.js";
+import {
+  BrowserVerificationExecutor,
+  type ResponsesClientFactory,
+} from "./browser-verification.executor.js";
 import {
   activeLease,
   ControlPlaneClient,
@@ -21,12 +23,11 @@ export class AgentRuntimeWorker {
   constructor(
     private readonly config: RuntimeConfig,
     private readonly controlPlane: ControlPlaneClient,
-    model: OpenAI,
+    modelClient: ResponsesClientFactory,
   ) {
     this.executor = new BrowserVerificationExecutor(
-      model as never,
+      modelClient,
       controlPlane,
-      config.OPENAI_MODEL,
       config.DEVPROOF_AGENT_TOOL_LIMIT,
     );
   }

@@ -14,6 +14,7 @@
     "@devproof/agent-runtime-protocol": "workspace:*",
     "@devproof/runtime-protocol": "workspace:*",
     "dotenv": "^17.4.2",
+    "ipaddr.js": "^2.2.0",
     "openai": "^6.49.0",
     "zod": "^4.4.3"
   },

@@ -9,6 +9,11 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import {
+  agentModelConfigurationCreateInputSchema,
+  agentModelConfigurationOrderInputSchema,
+  agentModelConfigurationUpdateInputSchema,
+  githubAccessCredentialCreateInputSchema,
+  githubAccessCredentialUpdateInputSchema,
   humanControlInputSchema,
   runtimeCommandInputSchema,
   runtimeConfigurationInputSchema,
@@ -25,6 +30,8 @@ import { BrowserRuntimeService } from "./browser-runtime.service.js";
 import { ConsoleService } from "./console.service.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
 import { RuntimeRoutingService } from "./runtime-routing.service.js";
+import { GithubAccessService } from "./github-access.service.js";
+import { AgentModelConfigurationService } from "./agent-model-configuration.service.js";
 
 @Controller("console/api")
 @UseGuards(AuthGuard)
@@ -34,7 +41,93 @@ export class ConsoleController {
     private readonly runtimes: BrowserRuntimeService,
     private readonly routing: RuntimeRoutingService,
     private readonly runtimeSessions: RuntimeSessionsService,
+    private readonly githubAccess: GithubAccessService,
+    private readonly agentModels: AgentModelConfigurationService,
   ) {}
+
+  @Get("github-access")
+  githubCredentials(@CurrentAuth() current: AuthContext) {
+    return this.githubAccess.list(current);
+  }
+
+  @Post("github-access")
+  createGithubCredential(
+    @CurrentAuth() current: AuthContext,
+    @Body() body: unknown,
+  ) {
+    return this.githubAccess.create(
+      current,
+      parseBody(githubAccessCredentialCreateInputSchema, body),
+    );
+  }
+
+  @Put("github-access/:id")
+  updateGithubCredential(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.githubAccess.update(
+      current,
+      id,
+      parseBody(githubAccessCredentialUpdateInputSchema, body),
+    );
+  }
+
+  @Delete("github-access/:id")
+  async deleteGithubCredential(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+  ) {
+    await this.githubAccess.remove(current, id);
+    return { ok: true };
+  }
+
+  @Get("agent-models")
+  agentModelList(@CurrentAuth() current: AuthContext) {
+    return this.agentModels.list(current);
+  }
+
+  @Post("agent-models")
+  createAgentModel(@CurrentAuth() current: AuthContext, @Body() body: unknown) {
+    return this.agentModels.create(
+      current,
+      parseBody(agentModelConfigurationCreateInputSchema, body),
+    );
+  }
+
+  @Put("agent-models/order")
+  reorderAgentModels(
+    @CurrentAuth() current: AuthContext,
+    @Body() body: unknown,
+  ) {
+    return this.agentModels.reorder(
+      current,
+      parseBody(agentModelConfigurationOrderInputSchema, body),
+    );
+  }
+
+  @Put("agent-models/:id")
+  updateAgentModel(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.agentModels.update(
+      current,
+      id,
+      parseBody(agentModelConfigurationUpdateInputSchema, body),
+    );
+  }
+
+  @Delete("agent-models/:id")
+  async deleteAgentModel(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+  ) {
+    await this.agentModels.remove(current, id);
+    return { ok: true };
+  }
 
   @Get("runtime-settings")
   runtimeSettings(@CurrentAuth() current: AuthContext) {

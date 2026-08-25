@@ -24,6 +24,14 @@ const task: RuntimeTaskLease = {
     environment: { targetUrl: "https://example.com" },
     executionPolicy: {},
     goal: "Verify the page.",
+    modelCandidates: [
+      {
+        apiKey: "sk-test-model-secret",
+        baseUrl: "https://gateway.example.com/v1",
+        displayName: "Test model",
+        modelId: "gpt-test",
+      },
+    ],
     runId: "285146a8-5230-4b02-832a-5eef19e8dc8a",
     teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
     traceId: "1234567890abcdef1234567890abcdef",
@@ -61,6 +69,10 @@ function functionCall(
   };
 }
 
+function modelFactory(create: ReturnType<typeof vi.fn>) {
+  return () => ({ responses: { create } }) as never;
+}
+
 describe("Agent Runtime browser verification executor", () => {
   it("removes validation-only formats from non-strict function schemas", async () => {
     const create = vi.fn().mockResolvedValue({
@@ -83,9 +95,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -134,9 +145,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -151,6 +161,7 @@ describe("Agent Runtime browser verification executor", () => {
     expect(tracePayloads).not.toContain("trace-secret-value");
     expect(tracePayloads).not.toContain("query-secret-value");
     expect(tracePayloads).not.toContain("tool-secret-value");
+    expect(tracePayloads).not.toContain("sk-test-model-secret");
   });
 
   it("rejects direct completion until browser work and criteria exist", async () => {
@@ -211,9 +222,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -300,9 +310,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -353,9 +362,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -380,6 +388,88 @@ describe("Agent Runtime browser verification executor", () => {
         ? outcome.intervention.expiresAt
         : undefined,
     ).toEqual(expect.any(String));
+  });
+
+  it("falls through configured models and probes the preferred model again on the next call", async () => {
+    const fallbackTask: RuntimeTaskLease = {
+      ...task,
+      snapshot: {
+        ...task.snapshot,
+        modelCandidates: [
+          {
+            apiKey: "sk-primary",
+            baseUrl: "https://primary.example.com/v1",
+            displayName: "Primary",
+            modelId: "gpt-primary",
+          },
+          {
+            apiKey: "sk-fallback",
+            baseUrl: "https://fallback.example.com/v1",
+            displayName: "Fallback",
+            modelId: "gpt-fallback",
+          },
+        ],
+      },
+    };
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("primary unavailable for Bearer sk-primary-secret-123456"),
+      )
+      .mockResolvedValueOnce({
+        id: "response-fallback",
+        output: [{ role: "assistant", text: "Continue.", type: "message" }],
+      })
+      .mockResolvedValueOnce({
+        id: "response-primary-recovered",
+        output: [
+          functionCall(
+            "request_human_input",
+            {
+              prompt: "Please approve access.",
+              summary: "Approval is required.",
+            },
+            2,
+          ),
+        ],
+      });
+    const controlPlane = {
+      acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
+      appendEvent: vi.fn().mockResolvedValue({}),
+      browserCommand: vi.fn(),
+      releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
+    };
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+
+    const outcome = await executor.execute(
+      fallbackTask,
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(outcome.kind).toBe("WAITING_HUMAN");
+    expect(create.mock.calls.map((call) => call[0].model)).toEqual([
+      "gpt-primary",
+      "gpt-fallback",
+      "gpt-primary",
+    ]);
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "agent.model.failed",
+      expect.objectContaining({ model: "gpt-primary" }),
+    );
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "agent.model.completed",
+      expect.objectContaining({ model: "gpt-primary" }),
+    );
+    expect(JSON.stringify(controlPlane.appendEvent.mock.calls)).not.toContain(
+      "sk-primary-secret-123456",
+    );
   });
 
   it("waits for browser capacity within the same Runtime task", async () => {
@@ -411,9 +501,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -443,9 +532,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn(),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
     const controller = new AbortController();
@@ -497,9 +585,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 
@@ -606,9 +693,8 @@ describe("Agent Runtime browser verification executor", () => {
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };
     const executor = new BrowserVerificationExecutor(
-      { responses: { create } },
+      modelFactory(create),
       controlPlane as never,
-      "gpt-test",
       10,
     );
 

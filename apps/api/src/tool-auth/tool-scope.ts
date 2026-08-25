@@ -11,3 +11,14 @@ export function requireToolScope(
     throw new ForbiddenException(`Tool credential requires ${scope} scope.`);
   }
 }
+
+export function requireAgentRuntimeIdentity(current: ToolAuthContext) {
+  if (
+    current.credential.kind !== "AGENT_RUNTIME" ||
+    !current.credential.scopes.includes("runtime:lease")
+  ) {
+    throw new ForbiddenException(
+      "A registered Agent Runtime credential is required.",
+    );
+  }
+}

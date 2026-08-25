@@ -7,7 +7,6 @@ import {
   CircleHelp,
   Eye,
   FileCheck2,
-  KeyRound,
   MonitorUp,
   Pause,
   Play,
@@ -26,23 +25,23 @@ const configSteps = [
   {
     detail: "运行一次性配对命令，让执行节点上线。",
     icon: MonitorUp,
-    link: "/console/access#runtime",
+    link: "/console/access",
     linkLabel: "注册执行节点",
     title: "接入执行节点",
   },
   {
     detail: "设置域名路由、不可用策略和人工接管开关。",
     icon: Settings2,
-    link: "/console/access#runtime",
+    link: "/console/access",
     linkLabel: "配置策略",
     title: "设置执行策略",
   },
   {
-    detail: "分别创建 Agent Token 与 runtime:lease Token。",
-    icon: KeyRound,
-    link: "/console/access#mcp",
-    linkLabel: "生成 Token",
-    title: "创建两类 Token",
+    detail: "配置 Base URL、API Key、Model ID 与显示名称。",
+    icon: Bot,
+    link: "/console/access",
+    linkLabel: "配置模型",
+    title: "配置 Agent 模型",
   },
 ];
 

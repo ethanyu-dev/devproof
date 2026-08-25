@@ -75,7 +75,7 @@ export class TestSpecificationService {
   }
 
   async resolve(current: ToolAuthContext, issueRef: string) {
-    const resolved = await this.resolver.resolve(issueRef);
+    const resolved = await this.resolver.resolve(issueRef, current.team.id);
     const specification = await this.sync(current, {
       context: resolved.context,
       forceRegeneration: false,
@@ -85,7 +85,10 @@ export class TestSpecificationService {
 
   async regenerate(current: ToolAuthContext, id: string) {
     const currentSpecification = await this.get(current, id);
-    const resolved = await this.resolver.resolve(currentSpecification.issueUrl);
+    const resolved = await this.resolver.resolve(
+      currentSpecification.issueUrl,
+      current.team.id,
+    );
     const specification = await this.sync(current, {
       context: resolved.context,
       forceRegeneration: true,

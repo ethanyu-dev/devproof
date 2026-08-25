@@ -6,6 +6,7 @@ import {
   runtimeTraceEventSchema,
   type RuntimeBrowserAcquireInput,
   type RuntimeEvidenceRef,
+  type RuntimeModelCandidate,
   type RuntimeOutcome,
   type RuntimeTaskLease,
   type RuntimeTraceEvent,
@@ -25,7 +26,7 @@ interface ModelFunctionCall {
   type: "function_call";
 }
 
-interface ModelResponse {
+export interface ModelResponse {
   id: string;
   output: Array<ModelFunctionCall | Record<string, unknown>>;
   usage?: Record<string, unknown>;
@@ -46,6 +47,10 @@ export interface ResponsesClient {
   };
 }
 
+export type ResponsesClientFactory = (
+  candidate: RuntimeModelCandidate,
+) => ResponsesClient;
+
 const recordCriterionInputSchema = runtimeCriterionResultSchema;
 const finishInputSchema = z.object({
   summary: z.string().trim().min(1).max(8_000),
@@ -62,9 +67,8 @@ const humanInputSchema = z.object({
 /** Executes one leased browser-verification task without owning retry state. */
 export class BrowserVerificationExecutor {
   constructor(
-    private readonly model: ResponsesClient,
+    private readonly modelClient: ResponsesClientFactory,
     private readonly controlPlane: ControlPlaneClient,
-    private readonly defaultModel: string,
     private readonly toolLimit: number,
   ) {}
 
@@ -81,9 +85,14 @@ export class BrowserVerificationExecutor {
       requiredCapabilities: browserPolicy.requiredCapabilities,
       ...(targetUrl ? { targetUrl } : {}),
     });
+    const modelCandidates = task.snapshot.modelCandidates ?? [];
+    if (modelCandidates.length === 0) {
+      throw new Error("No Agent model is configured for this team.");
+    }
     await this.controlPlane.appendEvent(lease, "executor.started", {
       executor: "browser-verification",
-      model: task.snapshot.model?.name ?? this.defaultModel,
+      model: modelCandidates[0]?.modelId,
+      modelCandidates: modelCandidates.map((candidate) => candidate.modelId),
     });
 
     const history: unknown[] = [
@@ -95,8 +104,7 @@ export class BrowserVerificationExecutor {
     ];
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
-    const model = task.snapshot.model?.name ?? this.defaultModel;
-    const provider = task.snapshot.model?.provider ?? "CODEX";
+    const preferredModel = modelCandidates[0]!;
     await this.appendTraceEvent(lease, {
       kind: "agent.segment.started",
       payload: {
@@ -106,8 +114,8 @@ export class BrowserVerificationExecutor {
           humanResume: readHumanResume(task.snapshot.executionPolicy),
           targetUrl: targetUrl ?? null,
         }),
-        model,
-        provider,
+        model: preferredModel.modelId,
+        provider: "OPENAI_COMPATIBLE",
         segmentId,
       },
     });
@@ -151,67 +159,84 @@ export class BrowserVerificationExecutor {
         }
         step += 1;
         const modelInputPreview = tracePreview(history);
-        const modelStartedAt = Date.now();
-        await this.appendTraceEvent(lease, {
-          kind: "agent.model.started",
-          payload: {
-            attemptNumber: task.snapshot.attemptNumber,
-            inputPreview: modelInputPreview,
-            model,
-            provider,
-            segmentId,
-            step,
-          },
-        });
-        let response: ModelResponse;
-        const modelAbort = abortScope(
-          signal,
-          deadlinePolicy.mode === "ADAPTIVE"
-            ? deadlinePolicy.maxModelCallSeconds * 1_000
-            : null,
-        );
-        try {
-          response = await this.model.responses.create(
-            {
-              input: history,
-              model,
-              parallel_tool_calls: false,
-              tool_choice: "required",
-              tools: toolDefinitions(hitlPolicy.enabled),
-            },
-            { signal: modelAbort.signal },
-          );
-        } catch (error) {
-          const responseError =
-            modelAbort.signal.aborted && !signal.aborted
-              ? (modelAbort.signal.reason ?? error)
-              : error;
+        let response: ModelResponse | null = null;
+        let selectedModel = preferredModel;
+        let selectedModelStartedAt = Date.now();
+        let lastModelError: unknown;
+        for (const candidate of modelCandidates) {
+          const modelStartedAt = Date.now();
           await this.appendTraceEvent(lease, {
-            kind: "agent.model.failed",
+            kind: "agent.model.started",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
-              durationMs: Math.max(0, Date.now() - modelStartedAt),
-              errorMessage: traceErrorMessage(responseError),
               inputPreview: modelInputPreview,
-              model,
-              provider,
+              model: candidate.modelId,
+              provider: "OPENAI_COMPATIBLE",
               segmentId,
               step,
             },
           });
-          throw responseError;
-        } finally {
-          modelAbort.dispose();
+          const modelAbort = abortScope(
+            signal,
+            deadlinePolicy.mode === "ADAPTIVE"
+              ? deadlinePolicy.maxModelCallSeconds * 1_000
+              : null,
+          );
+          try {
+            response = await this.modelClient(candidate).responses.create(
+              {
+                input: history,
+                model: candidate.modelId,
+                parallel_tool_calls: false,
+                tool_choice: "required",
+                tools: toolDefinitions(hitlPolicy.enabled),
+              },
+              { signal: modelAbort.signal },
+            );
+            selectedModel = candidate;
+            selectedModelStartedAt = modelStartedAt;
+            lastModelError = undefined;
+            break;
+          } catch (error) {
+            const responseError =
+              modelAbort.signal.aborted && !signal.aborted
+                ? (modelAbort.signal.reason ?? error)
+                : error;
+            lastModelError = responseError;
+            await this.appendTraceEvent(lease, {
+              kind: "agent.model.failed",
+              payload: {
+                attemptNumber: task.snapshot.attemptNumber,
+                durationMs: Math.max(0, Date.now() - modelStartedAt),
+                errorMessage: traceErrorMessage(responseError),
+                inputPreview: modelInputPreview,
+                model: candidate.modelId,
+                provider: "OPENAI_COMPATIBLE",
+                segmentId,
+                step,
+              },
+            });
+            if (signal.aborted) throw responseError;
+          } finally {
+            modelAbort.dispose();
+          }
+        }
+        if (!response) {
+          throw new Error(
+            `All configured model providers failed: ${traceErrorMessage(
+              lastModelError ?? "No model response was returned.",
+            )}`,
+          );
         }
         await this.appendTraceEvent(lease, {
           kind: "agent.model.completed",
           payload: {
             attemptNumber: task.snapshot.attemptNumber,
-            durationMs: Math.max(0, Date.now() - modelStartedAt),
+            durationMs: Math.max(0, Date.now() - selectedModelStartedAt),
             inputPreview: modelInputPreview,
-            model,
+            model: selectedModel.modelId,
             outputPreview: tracePreview(response.output),
-            provider,
+            provider: "OPENAI_COMPATIBLE",
             responseId: response.id,
             segmentId,
             step,

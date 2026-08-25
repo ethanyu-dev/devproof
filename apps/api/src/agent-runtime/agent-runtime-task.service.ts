@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -27,7 +28,10 @@ import {
 import { z } from "zod";
 
 import { env } from "../config/env.js";
+import { AgentModelConfigurationService } from "../console/agent-model-configuration.service.js";
 import { PrismaService } from "../database/prisma.service.js";
+
+const MODEL_CONFIGURATION_PROTOCOL_MINOR = 2;
 
 const retryPolicySchema = z.object({
   browser: z
@@ -165,9 +169,19 @@ function leaseExpiry(now: Date) {
 
 @Injectable()
 export class AgentRuntimeTaskService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly agentModels: AgentModelConfigurationService,
+  ) {}
 
   async claim(teamId: string, input: RuntimeTaskClaimInput) {
+    if (input.protocol.minor < MODEL_CONFIGURATION_PROTOCOL_MINOR) {
+      throw new BadRequestException(
+        `Agent Runtime protocol minor ${MODEL_CONFIGURATION_PROTOCOL_MINOR} or newer is required for Console-managed models.`,
+      );
+    }
+    const modelCandidates = await this.agentModels.candidatesForTeam(teamId);
+    if (modelCandidates.length === 0) return { task: null };
     for (let collision = 0; collision < 5; collision += 1) {
       const claimed = await this.prisma.$transaction(
         async (tx) => {
@@ -255,12 +269,16 @@ export class AgentRuntimeTaskService {
       if (claimed === undefined) continue;
       if (claimed === null) return { task: null };
 
+      const snapshot = runtimeTaskSnapshotSchema.parse(claimed.snapshot);
       return {
         task: {
           fencingToken: claimed.fencingToken.toString(),
           leaseExpiresAt: claimed.leaseExpiresAt?.toISOString(),
           leaseToken: claimed.leaseToken,
-          snapshot: runtimeTaskSnapshotSchema.parse(claimed.snapshot),
+          snapshot: runtimeTaskSnapshotSchema.parse({
+            ...snapshot,
+            modelCandidates,
+          }),
           taskId: claimed.id,
         },
       };

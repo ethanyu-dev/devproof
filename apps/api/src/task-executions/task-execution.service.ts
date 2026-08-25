@@ -29,9 +29,11 @@ import {
 } from "@devproof/test-domain";
 
 import { env } from "../config/env.js";
+import { GithubAccessService } from "../console/github-access.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { redactText } from "../observability/observability.service.js";
+import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
 import { IssueContextResolverService } from "../specifications/issue-context-resolver.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
@@ -183,6 +185,7 @@ export class TaskExecutionService {
     private readonly runs: ExecutionRunService,
     private readonly profileResolver: TaskProfileResolverService,
     private readonly reservations: ProfileReservationService,
+    private readonly githubAccess: GithubAccessService,
   ) {}
 
   async create(
@@ -1041,6 +1044,12 @@ export class TaskExecutionService {
           : issueCases.length,
     };
     const completionSpecification = task.specificationSnapshots[0] ?? null;
+    const enableGithub =
+      becameTerminal &&
+      (await this.githubWritebackEnabled(
+        task.teamId,
+        completionSpecification?.primaryPullRequestUrl ?? null,
+      ));
     const projectionApplied = await this.prisma.$transaction(async (tx) => {
       const applied = await tx.taskExecution.updateMany({
         data: {
@@ -1118,10 +1127,7 @@ export class TaskExecutionService {
             taskNotificationContext(task.notificationContext).feishu ||
             env().FEISHU_NOTIFICATION_WEBHOOK_URL,
           ),
-          enableGithub: Boolean(
-            completionSpecification?.primaryPullRequestUrl &&
-            env().GITHUB_TOKEN,
-          ),
+          enableGithub,
           executionDisposition: projection.executionDisposition,
           lifecycle: projection.lifecycle,
           notificationContext: task.notificationContext,
@@ -1153,6 +1159,19 @@ export class TaskExecutionService {
       await this.reservations.releaseTask(task.id);
     }
     return projection;
+  }
+
+  private async githubWritebackEnabled(
+    teamId: string,
+    pullRequestUrl: string | null,
+  ) {
+    if (!pullRequestUrl) return false;
+    const reference = parsePullRequestUrl(pullRequestUrl);
+    return this.githubAccess.hasCandidateForRepository(
+      teamId,
+      reference.owner,
+      reference.repository,
+    );
   }
 
   private idempotentDetail(
@@ -1656,7 +1675,10 @@ export class TaskExecutionService {
     if (input.kind !== "ISSUE_SPEC") {
       throw new ConflictException("Only Issue tasks have an analysis stage.");
     }
-    const resolved = await this.resolver.resolve(input.issueRef);
+    const resolved = await this.resolver.resolve(
+      input.issueRef,
+      attempt.stage.taskExecution.teamId,
+    );
     const context = resolved.context;
     const generated = generateBusinessTestSpec(context);
     const cases = generated.cases.map((item) =>

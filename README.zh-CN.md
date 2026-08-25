@@ -108,11 +108,11 @@ Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户�
        pnpm prisma:deploy
        pnpm dev
 
-5. 在 Console 的“接入配置”分别生成 Agent Token 和仅带 `runtime:lease` scope 的 Agent Runtime Token。在 `.env` 配置 `DEVPROOF_AGENT_RUNTIME_TOKEN`、`OPENAI_API_KEY`；兼容网关可额外设置 `OPENAI_BASE_URL`。然后重启 `pnpm dev`。该命令始终启动 Web 与 API；凭据齐全时再启动唯一的 Agent Runtime。
+5. 在 Console → 接入配置 → Agent 模型配置中维护团队级有序模型列表。每项只包含 Base URL、加密 API Key、Model ID 和 Display Name；列表顺序同时决定故障下沉与恢复优先级。Agent Runtime Token 属于独立的部署身份，执行 `pnpm --filter @devproof/api runtime:provision -- --team default` 后，将仅显示一次的 Token 配置为 Runtime 进程的 `DEVPROOF_AGENT_RUNTIME_TOKEN`。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。重启 `pnpm dev` 后 Web 与 API 始终启动，内部凭据存在时再启动 Agent Runtime。
 
-6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。`GITHUB_TOKEN` 用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
+6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
 
-迁移期间仍接受旧的 Runtime Token、Worker ID、轮询间隔和工具上限环境变量；新配置应统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。
+安全迁移会撤销原先通过 Console 签发的 Runtime Token，需要使用上述运维命令重新签发。旧的 Runtime Token 环境变量名、Worker ID、轮询间隔和工具上限环境变量名在迁移期间仍可读取；模型 API Key 与 Base URL 只在 Console 管理，新的 Runtime 参数统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。
 
 Web 默认监听 http://localhost:3344，API 默认监听 http://localhost:4433。
 Docker 中的 PostgreSQL、Redis、MinIO API 分别映射到宿主机 55432、56379、59000 端口，避免与本机服务冲突。
@@ -207,7 +207,7 @@ Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制
 
 开启 `FEISHU_BOT_ENABLED` 后，配置机器人的稳定 `FEISHU_BOT_OPEN_ID`，并在飞书开发者后台把加密事件订阅回调配置为 `/integrations/feishu/events`，订阅 `im.message.receive_v1` 并授予读取群消息、读取用户身份和回复消息所需权限。服务端验证原始请求签名、时间窗、verification token、app id、tenant key 和被 @ 的 bot open_id，按 event id 幂等入库后异步创建 Task。群内使用 `@DevProof ENG-123 https://preview.example.com`；默认采用发起人 Profile，可加 `--owner` 使用 Issue owner，或 `--ephemeral` 强制临时会话。用户须先通过飞书 SSO 登录一次以建立稳定身份映射。
 
-Task 进入终态后，控制面通过 durable outbox 回复原飞书消息（或群机器人 Webhook），并把同一份汇总结果幂等回写到关联的 GitHub PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。通知链接打开最终结果，可查看逐步截图和 R2 中的操作视频。GitHub 回写需要 `GITHUB_TOKEN` 对目标仓库具备 Issue/PR comment 写权限。
+Task 进入终态后，控制面通过 durable outbox 回复原飞书消息（或群机器人 Webhook），并把同一份汇总结果幂等回写到关联的 GitHub PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。通知链接打开最终结果，可查看逐步截图和 R2 中的操作视频。GitHub 回写要求路由命中的 Console PAT 对目标仓库具备 Issue/PR comment 写权限。
 
 飞书 HITL 通知使用群自定义机器人：
 

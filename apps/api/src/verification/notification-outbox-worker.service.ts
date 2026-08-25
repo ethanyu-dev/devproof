@@ -10,6 +10,7 @@ import { FeishuIntegrationService } from "../integrations/feishu-integration.ser
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { redactText } from "../observability/observability.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
+import { GithubAccessService } from "../console/github-access.service.js";
 
 export function signFeishuWebhook(timestamp: string, secret: string): string {
   return createHmac("sha256", `${timestamp}\n${secret}`)
@@ -98,6 +99,16 @@ export function githubTaskResultComment(
   ].join("\n");
 }
 
+class GithubWritebackResponseError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GithubWritebackResponseError";
+  }
+}
+
 @Injectable()
 export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(NotificationOutboxWorker.name);
@@ -107,6 +118,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly feishu: FeishuIntegrationService,
+    private readonly githubAccess: GithubAccessService,
     @Optional() private readonly monitor?: WorkerMonitorService,
   ) {}
 
@@ -211,7 +223,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       if (row.channel === "AGENT_WEBHOOK") {
         await this.sendAgentResumeWebhook(row.id, row.payload);
       } else if (row.channel === "GITHUB") {
-        await this.sendGithub(row.payload);
+        await this.sendGithub(row.teamId, row.payload);
       } else {
         await this.sendFeishu(row.id, row.payload);
       }
@@ -420,62 +432,86 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async sendGithub(payloadValue: Prisma.JsonValue) {
+  private async sendGithub(teamId: string, payloadValue: Prisma.JsonValue) {
     const configuration = env();
-    if (!configuration.GITHUB_TOKEN) {
-      throw new Error("GITHUB_TOKEN is not configured for PR writeback.");
-    }
     const payload = payloadValue as Record<string, unknown>;
     const pullRequestUrl = String(payload.primaryPullRequestUrl ?? "");
     const reference = parsePullRequestUrl(pullRequestUrl);
+    const candidates = await this.githubAccess.candidatesForRepository(
+      teamId,
+      reference.owner,
+      reference.repository,
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        `No GitHub credential matches ${reference.owner}/${reference.repository}.`,
+      );
+    }
     const apiOrigin = configuration.GITHUB_API_URL.replace(/\/$/u, "");
     const prefix = `${apiOrigin}/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.repository)}`;
     const consoleUrl = feishuConsoleUrl(configuration.WEB_ORIGIN, payload);
     const body = githubTaskResultComment(payload, consoleUrl);
     const marker = `<!-- devproof-task:${String(payload.taskExecutionId ?? "")} -->`;
-    const headers = {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${configuration.GITHUB_TOKEN}`,
-      "content-type": "application/json; charset=utf-8",
-      "x-github-api-version": configuration.GITHUB_API_VERSION,
-    };
-    const commentsResponse = await fetch(
-      `${prefix}/issues/${reference.number}/comments?per_page=100`,
-      {
-        headers,
-        signal: AbortSignal.timeout(15_000),
-      },
-    );
-    if (!commentsResponse.ok) {
-      throw new Error(
-        `GitHub comments lookup returned HTTP ${commentsResponse.status}.`,
-      );
-    }
-    const comments = (await commentsResponse.json()) as unknown;
-    const existing = Array.isArray(comments)
-      ? comments.find((comment) => {
-          const row = record(comment);
-          return (
-            typeof row.body === "string" &&
-            row.body.includes(marker) &&
-            typeof row.id === "number"
+    for (const [index, candidate] of candidates.entries()) {
+      try {
+        const headers = {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${candidate.token}`,
+          "content-type": "application/json; charset=utf-8",
+          "x-github-api-version": configuration.GITHUB_API_VERSION,
+        };
+        const commentsResponse = await fetch(
+          `${prefix}/issues/${reference.number}/comments?per_page=100`,
+          {
+            headers,
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+        if (!commentsResponse.ok) {
+          throw new GithubWritebackResponseError(
+            commentsResponse.status,
+            `GitHub comments lookup returned HTTP ${commentsResponse.status}.`,
           );
-        })
-      : undefined;
-    const existingId = record(existing).id;
-    const response = await fetch(
-      typeof existingId === "number"
-        ? `${prefix}/issues/comments/${existingId}`
-        : `${prefix}/issues/${reference.number}/comments`,
-      {
-        body: JSON.stringify({ body }),
-        headers,
-        method: typeof existingId === "number" ? "PATCH" : "POST",
-        signal: AbortSignal.timeout(15_000),
-      },
-    );
-    if (!response.ok) {
-      throw new Error(`GitHub PR writeback returned HTTP ${response.status}.`);
+        }
+        const comments = (await commentsResponse.json()) as unknown;
+        const existing = Array.isArray(comments)
+          ? comments.find((comment) => {
+              const row = record(comment);
+              return (
+                typeof row.body === "string" &&
+                row.body.includes(marker) &&
+                typeof row.id === "number"
+              );
+            })
+          : undefined;
+        const existingId = record(existing).id;
+        const response = await fetch(
+          typeof existingId === "number"
+            ? `${prefix}/issues/comments/${existingId}`
+            : `${prefix}/issues/${reference.number}/comments`,
+          {
+            body: JSON.stringify({ body }),
+            headers,
+            method: typeof existingId === "number" ? "PATCH" : "POST",
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+        if (!response.ok) {
+          throw new GithubWritebackResponseError(
+            response.status,
+            `GitHub PR writeback returned HTTP ${response.status}.`,
+          );
+        }
+        return;
+      } catch (error) {
+        if (
+          index === candidates.length - 1 ||
+          !(error instanceof GithubWritebackResponseError) ||
+          ![401, 403, 404, 429].includes(error.status)
+        ) {
+          throw error;
+        }
+      }
     }
   }
 

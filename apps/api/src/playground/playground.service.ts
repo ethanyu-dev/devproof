@@ -24,7 +24,7 @@ export class PlaygroundService {
     const onlineRuntimes = browserRuntimes.filter(
       (browserRuntime) => browserRuntime.status === "ONLINE",
     );
-    const specification = this.issueResolver.readiness();
+    const specification = await this.issueResolver.readiness(current.team.id);
     return {
       apiUrl: env().API_PUBLIC_URL,
       canExecuteNow: onlineRuntimes.length > 0,

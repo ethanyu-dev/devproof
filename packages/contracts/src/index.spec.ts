@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  agentModelConfigurationCreateInputSchema,
+  agentModelConfigurationOrderInputSchema,
+  agentModelConfigurationUpdateInputSchema,
   agentRuntimeProviderSchema,
   executionRunCreateInputSchema,
+  githubAccessCredentialCreateInputSchema,
+  githubAccessCredentialUpdateInputSchema,
   playgroundRunInputSchema,
   runInterventionResolveInputSchema,
   runtimeCommandInputSchema,
@@ -30,6 +35,68 @@ import {
 describe("DevProof contracts", () => {
   it("uses a generic extension point for custom agent providers", () => {
     expect(agentRuntimeProviderSchema.parse("CUSTOM")).toBe("CUSTOM");
+  });
+
+  it("normalizes GitHub credential routing scopes and allows secret-free updates", () => {
+    const created = githubAccessCredentialCreateInputSchema.parse({
+      name: "Organization A",
+      organizations: ["Organization-A", "organization-a"],
+      personalAccessToken: "github_pat_abcdefghijklmnop",
+      repositories: ["Organization-A/Core-API"],
+    });
+    expect(created).toMatchObject({
+      enabled: true,
+      organizations: ["organization-a"],
+      priority: 100,
+      repositories: ["organization-a/core-api"],
+    });
+    expect(
+      githubAccessCredentialUpdateInputSchema.parse({
+        enabled: false,
+        name: "Organization A",
+        organizations: ["organization-a"],
+        priority: 50,
+        repositories: [],
+      }).personalAccessToken,
+    ).toBeUndefined();
+    expect(
+      githubAccessCredentialCreateInputSchema.safeParse({
+        name: "Invalid",
+        organizations: ["organization with spaces"],
+        personalAccessToken: "github_pat_abcdefghijklmnop",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates encrypted Agent model list inputs", () => {
+    expect(
+      agentModelConfigurationCreateInputSchema.parse({
+        apiKey: "sk-model-secret",
+        baseUrl: "https://gateway.example.com/v1/",
+        displayName: "Primary model",
+        modelId: "provider/model-1",
+      }),
+    ).toEqual({
+      apiKey: "sk-model-secret",
+      baseUrl: "https://gateway.example.com/v1",
+      displayName: "Primary model",
+      modelId: "provider/model-1",
+    });
+    expect(
+      agentModelConfigurationUpdateInputSchema.parse({
+        baseUrl: "https://gateway.example.com/v1",
+        displayName: "Primary model",
+        modelId: "provider/model-1",
+      }).apiKey,
+    ).toBeUndefined();
+    expect(
+      agentModelConfigurationOrderInputSchema.safeParse({
+        ids: [
+          "d63bd843-b89d-48ea-90c9-caad5b51d526",
+          "d63bd843-b89d-48ea-90c9-caad5b51d526",
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts an HTTP target for a Playground run", () => {
@@ -496,6 +563,12 @@ describe("DevProof contracts", () => {
         scopes: ["run:read", "run:read"],
       }).scopes,
     ).toEqual(["run:read"]);
+    expect(
+      toolCredentialCreateInputSchema.safeParse({
+        name: "Untrusted Runtime",
+        scopes: ["runtime:lease"],
+      }).success,
+    ).toBe(false);
   });
 
   it("requires deterministic and credential-free user Profile verification", () => {

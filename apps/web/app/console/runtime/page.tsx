@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function RuntimePage() {
-  redirect("/console/access#runtime");
+  redirect("/console/access");
 }

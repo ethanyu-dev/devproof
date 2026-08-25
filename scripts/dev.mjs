@@ -116,11 +116,11 @@ try {
   const agentRuntimeToken =
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN ??
     process.env.DEVPROOF_RUNTIME_TOKEN;
-  if (agentRuntimeToken && process.env.OPENAI_API_KEY) {
+  if (agentRuntimeToken) {
     start("@devproof/agent-runtime");
   } else {
     process.stdout.write(
-      "Agent Runtime is disabled until DEVPROOF_AGENT_RUNTIME_TOKEN and OPENAI_API_KEY are configured.\n",
+      "Agent Runtime is disabled until DEVPROOF_AGENT_RUNTIME_TOKEN is configured.\n",
     );
   }
   start("@devproof/web");

@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
 
 import {
+  AgentRuntimeTaskService,
   completedOutcomeEvidenceError,
   decideAdaptiveDeadlineExtension,
 } from "./agent-runtime-task.service.js";
@@ -107,6 +108,96 @@ describe("AgentRuntimeTaskService completed evidence validation", () => {
     expect(completedOutcomeEvidenceError(snapshot, fabricated, [])).toContain(
       "untrusted evidence",
     );
+  });
+});
+
+describe("AgentRuntimeTaskService Runtime model configuration", () => {
+  it("rejects workers that cannot consume Console-managed model credentials", async () => {
+    const agentModels = { candidatesForTeam: vi.fn() };
+    const service = new AgentRuntimeTaskService(
+      {} as never,
+      agentModels as never,
+    );
+
+    await expect(
+      service.claim(snapshot.teamId, {
+        capabilities: ["BROWSER_VERIFICATION"],
+        protocol: {
+          major: 2,
+          minor: 1,
+          name: "devproof-agent-runtime",
+        },
+        workerId: "legacy-worker",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(agentModels.candidatesForTeam).not.toHaveBeenCalled();
+  });
+
+  it("injects the team's ordered encrypted model configuration", async () => {
+    const leaseToken = "70844616-602c-475b-95f6-393015b82ed1";
+    const task = {
+      attemptId: snapshot.attemptId,
+      fencingToken: 4n,
+      id: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      leaseToken,
+      run: { startedAt: null },
+      runId: snapshot.runId,
+      snapshot,
+    };
+    const tx = {
+      agentRuntimeTask: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: task.id,
+          startedAt: null,
+        }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(task),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      executionRun: { update: vi.fn().mockResolvedValue({}) },
+      runAttempt: { update: vi.fn().mockResolvedValue({}) },
+      runEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (callback: (transaction: typeof tx) => Promise<unknown>) =>
+          callback(tx),
+      ),
+    };
+    const modelCandidates = [
+      {
+        apiKey: "sk-primary",
+        baseUrl: "https://primary.example.com/v1",
+        displayName: "Primary",
+        modelId: "gpt-primary",
+      },
+      {
+        apiKey: "sk-fallback",
+        baseUrl: "https://fallback.example.com/v1",
+        displayName: "Fallback",
+        modelId: "gpt-fallback",
+      },
+    ];
+    const agentModels = {
+      candidatesForTeam: vi.fn().mockResolvedValue(modelCandidates),
+    };
+    const service = new AgentRuntimeTaskService(
+      prisma as never,
+      agentModels as never,
+    );
+
+    const result = await service.claim(snapshot.teamId, {
+      capabilities: ["BROWSER_VERIFICATION"],
+      protocol: {
+        major: 2,
+        minor: 2,
+        name: "devproof-agent-runtime",
+      },
+      workerId: "worker-1",
+    });
+
+    expect(agentModels.candidatesForTeam).toHaveBeenCalledWith(snapshot.teamId);
+    expect(result.task?.snapshot.modelCandidates).toEqual(modelCandidates);
   });
 });
 

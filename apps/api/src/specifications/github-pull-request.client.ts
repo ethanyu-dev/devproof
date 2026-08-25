@@ -6,6 +6,7 @@ import {
 import { Injectable } from "@nestjs/common";
 
 import { env } from "../config/env.js";
+import { GithubAccessService } from "../console/github-access.service.js";
 import { ContextSourceError } from "./context-source.error.js";
 
 export interface PullRequestReference {
@@ -22,30 +23,52 @@ export interface GithubPullRequestResolution {
 
 @Injectable()
 export class GithubPullRequestClient {
-  configured() {
-    return Boolean(env().GITHUB_TOKEN);
+  constructor(private readonly access: GithubAccessService) {}
+
+  configured(teamId: string) {
+    return this.access.configured(teamId);
   }
 
   async getPullRequest(
+    teamId: string,
     pullRequestUrl: string,
     isPrimary: boolean,
   ): Promise<GithubPullRequestResolution> {
-    const token = env().GITHUB_TOKEN;
-    if (!token) {
+    const reference = parsePullRequestUrl(pullRequestUrl);
+    const candidates = await this.access.candidatesForRepository(
+      teamId,
+      reference.owner,
+      reference.repository,
+    );
+    if (candidates.length === 0) {
       throw new ContextSourceError(
         "GITHUB",
-        "GITHUB_TOKEN_NOT_CONFIGURED",
-        "DevProof 尚未配置用于读取 Pull Request 的 GITHUB_TOKEN。",
+        "GITHUB_PAT_NOT_CONFIGURED",
+        `没有匹配 ${reference.owner}/${reference.repository} 的 GitHub 凭证。`,
         pullRequestUrl,
       );
     }
-    const reference = parsePullRequestUrl(pullRequestUrl);
     const prefix = `/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.repository)}`;
-    const raw = await this.request(
-      `${prefix}/pulls/${reference.number}`,
-      token,
-      pullRequestUrl,
-    );
+    let raw: unknown;
+    let token: string | null = null;
+    let lastError: unknown;
+    for (const [index, candidate] of candidates.entries()) {
+      try {
+        raw = await this.request(
+          `${prefix}/pulls/${reference.number}`,
+          candidate.token,
+          pullRequestUrl,
+        );
+        token = candidate.token;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (index === candidates.length - 1 || !canTryNextCredential(error)) {
+          throw error;
+        }
+      }
+    }
+    if (!token) throw lastError;
     if (!isRecord(raw)) {
       throw new ContextSourceError(
         "GITHUB",
@@ -232,6 +255,14 @@ export class GithubPullRequestClient {
       ? null
       : ((await response.json()) as unknown);
   }
+}
+
+function canTryNextCredential(error: unknown) {
+  return (
+    error instanceof ContextSourceError &&
+    error.status !== null &&
+    [401, 403, 404, 429].includes(error.status)
+  );
 }
 
 export function parsePullRequestUrl(value: string): PullRequestReference {

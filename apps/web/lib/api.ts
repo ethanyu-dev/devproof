@@ -49,13 +49,29 @@ export async function consoleApi<T>(
   }
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
+      error?: string;
+      issues?: Array<{ message?: string; path?: Array<number | string> }>;
       message?: string | string[];
     } | null;
     const message = Array.isArray(body?.message)
       ? body.message.join(", ")
       : body?.message;
+    const validationMessage = body?.issues
+      ?.map((issue) => {
+        const field = issue.path?.join(".");
+        if (!issue.message) return null;
+        return field ? `${field}: ${issue.message}` : issue.message;
+      })
+      .filter((value): value is string => Boolean(value))
+      .join("；");
     throw new Error(
-      message ? displayMessage(message) : "请求失败，请稍后重试。",
+      message
+        ? displayMessage(message)
+        : validationMessage
+          ? displayMessage(validationMessage)
+          : body?.error
+            ? displayMessage(body.error)
+            : "请求失败，请稍后重试。",
     );
   }
   if (response.status === 204) {

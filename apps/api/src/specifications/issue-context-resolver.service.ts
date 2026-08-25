@@ -28,11 +28,11 @@ export class IssueContextResolverService {
     private readonly knowledge: KnowledgeContextClient,
   ) {}
 
-  readiness() {
+  async readiness(teamId: string) {
     const linear = this.linear.configured();
     return {
       github: {
-        configured: this.github.configured(),
+        configured: await this.github.configured(teamId),
         mode: "TOKEN" as const,
       },
       knowledge: {
@@ -50,13 +50,20 @@ export class IssueContextResolverService {
     };
   }
 
-  async resolve(issueRef: string): Promise<ResolvedIssueContext> {
+  async resolve(
+    issueRef: string,
+    teamId: string,
+  ): Promise<ResolvedIssueContext> {
     const linear = await this.linear.getIssue(issueRef);
     const diagnostics: SpecificationContextDiagnostic[] = [];
     const pullRequests = await Promise.all(
       linear.pullRequestUrls.map(async (url, index) => {
         try {
-          const result = await this.github.getPullRequest(url, index === 0);
+          const result = await this.github.getPullRequest(
+            teamId,
+            url,
+            index === 0,
+          );
           diagnostics.push(...result.diagnostics);
           return result.pullRequest;
         } catch (error) {

@@ -42,6 +42,84 @@ export const runtimeSettingsInputSchema = z.object({
   hitlEnabled: z.boolean(),
 });
 
+const githubOrganizationSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(39)
+  .regex(/^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/u)
+  .transform((value) => value.toLowerCase());
+
+const githubRepositorySchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(140)
+  .regex(/^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\/[a-zA-Z0-9_.-]+$/u)
+  .transform((value) => value.toLowerCase());
+
+const githubAccessCredentialFields = {
+  enabled: z.boolean().default(true),
+  name: z.string().trim().min(1).max(100),
+  organizations: z
+    .array(githubOrganizationSchema)
+    .max(100)
+    .default([])
+    .transform((values) => [...new Set(values)]),
+  priority: z.coerce.number().int().min(0).max(1000).default(100),
+  repositories: z
+    .array(githubRepositorySchema)
+    .max(200)
+    .default([])
+    .transform((values) => [...new Set(values)]),
+};
+
+export const githubAccessCredentialCreateInputSchema = z.object({
+  ...githubAccessCredentialFields,
+  personalAccessToken: z.string().trim().min(20).max(512),
+});
+
+export const githubAccessCredentialUpdateInputSchema = z.object({
+  ...githubAccessCredentialFields,
+  personalAccessToken: z.string().trim().min(20).max(512).optional(),
+});
+
+const agentModelConfigurationFields = {
+  baseUrl: z
+    .string()
+    .trim()
+    .url()
+    .max(2_000)
+    .refine((value) => /^https?:\/\//u.test(value), {
+      message: "Base URL must use http or https.",
+    })
+    .refine((value) => !/^https?:\/\/[^/?#]*@/iu.test(value), {
+      message: "Base URL cannot contain URL credentials.",
+    })
+    .transform((value) => value.replace(/\/+$/u, "")),
+  displayName: z.string().trim().min(1).max(100),
+  modelId: z.string().trim().min(1).max(160),
+};
+
+export const agentModelConfigurationCreateInputSchema = z.object({
+  ...agentModelConfigurationFields,
+  apiKey: z.string().trim().min(1).max(4_096),
+});
+
+export const agentModelConfigurationUpdateInputSchema = z.object({
+  ...agentModelConfigurationFields,
+  apiKey: z.string().trim().min(1).max(4_096).optional(),
+});
+
+export const agentModelConfigurationOrderInputSchema = z
+  .object({
+    ids: z.array(z.string().uuid()).min(1).max(10),
+  })
+  .refine((value) => new Set(value.ids).size === value.ids.length, {
+    message: "Model order cannot contain duplicate IDs.",
+    path: ["ids"],
+  });
+
 export const runtimeRoutingFallbackPolicySchema = z.enum(["WAIT", "FAIL_FAST"]);
 
 export const runtimeHostnamePatternSchema = z
@@ -400,12 +478,22 @@ export const toolCredentialScopeSchema = z.enum([
   "runtime:lease",
 ]);
 
+const consoleToolCredentialScopeSchema = z.enum([
+  "verification:read",
+  "verification:write",
+  "verification:cancel",
+  "profile:delete",
+  "run:read",
+  "run:write",
+  "run:cancel",
+]);
+
 export const toolCredentialCreateInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
   scopes: z
-    .array(toolCredentialScopeSchema)
+    .array(consoleToolCredentialScopeSchema)
     .min(1)
-    .max(8)
+    .max(7)
     .default(["run:read", "run:write", "run:cancel"])
     .transform((scopes) => Array.from(new Set(scopes))),
   expiresAt: z.coerce.date().nullable().default(null),
@@ -1496,6 +1584,21 @@ export const taskProfileSelectionInputSchema = z.object({
 });
 
 export type RuntimeSettingsInput = z.infer<typeof runtimeSettingsInputSchema>;
+export type GithubAccessCredentialCreateInput = z.infer<
+  typeof githubAccessCredentialCreateInputSchema
+>;
+export type GithubAccessCredentialUpdateInput = z.infer<
+  typeof githubAccessCredentialUpdateInputSchema
+>;
+export type AgentModelConfigurationCreateInput = z.infer<
+  typeof agentModelConfigurationCreateInputSchema
+>;
+export type AgentModelConfigurationUpdateInput = z.infer<
+  typeof agentModelConfigurationUpdateInputSchema
+>;
+export type AgentModelConfigurationOrderInput = z.infer<
+  typeof agentModelConfigurationOrderInputSchema
+>;
 export type BrowserProfilePurgeInput = z.infer<
   typeof browserProfilePurgeInputSchema
 >;

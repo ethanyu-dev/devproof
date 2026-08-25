@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -19,13 +20,14 @@ import { PrismaService } from "../database/prisma.service.js";
 import type { ToolAuthContext } from "./tool-auth.types.js";
 
 const TOKEN_PREFIX = "dvp_sk_";
+export const AGENT_RUNTIME_TOKEN_PREFIX = "dvp_rt_";
 
 export function hashToolToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
 export function extractBearerToken(header: string | undefined): string {
-  const match = header?.match(/^Bearer\s+(dvp_sk_[A-Za-z0-9_-]+)$/u);
+  const match = header?.match(/^Bearer\s+(dvp_(?:rt|sk)_[A-Za-z0-9_-]+)$/u);
   if (!match?.[1]) {
     throw new UnauthorizedException("A valid DevProof tool token is required.");
   }
@@ -57,6 +59,11 @@ export class ToolAuthService {
   }
 
   async create(current: AuthContext, input: ToolCredentialCreateInput) {
+    if ((input.scopes as readonly string[]).includes("runtime:lease")) {
+      throw new ForbiddenException(
+        "Agent Runtime credentials must be provisioned by an operator.",
+      );
+    }
     if (input.expiresAt && input.expiresAt.getTime() <= Date.now()) {
       throw new BadRequestException(
         "Tool credential expiry must be in the future.",
@@ -128,6 +135,9 @@ export class ToolAuthService {
     authorization: string | undefined,
   ): Promise<ToolAuthContext> {
     const token = extractBearerToken(authorization);
+    if (token.startsWith(AGENT_RUNTIME_TOKEN_PREFIX)) {
+      return this.authenticateAgentRuntime(token);
+    }
     const credential = await this.prisma.toolCredential.findUnique({
       include: { team: true },
       where: { tokenHash: hashToolToken(token) },
@@ -147,8 +157,45 @@ export class ToolAuthService {
     return {
       credential: {
         id: credential.id,
+        kind: "TOOL",
         name: credential.name,
         scopes: credential.scopes as ToolCredentialScope[],
+      },
+      team: {
+        id: credential.team.id,
+        name: credential.team.name,
+        slug: credential.team.slug,
+      },
+    };
+  }
+
+  private async authenticateAgentRuntime(
+    token: string,
+  ): Promise<ToolAuthContext> {
+    const credential = await this.prisma.agentRuntimeCredential.findUnique({
+      include: { team: true },
+      where: { tokenHash: hashToolToken(token) },
+    });
+    if (
+      !credential ||
+      credential.revokedAt ||
+      (credential.expiresAt && credential.expiresAt.getTime() <= Date.now())
+    ) {
+      throw new UnauthorizedException(
+        "Agent Runtime credential is invalid or expired.",
+      );
+    }
+
+    await this.prisma.agentRuntimeCredential.update({
+      data: { lastUsedAt: new Date() },
+      where: { id: credential.id },
+    });
+    return {
+      credential: {
+        id: credential.id,
+        kind: "AGENT_RUNTIME",
+        name: credential.name,
+        scopes: ["runtime:lease"],
       },
       team: {
         id: credential.team.id,

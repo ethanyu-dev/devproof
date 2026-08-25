@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 1,
+  minor: 2,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -101,6 +101,13 @@ export const runtimeCriterionSchema = z.object({
     .transform((values) => Array.from(new Set(values))),
 });
 
+export const runtimeModelCandidateSchema = z.object({
+  apiKey: z.string().min(1).max(4_096),
+  baseUrl: z.string().url().max(2_000),
+  displayName: z.string().trim().min(1).max(100),
+  modelId: z.string().trim().min(1).max(160),
+});
+
 export const runtimeTaskSnapshotSchema = z.object({
   attemptId: z.string().uuid(),
   attemptNumber: z.number().int().positive(),
@@ -120,6 +127,11 @@ export const runtimeTaskSnapshotSchema = z.object({
       provider: agentProviderSchema,
       reasoningEffort: z.string().trim().min(1).max(80).optional(),
     })
+    .optional(),
+  modelCandidates: z
+    .array(runtimeModelCandidateSchema)
+    .min(1)
+    .max(10)
     .optional(),
   runId: z.string().uuid(),
   teamId: z.string().uuid(),
@@ -451,6 +463,7 @@ export type RuntimeFailureClass = z.infer<typeof runtimeFailureClassSchema>;
 export type RuntimeEvidenceKind = z.infer<typeof runtimeEvidenceKindSchema>;
 export type RuntimeEvidenceRef = z.infer<typeof runtimeEvidenceRefSchema>;
 export type RuntimeOutcome = z.infer<typeof runtimeOutcomeSchema>;
+export type RuntimeModelCandidate = z.infer<typeof runtimeModelCandidateSchema>;
 export type RuntimeTaskClaimInput = z.infer<typeof runtimeTaskClaimInputSchema>;
 export type RuntimeTaskLease = z.infer<typeof runtimeTaskLeaseSchema>;
 export type RuntimeTaskOutcomeInput = z.infer<
