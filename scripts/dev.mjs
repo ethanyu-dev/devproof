@@ -3,13 +3,20 @@ import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 
+import {
+  isProcessTreeRunning,
+  signalProcessTree,
+  supportsDetachedProcessTrees,
+  waitForProcessTrees,
+} from "./dev-process-tree.mjs";
+
 const localEnvPath = fileURLToPath(new URL("../.env", import.meta.url));
 if (existsSync(localEnvPath)) loadEnvFile(localEnvPath);
 
 reportDatabaseTarget();
 
 const children = new Set();
-const detached = process.platform !== "win32";
+const detached = supportsDetachedProcessTrees;
 let shuttingDown = false;
 
 function reportDatabaseTarget() {
@@ -41,7 +48,6 @@ function start(packageName) {
   });
   children.add(child);
   child.once("exit", (code, signal) => {
-    children.delete(child);
     if (shuttingDown) return;
     process.stderr.write(
       `${packageName} dev exited unexpectedly (${signal ?? code ?? "unknown"}).\n`,
@@ -74,32 +80,15 @@ async function waitForApi(api) {
   throw new Error("Timed out waiting for DevProof API on port 4433.");
 }
 
-function kill(child, signal) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
-    return;
-  try {
-    if (detached) process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch {
-    // The process may have exited between the state check and signal.
-  }
-}
-
 async function shutdown(exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
-  const running = [...children];
-  running.forEach((child) => kill(child, "SIGTERM"));
-  await Promise.race([
-    Promise.all(
-      running.map(
-        (child) =>
-          new Promise((resolve) => child.once("exit", () => resolve())),
-      ),
-    ),
-    new Promise((resolve) => setTimeout(resolve, 3_000)),
-  ]);
-  running.forEach((child) => kill(child, "SIGKILL"));
+  const processes = [...children];
+  processes.forEach((child) => signalProcessTree(child, "SIGTERM", detached));
+  await waitForProcessTrees(processes, 3_000, detached);
+  processes
+    .filter((child) => isProcessTreeRunning(child, detached))
+    .forEach((child) => signalProcessTree(child, "SIGKILL", detached));
   process.exit(exitCode);
 }
 

@@ -26,7 +26,7 @@
     "prisma:deploy": "pnpm --filter @devproof/api prisma:deploy",
     "prisma:migrate": "pnpm --filter @devproof/api prisma:migrate",
     "stats": "node scripts/code-stats.mjs",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --if-present test && node --test scripts/dev-process-tree.spec.mjs",
     "typecheck": "pnpm prisma:generate && pnpm build:packages && pnpm -r --if-present typecheck"
   },
   "devDependencies": {
