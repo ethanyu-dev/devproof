@@ -409,6 +409,8 @@ model User {
   ownedBrowserProfiles            UserBrowserProfile[]       @relation("BrowserProfileOwner")
   consentedBrowserProfileGrants   BrowserProfileGrant[]      @relation("BrowserProfileGrantConsenter")
   requestedTaskExecutions         TaskExecution[]            @relation("TaskExecutionRequester")
+  githubAccessCredentials         GithubAccessCredential[]
+  agentModelConfigurations        AgentModelConfiguration[]
   profileBindingOwnerships        TaskProfileBinding[]       @relation("TaskProfileBindingOwner")
   browserProfileUsages            BrowserProfileUsage[]      @relation("BrowserProfileUsageRequester")
 
@@ -453,6 +455,9 @@ model Team {
   updatedAt                  DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
   memberships                TeamMembership[]
   runtimeSettings            RuntimeSettings?
+  githubAccessCredentials    GithubAccessCredential[]
+  agentRuntimeCredentials    AgentRuntimeCredential[]
+  agentModelConfigurations   AgentModelConfiguration[]
   browserRuntimes            BrowserRuntime[]
   runtimeProfileLeases       BrowserRuntimeProfileLease[]
   runtimeRoutingRules        RuntimeRoutingRule[]
@@ -532,6 +537,66 @@ model ToolCredential {
   @@index([teamId, createdAt(sort: Desc)])
   @@index([expiresAt])
   @@map("tool_credentials")
+}
+
+model GithubAccessCredential {
+  id                 String   @id @default(uuid()) @db.Uuid
+  teamId             String   @map("team_id") @db.Uuid
+  name               String
+  tokenEncrypted     String   @map("token_encrypted")
+  tokenHint          String   @map("token_hint")
+  organizations      String[] @default([])
+  repositories       String[] @default([])
+  priority           Int      @default(100)
+  enabled            Boolean  @default(true)
+  configuredByUserId String   @map("configured_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  team               Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  configuredBy       User     @relation(fields: [configuredByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, name])
+  @@index([teamId, enabled, priority(sort: Desc)])
+  @@map("github_access_credentials")
+}
+
+model AgentRuntimeCredential {
+  id         String    @id @default(uuid()) @db.Uuid
+  teamId     String    @map("team_id") @db.Uuid
+  name       String
+  tokenHash  String    @unique @map("token_hash")
+  tokenHint  String    @map("token_hint")
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  team       Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, name])
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("agent_runtime_credentials")
+}
+
+model AgentModelConfiguration {
+  id                 String   @id @default(uuid()) @db.Uuid
+  teamId             String   @map("team_id") @db.Uuid
+  baseUrl            String   @map("base_url")
+  apiKeyEncrypted    String   @map("api_key_encrypted")
+  apiKeyHint         String   @map("api_key_hint")
+  modelId            String   @map("model_id")
+  displayName        String   @map("display_name")
+  position           Int
+  configuredByUserId String   @map("configured_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  team               Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  configuredBy       User     @relation(fields: [configuredByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, displayName])
+  @@index([teamId, position])
+  @@map("agent_model_configurations")
 }
 
 model RuntimeSettings {

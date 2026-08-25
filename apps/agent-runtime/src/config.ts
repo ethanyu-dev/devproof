@@ -5,31 +5,46 @@ for (const envPath of ["../../.env", ".env"]) {
   loadDotenv({ path: envPath, override: false, quiet: true });
 }
 
-const configSchema = z.object({
-  DEVPROOF_API_URL: z.string().url().default("http://localhost:4433"),
-  DEVPROOF_AGENT_RUNTIME_TOKEN: z.string().min(16),
-  DEVPROOF_AGENT_POLL_INTERVAL_MS: z.coerce
-    .number()
-    .int()
-    .min(100)
-    .max(10_000)
-    .default(750),
-  DEVPROOF_AGENT_TOOL_LIMIT: z.coerce
-    .number()
-    .int()
-    .min(5)
-    .max(200)
-    .default(60),
-  DEVPROOF_AGENT_WORKER_ID: z
-    .string()
-    .trim()
-    .min(1)
-    .max(200)
-    .default(`agent-runtime-${process.pid}`),
-  OPENAI_API_KEY: z.string().min(1),
-  OPENAI_BASE_URL: z.string().url().optional(),
-  OPENAI_MODEL: z.string().trim().min(1).default("gpt-5.4"),
-});
+const configSchema = z
+  .object({
+    DEVPROOF_API_URL: z.string().url().default("http://localhost:4433"),
+    DEVPROOF_AGENT_RUNTIME_TOKEN: z.string().min(16),
+    DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: z.string().default(""),
+    DEVPROOF_AGENT_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(10_000)
+      .default(750),
+    DEVPROOF_AGENT_TOOL_LIMIT: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(200)
+      .default(60),
+    DEVPROOF_AGENT_WORKER_ID: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .default(`agent-runtime-${process.pid}`),
+    NODE_ENV: z
+      .enum(["development", "test", "production"])
+      .default("development"),
+  })
+  .superRefine((value, context) => {
+    if (
+      value.NODE_ENV === "production" &&
+      new URL(value.DEVPROOF_API_URL).protocol !== "https:"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "DEVPROOF_API_URL must use HTTPS in production because model credentials cross this connection.",
+        path: ["DEVPROOF_API_URL"],
+      });
+    }
+  });
 
 export type RuntimeConfig = z.infer<typeof configSchema>;
 

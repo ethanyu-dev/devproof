@@ -50,10 +50,6 @@ const envSchema = z
     ),
     GITHUB_API_URL: z.string().url().default("https://api.github.com"),
     GITHUB_API_VERSION: z.string().min(1).default("2022-11-28"),
-    GITHUB_TOKEN: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().min(20).optional(),
-    ),
     KNOWLEDGE_MCP_BEARER_TOKEN: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),

@@ -57,6 +57,8 @@ import { RuntimeHumanControlRelay } from "./runtime/runtime-human-control-relay.
 import { RuntimeLeaseSweeper } from "./runtime/runtime-lease-sweeper.service.js";
 import { RuntimeSessionsService } from "./runtime/runtime-sessions.service.js";
 import { RuntimeRoutingService } from "./console/runtime-routing.service.js";
+import { GithubAccessService } from "./console/github-access.service.js";
+import { AgentModelConfigurationService } from "./console/agent-model-configuration.service.js";
 import { CredentialCipherService } from "./security/credential-cipher.service.js";
 import { TestDataController } from "./test-data/test-data.controller.js";
 import { TestDataService } from "./test-data/test-data.service.js";
@@ -108,6 +110,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     VerificationMcpController,
   ],
   providers: [
+    AgentModelConfigurationService,
     AgentRuntimeTaskService,
     UnifiedBrowserExecutionService,
     AuditService,
@@ -124,6 +127,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     RunBrowserPreviewService,
     RunHitlBrowserService,
     GithubPullRequestClient,
+    GithubAccessService,
     UnifiedRunCleanupWorker,
     FeishuOAuthClient,
     FeishuIntegrationService,

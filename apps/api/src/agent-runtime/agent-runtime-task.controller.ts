@@ -13,7 +13,7 @@ import { parseBody } from "../common/validation.js";
 import { CurrentToolAuth } from "../tool-auth/current-tool-auth.decorator.js";
 import { ToolAuthGuard } from "../tool-auth/tool-auth.guard.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
-import { requireToolScope } from "../tool-auth/tool-scope.js";
+import { requireAgentRuntimeIdentity } from "../tool-auth/tool-scope.js";
 import { AgentRuntimeTaskService } from "./agent-runtime-task.service.js";
 import { UnifiedBrowserExecutionService } from "./unified-browser-execution.service.js";
 
@@ -27,7 +27,7 @@ export class AgentRuntimeTaskController {
 
   @Post("claim")
   claim(@CurrentToolAuth() current: ToolAuthContext, @Body() body: unknown) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.tasks.claim(
       current.team.id,
       parseBody(runtimeTaskClaimInputSchema, body),
@@ -40,7 +40,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.tasks.heartbeat(
       current.team.id,
       id,
@@ -54,7 +54,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.tasks.appendEvent(
       current.team.id,
       id,
@@ -68,7 +68,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.tasks.submitOutcome(
       current.team.id,
       id,
@@ -82,7 +82,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.browser.acquire(
       current.team.id,
       id,
@@ -96,7 +96,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.browser.execute(
       current.team.id,
       id,
@@ -110,7 +110,7 @@ export class AgentRuntimeTaskController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireToolScope(current, "runtime:lease");
+    requireAgentRuntimeIdentity(current);
     return this.browser.release(
       current.team.id,
       id,

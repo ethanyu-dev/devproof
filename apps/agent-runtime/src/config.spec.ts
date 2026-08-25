@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runtimeConfig } from "./config.js";
 
 const managedKeys = [
+  "DEVPROOF_API_URL",
   "DEVPROOF_AGENT_RUNTIME_TOKEN",
+  "DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST",
   "DEVPROOF_AGENT_POLL_INTERVAL_MS",
   "DEVPROOF_AGENT_TOOL_LIMIT",
   "DEVPROOF_AGENT_WORKER_ID",
@@ -11,7 +13,7 @@ const managedKeys = [
   "FLOWPROOF_POLL_INTERVAL_MS",
   "FLOWPROOF_TOOL_LIMIT",
   "FLOWPROOF_WORKER_ID",
-  "OPENAI_API_KEY",
+  "NODE_ENV",
 ] as const;
 
 const originalValues = new Map(
@@ -20,7 +22,6 @@ const originalValues = new Map(
 
 beforeEach(() => {
   for (const key of managedKeys) delete process.env[key];
-  process.env.OPENAI_API_KEY = "test-api-key";
 });
 
 afterEach(() => {
@@ -37,10 +38,12 @@ describe("Agent Runtime configuration", () => {
     process.env.DEVPROOF_AGENT_POLL_INTERVAL_MS = "900";
     process.env.DEVPROOF_AGENT_TOOL_LIMIT = "42";
     process.env.DEVPROOF_AGENT_WORKER_ID = "agent-worker-1";
+    process.env.DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST = "model-gateway.internal";
 
     expect(runtimeConfig()).toMatchObject({
       DEVPROOF_AGENT_POLL_INTERVAL_MS: 900,
       DEVPROOF_AGENT_RUNTIME_TOKEN: "agent-runtime-token",
+      DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: "model-gateway.internal",
       DEVPROOF_AGENT_TOOL_LIMIT: 42,
       DEVPROOF_AGENT_WORKER_ID: "agent-worker-1",
     });
@@ -58,5 +61,16 @@ describe("Agent Runtime configuration", () => {
       DEVPROOF_AGENT_TOOL_LIMIT: 30,
       DEVPROOF_AGENT_WORKER_ID: "legacy-worker",
     });
+  });
+
+  it("requires HTTPS when provider credentials cross the production control plane", () => {
+    process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+    process.env.DEVPROOF_API_URL = "http://api.internal:4433";
+    process.env.NODE_ENV = "production";
+
+    expect(() => runtimeConfig()).toThrow(/must use HTTPS in production/u);
+
+    process.env.DEVPROOF_API_URL = "https://api.example.com";
+    expect(runtimeConfig().DEVPROOF_API_URL).toBe("https://api.example.com");
   });
 });

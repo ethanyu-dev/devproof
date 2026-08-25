@@ -4745,6 +4745,121 @@ a {
   scroll-margin-top: 20px;
 }
 
+.dp-access-navigation {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 16px;
+  border: 1px solid var(--ek-border-2);
+  background: var(--ek-border);
+}
+
+.dp-access-navigation button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: var(--ek-surface);
+  color: var(--ek-muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 10px 12px;
+  text-align: left;
+  text-decoration: none;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.dp-access-navigation button:hover {
+  background: var(--ek-surface-2);
+  color: var(--ek-fg);
+}
+
+.dp-access-navigation button.active {
+  box-shadow: inset 0 -3px 0 var(--ek-fg);
+  color: var(--ek-fg);
+}
+
+.dp-access-navigation svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.dp-access-navigation strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dp-access-module .dp-pairing-panel {
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.dp-access-module .dp-section-head {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.dp-access-module .dp-section-body {
+  padding: 12px;
+}
+
+.dp-access-module .dp-form {
+  gap: 12px;
+}
+
+.dp-access-module .dp-form-grid {
+  gap: 12px;
+}
+
+.dp-access-module .dp-field {
+  gap: 5px;
+}
+
+.dp-access-module .dp-textarea {
+  min-height: 76px;
+}
+
+.dp-access-module .dp-config-actions {
+  margin-top: 0;
+  padding-top: 12px;
+}
+
+.dp-access-module .dp-config-actions > .dp-button,
+.dp-access-module .dp-inline-actions {
+  margin-left: auto;
+}
+
+.dp-access-module .dp-runtime-primary {
+  gap: 12px;
+}
+
+.dp-access-module .dp-runtime-item {
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.dp-access-module .dp-runtime-item dl {
+  grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+}
+
+.dp-access-module .dp-runtime-item dl > div {
+  padding: 6px 8px;
+}
+
+.dp-access-module .dp-runtime-empty {
+  min-height: 112px;
+  padding: 16px;
+}
+
 .dp-access-module + .dp-access-module {
   margin-top: 42px;
   border-top: 1px solid var(--ek-border-2);
@@ -4779,6 +4894,11 @@ a {
 .dp-config-actions > span svg {
   width: 13px;
   height: 13px;
+}
+
+.dp-inline-actions {
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .dp-mcp-endpoint {
@@ -5077,6 +5197,11 @@ a {
   border-bottom: 0;
 }
 
+.dp-runtime-item.selected {
+  box-shadow: inset 3px 0 0 var(--ek-fg);
+  background: var(--ek-surface-2);
+}
+
 .dp-runtime-item > div:first-child {
   display: flex;
   align-items: center;
@@ -5183,6 +5308,137 @@ a {
 .dp-runtime-empty span {
   margin-top: 5px;
   font-size: 12px;
+}
+
+.dp-github-permissions {
+  display: grid;
+  gap: 0;
+}
+
+.dp-github-permissions > div {
+  display: grid;
+  gap: 4px;
+  border-bottom: 1px solid var(--ek-border);
+  padding: 12px 0;
+}
+
+.dp-github-permissions > div:first-child {
+  padding-top: 0;
+}
+
+.dp-github-permissions > div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.dp-github-permissions strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dp-github-permissions small {
+  color: var(--ek-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dp-agent-model-list {
+  max-height: clamp(320px, 52vh, 480px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dp-agent-model-item {
+  border-bottom: 1px solid var(--ek-border);
+  padding: 8px 10px;
+}
+
+.dp-agent-model-item:last-child {
+  border-bottom: 0;
+}
+
+.dp-agent-model-item.selected {
+  box-shadow: inset 3px 0 0 var(--ek-fg);
+  background: var(--ek-surface-2);
+}
+
+.dp-agent-model-summary {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.dp-agent-model-summary > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  background: var(--ek-fg);
+  color: var(--ek-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.dp-agent-model-summary > button {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dp-agent-model-summary strong,
+.dp-agent-model-summary code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-agent-model-summary strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dp-agent-model-summary code,
+.dp-agent-model-meta {
+  color: var(--ek-muted);
+  font-size: 11px;
+}
+
+.dp-agent-model-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.dp-agent-model-actions .dp-button {
+  width: 27px;
+  height: 27px;
+  padding: 0;
+}
+
+.dp-agent-model-actions svg {
+  width: 12px;
+  height: 12px;
+}
+
+.dp-agent-model-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 5px;
+  padding-left: 31px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dp-agent-model-meta code {
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dp-access-endpoint {
@@ -5330,6 +5586,10 @@ a {
 
   .dp-settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dp-access-navigation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .dp-task-filters {
@@ -5620,6 +5880,14 @@ a {
   .dp-mcp-endpoint {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .dp-access-navigation {
+    grid-template-columns: 1fr;
+  }
+
+  .dp-access-navigation button.active {
+    box-shadow: inset 3px 0 0 var(--ek-fg);
   }
 
   .dp-routing-form,

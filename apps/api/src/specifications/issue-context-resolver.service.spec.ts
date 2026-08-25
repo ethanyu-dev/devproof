@@ -26,7 +26,11 @@ describe("IssueContextResolverService", () => {
       }),
     };
     const github = {
-      getPullRequest: async (url: string, isPrimary: boolean) => {
+      getPullRequest: async (
+        _teamId: string,
+        url: string,
+        isPrimary: boolean,
+      ) => {
         if (url.includes("private/web")) {
           throw new ContextSourceError(
             "GITHUB",
@@ -59,7 +63,7 @@ describe("IssueContextResolverService", () => {
       linear as never,
       github as never,
       knowledge as never,
-    ).resolve("PAY-1");
+    ).resolve("PAY-1", "team-1");
 
     expect(result.completeness).toBe("PARTIAL");
     expect(result.context.pullRequests).toHaveLength(2);

@@ -5,6 +5,7 @@ import {
   missingRequiredEvidenceKinds,
   runtimeBrowserAcquireOutputSchema,
   runtimeCriterionSchema,
+  runtimeModelCandidateSchema,
   runtimeOutcomeSchema,
   runtimeTaskSnapshotSchema,
   runtimeTraceEventSchema,
@@ -13,6 +14,22 @@ import {
 describe("agent runtime protocol", () => {
   it("uses a generic extension point for custom model providers", () => {
     expect(agentProviderSchema.parse("CUSTOM")).toBe("CUSTOM");
+  });
+
+  it("validates an OpenAI-compatible model candidate", () => {
+    expect(
+      runtimeModelCandidateSchema.parse({
+        apiKey: "sk-secret",
+        baseUrl: "https://gateway.example.com/v1",
+        displayName: "Primary model",
+        modelId: "provider/model-1",
+      }),
+    ).toEqual({
+      apiKey: "sk-secret",
+      baseUrl: "https://gateway.example.com/v1",
+      displayName: "Primary model",
+      modelId: "provider/model-1",
+    });
   });
 
   it("keeps infrastructure failures separate from product verdicts", () => {
