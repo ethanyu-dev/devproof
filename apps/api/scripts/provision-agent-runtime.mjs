@@ -25,8 +25,9 @@ try {
   await prisma.$transaction([
     prisma.toolCredential.updateMany({
       data: {
+        // Historical credentials must keep a non-empty scope array. Revocation
+        // and the separate AgentRuntimeCredential lookup remove their authority.
         revokedAt: new Date(),
-        scopes: { set: [] },
       },
       where: { scopes: { has: "runtime:lease" }, teamId: team.id },
     }),
