@@ -24,6 +24,9 @@ describe("RuntimeHumanControlRelay", () => {
     const subscribe = send.mock.calls[0]?.[1];
 
     expect(emit).toHaveBeenCalledWith({ connected: false, type: "status" });
+    expect(subscribe).toEqual(
+      expect.objectContaining({ intervalMs: 500, quality: 65 }),
+    );
     relay.acceptFrame(session.runtimeId, {
       capturedAt: new Date().toISOString(),
       dataBase64: "anBlZw==",

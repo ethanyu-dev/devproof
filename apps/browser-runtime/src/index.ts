@@ -887,6 +887,21 @@ class StateStore {
   }
 }
 
+export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
+  if (events.length !== 2) return null;
+  const [down, up] = events;
+  if (
+    down?.type !== "pointer" ||
+    down.phase !== "down" ||
+    down.button === "none" ||
+    up?.type !== "pointer" ||
+    up.phase !== "up" ||
+    up.button !== down.button
+  )
+    return null;
+  return { ...up, button: down.button };
+}
+
 export class BrowserSessionManager {
   private readonly sessions = new Map<string, LiveSession>();
   private readonly openingProfileKeys = new Set<string>();
@@ -896,6 +911,10 @@ export class BrowserSessionManager {
     {
       capturing: boolean;
       consecutiveFailures: number;
+      message: Extract<
+        RuntimeServerMessage,
+        { type: "human.preview.subscribe" }
+      >;
       sessionId: string;
       timer: NodeJS.Timeout;
     }
@@ -1969,6 +1988,15 @@ export class BrowserSessionManager {
       context.on("page", (createdPage) => {
         session.pageIds.set(createdPage, randomUUID());
         this.attachObservers(session, createdPage);
+        if (session.state === "HUMAN_CONTROL") {
+          session.page = createdPage;
+          void createdPage.bringToFront().catch(() => undefined);
+          this.refreshPreviewsForSession(session.sessionId);
+          runtimeLog("info", "human.page.activated", {
+            sessionId: session.sessionId,
+            tabId: this.pageId(session, createdPage),
+          });
+        }
       });
       this.sessions.set(session.sessionId, session);
       await this.store.replaceSession(this.descriptor(session));
@@ -2631,6 +2659,7 @@ export class BrowserSessionManager {
     const stream = {
       capturing: false,
       consecutiveFailures: 0,
+      message,
       sessionId: session.sessionId,
       timer: setInterval(
         () => void this.capturePreview(message),
@@ -2659,8 +2688,30 @@ export class BrowserSessionManager {
     message: Extract<RuntimeServerMessage, { type: "human.input.dispatch" }>,
   ) {
     const session = this.ownedHumanSession(message);
-    for (const event of message.events) {
-      await this.applyHumanInput(session, event);
+    const click = atomicPointerClick(message.events);
+    if (click) {
+      await this.releaseHumanInput(session);
+      const viewport = session.page.viewportSize() ?? {
+        height: 720,
+        width: 1280,
+      };
+      await session.page.mouse.click(
+        Math.round(click.x * viewport.width),
+        Math.round(click.y * viewport.height),
+        { button: click.button },
+      );
+    } else {
+      for (const event of message.events) {
+        await this.applyHumanInput(session, event);
+      }
+    }
+    this.refreshPreviewsForSession(session.sessionId);
+  }
+
+  private refreshPreviewsForSession(sessionId: string) {
+    for (const stream of this.previewStreams.values()) {
+      if (stream.sessionId !== sessionId) continue;
+      void this.capturePreview(stream.message);
     }
   }
 

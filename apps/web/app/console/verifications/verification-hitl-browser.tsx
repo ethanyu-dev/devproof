@@ -8,7 +8,7 @@ import type {
   PointerEvent,
   WheelEvent,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   CircleAlert,
@@ -26,6 +26,11 @@ import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
 import { Badge, Button, Field, Input } from "@devproof/ui";
 
 import { consoleApi } from "@/lib/api";
+import { BrowserInputQueue } from "@/lib/browser-input-queue";
+import {
+  BrowserPointerController,
+  normalizedBrowserPoint,
+} from "@/lib/browser-pointer-controller";
 import { displayLabel } from "@/lib/display-text";
 
 interface BrowserHandoffStatus {
@@ -123,7 +128,6 @@ function BrowserHitl({
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null);
-  const imageRef = useRef<HTMLImageElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const keyboardRef = useRef<HTMLTextAreaElement>(null);
   const lastFrameAt = useRef(0);
@@ -249,20 +253,49 @@ function BrowserHitl({
     }
   }
 
-  const send = useCallback(
-    async (events: BrowserHumanInputEvent[]) => {
-      if (!controlId || streamStatus !== "live") return;
-      try {
-        await consoleApi(`${base}/control/input`, {
+  const inputQueue = useMemo(
+    () =>
+      new BrowserInputQueue((events) => {
+        if (!controlId) return Promise.resolve();
+        return consoleApi(`${base}/control/input`, {
           body: JSON.stringify({ controlId, events }),
           method: "POST",
         });
-      } catch (inputError) {
-        setError((inputError as Error).message);
-      }
-    },
-    [base, controlId, streamStatus],
+      }),
+    [base, controlId],
   );
+  const send = useCallback(
+    async (events: BrowserHumanInputEvent[]) => {
+      if (!controlId) return;
+      await inputQueue
+        .enqueue(events)
+        .catch((inputError: unknown) =>
+          setError(
+            inputError instanceof Error
+              ? inputError.message
+              : "浏览器输入发送失败，请重试。",
+          ),
+        );
+    },
+    [controlId, inputQueue],
+  );
+  const pointerController = useMemo(
+    () => new BrowserPointerController(send),
+    [send],
+  );
+
+  useEffect(() => {
+    const release = () => pointerController.cancel();
+    const releaseWhenHidden = () => {
+      if (document.visibilityState !== "visible") release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", releaseWhenHidden);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", releaseWhenHidden);
+    };
+  }, [pointerController]);
 
   async function complete(resolution: "continue" | "cancel") {
     if (!controlId) return;
@@ -382,15 +415,15 @@ function BrowserHitl({
                 if (event.target === event.currentTarget)
                   keyboardRef.current?.focus({ preventScroll: true });
               }}
-              onPointerCancel={() => void send([{ type: "release" }])}
+              onPointerCancel={() => pointerController.cancel()}
               onPointerDown={(event) =>
-                void handlePointer(
+                handlePointer(
                   event,
                   "down",
                   viewportRef.current,
-                  imageRef.current,
+                  frame,
                   keyboardRef.current,
-                  send,
+                  pointerController,
                 )
               }
               onPointerMove={(event) => {
@@ -400,42 +433,40 @@ function BrowserHitl({
                 )
                   return;
                 lastPointerMoveAt.current = Date.now();
-                void handlePointer(
+                handlePointer(
                   event,
                   "move",
                   viewportRef.current,
-                  imageRef.current,
+                  frame,
                   keyboardRef.current,
-                  send,
+                  pointerController,
                 );
               }}
               onPointerUp={(event) =>
-                void handlePointer(
+                handlePointer(
                   event,
                   "up",
                   viewportRef.current,
-                  imageRef.current,
+                  frame,
                   keyboardRef.current,
-                  send,
+                  pointerController,
                 )
               }
               onWheel={(event) =>
-                void handleWheel(
-                  event,
-                  viewportRef.current,
-                  imageRef.current,
-                  send,
-                )
+                void handleWheel(event, viewportRef.current, frame, send)
               }
               ref={viewportRef}
               tabIndex={0}
             >
-              <RemoteKeyboard ref={keyboardRef} send={send} />
+              <RemoteKeyboard
+                ref={keyboardRef}
+                release={() => pointerController.cancel()}
+                send={send}
+              />
               {frame ? (
                 <img
                   alt="浏览器执行节点实时画面"
                   draggable={false}
-                  ref={imageRef}
                   src={`data:image/jpeg;base64,${frame.dataBase64}`}
                 />
               ) : (
@@ -498,9 +529,11 @@ function BrowserHitl({
 
 function RemoteKeyboard({
   ref,
+  release,
   send,
 }: {
   ref: React.Ref<HTMLTextAreaElement>;
+  release: () => void;
   send: (events: BrowserHumanInputEvent[]) => Promise<void>;
 }) {
   function key(
@@ -530,7 +563,7 @@ function RemoteKeyboard({
     <textarea
       aria-label="远程浏览器键盘输入"
       className="dp-browser-keyboard-target"
-      onBlur={() => void send([{ type: "release" }])}
+      onBlur={release}
       onCompositionEnd={composition}
       onInput={text}
       onKeyDown={(event) => key(event, "down")}
@@ -542,34 +575,58 @@ function RemoteKeyboard({
   );
 }
 
-async function handlePointer(
+function handlePointer(
   event: PointerEvent<HTMLDivElement>,
   phase: "down" | "move" | "up",
   container: HTMLDivElement | null,
-  image: HTMLImageElement | null,
+  frame: { height: number; width: number } | null,
   keyboard: HTMLTextAreaElement | null,
-  send: (events: BrowserHumanInputEvent[]) => Promise<void>,
+  pointerController: BrowserPointerController,
 ) {
-  const point = normalizedPoint(event.clientX, event.clientY, container, image);
-  if (!point) return;
+  const point = normalizedBrowserPoint(
+    event.clientX,
+    event.clientY,
+    container?.getBoundingClientRect() ?? null,
+    frame,
+  );
+  if (!point) {
+    if (phase === "up") {
+      pointerController.cancel();
+      releasePointerCapture(event);
+    }
+    return;
+  }
   event.preventDefault();
-  const target = event.currentTarget;
-  if (phase === "down") target.setPointerCapture(event.pointerId);
-  keyboard?.focus({ preventScroll: true });
-  await send([
-    { button: pointerButton(event.button), phase, type: "pointer", ...point },
-  ]);
-  if (phase === "up" && target.hasPointerCapture(event.pointerId))
-    target.releasePointerCapture(event.pointerId);
+  const input = {
+    button: pointerButton(event.button),
+    phase,
+    type: "pointer",
+    ...point,
+  } as const;
+  if (phase === "down") {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    keyboard?.focus({ preventScroll: true });
+    pointerController.down(event.pointerId, input);
+  } else if (phase === "move") {
+    pointerController.move(event.pointerId, input);
+  } else {
+    pointerController.up(event.pointerId, input);
+    releasePointerCapture(event);
+  }
 }
 
 async function handleWheel(
   event: WheelEvent<HTMLDivElement>,
   container: HTMLDivElement | null,
-  image: HTMLImageElement | null,
+  frame: { height: number; width: number } | null,
   send: (events: BrowserHumanInputEvent[]) => Promise<void>,
 ) {
-  const point = normalizedPoint(event.clientX, event.clientY, container, image);
+  const point = normalizedBrowserPoint(
+    event.clientX,
+    event.clientY,
+    container?.getBoundingClientRect() ?? null,
+    frame,
+  );
   if (!point) return;
   event.preventDefault();
   await send([
@@ -582,32 +639,9 @@ async function handleWheel(
   ]);
 }
 
-function normalizedPoint(
-  clientX: number,
-  clientY: number,
-  container: HTMLElement | null,
-  image: HTMLImageElement | null,
-) {
-  if (
-    !container ||
-    !image ||
-    image.naturalWidth <= 0 ||
-    image.naturalHeight <= 0
-  )
-    return null;
-  const bounds = container.getBoundingClientRect();
-  const scale = Math.min(
-    bounds.width / image.naturalWidth,
-    bounds.height / image.naturalHeight,
-  );
-  const width = image.naturalWidth * scale;
-  const height = image.naturalHeight * scale;
-  const left = bounds.left + (bounds.width - width) / 2;
-  const top = bounds.top + (bounds.height - height) / 2;
-  const x = (clientX - left) / width;
-  const y = (clientY - top) / height;
-  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-  return { x, y };
+function releasePointerCapture(event: PointerEvent<HTMLDivElement>) {
+  if (event.currentTarget.hasPointerCapture(event.pointerId))
+    event.currentTarget.releasePointerCapture(event.pointerId);
 }
 
 function pointerButton(button: number): "left" | "middle" | "none" | "right" {

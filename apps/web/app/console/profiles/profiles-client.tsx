@@ -9,11 +9,16 @@ import type {
   WheelEvent,
 } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
+  CircleAlert,
+  Clock3,
   Globe2,
   KeyRound,
   Keyboard,
   LoaderCircle,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -29,9 +34,15 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { BrowserInputQueue } from "@/lib/browser-input-queue";
+import {
+  BrowserPointerController,
+  normalizedBrowserPoint,
+} from "@/lib/browser-pointer-controller";
 import { displayLabel } from "@/lib/display-text";
 
 type TriggerSource = "CONSOLE" | "FEISHU" | "ISSUE_ASSIGNEE";
+
+const PROFILE_FRAME_STALE_MS = 6_000;
 
 interface Profile {
   activeSession: {
@@ -353,6 +364,7 @@ function ProfileBrowser({
   profile: Profile;
 }) {
   const [frame, setFrame] = useState<{
+    capturedAt: string;
     dataBase64: string;
     height: number;
     title: string;
@@ -360,9 +372,14 @@ function ProfileBrowser({
     width: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null);
+  const [streamStatus, setStreamStatus] = useState<
+    "connecting" | "interrupted" | "live"
+  >("connecting");
   const container = useRef<HTMLDivElement>(null);
-  const image = useRef<HTMLImageElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
+  const lastFrameAt = useRef(0);
   const lastPointerMoveAt = useRef(0);
   const inputQueue = useMemo(
     () =>
@@ -389,14 +406,38 @@ function ProfileBrowser({
     },
     [inputQueue],
   );
+  const pointerController = useMemo(
+    () => new BrowserPointerController(send),
+    [send],
+  );
 
   useEffect(() => {
+    setOverlayHost(document.getElementById("dp-console-workspace-overlay"));
+  }, []);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    document.body.classList.add("dp-browser-handoff-fullscreen-open");
+    const exitOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setFullscreen(false);
+    };
+    window.addEventListener("keydown", exitOnEscape);
+    return () => {
+      document.body.classList.remove("dp-browser-handoff-fullscreen-open");
+      window.removeEventListener("keydown", exitOnEscape);
+    };
+  }, [fullscreen]);
+
+  useEffect(() => {
+    lastFrameAt.current = Date.now();
+    setStreamStatus("connecting");
     const source = new EventSource(
       `/console/api/browser-profiles/${profile.id}/browser/stream`,
       { withCredentials: true },
     );
     source.onmessage = (message) => {
       let event: {
+        capturedAt?: string;
         dataBase64?: string;
         error?: string;
         type: string;
@@ -418,20 +459,40 @@ function ProfileBrowser({
         event.width
       )
         setFrame({
+          capturedAt: event.capturedAt ?? new Date().toISOString(),
           dataBase64: event.dataBase64,
           height: event.height,
           title: event.title ?? "",
           url: event.url ?? "",
           width: event.width,
         });
-      if (event.type === "error") setError(event.error ?? "实时画面连接中断。");
+      if (event.type === "frame") {
+        lastFrameAt.current = Date.now();
+        setStreamStatus("live");
+        setError(null);
+      }
+      if (event.type === "error") {
+        setStreamStatus("interrupted");
+        setError(event.error ?? "实时画面连接中断。");
+      }
     };
-    source.onerror = () => setError("实时画面连接中断，正在等待执行节点恢复。");
-    return () => source.close();
+    source.onerror = () => {
+      setStreamStatus("interrupted");
+      setError("实时画面连接中断，正在等待执行节点恢复。");
+    };
+    const watchdog = window.setInterval(() => {
+      if (Date.now() - lastFrameAt.current <= PROFILE_FRAME_STALE_MS) return;
+      setStreamStatus("interrupted");
+      setError("浏览器画面已过期，正在等待执行节点恢复。");
+    }, 1_000);
+    return () => {
+      window.clearInterval(watchdog);
+      source.close();
+    };
   }, [profile.id]);
 
   useEffect(() => {
-    const release = () => void send([{ type: "release" }]);
+    const release = () => pointerController.cancel();
     const releaseWhenHidden = () => {
       if (document.visibilityState !== "visible") release();
     };
@@ -441,97 +502,167 @@ function ProfileBrowser({
       window.removeEventListener("blur", release);
       document.removeEventListener("visibilitychange", releaseWhenHidden);
     };
-  }, [send]);
+  }, [pointerController]);
 
-  return (
-    <Card className="dp-profile-browser">
+  const remaining = profile.activeSession?.humanControlExpiresAt
+    ? formatRemaining(profile.activeSession.humanControlExpiresAt)
+    : null;
+  const panel = (
+    <section
+      className={`dp-browser-handoff dp-profile-browser-handoff is-floating${fullscreen ? " is-fullscreen" : ""}`}
+    >
       <header>
         <span>
           <Keyboard />
-          <b>完成登录或 MFA</b>
-          <small>{frame?.url ?? "正在连接浏览器画面…"}</small>
+          <b>浏览器身份验证</b>
         </span>
-        <Button disabled={busy || !frame} onClick={onVerify}>
-          <ShieldCheck />
-          验证并保存
-        </Button>
+        <div className="dp-browser-handoff-header-actions">
+          <span className="dp-browser-handoff-status">
+            {remaining ? (
+              <>
+                <Clock3 /> {remaining}
+              </>
+            ) : null}
+            <Badge tone={streamStatus === "live" ? "success" : "warning"}>
+              {streamStatus === "live" ? "由你控制" : "连接中"}
+            </Badge>
+          </span>
+          <Button
+            aria-label={fullscreen ? "退出全屏操作" : "全屏操作"}
+            className="dp-browser-handoff-fullscreen-toggle"
+            onClick={() => setFullscreen((current) => !current)}
+            variant="secondary"
+          >
+            {fullscreen ? <Minimize2 /> : <Maximize2 />}
+            {fullscreen ? "退出全屏" : "全屏操作"}
+          </Button>
+        </div>
       </header>
-      <div
-        aria-label="远程浏览器身份登录窗口，可使用键盘和指针操作"
-        className="dp-profile-browser-frame"
-        onContextMenu={(event) => event.preventDefault()}
-        onFocus={(event) => {
-          if (event.target === event.currentTarget)
-            keyboard.current?.focus({ preventScroll: true });
-        }}
-        onPointerCancel={() => void send([{ type: "release" }])}
-        onPointerDown={(event) =>
-          void pointer(
-            event,
-            "down",
-            container.current,
-            image.current,
-            keyboard.current,
-            send,
-          )
-        }
-        onPointerMove={(event) => {
-          if (!event.buttons || Date.now() - lastPointerMoveAt.current < 32)
-            return;
-          lastPointerMoveAt.current = Date.now();
-          void pointer(
-            event,
-            "move",
-            container.current,
-            image.current,
-            keyboard.current,
-            send,
-          );
-        }}
-        onPointerUp={(event) =>
-          void pointer(
-            event,
-            "up",
-            container.current,
-            image.current,
-            keyboard.current,
-            send,
-          )
-        }
-        onWheel={(event) =>
-          void wheel(event, container.current, image.current, send)
-        }
-        ref={container}
-        tabIndex={0}
-      >
-        {frame ? (
-          <img
-            alt="用户浏览器身份登录窗口"
-            draggable={false}
-            ref={image}
-            src={`data:image/jpeg;base64,${frame.dataBase64}`}
-          />
-        ) : (
-          <div>
-            <LoaderCircle />
-            正在加载浏览器执行节点…
-          </div>
-        )}
-        <RemoteKeyboard inputRef={keyboard} send={send} />
+
+      <div className="dp-browser-handoff-copy">
+        <strong>完成登录或 MFA</strong>
+        <p>请在原浏览器会话中完成身份验证，然后点击“验证并保存”。</p>
+        <small>
+          <ShieldCheck />
+          输入只会通过临时控制通道发送到浏览器执行节点，不会进入 Agent
+          提示词、验证轨迹或制品。
+        </small>
       </div>
-      <footer>
-        {error ??
-          "点击画面后可输入键盘、粘贴、点击与滚动。完成后点击“验证并保存”。"}
-      </footer>
-    </Card>
+
+      {error ? (
+        <div className="dp-browser-handoff-error">
+          <CircleAlert /> {error}
+        </div>
+      ) : null}
+
+      <div className="dp-browser-handoff-session">
+        <div className="dp-browser-frame">
+          <div
+            aria-label="远程浏览器身份登录窗口，可使用键盘和指针操作"
+            className={`dp-browser-viewport ${streamStatus === "live" ? "is-controllable" : ""}`}
+            onContextMenu={(event) => event.preventDefault()}
+            onFocus={(event) => {
+              if (event.target === event.currentTarget)
+                keyboard.current?.focus({ preventScroll: true });
+            }}
+            onPointerCancel={() => pointerController.cancel()}
+            onPointerDown={(event) =>
+              handleProfilePointer(
+                event,
+                "down",
+                container.current,
+                frame,
+                keyboard.current,
+                pointerController,
+              )
+            }
+            onPointerMove={(event) => {
+              if (!event.buttons || Date.now() - lastPointerMoveAt.current < 32)
+                return;
+              lastPointerMoveAt.current = Date.now();
+              handleProfilePointer(
+                event,
+                "move",
+                container.current,
+                frame,
+                keyboard.current,
+                pointerController,
+              );
+            }}
+            onPointerUp={(event) =>
+              handleProfilePointer(
+                event,
+                "up",
+                container.current,
+                frame,
+                keyboard.current,
+                pointerController,
+              )
+            }
+            onWheel={(event) =>
+              void handleProfileWheel(event, container.current, frame, send)
+            }
+            ref={container}
+            tabIndex={0}
+          >
+            <RemoteKeyboard
+              inputRef={keyboard}
+              release={() => pointerController.cancel()}
+              send={send}
+            />
+            {frame ? (
+              <img
+                alt="用户浏览器身份登录窗口"
+                draggable={false}
+                src={`data:image/jpeg;base64,${frame.dataBase64}`}
+              />
+            ) : (
+              <div className="dp-browser-viewport-waiting">
+                <LoaderCircle /> 正在连接浏览器执行节点…
+              </div>
+            )}
+            {streamStatus === "interrupted" ? (
+              <div className="dp-browser-viewport-blocked">
+                <LoaderCircle /> 画面已过期，正在恢复画面与输入…
+              </div>
+            ) : null}
+          </div>
+          {frame ? (
+            <div className="dp-browser-viewport-meta">
+              <span>{frame.title || "未命名页面"}</span>
+              <small>{frame.url}</small>
+            </div>
+          ) : null}
+        </div>
+        <div className="dp-browser-handoff-controls">
+          <div className="dp-browser-handoff-guide">
+            <Keyboard />
+            点击画面定位输入焦点，可使用键盘、粘贴、点击和滚轮完成登录。
+          </div>
+          <div className="dp-browser-handoff-actions">
+            <Button
+              disabled={busy || !frame || streamStatus !== "live"}
+              onClick={onVerify}
+            >
+              <ShieldCheck />
+              验证并保存
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
   );
+
+  return overlayHost ? createPortal(panel, overlayHost) : null;
 }
 
 function RemoteKeyboard({
   inputRef,
+  release,
   send,
 }: {
   inputRef: React.Ref<HTMLTextAreaElement>;
+  release: () => void;
   send: (events: BrowserHumanInputEvent[]) => Promise<void>;
 }) {
   function key(
@@ -570,7 +701,7 @@ function RemoteKeyboard({
     <textarea
       aria-label="远程浏览器键盘输入"
       className="dp-browser-keyboard-target"
-      onBlur={() => void send([{ type: "release" }])}
+      onBlur={release}
       onCompositionEnd={composition}
       onInput={text}
       onKeyDown={(event) => key(event, "down")}
@@ -582,30 +713,44 @@ function RemoteKeyboard({
   );
 }
 
-async function pointer(
+function handleProfilePointer(
   event: PointerEvent<HTMLDivElement>,
   phase: "down" | "move" | "up",
   container: HTMLDivElement | null,
-  image: HTMLImageElement | null,
+  frame: { height: number; width: number } | null,
   keyboard: HTMLTextAreaElement | null,
-  send: (events: BrowserHumanInputEvent[]) => Promise<void>,
+  pointerController: BrowserPointerController,
 ) {
-  const point = normalizedPoint(event.clientX, event.clientY, container, image);
-  if (!point) return;
+  const point = normalizedBrowserPoint(
+    event.clientX,
+    event.clientY,
+    container?.getBoundingClientRect() ?? null,
+    frame,
+  );
+  if (!point) {
+    if (phase === "up") {
+      pointerController.cancel();
+      releasePointerCapture(event);
+    }
+    return;
+  }
   event.preventDefault();
-  const target = event.currentTarget;
-  if (phase === "down") target.setPointerCapture(event.pointerId);
-  keyboard?.focus({ preventScroll: true });
-  await send([
-    {
-      button: pointerButton(event),
-      phase,
-      type: "pointer",
-      ...point,
-    },
-  ]);
-  if (phase === "up" && target.hasPointerCapture(event.pointerId))
-    target.releasePointerCapture(event.pointerId);
+  const input = {
+    button: pointerButton(event),
+    phase,
+    type: "pointer",
+    ...point,
+  } as const;
+  if (phase === "down") {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    keyboard?.focus({ preventScroll: true });
+    pointerController.down(event.pointerId, input);
+  } else if (phase === "move") {
+    pointerController.move(event.pointerId, input);
+  } else {
+    pointerController.up(event.pointerId, input);
+    releasePointerCapture(event);
+  }
 }
 
 function pointerButton(event: PointerEvent<HTMLDivElement>) {
@@ -616,13 +761,18 @@ function pointerButton(event: PointerEvent<HTMLDivElement>) {
   return "left" as const;
 }
 
-async function wheel(
+async function handleProfileWheel(
   event: WheelEvent<HTMLDivElement>,
   container: HTMLDivElement | null,
-  image: HTMLImageElement | null,
+  frame: { height: number; width: number } | null,
   send: (events: BrowserHumanInputEvent[]) => Promise<void>,
 ) {
-  const point = normalizedPoint(event.clientX, event.clientY, container, image);
+  const point = normalizedBrowserPoint(
+    event.clientX,
+    event.clientY,
+    container?.getBoundingClientRect() ?? null,
+    frame,
+  );
   if (!point) return;
   event.preventDefault();
   await send([
@@ -635,26 +785,18 @@ async function wheel(
   ]);
 }
 
-function normalizedPoint(
-  clientX: number,
-  clientY: number,
-  container: HTMLElement | null,
-  image: HTMLImageElement | null,
-) {
-  if (!container || !image || !image.naturalWidth || !image.naturalHeight)
-    return null;
-  const bounds = container.getBoundingClientRect();
-  const scale = Math.min(
-    bounds.width / image.naturalWidth,
-    bounds.height / image.naturalHeight,
+function releasePointerCapture(event: PointerEvent<HTMLDivElement>) {
+  if (event.currentTarget.hasPointerCapture(event.pointerId))
+    event.currentTarget.releasePointerCapture(event.pointerId);
+}
+
+function formatRemaining(expiresAt: string) {
+  const seconds = Math.max(
+    0,
+    Math.ceil((Date.parse(expiresAt) - Date.now()) / 1_000),
   );
-  const width = image.naturalWidth * scale;
-  const height = image.naturalHeight * scale;
-  const left = bounds.left + (bounds.width - width) / 2;
-  const top = bounds.top + (bounds.height - height) / 2;
-  const x = (clientX - left) / width;
-  const y = (clientY - top) / height;
-  return x < 0 || x > 1 || y < 0 || y > 1 ? null : { x, y };
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function activeTriggerSources(profile: Profile) {

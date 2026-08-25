@@ -63,7 +63,7 @@ export class RuntimeHumanControlRelay {
     try {
       await this.hub.send(session.runtimeId, {
         fencingToken,
-        intervalMs: 1000,
+        intervalMs: 500,
         leaseToken: session.leaseToken,
         quality: 65,
         sessionId: session.id,

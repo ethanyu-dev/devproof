@@ -4126,6 +4126,11 @@ a {
   padding-top: 10px;
 }
 
+.dp-profile-browser-handoff.is-floating .dp-browser-handoff-controls,
+.dp-profile-browser-handoff.is-fullscreen .dp-browser-handoff-controls {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .dp-browser-handoff.is-floating .dp-browser-viewport img {
   max-height: none;
 }
