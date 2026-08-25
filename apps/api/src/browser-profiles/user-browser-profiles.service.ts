@@ -404,23 +404,48 @@ export class UserBrowserProfilesService {
     if (profile.status === "DISABLED") {
       throw new ConflictException("This browser profile cannot be prepared.");
     }
+    if (!profile.verificationUrl) {
+      throw new ConflictException("Profile verificationUrl is not configured.");
+    }
     const existing = profile.runtimeSessions[0];
     if (
       existing &&
       ["OPENING", "ACTIVE", "HUMAN_CONTROL"].includes(existing.status)
     ) {
+      if (existing.status === "OPENING") {
+        return {
+          profile: this.serialize(await this.owned(current, id)),
+          sessionId: existing.id,
+        };
+      }
+      await this.openVerificationPage(
+        current,
+        existing.id,
+        profile.verificationUrl,
+      );
       if (existing.status === "ACTIVE") {
         await this.sessions.takeover(current, existing.id, {
           ttlSeconds: input.ttlSeconds,
         });
       }
+      await this.prisma.userBrowserProfile.update({
+        data: {
+          inactivityExpiresAt: new Date(Date.now() + PROFILE_TTL_MS),
+          lastPreparedAt: new Date(),
+        },
+        where: { id },
+      });
+      await this.audit.record(
+        current,
+        "browser_profile.preparation_started",
+        "user_browser_profile",
+        id,
+        { reused: true, sessionId: existing.id },
+      );
       return {
         profile: this.serialize(await this.owned(current, id)),
         sessionId: existing.id,
       };
-    }
-    if (!profile.verificationUrl) {
-      throw new ConflictException("Profile verificationUrl is not configured.");
     }
     const hostname = new URL(profile.verificationUrl).hostname;
     const runtimeId = await this.selectRuntime(
@@ -456,13 +481,11 @@ export class UserBrowserProfilesService {
           "Browser Runtime could not open the profile.",
         );
       }
-      await this.sessions.execute(current, session.id, {
-        commandType: "page.navigate",
-        payload: {
-          url: profile.verificationUrl,
-          waitUntil: "domcontentloaded",
-        },
-      });
+      await this.openVerificationPage(
+        current,
+        session.id,
+        profile.verificationUrl,
+      );
       await this.sessions.takeover(current, session.id, {
         ttlSeconds: input.ttlSeconds,
       });
@@ -941,6 +964,25 @@ export class UserBrowserProfilesService {
       leaseToken: session.leaseToken,
       runtimeId: session.runtimeId,
     };
+  }
+
+  private async openVerificationPage(
+    current: AuthContext,
+    sessionId: string,
+    verificationUrl: string,
+  ) {
+    const navigation = await this.sessions.execute(current, sessionId, {
+      commandType: "page.navigate",
+      payload: {
+        url: verificationUrl,
+        waitUntil: "domcontentloaded",
+      },
+    });
+    if (navigation?.status !== "SUCCEEDED") {
+      throw new ConflictException(
+        "Browser Runtime could not open the profile login page.",
+      );
+    }
   }
 
   private owned(current: AuthContext, id: string) {

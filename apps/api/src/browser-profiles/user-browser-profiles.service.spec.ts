@@ -239,6 +239,71 @@ describe("UserBrowserProfilesService", () => {
     expect(updateMany).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["ACTIVE", "HUMAN_CONTROL"] as const)(
+    "reopens the verification URL when reusing a %s profile session",
+    async (status) => {
+      const execute = vi.fn().mockResolvedValue({ status: "SUCCEEDED" });
+      const takeover = vi.fn().mockResolvedValue(undefined);
+      const update = vi.fn().mockResolvedValue(undefined);
+      const audit = { record: vi.fn() };
+      const profiles = new UserBrowserProfilesService(
+        { userBrowserProfile: { update } } as never,
+        {} as never,
+        { execute, takeover } as never,
+        {} as never,
+        {} as never,
+        audit as never,
+      );
+      vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+        grants: [],
+        id: "profile-1",
+        runtimeSessions: [{ id: "session-1", status }],
+        status: "REAUTH_REQUIRED",
+        verificationRules: {},
+        verificationUrl: "https://app.example.com/login",
+      } as never);
+
+      const result = await profiles.prepare(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+        { ttlSeconds: 300 },
+      );
+
+      expect(result.sessionId).toBe("session-1");
+      expect(execute).toHaveBeenCalledWith(expect.anything(), "session-1", {
+        commandType: "page.navigate",
+        payload: {
+          url: "https://app.example.com/login",
+          waitUntil: "domcontentloaded",
+        },
+      });
+      if (status === "ACTIVE") {
+        expect(takeover).toHaveBeenCalledOnce();
+        expect(execute.mock.invocationCallOrder[0]).toBeLessThan(
+          takeover.mock.invocationCallOrder[0]!,
+        );
+      } else {
+        expect(takeover).not.toHaveBeenCalled();
+      }
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.anything(),
+        "browser_profile.preparation_started",
+        "user_browser_profile",
+        "profile-1",
+        { reused: true, sessionId: "session-1" },
+      );
+    },
+  );
+
   it("rolls back only the preparation version owned by the failed request", async () => {
     const updateMany = vi
       .fn()

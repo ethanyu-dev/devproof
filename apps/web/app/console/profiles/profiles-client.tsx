@@ -335,6 +335,7 @@ export function ProfilesClient() {
         <ProfileBrowser
           profile={selected}
           busy={busy}
+          onReload={() => void action("prepare")}
           onVerify={() => void action("verify")}
         />
       ) : selected ? (
@@ -356,10 +357,12 @@ export function ProfilesClient() {
 
 function ProfileBrowser({
   busy,
+  onReload,
   onVerify,
   profile,
 }: {
   busy: boolean;
+  onReload: () => void;
   onVerify: () => void;
   profile: Profile;
 }) {
@@ -640,6 +643,14 @@ function ProfileBrowser({
             点击画面定位输入焦点，可使用键盘、粘贴、点击和滚轮完成登录。
           </div>
           <div className="dp-browser-handoff-actions">
+            <Button
+              disabled={busy || streamStatus !== "live"}
+              onClick={onReload}
+              variant="secondary"
+            >
+              <RefreshCw />
+              重新打开登录页
+            </Button>
             <Button
               disabled={busy || !frame || streamStatus !== "live"}
               onClick={onVerify}
