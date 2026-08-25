@@ -8,7 +8,7 @@ import type {
   PointerEvent,
   WheelEvent,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe2,
   KeyRound,
@@ -28,6 +28,7 @@ import {
   LoadingState,
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
+import { BrowserInputQueue } from "@/lib/browser-input-queue";
 import { displayLabel } from "@/lib/display-text";
 
 type TriggerSource = "CONSOLE" | "FEISHU" | "ISSUE_ASSIGNEE";
@@ -363,6 +364,31 @@ function ProfileBrowser({
   const image = useRef<HTMLImageElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const lastPointerMoveAt = useRef(0);
+  const inputQueue = useMemo(
+    () =>
+      new BrowserInputQueue((events) =>
+        consoleApi(`/browser-profiles/${profile.id}/browser/input`, {
+          body: JSON.stringify({ events }),
+          method: "POST",
+        }),
+      ),
+    [profile.id],
+  );
+
+  const send = useCallback(
+    async (events: BrowserHumanInputEvent[]) => {
+      await inputQueue
+        .enqueue(events)
+        .catch((inputError: unknown) =>
+          setError(
+            inputError instanceof Error
+              ? inputError.message
+              : "浏览器输入发送失败，请重试。",
+          ),
+        );
+    },
+    [inputQueue],
+  );
 
   useEffect(() => {
     const source = new EventSource(
@@ -404,12 +430,18 @@ function ProfileBrowser({
     return () => source.close();
   }, [profile.id]);
 
-  async function send(events: BrowserHumanInputEvent[]) {
-    await consoleApi(`/browser-profiles/${profile.id}/browser/input`, {
-      body: JSON.stringify({ events }),
-      method: "POST",
-    }).catch((inputError: Error) => setError(inputError.message));
-  }
+  useEffect(() => {
+    const release = () => void send([{ type: "release" }]);
+    const releaseWhenHidden = () => {
+      if (document.visibilityState !== "visible") release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", releaseWhenHidden);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", releaseWhenHidden);
+    };
+  }, [send]);
 
   return (
     <Card className="dp-profile-browser">
