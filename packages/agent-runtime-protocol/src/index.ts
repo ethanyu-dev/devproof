@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 3,
+  minor: 4,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -49,6 +49,8 @@ export const runtimeCapabilitySchema = z.enum([
   "BROWSER_VERIFICATION",
   "ISSUE_ANALYSIS",
 ]);
+
+export const runtimePoolSchema = z.enum(["SPEC_ANALYSIS", "BROWSER_EXECUTION"]);
 
 export const agentProviderSchema = z.enum([
   "OPENAI",
@@ -266,6 +268,18 @@ export const runtimeTaskClaimInputSchema = z.object({
 
 export const runtimeTaskClaimOutputSchema = z.object({
   task: runtimeTaskLeaseSchema.nullable(),
+});
+
+export const runtimeRegistrationInputSchema = z.object({
+  protocol: runtimeProtocolVersionSchema,
+  workerId: z.string().trim().min(1).max(200),
+});
+
+export const runtimeRegistrationOutputSchema = z.object({
+  browserConcurrency: z.number().int().min(0).max(1_024),
+  pools: z.array(runtimePoolSchema).min(1).max(2),
+  refreshAfterMs: z.number().int().min(1_000).max(60_000),
+  specConcurrency: z.number().int().min(0).max(64),
 });
 
 const leasedTaskInputSchema = z.object({

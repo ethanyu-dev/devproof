@@ -118,6 +118,7 @@ export class PlaygroundService {
         issueRef: input.issueRef,
         kind: "ISSUE_SPEC",
         profilePolicy: input.profilePolicy,
+        deployments: input.deployments,
         ...(input.targetUrl ? { targetUrl: input.targetUrl } : {}),
       },
       { kind: "USER", triggerSource: "CONSOLE", userId: current.user.id },

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_RUNTIME_PROTOCOL,
   runtimeBrowserAcquireOutputSchema,
+  runtimeRegistrationOutputSchema,
   runtimeSpecAnalysisClaimOutputSchema,
   runtimeSpecAnalysisTaskOutcomeOutputSchema,
   runtimeSpecAnalysisToolOutputSchema,
@@ -31,6 +32,14 @@ export class ControlPlaneClient {
     private readonly baseUrl: string,
     private readonly token: string,
   ) {}
+
+  async register(workerId: string, signal?: AbortSignal) {
+    const result = await this.request("/internal/v2/runtime/registration", {
+      body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
+      ...(signal ? { signal } : {}),
+    });
+    return runtimeRegistrationOutputSchema.parse(result);
+  }
 
   async claim(workerId: string, signal?: AbortSignal) {
     const result = await this.request("/internal/v2/runtime/tasks/claim", {

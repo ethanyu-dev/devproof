@@ -22,3 +22,21 @@ export function requireAgentRuntimeIdentity(current: ToolAuthContext) {
     );
   }
 }
+
+export function requireAgentRuntimePool(
+  current: ToolAuthContext,
+  pool: "SPEC_ANALYSIS" | "BROWSER_EXECUTION",
+) {
+  requireAgentRuntimeIdentity(current);
+  const credentialPool = current.credential.pool ?? "MIXED";
+  if (credentialPool === "MIXED") {
+    throw new ForbiddenException(
+      "Legacy MIXED Agent Runtime credentials are disabled; provision a pool-specific credential.",
+    );
+  }
+  if (credentialPool !== pool) {
+    throw new ForbiddenException(
+      `This Agent Runtime credential is not authorized for the ${pool} pool.`,
+    );
+  }
+}

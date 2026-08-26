@@ -36,6 +36,7 @@ import { PrismaService } from "../database/prisma.service.js";
 import { GithubPullRequestClient } from "../specifications/github-pull-request.client.js";
 import { KnowledgeContextClient } from "../specifications/knowledge-context.client.js";
 import { LinearContextClient } from "../specifications/linear-context.client.js";
+import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
 
 const SPEC_PROTOCOL_MINOR = 3;
 const SOURCE_PAGE_SIZE = 20;
@@ -563,7 +564,10 @@ export class SpecAnalysisRuntimeService {
       throw new ConflictException("Only Issue tasks support generated Specs.");
     }
     const targetUrl =
-      createInput.targetUrl ?? primaryPullRequest?.deploymentUrl ?? null;
+      createInput.deployments[0]?.targetUrl ??
+      createInput.targetUrl ??
+      primaryPullRequest?.deploymentUrl ??
+      null;
     const normalizedTarget = targetUrl ? normalizeTargetUrl(targetUrl) : null;
     const target = normalizedTarget ? new URL(normalizedTarget) : null;
     const sourceHash = hashJson(
@@ -616,12 +620,31 @@ export class SpecAnalysisRuntimeService {
         },
         include: { cases: true },
       });
-      await tx.taskCaseExecution.createMany({
-        data: snapshot.cases.map((testCase) => ({
-          caseId: testCase.id,
-          executionOrdinal: 1,
+      let deployments = await tx.taskDeployment.findMany({
+        where: {
+          enabled: true,
           taskExecutionId: attempt.stage.taskExecutionId,
-        })),
+        },
+      });
+      if (!deployments.length && normalizedTarget) {
+        deployments = [
+          await tx.taskDeployment.create({
+            data: {
+              environmentSnapshot: json({}),
+              key: "default",
+              name: "Default",
+              targetUrl: normalizedTarget,
+              taskExecutionId: attempt.stage.taskExecutionId,
+            },
+          }),
+        ];
+      }
+      await tx.taskCaseExecution.createMany({
+        data: taskDeploymentMatrix(
+          attempt.stage.taskExecutionId,
+          snapshot.cases,
+          deployments,
+        ),
       });
       const result = {
         attemptNumber: attempt.number,
@@ -670,7 +693,10 @@ export class SpecAnalysisRuntimeService {
             ...(target
               ? {
                   allowedHosts: [target.hostname],
-                  targetSource: createInput.targetUrl ? "MANUAL" : "GITHUB",
+                  targetSource:
+                    createInput.deployments.length || createInput.targetUrl
+                      ? "MANUAL"
+                      : "GITHUB",
                   targetUrl: normalizedTarget,
                 }
               : {}),

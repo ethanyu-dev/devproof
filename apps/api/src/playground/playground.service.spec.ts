@@ -168,6 +168,7 @@ describe("PlaygroundService", () => {
     const { service, tasks } = createService({ task: { id: "task-issue" } });
 
     const result = await service.resolveSpecification(current, {
+      deployments: [],
       issueRef: "ENG-123",
       submissionId: "d63bd843-b89d-48ea-90c9-caad5b51d526",
       targetUrl: "https://preview.example.com",
@@ -190,6 +191,7 @@ describe("PlaygroundService", () => {
   it("reuses the same task idempotency key when a submission is retried", async () => {
     const { service, tasks } = createService({ task: { id: "task-issue" } });
     const input = {
+      deployments: [],
       issueRef: "ENG-123",
       submissionId: "d63bd843-b89d-48ea-90c9-caad5b51d526",
       targetUrl: "https://preview.example.com",

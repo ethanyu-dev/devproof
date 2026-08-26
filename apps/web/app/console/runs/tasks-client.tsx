@@ -744,7 +744,9 @@ function TaskStatusPanel({
 }) {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [targetUrl, setTargetUrl] = useState("");
+  const [deploymentDrafts, setDeploymentDrafts] = useState([
+    { id: 1, name: "Preview", targetUrl: "" },
+  ]);
   const [profileStrategy, setProfileStrategy] = useState<
     "EPHEMERAL" | "REQUESTER" | "ISSUE_ASSIGNEE" | "EXPLICIT_PROFILE"
   >("REQUESTER");
@@ -831,7 +833,7 @@ function TaskStatusPanel({
         </div>
         <div className="dp-task-counts">
           <span>
-            Case <b>{detail.counts.total}</b>
+            执行单元 <b>{detail.counts.total}</b>
           </span>
           <span>
             通过 <b>{detail.counts.passed}</b>
@@ -849,6 +851,16 @@ function TaskStatusPanel({
             阻塞 <b>{detail.counts.blocked}</b>
           </span>
         </div>
+        {detail.deployments.length ? (
+          <div className="dp-task-deployments">
+            {detail.deployments.map((deployment) => (
+              <span key={deployment.id}>
+                <b>{deployment.name}</b>
+                <small>{deployment.targetUrl}</small>
+              </span>
+            ))}
+          </div>
+        ) : null}
       </Card>
 
       <div className="dp-task-stage-grid">
@@ -894,20 +906,90 @@ function TaskStatusPanel({
             <Badge tone="warning">等待部署地址</Badge>
           </div>
           <div className="dp-playground-form">
-            <Field label="Deployment URL">
-              <Input
-                onChange={(event) => setTargetUrl(event.target.value)}
-                placeholder="https://preview.example.com"
-                value={targetUrl}
-              />
+            <Field label="验证环境（可添加多个）">
+              <div className="dp-deployment-editor">
+                {deploymentDrafts.map((deployment, index) => (
+                  <div className="dp-deployment-row" key={deployment.id}>
+                    <Input
+                      aria-label={`验证环境 ${index + 1} 名称`}
+                      onChange={(event) =>
+                        setDeploymentDrafts((current) =>
+                          current.map((item) =>
+                            item.id === deployment.id
+                              ? { ...item, name: event.target.value }
+                              : item,
+                          ),
+                        )
+                      }
+                      placeholder="环境名称"
+                      value={deployment.name}
+                    />
+                    <Input
+                      aria-label={`验证环境 ${index + 1} URL`}
+                      onChange={(event) =>
+                        setDeploymentDrafts((current) =>
+                          current.map((item) =>
+                            item.id === deployment.id
+                              ? { ...item, targetUrl: event.target.value }
+                              : item,
+                          ),
+                        )
+                      }
+                      placeholder="https://preview.example.com"
+                      value={deployment.targetUrl}
+                    />
+                    {deploymentDrafts.length > 1 ? (
+                      <Button
+                        onClick={() =>
+                          setDeploymentDrafts((current) =>
+                            current.filter((item) => item.id !== deployment.id),
+                          )
+                        }
+                        variant="secondary"
+                      >
+                        删除
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+                <Button
+                  disabled={deploymentDrafts.length >= 20}
+                  onClick={() =>
+                    setDeploymentDrafts((current) => [
+                      ...current,
+                      {
+                        id: Math.max(0, ...current.map((item) => item.id)) + 1,
+                        name: `验证环境 ${current.length + 1}`,
+                        targetUrl: "",
+                      },
+                    ])
+                  }
+                  variant="secondary"
+                >
+                  添加验证环境
+                </Button>
+              </div>
             </Field>
             <Button
-              disabled={busy || !targetUrl}
-              onClick={() =>
-                void onMutate("/deployment-target", { url: targetUrl })
+              disabled={
+                busy ||
+                !deploymentDrafts.some((deployment) =>
+                  Boolean(deployment.targetUrl.trim()),
+                )
               }
+              onClick={() => {
+                const deployments = deploymentDrafts
+                  .filter((deployment) => deployment.targetUrl.trim())
+                  .map((deployment, index) => ({
+                    environment: {},
+                    key: `deployment-${index + 1}`,
+                    name: deployment.name.trim() || `验证环境 ${index + 1}`,
+                    targetUrl: deployment.targetUrl.trim(),
+                  }));
+                void onMutate("/deployments", { deployments });
+              }}
             >
-              提交并执行全部 Case
+              提交并执行全部 Spec × Deployment
             </Button>
           </div>
         </Card>
@@ -1147,11 +1229,37 @@ function CaseCard({
   onRerun: () => void;
   testCase: TaskCase;
 }) {
-  const execution = testCase.executions.at(-1) ?? null;
-  const run = execution?.run ?? null;
-  const outcome = run ? taskOutcomeDisplay(run) : null;
-  const rerunnable = run ? terminalLifecycles.has(run.lifecycle) : false;
-  const status = outcome?.toneStatus ?? execution?.dispatch.status ?? "PENDING";
+  const executions = latestTaskCaseExecutions(testCase.executions);
+  const active = executions.find(
+    (execution) =>
+      execution.run && !terminalLifecycles.has(execution.run.lifecycle),
+  );
+  const pending = executions.find((execution) => !execution.run);
+  const outcomes = executions.flatMap((execution) =>
+    execution.run ? [taskOutcomeDisplay(execution.run)] : [],
+  );
+  const aggregateOutcome =
+    outcomes.find((outcome) => outcome.toneStatus === "FAILED") ??
+    outcomes.find((outcome) => outcome.toneStatus === "INCONCLUSIVE") ??
+    outcomes[0];
+  const rerunnable =
+    executions.length > 0 &&
+    executions.every(
+      (execution) =>
+        execution.run && terminalLifecycles.has(execution.run.lifecycle),
+    );
+  const status =
+    active?.run?.lifecycle ??
+    pending?.dispatch.status ??
+    aggregateOutcome?.toneStatus ??
+    "PENDING";
+  const dispatchStatus =
+    pending?.dispatch.status ?? (executions.length ? "LINKED" : "PENDING");
+  const executionStatus =
+    active?.run?.lifecycle ??
+    (executions.length && executions.every((execution) => execution.run)
+      ? "COMPLETED"
+      : "PENDING");
   return (
     <Card className="dp-verification-detail dp-specification-case">
       <div className="dp-section-head">
@@ -1162,7 +1270,9 @@ function CaseCard({
         </span>
         <span className="dp-specification-case-actions">
           <Badge tone={tone(status)}>
-            {outcome?.label ?? displayLabel(status)}
+            {active || pending
+              ? displayLabel(status)
+              : (aggregateOutcome?.label ?? displayLabel(status))}
           </Badge>
           {rerunnable ? (
             <Button
@@ -1191,20 +1301,20 @@ function CaseCard({
       <div className="dp-spec-run-state">
         <span>
           派发{" "}
-          <Badge tone={tone(execution?.dispatch.status ?? "PENDING")}>
-            {displayLabel(execution?.dispatch.status ?? "PENDING")}
+          <Badge tone={tone(dispatchStatus)}>
+            {displayLabel(dispatchStatus)}
           </Badge>
         </span>
         <span>
           执行{" "}
-          <Badge tone={tone(run?.lifecycle ?? "PENDING")}>
-            {displayLabel(run?.lifecycle ?? "PENDING")}
+          <Badge tone={tone(executionStatus)}>
+            {displayLabel(executionStatus)}
           </Badge>
         </span>
         <span>
           验证判定{" "}
-          <Badge tone={tone(run?.verdict ?? "PENDING")}>
-            {verificationVerdictLabel(run?.verdict ?? null)}
+          <Badge tone={tone(aggregateOutcome?.toneStatus ?? "PENDING")}>
+            {aggregateOutcome?.label ?? verificationVerdictLabel(null)}
           </Badge>
         </span>
       </div>
@@ -1242,7 +1352,8 @@ function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
   if (execution.run) {
     return (
       <Link href={`/console/executions/${execution.run.runId}`}>
-        查看执行详情 #{execution.executionOrdinal} <ExternalLink />
+        {execution.deployment.name} · 执行 #{execution.executionOrdinal}{" "}
+        <ExternalLink />
       </Link>
     );
   }
@@ -1250,6 +1361,17 @@ function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
   return failure ? (
     <small className="dp-spec-dispatch-error">{failure}</small>
   ) : null;
+}
+
+function latestTaskCaseExecutions(executions: readonly TaskCaseExecution[]) {
+  const latest = new Map<string, TaskCaseExecution>();
+  for (const execution of executions) {
+    const previous = latest.get(execution.deployment.id);
+    if (!previous || execution.executionOrdinal > previous.executionOrdinal) {
+      latest.set(execution.deployment.id, execution);
+    }
+  }
+  return [...latest.values()];
 }
 
 function StageCard({

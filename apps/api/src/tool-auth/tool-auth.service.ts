@@ -195,6 +195,7 @@ export class ToolAuthService {
         id: credential.id,
         kind: "AGENT_RUNTIME",
         name: credential.name,
+        pool: credential.pool,
         scopes: ["runtime:lease"],
       },
       team: {

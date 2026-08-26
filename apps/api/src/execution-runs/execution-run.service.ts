@@ -269,6 +269,14 @@ export class ExecutionRunService {
             snapshot: json(snapshot),
           },
         });
+        await tx.browserExecution.create({
+          data: {
+            attemptId,
+            input: json(browserAdmissionInput(input)),
+            runId,
+            status: "REQUESTED",
+          },
+        });
         await tx.runEvent.create({
           data: {
             actor: "CONTROL_PLANE",
@@ -821,6 +829,19 @@ export class ExecutionRunService {
     if (!run) throw new NotFoundException("Run not found.");
     return run;
   }
+}
+
+function browserAdmissionInput(input: ExecutionRunCreateInput) {
+  const targetUrl =
+    typeof input.environment.targetUrl === "string"
+      ? input.environment.targetUrl
+      : undefined;
+  return {
+    availabilityPolicy: input.browserPolicy.availabilityPolicy,
+    profile: input.browserPolicy.profile,
+    requiredCapabilities: input.browserPolicy.requiredCapabilities,
+    ...(targetUrl ? { targetUrl } : {}),
+  };
 }
 
 interface TrajectoryEventRow {

@@ -5,7 +5,10 @@ import type {
   RuntimeConfigurationInput,
   RuntimePairInput,
 } from "@devproof/contracts";
-import { RUNTIME_PROTOCOL } from "@devproof/runtime-protocol";
+import {
+  RUNTIME_PROTOCOL,
+  runtimeCommandMinimumMinor,
+} from "@devproof/runtime-protocol";
 
 import type { AuthContext } from "../auth/auth.types.js";
 import { env } from "../config/env.js";
@@ -44,6 +47,96 @@ export class BrowserRuntimeService {
         tokenHash: undefined,
       })),
     );
+  }
+
+  async capacity(current: AuthContext) {
+    const now = new Date();
+    const runtimes = await this.prisma.browserRuntime.findMany({
+      select: { id: true, maxConcurrency: true, name: true },
+      where: {
+        enabled: true,
+        protocolMajor: RUNTIME_PROTOCOL.major,
+        protocolMinor: {
+          gte: runtimeCommandMinimumMinor("page.snapshot"),
+        },
+        revokedAt: null,
+        teamId: current.team.id,
+      },
+    });
+    const [slotCounts, pinnedWaiting, flexibleWaiting] = await Promise.all([
+      this.prisma.browserRuntimeSlot.groupBy({
+        _count: { _all: true },
+        by: ["runtimeId"],
+        where: {
+          expiresAt: { gt: now },
+          runtimeId: { in: runtimes.map((runtime) => runtime.id) },
+        },
+      }),
+      this.prisma.browserExecution.groupBy({
+        _count: { _all: true },
+        by: ["targetRuntimeId"],
+        where: {
+          run: { teamId: current.team.id },
+          status: { in: ["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"] },
+          targetRuntimeId: {
+            in: runtimes.map((runtime) => runtime.id),
+          },
+        },
+      }),
+      this.prisma.browserExecution.count({
+        where: {
+          run: { teamId: current.team.id },
+          status: { in: ["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"] },
+          targetRuntimeId: null,
+        },
+      }),
+    ]);
+    const occupiedByRuntime = new Map(
+      slotCounts.map((row) => [row.runtimeId, row._count._all]),
+    );
+    const waitingByRuntime = new Map(
+      pinnedWaiting.flatMap((row) =>
+        row.targetRuntimeId
+          ? [[row.targetRuntimeId, row._count._all] as const]
+          : [],
+      ),
+    );
+    const nodes = await Promise.all(
+      runtimes.map(async (runtime) => {
+        const occupied = occupiedByRuntime.get(runtime.id) ?? 0;
+        const online = await this.redis.isRuntimeOnline(runtime.id);
+        return {
+          available: online
+            ? Math.max(0, runtime.maxConcurrency - occupied)
+            : 0,
+          configured: runtime.maxConcurrency,
+          draining: Math.max(0, occupied - runtime.maxConcurrency),
+          id: runtime.id,
+          name: runtime.name,
+          occupied,
+          online,
+          waiting: waitingByRuntime.get(runtime.id) ?? 0,
+        };
+      }),
+    );
+    return {
+      availableCapacity: nodes.reduce(
+        (total, node) => total + node.available,
+        0,
+      ),
+      configuredCapacity: nodes.reduce(
+        (total, node) => total + node.configured,
+        0,
+      ),
+      drainingCapacity: nodes.reduce((total, node) => total + node.draining, 0),
+      flexibleWaiting,
+      nodes,
+      occupiedCapacity: nodes.reduce((total, node) => total + node.occupied, 0),
+      schedulableCapacity: nodes.reduce(
+        (total, node) => total + (node.online ? node.configured : 0),
+        0,
+      ),
+    };
   }
 
   async createPairingToken(current: AuthContext) {

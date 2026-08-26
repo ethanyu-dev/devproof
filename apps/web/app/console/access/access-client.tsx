@@ -75,6 +75,25 @@ interface RuntimeSettings {
   hitlEnabled: boolean;
 }
 
+interface BrowserPoolCapacity {
+  availableCapacity: number;
+  configuredCapacity: number;
+  drainingCapacity: number;
+  flexibleWaiting: number;
+  nodes: Array<{
+    available: number;
+    configured: number;
+    draining: number;
+    id: string;
+    name: string;
+    occupied: number;
+    online: boolean;
+    waiting: number;
+  }>;
+  occupiedCapacity: number;
+  schedulableCapacity: number;
+}
+
 interface GithubAccessCredential {
   createdAt: string;
   enabled: boolean;
@@ -189,6 +208,9 @@ function runtimeTone(status: BrowserRuntime["status"]) {
 export function AccessClient() {
   const [activeSection, setActiveSection] = useState<AccessSection>("browser");
   const [runtimes, setRuntimes] = useState<BrowserRuntime[] | null>(null);
+  const [browserPool, setBrowserPool] = useState<BrowserPoolCapacity | null>(
+    null,
+  );
   const [settings, setSettings] = useState<RuntimeSettings>(defaultSettings);
   const [githubCredentials, setGithubCredentials] = useState<
     GithubAccessCredential[] | null
@@ -272,6 +294,7 @@ export function AccessClient() {
     try {
       const [
         runtimeRows,
+        browserPoolCapacity,
         currentSettings,
         routeRows,
         credentialRows,
@@ -279,6 +302,7 @@ export function AccessClient() {
         agentModelRows,
       ] = await Promise.all([
         consoleApi<BrowserRuntime[]>("/browser-runtimes"),
+        consoleApi<BrowserPoolCapacity>("/browser-pool-capacity"),
         consoleApi<RuntimeSettings>("/runtime-settings"),
         consoleApi<RuntimeRoutingRule[]>("/runtime-routing-rules"),
         consoleApi<ToolCredential[]>("/tool-credentials"),
@@ -286,6 +310,7 @@ export function AccessClient() {
         consoleApi<AgentModelConfiguration[]>("/agent-models"),
       ]);
       setRuntimes(runtimeRows);
+      setBrowserPool(browserPoolCapacity);
       setSettings(currentSettings);
       setRoutingRules(routeRows);
       setCredentials(credentialRows);
@@ -421,6 +446,9 @@ export function AccessClient() {
       );
       setRuntimeMaxConcurrency(String(runtime.maxConcurrency));
       setNetworkAllowlistText(runtime.networkAllowlist.join("\n"));
+      setBrowserPool(
+        await consoleApi<BrowserPoolCapacity>("/browser-pool-capacity"),
+      );
       const successText =
         runtime.status === "ONLINE" && (runtime.protocolMinor ?? 0) >= 4
           ? "执行节点配置已保存；并发容量已生效，网络白名单已下发。"
@@ -1002,6 +1030,30 @@ export function AccessClient() {
                           {savingRuntime ? "保存中…" : "保存策略"}
                         </Button>
                       </div>
+                      {browserPool ? (
+                        <div className="dp-browser-pool-summary">
+                          <span>
+                            <b>{browserPool.configuredCapacity}</b>
+                            <small>配置总容量</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.schedulableCapacity}</b>
+                            <small>在线可调度</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.occupiedCapacity}</b>
+                            <small>占用中</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.availableCapacity}</b>
+                            <small>当前空闲</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.flexibleWaiting}</b>
+                            <small>灵活队列等待</small>
+                          </span>
+                        </div>
+                      ) : null}
                     </div>
                   </Card>
                 </div>
@@ -1062,7 +1114,16 @@ export function AccessClient() {
                               </div>
                               <div>
                                 <dt>并发容量</dt>
-                                <dd>{runtime.maxConcurrency}</dd>
+                                <dd>
+                                  {runtime.maxConcurrency}
+                                  {browserPool?.nodes.find(
+                                    (node) => node.id === runtime.id,
+                                  ) ? (
+                                    <small>
+                                      {` · 占用 ${browserPool.nodes.find((node) => node.id === runtime.id)!.occupied} · 空闲 ${browserPool.nodes.find((node) => node.id === runtime.id)!.available} · 固定队列等待 ${browserPool.nodes.find((node) => node.id === runtime.id)!.waiting}`}
+                                    </small>
+                                  ) : null}
+                                </dd>
                               </div>
                               <div>
                                 <dt>最后在线</dt>

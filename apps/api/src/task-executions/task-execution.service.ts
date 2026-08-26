@@ -17,6 +17,8 @@ import {
   taskExecutionStageTypeSchema,
   testGenerationContextSchema,
   type ExecutionRunCreateInput,
+  type TaskDeployment,
+  type TaskDeploymentsInput,
   type TaskExecutionCreateInput,
   type TaskStageRetryInput,
 } from "@devproof/contracts";
@@ -38,6 +40,7 @@ import { parsePullRequestUrl } from "../specifications/github-pull-request.clien
 import { IssueContextResolverService } from "../specifications/issue-context-resolver.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
+import { taskDeploymentMatrix } from "./task-deployment-matrix.js";
 import {
   enqueueTaskCompletionNotifications,
   taskNotificationContext,
@@ -59,6 +62,7 @@ const taskDetailInclude = {
           _count: { select: { evidences: true, interventions: true } },
         },
       },
+      deployment: true,
       testCase: true,
     },
     orderBy: [
@@ -72,6 +76,7 @@ const taskDetailInclude = {
     },
     orderBy: { createdAt: "asc" as const },
   },
+  deployments: { orderBy: { createdAt: "asc" as const } },
   profileBinding: {
     include: {
       requestedProfile: {
@@ -125,12 +130,21 @@ const taskListInclude = {
       verdict: true,
     },
   },
+  deployments: { select: { id: true } },
   specificationSnapshots: {
     orderBy: { generatedAt: "desc" as const },
     select: { _count: { select: { cases: true } } },
     take: 1,
   },
 } satisfies Prisma.TaskExecutionInclude;
+
+const dispatchCandidateInclude = {
+  deployment: true,
+  taskExecution: {
+    include: { analysisSources: true, profileBinding: true, team: true },
+  },
+  testCase: { include: { snapshot: true } },
+} satisfies Prisma.TaskCaseExecutionInclude;
 
 type TaskDetailRow = Prisma.TaskExecutionGetPayload<{
   include: typeof taskDetailInclude;
@@ -553,6 +567,14 @@ export class TaskExecutionService {
         createdAt: task.createdAt.toISOString(),
         currentStage: task.currentStage,
         deadlineAt: task.deadlineAt.toISOString(),
+        deployments: task.deployments.map((deployment) => ({
+          enabled: deployment.enabled,
+          environment: deployment.environmentSnapshot,
+          id: deployment.id,
+          key: deployment.key,
+          name: deployment.name,
+          targetUrl: deployment.targetUrl,
+        })),
         environment: task.environmentSnapshot,
         executionDisposition: task.executionDisposition,
         finishedAt: iso(task.finishedAt),
@@ -582,8 +604,29 @@ export class TaskExecutionService {
     rawUrl: string,
   ) {
     const url = normalizeTargetUrl(rawUrl);
+    return this.setDeployments(current, id, {
+      deployments: [
+        { environment: {}, key: "default", name: "Default", targetUrl: url },
+      ],
+    });
+  }
+
+  async setDeployments(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskDeploymentsInput,
+  ) {
+    const deployments = normalizeTaskDeployments(input.deployments);
     const task = await this.prisma.taskExecution.findFirst({
-      include: { executionRuns: { select: { id: true } }, stages: true },
+      include: {
+        executionRuns: { select: { id: true } },
+        specificationSnapshots: {
+          include: { cases: true },
+          orderBy: { generatedAt: "desc" },
+          take: 1,
+        },
+        stages: true,
+      },
       where: { id, teamId: current.team.id },
     });
     if (!task)
@@ -604,7 +647,8 @@ export class TaskExecutionService {
       );
     }
     const environment = record(task.environmentSnapshot);
-    const target = new URL(url);
+    const primary = deployments[0]!;
+    const target = new URL(primary.targetUrl);
     const analysisStage = task.stages.find(
       (stage) => stage.type === "SPEC_ANALYSIS",
     );
@@ -627,7 +671,7 @@ export class TaskExecutionService {
             targetProvidedAt: now.toISOString(),
             targetProvidedBy: current.credential.id,
             targetSource: "MANUAL",
-            targetUrl: url,
+            targetUrl: primary.targetUrl,
           }),
           lifecycle: "RUNNING",
           projectionNeededAt: null,
@@ -643,6 +687,29 @@ export class TaskExecutionService {
       if (updated.count !== 1) {
         throw new ConflictException("The task can no longer accept input.");
       }
+      await tx.taskCaseExecution.deleteMany({
+        where: { runId: null, taskExecutionId: id },
+      });
+      await tx.taskDeployment.deleteMany({ where: { taskExecutionId: id } });
+      const createdDeployments = await Promise.all(
+        deployments.map((deployment) =>
+          tx.taskDeployment.create({
+            data: {
+              environmentSnapshot: json(deployment.environment),
+              key: deployment.key,
+              name: deployment.name,
+              targetUrl: deployment.targetUrl,
+              taskExecutionId: id,
+            },
+          }),
+        ),
+      );
+      const cases = task.specificationSnapshots[0]?.cases ?? [];
+      if (cases.length) {
+        await tx.taskCaseExecution.createMany({
+          data: taskDeploymentMatrix(id, cases, createdDeployments),
+        });
+      }
       await tx.taskExecutionStage.updateMany({
         data: {
           finishedAt: null,
@@ -655,7 +722,10 @@ export class TaskExecutionService {
       await tx.taskExecutionEvent.create({
         data: event(current.team.id, id, "HUMAN", "task.input.provided", {
           input: "DEPLOYMENT_TARGET",
-          url,
+          deployments: deployments.map((deployment) => ({
+            key: deployment.key,
+            targetUrl: deployment.targetUrl,
+          })),
         }),
       });
     });
@@ -799,6 +869,7 @@ export class TaskExecutionService {
         await tx.taskCaseExecution.createMany({
           data: retryCases.map((item) => ({
             caseId: item.caseId,
+            deploymentId: item.deploymentId,
             executionOrdinal: item.executionOrdinal + 1,
             taskExecutionId: id,
           })),
@@ -840,7 +911,12 @@ export class TaskExecutionService {
     return this.detail(current, id);
   }
 
-  async rerunCase(current: ToolAuthContext, id: string, caseId: string) {
+  async rerunCase(
+    current: ToolAuthContext,
+    id: string,
+    caseId: string,
+    deploymentId?: string,
+  ) {
     const now = new Date();
     const dispatchDeadline = new Date(
       now.getTime() + MINIMUM_CHILD_RUN_WINDOW_MS,
@@ -852,8 +928,7 @@ export class TaskExecutionService {
             caseExecutions: {
               include: { run: { select: { lifecycle: true } } },
               orderBy: { executionOrdinal: "desc" },
-              take: 1,
-              where: { caseId },
+              where: { caseId, ...(deploymentId ? { deploymentId } : {}) },
             },
             stages: true,
           },
@@ -877,22 +952,25 @@ export class TaskExecutionService {
             "The task deadline cannot accommodate another Runtime; create a new task instead.",
           );
         }
-        const latest = task.caseExecutions[0];
-        if (!latest) {
+        const latestExecutions = latestCaseExecutions(task.caseExecutions);
+        if (!latestExecutions.length) {
           throw new NotFoundException(`Spec Case ${caseId} was not found.`);
         }
-        if (!latest.run) {
+        if (latestExecutions.some((execution) => !execution.run)) {
           throw new ConflictException(
-            "The latest Spec Runtime has not been created yet.",
+            "At least one latest Spec Runtime has not been created yet.",
           );
         }
         if (
-          !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
-            latest.run.lifecycle,
+          latestExecutions.some(
+            (execution) =>
+              !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+                execution.run!.lifecycle,
+              ),
           )
         ) {
           throw new ConflictException(
-            "Only a terminal Spec Runtime can be rerun.",
+            "Only terminal Spec Runtimes can be rerun.",
           );
         }
         const executionStage = task.stages.find(
@@ -903,14 +981,23 @@ export class TaskExecutionService {
             "The task does not have a Spec execution stage.",
           );
         }
-        const nextExecution = await tx.taskCaseExecution.create({
-          data: {
-            caseId,
-            executionOrdinal: latest.executionOrdinal + 1,
-            taskExecutionId: task.id,
-          },
-          select: { executionOrdinal: true, id: true },
-        });
+        const nextExecutions = await Promise.all(
+          latestExecutions.map((latest) =>
+            tx.taskCaseExecution.create({
+              data: {
+                caseId,
+                deploymentId: latest.deploymentId,
+                executionOrdinal: latest.executionOrdinal + 1,
+                taskExecutionId: task.id,
+              },
+              select: {
+                deploymentId: true,
+                executionOrdinal: true,
+                id: true,
+              },
+            }),
+          ),
+        );
         await tx.taskExecutionStage.update({
           data: {
             finishedAt: null,
@@ -942,22 +1029,31 @@ export class TaskExecutionService {
             "The task can no longer accept a Runtime rerun.",
           );
         }
-        await tx.taskExecutionEvent.create({
-          data: event(
-            current.team.id,
-            task.id,
-            "HUMAN",
-            "task.case.rerun_queued",
-            {
-              caseExecutionId: nextExecution.id,
-              caseId,
-              executionOrdinal: nextExecution.executionOrdinal,
-              previousCaseExecutionId: latest.id,
-              requestedByCredentialId: current.credential.id,
-            },
-          ),
-        });
-        return nextExecution;
+        await Promise.all(
+          nextExecutions.map((nextExecution) => {
+            const previous = latestExecutions.find(
+              (execution) =>
+                execution.deploymentId === nextExecution.deploymentId,
+            )!;
+            return tx.taskExecutionEvent.create({
+              data: event(
+                current.team.id,
+                task.id,
+                "HUMAN",
+                "task.case.rerun_queued",
+                {
+                  caseExecutionId: nextExecution.id,
+                  caseId,
+                  deploymentId: nextExecution.deploymentId,
+                  executionOrdinal: nextExecution.executionOrdinal,
+                  previousCaseExecutionId: previous.id,
+                  requestedByCredentialId: current.credential.id,
+                },
+              ),
+            });
+          }),
+        );
+        return nextExecutions;
       });
     } catch (error) {
       if (uniqueConstraint(error)) {
@@ -1122,6 +1218,7 @@ export class TaskExecutionService {
     const task = await this.prisma.taskExecution.findUnique({
       include: {
         caseExecutions: { include: { run: true } },
+        deployments: { select: { id: true } },
         executionRuns: true,
         profileBinding: true,
         specificationSnapshots: {
@@ -1185,6 +1282,7 @@ export class TaskExecutionService {
       targetAvailable:
         task.kind === "DIRECT_RUN" ||
         task.kind === "LEGACY_RUN" ||
+        task.deployments.length > 0 ||
         typeof environment.targetUrl === "string",
       timedOut:
         task.lifecycle === "TIMED_OUT" ||
@@ -1399,7 +1497,11 @@ export class TaskExecutionService {
     const targetUrl = input.targetUrl
       ? normalizeTargetUrl(input.targetUrl)
       : undefined;
-    const target = targetUrl ? new URL(targetUrl) : null;
+    const deployments = normalizeTaskDeployments(input.deployments, targetUrl);
+    const primaryDeployment = deployments[0];
+    const target = primaryDeployment
+      ? new URL(primaryDeployment.targetUrl)
+      : null;
     try {
       await this.prisma.$transaction(async (tx) => {
         await tx.taskExecution.create({
@@ -1410,7 +1512,7 @@ export class TaskExecutionService {
                 ? {
                     allowedHosts: [target.hostname],
                     targetSource: "MANUAL",
-                    targetUrl,
+                    targetUrl: primaryDeployment!.targetUrl,
                   }
                 : {}),
               browserPolicy: input.browserPolicy,
@@ -1430,6 +1532,14 @@ export class TaskExecutionService {
             teamId: current.team.id,
             title: input.issueRef,
             traceId: randomBytes(16).toString("hex"),
+            deployments: {
+              create: deployments.map((deployment) => ({
+                environmentSnapshot: json(deployment.environment),
+                key: deployment.key,
+                name: deployment.name,
+                targetUrl: deployment.targetUrl,
+              })),
+            },
           },
         });
         await tx.taskExecutionStage.createMany({
@@ -1859,7 +1969,10 @@ export class TaskExecutionService {
     const sourceHash = testGenerationContextHash(context);
     const primaryPullRequest = selectPrimaryPullRequest(context);
     const targetUrl =
-      input.targetUrl ?? primaryPullRequest?.deploymentUrl ?? null;
+      input.deployments[0]?.targetUrl ??
+      input.targetUrl ??
+      primaryPullRequest?.deploymentUrl ??
+      null;
     const normalizedTarget = targetUrl ? normalizeTargetUrl(targetUrl) : null;
     const target = normalizedTarget ? new URL(normalizedTarget) : null;
     const now = new Date();
@@ -1901,12 +2014,31 @@ export class TaskExecutionService {
         },
         include: { cases: true },
       });
-      await tx.taskCaseExecution.createMany({
-        data: snapshot.cases.map((testCase) => ({
-          caseId: testCase.id,
-          executionOrdinal: 1,
+      let deployments = await tx.taskDeployment.findMany({
+        where: {
+          enabled: true,
           taskExecutionId: locked.stage.taskExecutionId,
-        })),
+        },
+      });
+      if (!deployments.length && normalizedTarget) {
+        deployments = [
+          await tx.taskDeployment.create({
+            data: {
+              environmentSnapshot: json({}),
+              key: "default",
+              name: "Default",
+              targetUrl: normalizedTarget,
+              taskExecutionId: locked.stage.taskExecutionId,
+            },
+          }),
+        ];
+      }
+      await tx.taskCaseExecution.createMany({
+        data: taskDeploymentMatrix(
+          locked.stage.taskExecutionId,
+          snapshot.cases,
+          deployments,
+        ),
       });
       await tx.taskStageAttempt.update({
         data: {
@@ -1950,7 +2082,10 @@ export class TaskExecutionService {
             ...(target
               ? {
                   allowedHosts: [target.hostname],
-                  targetSource: input.targetUrl ? "MANUAL" : "GITHUB",
+                  targetSource:
+                    input.deployments.length || input.targetUrl
+                      ? "MANUAL"
+                      : "GITHUB",
                   targetUrl: normalizedTarget,
                 }
               : {}),
@@ -2168,50 +2303,57 @@ export class TaskExecutionService {
     });
   }
 
-  private async dispatchPending(limit: number) {
+  private async dispatchPending(limit: number, taskExecutionId?: string) {
     const dispatchDeadline = new Date(Date.now() + MINIMUM_CHILD_RUN_WINDOW_MS);
-    const candidates = await this.prisma.taskCaseExecution.findMany({
-      include: {
-        taskExecution: {
-          include: { analysisSources: true, profileBinding: true, team: true },
-        },
-        testCase: { include: { snapshot: true } },
+    const where: Prisma.TaskCaseExecutionWhereInput = {
+      dispatchAttempts: { lt: CASE_DISPATCH_MAX_ATTEMPTS },
+      runId: null,
+      ...(taskExecutionId ? { taskExecutionId } : {}),
+      taskExecution: {
+        cancelRequestedAt: null,
+        deadlineAt: { gt: dispatchDeadline },
+        lifecycle: { in: ["RUNNING", "QUEUED"] },
       },
-      orderBy: { createdAt: "asc" },
-      take: limit,
-      where: {
-        dispatchAttempts: { lt: CASE_DISPATCH_MAX_ATTEMPTS },
-        runId: null,
-        taskExecution: {
-          cancelRequestedAt: null,
-          deadlineAt: { gt: dispatchDeadline },
-          lifecycle: { in: ["RUNNING", "QUEUED"] },
-        },
-        OR: [
-          { dispatchStatus: "PENDING" },
-          {
-            dispatchRequestedAt: {
-              lt: new Date(Date.now() - DISPATCH_RETRY_DELAY_MS),
-            },
-            dispatchStatus: { in: ["DISPATCHING", "FAILED"] },
+      OR: [
+        { dispatchStatus: "PENDING" },
+        {
+          dispatchRequestedAt: {
+            lt: new Date(Date.now() - DISPATCH_RETRY_DELAY_MS),
           },
-        ],
-      },
+          dispatchStatus: { in: ["DISPATCHING", "FAILED"] },
+        },
+      ],
+    };
+    // Select one lightweight row per Issue before loading any full execution
+    // candidate. This prevents a large or profile-blocked Issue from occupying a
+    // global candidate window and starving every newer Issue.
+    const issueRows = await this.prisma.taskCaseExecution.findMany({
+      distinct: ["taskExecutionId"],
+      orderBy: [{ createdAt: "asc" }, { taskExecutionId: "asc" }],
+      select: { createdAt: true, taskExecutionId: true },
+      where,
     });
+    const issueQueue = issueRows.map((row) => row.taskExecutionId);
     let dispatched = 0;
-    for (const candidate of candidates) {
-      const environment = record(candidate.taskExecution.environmentSnapshot);
-      if (typeof environment.targetUrl !== "string") continue;
+    while (issueQueue.length && dispatched < limit) {
+      const currentTaskExecutionId = issueQueue.shift()!;
+      const candidate = await this.prisma.taskCaseExecution.findFirst({
+        include: dispatchCandidateInclude,
+        orderBy: { createdAt: "asc" },
+        where: { AND: [where, { taskExecutionId: currentTaskExecutionId }] },
+      });
+      if (!candidate) continue;
       const reservation = await this.reservations.acquire(
         candidate.taskExecutionId,
+        candidate.deploymentId,
       );
       if (!reservation.acquired) continue;
       if (reservation.profile) {
         const activeRun = await this.prisma.executionRun.findFirst({
           select: { id: true },
           where: {
+            browserProfileId: reservation.profile.id,
             lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
-            taskExecutionId: candidate.taskExecutionId,
           },
         });
         if (activeRun) continue;
@@ -2230,12 +2372,15 @@ export class TaskExecutionService {
           dispatchStatus: candidate.dispatchStatus,
         },
       });
-      if (claimed.count !== 1) continue;
+      if (claimed.count !== 1) {
+        issueQueue.push(currentTaskExecutionId);
+        continue;
+      }
       try {
         const context = asToolContext(candidate.taskExecution);
         const request = taskCaseRunRequest(
           candidate,
-          environment.targetUrl,
+          candidate.deployment.targetUrl,
           reservation.profile?.runtimeProfileKey ?? null,
         );
         const run = await this.runs.createForTask(
@@ -2268,7 +2413,12 @@ export class TaskExecutionService {
               candidate.taskExecutionId,
               "CONTROL_PLANE",
               "task.case.run_created",
-              { caseId: candidate.caseId, runId: run.id },
+              {
+                caseId: candidate.caseId,
+                deploymentId: candidate.deploymentId,
+                deploymentKey: candidate.deployment.key,
+                runId: run.id,
+              },
             ),
           });
           return true;
@@ -2280,7 +2430,7 @@ export class TaskExecutionService {
         if (reservation.profile) {
           await this.reservations.recordUsage({
             executionRunId: run.id,
-            hostname: new URL(environment.targetUrl).hostname,
+            hostname: new URL(candidate.deployment.targetUrl).hostname,
             profileId: reservation.profile.id,
             requesterUserId: candidate.taskExecution.requestedByUserId,
             taskExecutionId: candidate.taskExecutionId,
@@ -2317,6 +2467,7 @@ export class TaskExecutionService {
           });
         });
       }
+      issueQueue.push(currentTaskExecutionId);
     }
     return dispatched;
   }
@@ -2379,7 +2530,10 @@ export class TaskExecutionService {
         },
       });
       if (!before) break;
-      const dispatched = await this.dispatchPending(Math.min(before, 100));
+      const dispatched = await this.dispatchPending(
+        Math.min(before, 100),
+        taskExecutionId,
+      );
       if (!dispatched) break;
     }
   }
@@ -2411,6 +2565,7 @@ export class TaskExecutionService {
 function taskCaseRunRequest(
   item: Prisma.TaskCaseExecutionGetPayload<{
     include: {
+      deployment: true;
       taskExecution: {
         include: {
           analysisSources: true;
@@ -2517,11 +2672,15 @@ function taskCaseRunRequest(
     ),
     deadlinePolicy: input.runDeadlinePolicy,
     environment: {
+      ...record(item.deployment.environmentSnapshot),
       allowedHosts: [target.hostname],
       authRole: agentDefinition.success
         ? agentDefinition.data.authRole
         : legacyDefinition!.authRole,
       caseId: item.caseId,
+      deploymentId: item.deploymentId,
+      deploymentKey: item.deployment.key,
+      deploymentName: item.deployment.name,
       specificationSnapshotId: item.testCase.snapshot.id,
       targetUrl,
       taskExecutionId: item.taskExecutionId,
@@ -2565,7 +2724,7 @@ function taskCaseRunRequest(
         : []),
     ].join("\n"),
     hitlPolicy: input.hitlPolicy,
-    idempotencyKey: `task:${item.taskExecutionId}:snapshot:${item.testCase.snapshot.id}:case:${item.caseId}:execution:${item.executionOrdinal}`,
+    idempotencyKey: `task:${item.taskExecutionId}:snapshot:${item.testCase.snapshot.id}:case:${item.caseId}:deployment:${item.deploymentId}:execution:${item.executionOrdinal}`,
     ...(input.model ? { model: input.model } : {}),
     retryPolicy: input.retryPolicy,
     source: { id: item.id, kind: "TASK_CASE" },
@@ -2767,6 +2926,12 @@ function toExportRun(
           dispatchLastError: execution.dispatchLastError,
           dispatchRequestedAt: iso(execution.dispatchRequestedAt),
           dispatchStatus: execution.dispatchStatus,
+          deployment: {
+            id: execution.deployment.id,
+            key: execution.deployment.key,
+            name: execution.deployment.name,
+            targetUrl: execution.deployment.targetUrl,
+          },
           executionOrdinal: execution.executionOrdinal,
           id: execution.id,
           updatedAt: execution.updatedAt.toISOString(),
@@ -2868,7 +3033,7 @@ function toTaskDetail(row: TaskDetailRow) {
     allExecutions,
     row.kind === "DIRECT_RUN" || row.kind === "LEGACY_RUN"
       ? row.executionRuns.length
-      : cases.length,
+      : cases.length * row.deployments.length,
   );
   return {
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
@@ -2878,6 +3043,14 @@ function toTaskDetail(row: TaskDetailRow) {
     currentStage: row.currentStage,
     deadlineAt: row.deadlineAt.toISOString(),
     environment: row.environmentSnapshot,
+    deployments: row.deployments.map((deployment) => ({
+      enabled: deployment.enabled,
+      environment: deployment.environmentSnapshot,
+      id: deployment.id,
+      key: deployment.key,
+      name: deployment.name,
+      targetUrl: deployment.targetUrl,
+    })),
     executionDisposition: row.executionDisposition,
     finishedAt: row.finishedAt?.toISOString() ?? null,
     id: row.id,
@@ -2973,7 +3146,8 @@ function toTaskSummary(
         }));
   const total =
     row.kind === "ISSUE_SPEC"
-      ? (row.specificationSnapshots[0]?._count.cases ?? 0)
+      ? (row.specificationSnapshots[0]?._count.cases ?? 0) *
+        row.deployments.length
       : row.executionRuns.length;
   return {
     counts: executionCounts(executions, total),
@@ -3026,16 +3200,39 @@ export function executionCounts(
 }
 
 function latestCaseExecutions<
-  T extends { caseId: string; executionOrdinal: number },
+  T extends { caseId: string; deploymentId: string; executionOrdinal: number },
 >(executions: readonly T[]) {
   const latest = new Map<string, T>();
   for (const execution of executions) {
-    const previous = latest.get(execution.caseId);
+    const key = `${execution.caseId}:${execution.deploymentId}`;
+    const previous = latest.get(key);
     if (!previous || execution.executionOrdinal > previous.executionOrdinal) {
-      latest.set(execution.caseId, execution);
+      latest.set(key, execution);
     }
   }
   return [...latest.values()];
+}
+
+function normalizeTaskDeployments(
+  deployments: readonly TaskDeployment[],
+  legacyTargetUrl?: string,
+): TaskDeployment[] {
+  if (deployments.length) {
+    return deployments.map((deployment) => ({
+      ...deployment,
+      targetUrl: normalizeTargetUrl(deployment.targetUrl),
+    }));
+  }
+  return legacyTargetUrl
+    ? [
+        {
+          environment: {},
+          key: "default",
+          name: "Default",
+          targetUrl: normalizeTargetUrl(legacyTargetUrl),
+        },
+      ]
+    : [];
 }
 
 function stageOrder(
@@ -3071,6 +3268,12 @@ function toCaseExecution(execution: TaskDetailRow["caseExecutions"][number]) {
       status: execution.dispatchStatus,
     },
     executionOrdinal: execution.executionOrdinal,
+    deployment: {
+      id: execution.deployment.id,
+      key: execution.deployment.key,
+      name: execution.deployment.name,
+      targetUrl: execution.deployment.targetUrl,
+    },
     id: execution.id,
     run: execution.run
       ? {

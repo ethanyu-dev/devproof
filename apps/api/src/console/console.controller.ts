@@ -150,6 +150,11 @@ export class ConsoleController {
     return this.runtimes.list(current);
   }
 
+  @Get("browser-pool-capacity")
+  browserPoolCapacity(@CurrentAuth() current: AuthContext) {
+    return this.runtimes.capacity(current);
+  }
+
   @Post("browser-runtimes/pairing-tokens")
   createPairingToken(@CurrentAuth() current: AuthContext) {
     return this.runtimes.createPairingToken(current);

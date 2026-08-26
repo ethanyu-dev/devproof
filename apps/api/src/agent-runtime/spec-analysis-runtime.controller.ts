@@ -10,7 +10,7 @@ import {
 import { parseBody } from "../common/validation.js";
 import { CurrentToolAuth } from "../tool-auth/current-tool-auth.decorator.js";
 import { ToolAuthGuard } from "../tool-auth/tool-auth.guard.js";
-import { requireAgentRuntimeIdentity } from "../tool-auth/tool-scope.js";
+import { requireAgentRuntimePool } from "../tool-auth/tool-scope.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 import { SpecAnalysisRuntimeService } from "./spec-analysis-runtime.service.js";
 
@@ -21,7 +21,7 @@ export class SpecAnalysisRuntimeController {
 
   @Post("claim")
   claim(@CurrentToolAuth() current: ToolAuthContext, @Body() body: unknown) {
-    requireAgentRuntimeIdentity(current);
+    requireAgentRuntimePool(current, "SPEC_ANALYSIS");
     return this.analysis.claim(
       current.team.id,
       parseBody(runtimeSpecAnalysisClaimInputSchema, body),
@@ -34,7 +34,7 @@ export class SpecAnalysisRuntimeController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireAgentRuntimeIdentity(current);
+    requireAgentRuntimePool(current, "SPEC_ANALYSIS");
     return this.analysis.heartbeat(
       current.team.id,
       id,
@@ -48,7 +48,7 @@ export class SpecAnalysisRuntimeController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireAgentRuntimeIdentity(current);
+    requireAgentRuntimePool(current, "SPEC_ANALYSIS");
     return this.analysis.appendEvent(
       current.team.id,
       id,
@@ -62,7 +62,7 @@ export class SpecAnalysisRuntimeController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireAgentRuntimeIdentity(current);
+    requireAgentRuntimePool(current, "SPEC_ANALYSIS");
     return this.analysis.executeTool(
       current.team.id,
       id,
@@ -76,7 +76,7 @@ export class SpecAnalysisRuntimeController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
-    requireAgentRuntimeIdentity(current);
+    requireAgentRuntimePool(current, "SPEC_ANALYSIS");
     return this.analysis.submitOutcome(
       current.team.id,
       id,

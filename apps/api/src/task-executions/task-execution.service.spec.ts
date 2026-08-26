@@ -49,6 +49,36 @@ describe("executionCounts", () => {
   });
 });
 
+describe("TaskExecutionService dispatch fairness", () => {
+  it("selects Issues distinctly before loading execution candidates", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const service = new TaskExecutionService(
+      { taskCaseExecution: { findMany } } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await (
+      service as unknown as {
+        dispatchPending(limit: number): Promise<number>;
+      }
+    ).dispatchPending(100);
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        distinct: ["taskExecutionId"],
+        select: { createdAt: true, taskExecutionId: true },
+      }),
+    );
+    expect(findMany).toHaveBeenCalledWith(
+      expect.not.objectContaining({ take: expect.anything() }),
+    );
+  });
+});
+
 describe("TaskExecutionService compatibility entry points", () => {
   it("wraps a legacy create_run request in a DIRECT_RUN task", async () => {
     const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
@@ -225,6 +255,7 @@ describe("TaskExecutionService profile ownership", () => {
 describe("TaskExecutionService Spec Runtime rerun", () => {
   const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
   const caseId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
+  const deploymentId = "764146a8-5230-4b02-832a-5eef19e8dc8a";
   const previousExecutionId = "fa078e55-f887-4f67-b8ef-229b976ee56f";
   const nextExecutionId = "0da63e02-7680-4a93-9721-6af09e6a4f04";
   const current = {
@@ -238,6 +269,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
       caseExecutions: [
         {
           caseId,
+          deploymentId,
           executionOrdinal: 1,
           id: previousExecutionId,
           run: { lifecycle: "COMPLETED" },
@@ -249,6 +281,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
       stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
     });
     const taskCaseExecutionCreate = vi.fn().mockResolvedValue({
+      deploymentId,
       executionOrdinal: 2,
       id: nextExecutionId,
     });
@@ -295,10 +328,11 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
     expect(taskCaseExecutionCreate).toHaveBeenCalledWith({
       data: {
         caseId,
+        deploymentId,
         executionOrdinal: 2,
         taskExecutionId: taskId,
       },
-      select: { executionOrdinal: true, id: true },
+      select: { deploymentId: true, executionOrdinal: true, id: true },
     });
     expect(taskExecutionStageUpdate).toHaveBeenCalledWith({
       data: {
@@ -476,6 +510,7 @@ describe("TaskExecutionService rerun", () => {
       caseExecutions: [],
       createdAt: new Date("2026-08-20T00:00:00.000Z"),
       currentStage: "SPEC_ANALYSIS",
+      deployments: [],
       executionDisposition: null,
       executionRuns: [],
       id: "task-11",
@@ -610,6 +645,12 @@ describe("TaskExecutionService log export", () => {
       name: "Open dashboard",
       position: 0,
     };
+    const deployment = {
+      id: "deployment-1",
+      key: "staging",
+      name: "Staging",
+      targetUrl: "https://example.com",
+    };
     const run = {
       _count: { evidences: 2, interventions: 1 },
       cancelRequestedAt: null,
@@ -659,6 +700,8 @@ describe("TaskExecutionService log export", () => {
           dispatchLastError: null,
           dispatchRequestedAt: occurredAt,
           dispatchStatus: "LINKED",
+          deployment,
+          deploymentId: deployment.id,
           executionOrdinal: 1,
           id: "execution-1",
           run,
@@ -670,6 +713,16 @@ describe("TaskExecutionService log export", () => {
       createdAt: occurredAt,
       currentStage: "SPEC_EXECUTION",
       deadlineAt: new Date("2026-08-20T09:00:00.000Z"),
+      deployments: [
+        {
+          ...deployment,
+          createdAt: occurredAt,
+          enabled: true,
+          environmentSnapshot: {},
+          taskExecutionId: taskId,
+          updatedAt: occurredAt,
+        },
+      ],
       environmentSnapshot: { targetUrl: "https://example.com" },
       executionDisposition: "EXECUTED",
       executionRuns: [run],
@@ -811,6 +864,13 @@ describe("TaskExecutionService log export", () => {
       logs: [{ sequence: "1" }, { sequence: "501" }],
       run: { id: runId },
     });
+    expect(exported.task.deployments).toEqual([
+      expect.objectContaining({
+        id: deployment.id,
+        key: deployment.key,
+        targetUrl: deployment.targetUrl,
+      }),
+    ]);
     expect(exported.taskEvents).toHaveLength(1);
     expect(runEventFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");
     expect(taskEventFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");

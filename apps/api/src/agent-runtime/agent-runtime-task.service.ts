@@ -37,6 +37,11 @@ const retryPolicySchema = z.object({
   browser: z
     .object({
       availabilityPolicy: z.enum(["WAIT", "FAIL_FAST"]),
+      profile: z.object({
+        key: z.string().optional(),
+        mode: z.enum(["PERSISTENT", "EPHEMERAL"]),
+      }),
+      requiredCapabilities: z.array(z.string()),
     })
     .optional(),
   retryPolicy: z.object({
@@ -195,6 +200,14 @@ export class AgentRuntimeTaskService {
                 cancelRequestedAt: null,
                 lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
                 teamId,
+              },
+              attempt: {
+                browserExecution: {
+                  is: {
+                    runtimeSessionId: { not: null },
+                    status: { in: ["ACTIVE", "HUMAN_CONTROL"] },
+                  },
+                },
               },
               OR: [
                 { status: "PENDING" },
@@ -817,6 +830,29 @@ export class AgentRuntimeTaskService {
         provider: task.provider,
         runId: task.runId,
         snapshot: json(nextSnapshot),
+      },
+    });
+    const browserPolicy = retryPolicySchema.parse(
+      previousSnapshot.executionPolicy,
+    ).browser;
+    if (!browserPolicy) {
+      throw new ConflictException("The retry has no Browser execution policy.");
+    }
+    const targetUrl =
+      typeof previousSnapshot.environment.targetUrl === "string"
+        ? previousSnapshot.environment.targetUrl
+        : undefined;
+    await tx.browserExecution.create({
+      data: {
+        attemptId: nextAttemptId,
+        input: json({
+          availabilityPolicy: browserPolicy.availabilityPolicy,
+          profile: browserPolicy.profile,
+          requiredCapabilities: browserPolicy.requiredCapabilities,
+          ...(targetUrl ? { targetUrl } : {}),
+        }),
+        runId: task.runId,
+        status: "REQUESTED",
       },
     });
     await tx.executionRun.update({

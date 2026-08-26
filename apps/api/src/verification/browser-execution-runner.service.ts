@@ -27,7 +27,6 @@ import type {
 import { ExecutionRunnerUnavailableError } from "./runtime-adapters.js";
 import {
   resolveRuntimeRoutingPlan,
-  shuffleRuntimeCandidates,
   verificationTargetHostname,
 } from "./runtime-routing.js";
 import { VerificationLifecycleService } from "./verification-lifecycle.service.js";
@@ -35,6 +34,8 @@ import { VerificationLifecycleService } from "./verification-lifecycle.service.j
 function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
+
+class RuntimeCapacityExhaustedError extends Error {}
 
 export function supportsBrowserAgentProtocol(runtime: {
   protocolMajor: number | null;
@@ -153,6 +154,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           });
           break;
         } catch (error) {
+          if (error instanceof RuntimeCapacityExhaustedError) break;
           if (
             error instanceof Prisma.PrismaClientKnownRequestError &&
             (error.code === "P2002" || error.code === "P2034")
@@ -314,6 +316,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           });
           break;
         } catch (error) {
+          if (error instanceof RuntimeCapacityExhaustedError) break;
           if (
             error instanceof Prisma.PrismaClientKnownRequestError &&
             (error.code === "P2002" || error.code === "P2034")
@@ -986,6 +989,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         });
         break;
       } catch (error) {
+        if (error instanceof RuntimeCapacityExhaustedError) break;
         if (
           error instanceof Prisma.PrismaClientKnownRequestError &&
           (error.code === "P2002" || error.code === "P2034")
@@ -1104,12 +1108,60 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         candidates.push(runtime);
       }
     }
+    if (plan.routing.source === "POOL" && candidates.length > 1) {
+      const now = new Date();
+      const [slotCounts, constrainedCounts] = await Promise.all([
+        this.prisma.browserRuntimeSlot.groupBy({
+          _count: { _all: true },
+          by: ["runtimeId"],
+          where: {
+            expiresAt: { gt: now },
+            runtimeId: { in: candidates.map((runtime) => runtime.id) },
+          },
+        }),
+        this.prisma.browserExecution.groupBy({
+          _count: { _all: true },
+          by: ["targetRuntimeId"],
+          where: {
+            status: { in: ["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"] },
+            targetRuntimeId: {
+              in: candidates.map((runtime) => runtime.id),
+            },
+          },
+        }),
+      ]);
+      const occupied = new Map(
+        slotCounts.map((row) => [row.runtimeId, row._count._all]),
+      );
+      const constrained = new Map(
+        constrainedCounts.flatMap((row) =>
+          row.targetRuntimeId
+            ? [[row.targetRuntimeId, row._count._all] as const]
+            : [],
+        ),
+      );
+      candidates.sort((left, right) => {
+        const pressure =
+          (constrained.get(left.id) ?? 0) - (constrained.get(right.id) ?? 0);
+        if (pressure !== 0) return pressure;
+        const leftOccupied = occupied.get(left.id) ?? 0;
+        const rightOccupied = occupied.get(right.id) ?? 0;
+        const utilization =
+          leftOccupied / left.maxConcurrency -
+          rightOccupied / right.maxConcurrency;
+        if (utilization !== 0) return utilization;
+        const availability =
+          right.maxConcurrency -
+          rightOccupied -
+          (left.maxConcurrency - leftOccupied);
+        return availability !== 0
+          ? availability
+          : left.id.localeCompare(right.id);
+      });
+    }
     return {
       ...plan,
-      runtimes:
-        plan.routing.source === "POOL"
-          ? shuffleRuntimeCandidates(candidates)
-          : candidates,
+      runtimes: candidates,
     };
   }
 
@@ -1132,13 +1184,24 @@ export class BrowserExecutionRunner implements ExecutionRunner {
   }) {
     return this.prisma.$transaction(
       async (tx) => {
+        const runtime = await tx.browserRuntime.findUniqueOrThrow({
+          where: { id: input.runtimeId },
+        });
+        const occupied = await tx.browserRuntimeSlot.count({
+          where: {
+            expiresAt: { gt: new Date() },
+            runtimeId: input.runtimeId,
+          },
+        });
+        if (occupied >= runtime.maxConcurrency) {
+          throw new RuntimeCapacityExhaustedError(
+            `Browser Runtime ${runtime.id} has no available slot.`,
+          );
+        }
         const counter = await tx.browserRuntimeFenceCounter.upsert({
           create: { runtimeId: input.runtimeId, value: 1n },
           update: { value: { increment: 1n } },
           where: { runtimeId: input.runtimeId },
-        });
-        const runtime = await tx.browserRuntime.findUniqueOrThrow({
-          where: { id: input.runtimeId },
         });
         const session = await tx.browserRuntimeSession.create({
           data: {
