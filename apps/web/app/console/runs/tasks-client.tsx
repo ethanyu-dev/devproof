@@ -1016,7 +1016,16 @@ function TaskStatusPanel({
                 />
               ))
             : detail.cases.map((testCase) => (
-                <CaseCard key={testCase.id} testCase={testCase} />
+                <CaseCard
+                  busy={busy}
+                  canRerun={
+                    detail.cancelRequestedAt === null &&
+                    new Date(detail.deadlineAt).getTime() - Date.now() >= 30_000
+                  }
+                  key={testCase.id}
+                  onRerun={() => void onMutate(`/cases/${testCase.id}/rerun`)}
+                  testCase={testCase}
+                />
               ))}
         </div>
       </div>
@@ -1122,9 +1131,20 @@ function SpecificationSnapshot({ detail }: { detail: TaskDetail }) {
   );
 }
 
-function CaseCard({ testCase }: { testCase: TaskCase }) {
+function CaseCard({
+  busy,
+  canRerun,
+  onRerun,
+  testCase,
+}: {
+  busy: boolean;
+  canRerun: boolean;
+  onRerun: () => void;
+  testCase: TaskCase;
+}) {
   const execution = testCase.executions.at(-1) ?? null;
   const run = execution?.run ?? null;
+  const rerunnable = run ? terminalLifecycles.has(run.lifecycle) : false;
   const status =
     run?.verdict ??
     run?.executionDisposition ??
@@ -1139,7 +1159,31 @@ function CaseCard({ testCase }: { testCase: TaskCase }) {
             {testCase.position + 1}. {testCase.name}
           </b>
         </span>
-        <Badge tone={tone(status)}>{displayLabel(status)}</Badge>
+        <span className="dp-specification-case-actions">
+          <Badge tone={tone(status)}>{displayLabel(status)}</Badge>
+          {rerunnable ? (
+            <Button
+              disabled={busy || !canRerun}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "确认重跑该 Spec Runtime？当前执行及证据会保留，并新建一次执行。",
+                  )
+                ) {
+                  onRerun();
+                }
+              }}
+              title={
+                canRerun
+                  ? "保留当前记录并创建新的 Runtime"
+                  : "任务已取消或剩余时间不足，无法重跑 Runtime"
+              }
+              variant="secondary"
+            >
+              <RotateCcw /> 重跑 Runtime
+            </Button>
+          ) : null}
+        </span>
       </div>
       <div className="dp-spec-run-state">
         <span>

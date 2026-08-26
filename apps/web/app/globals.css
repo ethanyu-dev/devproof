@@ -2741,6 +2741,12 @@ a {
   overflow-wrap: anywhere;
 }
 
+.dp-specification-case-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .dp-specification-case-body {
   display: grid;
   gap: 8px;
