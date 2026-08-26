@@ -139,6 +139,15 @@ export class TaskExecutionConsoleController {
     );
   }
 
+  @Post(":id/cases/:caseId/rerun")
+  rerunCase(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+  ) {
+    return this.tasks.rerunCase(taskToolContext(current), id, caseId);
+  }
+
   @Post(":id/cancel")
   cancel(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.tasks.cancel(taskToolContext(current), id);

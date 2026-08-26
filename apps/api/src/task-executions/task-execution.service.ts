@@ -816,6 +816,137 @@ export class TaskExecutionService {
     return this.detail(current, id);
   }
 
+  async rerunCase(current: ToolAuthContext, id: string, caseId: string) {
+    const now = new Date();
+    const dispatchDeadline = new Date(
+      now.getTime() + MINIMUM_CHILD_RUN_WINDOW_MS,
+    );
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const task = await tx.taskExecution.findFirst({
+          include: {
+            caseExecutions: {
+              include: { run: { select: { lifecycle: true } } },
+              orderBy: { executionOrdinal: "desc" },
+              take: 1,
+              where: { caseId },
+            },
+            stages: true,
+          },
+          where: { id, teamId: current.team.id },
+        });
+        if (!task) {
+          throw new NotFoundException(`Task execution ${id} was not found.`);
+        }
+        if (task.kind !== "ISSUE_SPEC") {
+          throw new ConflictException(
+            "Only Spec Runtime executions can be rerun in place.",
+          );
+        }
+        if (task.cancelRequestedAt) {
+          throw new ConflictException(
+            "A Runtime from a cancelled task cannot be rerun.",
+          );
+        }
+        if (task.deadlineAt <= dispatchDeadline) {
+          throw new ConflictException(
+            "The task deadline cannot accommodate another Runtime; create a new task instead.",
+          );
+        }
+        const latest = task.caseExecutions[0];
+        if (!latest) {
+          throw new NotFoundException(`Spec Case ${caseId} was not found.`);
+        }
+        if (!latest.run) {
+          throw new ConflictException(
+            "The latest Spec Runtime has not been created yet.",
+          );
+        }
+        if (
+          !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+            latest.run.lifecycle,
+          )
+        ) {
+          throw new ConflictException(
+            "Only a terminal Spec Runtime can be rerun.",
+          );
+        }
+        const executionStage = task.stages.find(
+          (stage) => stage.type === "SPEC_EXECUTION",
+        );
+        if (!executionStage) {
+          throw new NotFoundException(
+            "The task does not have a Spec execution stage.",
+          );
+        }
+        const nextExecution = await tx.taskCaseExecution.create({
+          data: {
+            caseId,
+            executionOrdinal: latest.executionOrdinal + 1,
+            taskExecutionId: task.id,
+          },
+          select: { executionOrdinal: true, id: true },
+        });
+        await tx.taskExecutionStage.update({
+          data: {
+            finishedAt: null,
+            lastError: Prisma.JsonNull,
+            status: "RUNNING",
+            waitingReason: null,
+          },
+          where: { id: executionStage.id },
+        });
+        const reopened = await tx.taskExecution.updateMany({
+          data: {
+            currentStage: "SPEC_EXECUTION",
+            executionDisposition: null,
+            finishedAt: null,
+            lifecycle: "RUNNING",
+            projectionNeededAt: now,
+            verdict: null,
+            waitingReason: null,
+          },
+          where: {
+            cancelRequestedAt: null,
+            deadlineAt: { gt: dispatchDeadline },
+            id: task.id,
+            teamId: current.team.id,
+          },
+        });
+        if (reopened.count !== 1) {
+          throw new ConflictException(
+            "The task can no longer accept a Runtime rerun.",
+          );
+        }
+        await tx.taskExecutionEvent.create({
+          data: event(
+            current.team.id,
+            task.id,
+            "HUMAN",
+            "task.case.rerun_queued",
+            {
+              caseExecutionId: nextExecution.id,
+              caseId,
+              executionOrdinal: nextExecution.executionOrdinal,
+              previousCaseExecutionId: latest.id,
+              requestedByCredentialId: current.credential.id,
+            },
+          ),
+        });
+        return nextExecution;
+      });
+    } catch (error) {
+      if (uniqueConstraint(error)) {
+        throw new ConflictException(
+          "This Spec Runtime has already been queued for rerun.",
+        );
+      }
+      throw error;
+    }
+    await this.dispatchPendingForTask(id);
+    return this.detail(current, id);
+  }
+
   async cancel(current: ToolAuthContext, id: string) {
     const task = await this.prisma.taskExecution.findFirst({
       include: { executionRuns: { select: { id: true, lifecycle: true } } },

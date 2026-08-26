@@ -89,6 +89,16 @@ export class TaskExecutionController {
     );
   }
 
+  @Post(":id/cases/:caseId/rerun")
+  rerunCase(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunCase(current, id, caseId);
+  }
+
   @Post(":id/cancel")
   cancel(@CurrentToolAuth() current: ToolAuthContext, @Param("id") id: string) {
     requireToolScope(current, "run:cancel");
