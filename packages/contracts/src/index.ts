@@ -861,10 +861,49 @@ const taskRetryPolicySchema = z
     ],
   });
 
+export const taskDeploymentSchema = z.object({
+  environment: z.record(z.string(), z.unknown()).default({}),
+  key: z
+    .string()
+    .trim()
+    .min(1)
+    .max(160)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
+  name: z.string().trim().min(1).max(200),
+  targetUrl: z
+    .string()
+    .trim()
+    .url()
+    .max(2_000)
+    .refine((value) => /^https?:\/\//u.test(value), {
+      message: "targetUrl must use http or https.",
+    })
+    .refine((value) => !/^https?:\/\/[^/?#]*@/iu.test(value), {
+      message: "targetUrl cannot contain URL credentials.",
+    }),
+});
+
 const issueTaskExecutionCreateInputSchema = z.object({
   analysisMaxAttempts: z.number().int().min(1).max(10).default(3),
   browserPolicy: taskBrowserPolicySchema,
   deadlineSeconds: z.number().int().min(60).max(86_400).default(7_200),
+  deployments: z
+    .array(taskDeploymentSchema)
+    .max(20)
+    .default([])
+    .superRefine((deployments, context) => {
+      const keys = new Set<string>();
+      for (const [index, deployment] of deployments.entries()) {
+        if (keys.has(deployment.key)) {
+          context.addIssue({
+            code: "custom",
+            message: "Deployment keys must be unique within an Issue task.",
+            path: [index, "key"],
+          });
+        }
+        keys.add(deployment.key);
+      }
+    }),
   hitlPolicy: runHitlPolicySchema.default({
     enabled: true,
     notificationChannels: ["FEISHU"],
@@ -923,6 +962,10 @@ export const taskDeploymentTargetInputSchema = z.object({
     .refine((value) => !/^https?:\/\/[^/?#]*@/iu.test(value), {
       message: "url cannot contain URL credentials.",
     }),
+});
+
+export const taskDeploymentsInputSchema = z.object({
+  deployments: z.array(taskDeploymentSchema).min(1).max(20),
 });
 
 export const taskStageRetryInputSchema = z.object({
@@ -1103,12 +1146,27 @@ export const specificationDeploymentTargetInputSchema = z.object({
   url: z.string().url().max(2_000),
 });
 
-export const specificationPlaygroundInputSchema = z.object({
-  issueRef: z.string().trim().min(1).max(500),
-  profilePolicy: taskProfilePolicySchema,
-  submissionId: z.string().uuid(),
-  targetUrl: z.string().url().max(2_000).optional(),
-});
+export const specificationPlaygroundInputSchema = z
+  .object({
+    deployments: z.array(taskDeploymentSchema).max(20).default([]),
+    issueRef: z.string().trim().min(1).max(500),
+    profilePolicy: taskProfilePolicySchema,
+    submissionId: z.string().uuid(),
+    targetUrl: z.string().url().max(2_000).optional(),
+  })
+  .superRefine((input, context) => {
+    const keys = new Set<string>();
+    for (const [index, deployment] of input.deployments.entries()) {
+      if (keys.has(deployment.key)) {
+        context.addIssue({
+          code: "custom",
+          message: "Deployment keys must be unique.",
+          path: ["deployments", index, "key"],
+        });
+      }
+      keys.add(deployment.key);
+    }
+  });
 
 export type SpecificationIssueContext = z.infer<
   typeof specificationIssueContextSchema
@@ -1674,6 +1732,8 @@ export type TaskExecutionCreateInput = z.infer<
 export type TaskDeploymentTargetInput = z.infer<
   typeof taskDeploymentTargetInputSchema
 >;
+export type TaskDeployment = z.infer<typeof taskDeploymentSchema>;
+export type TaskDeploymentsInput = z.infer<typeof taskDeploymentsInputSchema>;
 export type TaskStageRetryInput = z.infer<typeof taskStageRetryInputSchema>;
 export type AgentRuntimeProvider = z.infer<typeof agentRuntimeProviderSchema>;
 export type VerificationRunStatus = z.infer<typeof verificationRunStatusSchema>;

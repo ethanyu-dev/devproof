@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import {
   taskDeploymentTargetInputSchema,
+  taskDeploymentsInputSchema,
   taskExecutionCreateInputSchema,
   taskStageRetryInputSchema,
 } from "@devproof/contracts";
@@ -73,6 +74,20 @@ export class TaskExecutionController {
     return this.tasks.setDeploymentTarget(current, id, input.url);
   }
 
+  @Post(":id/deployments")
+  setDeployments(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.setDeployments(
+      current,
+      id,
+      parseBody(taskDeploymentsInputSchema, body),
+    );
+  }
+
   @Post(":id/stages/:stage/retry")
   retryStage(
     @CurrentToolAuth() current: ToolAuthContext,
@@ -97,6 +112,17 @@ export class TaskExecutionController {
   ) {
     requireToolScope(current, "run:write");
     return this.tasks.rerunCase(current, id, caseId);
+  }
+
+  @Post(":id/cases/:caseId/deployments/:deploymentId/rerun")
+  rerunCaseDeployment(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+    @Param("deploymentId") deploymentId: string,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunCase(current, id, caseId, deploymentId);
   }
 
   @Post(":id/cancel")

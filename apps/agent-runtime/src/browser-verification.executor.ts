@@ -379,25 +379,16 @@ export class BrowserVerificationExecutor {
   }
 
   private async acquireBrowserWithPolicy(
-    task: RuntimeTaskLease,
+    _task: RuntimeTaskLease,
     lease: ActiveLease,
-    signal: AbortSignal,
+    _signal: AbortSignal,
     execution: RuntimeBrowserAcquireInput["execution"],
   ) {
-    for (;;) {
-      const result = await this.controlPlane.acquireBrowser(lease, execution);
-      if (result.status === "ACQUIRED") return result;
-
-      if (
-        Date.now() + result.retryAfterMs >=
-        Date.parse(task.snapshot.deadlineAt)
-      ) {
-        throw new Error(
-          `等待浏览器容量时超过获取截止时间（${result.reason}）。`,
-        );
-      }
-      await abortableDelay(result.retryAfterMs, signal);
-    }
+    const result = await this.controlPlane.acquireBrowser(lease, execution);
+    if (result.status === "ACQUIRED") return result;
+    throw new Error(
+      `Browser admission was lost before Agent execution (${result.reason}); the task will be retried.`,
+    );
   }
 
   private async executeTool(input: {
@@ -774,24 +765,6 @@ function collectEvidence(
     }
     Object.values(record).forEach((item) => collectEvidence(item, target));
   }
-}
-
-function abortableDelay(milliseconds: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      return;
-    }
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
-  });
 }
 
 function readTargetUrl(environment: Record<string, unknown>) {

@@ -5,6 +5,7 @@ export interface ToolAuthContext {
     id: string;
     kind?: "AGENT_RUNTIME" | "TOOL";
     name: string;
+    pool?: "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "MIXED";
     scopes: ToolCredentialScope[];
   };
   team: {

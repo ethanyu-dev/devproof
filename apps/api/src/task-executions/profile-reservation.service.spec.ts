@@ -110,6 +110,7 @@ describe("ProfileReservationService", () => {
       taskExecutionStage: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      taskDeploymentProfileBinding: { deleteMany: vi.fn() },
       taskProfileBinding: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
@@ -167,6 +168,7 @@ describe("ProfileReservationService", () => {
       taskExecutionStage: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      taskDeploymentProfileBinding: { deleteMany: vi.fn() },
       taskProfileBinding: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },

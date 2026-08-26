@@ -238,6 +238,43 @@ describe("DevProof contracts", () => {
     });
   });
 
+  it("accepts multiple Deployment targets and rejects duplicate keys", () => {
+    const request = {
+      deployments: [
+        {
+          key: "staging",
+          name: "Staging",
+          targetUrl: "https://staging.example.com",
+        },
+        {
+          key: "preview",
+          name: "Preview",
+          targetUrl: "https://preview.example.com",
+        },
+      ],
+      idempotencyKey: "issue-task:ENG-2:1",
+      issueRef: "ENG-2",
+      kind: "ISSUE_SPEC" as const,
+    };
+
+    const parsed = taskExecutionCreateInputSchema.parse(request);
+    expect(parsed.kind).toBe("ISSUE_SPEC");
+    if (parsed.kind !== "ISSUE_SPEC") throw new Error("Expected Issue task.");
+    expect(parsed.deployments).toEqual([
+      expect.objectContaining({ key: "staging" }),
+      expect.objectContaining({ key: "preview" }),
+    ]);
+    expect(
+      taskExecutionCreateInputSchema.safeParse({
+        ...request,
+        deployments: request.deployments.map((deployment) => ({
+          ...deployment,
+          key: "same",
+        })),
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts a direct task wrapper and validates deployment targets", () => {
     expect(
       taskExecutionCreateInputSchema.safeParse({

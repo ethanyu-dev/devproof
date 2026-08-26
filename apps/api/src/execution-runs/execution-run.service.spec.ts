@@ -47,6 +47,7 @@ describe("ExecutionRunService HITL resume", () => {
   it("copies the Run HITL policy into the immutable Runtime task snapshot", async () => {
     const tx = {
       agentRuntimeTask: { create: vi.fn() },
+      browserExecution: { create: vi.fn() },
       executionRun: { create: vi.fn() },
       runAttempt: { create: vi.fn() },
       runEvent: { create: vi.fn() },
@@ -98,6 +99,16 @@ describe("ExecutionRunService HITL resume", () => {
               hitl: snapshot.executionPolicy.hitl,
             }),
           }),
+        }),
+      }),
+    );
+    expect(tx.browserExecution.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          input: expect.objectContaining({
+            targetUrl: "https://example.com",
+          }),
+          status: "REQUESTED",
         }),
       }),
     );

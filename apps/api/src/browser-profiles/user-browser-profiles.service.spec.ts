@@ -423,6 +423,7 @@ describe("UserBrowserProfilesService", () => {
       taskExecutionStage: {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
+      taskDeploymentProfileBinding: { deleteMany: vi.fn() },
       taskProfileBinding: {
         findMany: vi
           .fn()

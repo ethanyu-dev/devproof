@@ -267,30 +267,44 @@ export class UserBrowserProfilesService {
   ) {
     const profile = await this.owned(current, id);
     if (input.verificationUrl || input.grants) {
-      const [activeRuns, activeSessions, resolvedBindings] = await Promise.all([
-        this.prisma.executionRun.count({
-          where: {
-            browserProfileId: id,
-            lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
-          },
-        }),
-        this.prisma.browserRuntimeSession.count({
-          where: {
-            status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
-            userBrowserProfileId: id,
-          },
-        }),
-        this.prisma.taskProfileBinding.count({
-          where: {
-            resolvedProfileId: id,
-            status: "RESOLVED",
-            taskExecution: {
+      const [activeRuns, activeSessions, resolvedBindings, deploymentBindings] =
+        await Promise.all([
+          this.prisma.executionRun.count({
+            where: {
+              browserProfileId: id,
               lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
             },
-          },
-        }),
-      ]);
-      if (activeRuns || activeSessions || resolvedBindings) {
+          }),
+          this.prisma.browserRuntimeSession.count({
+            where: {
+              status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
+              userBrowserProfileId: id,
+            },
+          }),
+          this.prisma.taskProfileBinding.count({
+            where: {
+              resolvedProfileId: id,
+              status: "RESOLVED",
+              taskExecution: {
+                lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+              },
+            },
+          }),
+          this.prisma.taskDeploymentProfileBinding.count({
+            where: {
+              profileId: id,
+              taskExecution: {
+                lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+              },
+            },
+          }),
+        ]);
+      if (
+        activeRuns ||
+        activeSessions ||
+        resolvedBindings ||
+        deploymentBindings
+      ) {
         throw new ConflictException(
           "Profile target and trigger grants cannot change while a non-terminal task is bound to it.",
         );
@@ -884,9 +898,21 @@ export class UserBrowserProfilesService {
     await this.prisma.$transaction(async (tx) => {
       const bindings = await tx.taskProfileBinding.findMany({
         select: { taskExecutionId: true },
-        where: { resolvedProfileId: profileId, status: "RESOLVED" },
+        where: {
+          OR: [
+            { resolvedProfileId: profileId },
+            {
+              taskExecution: {
+                deploymentProfileBindings: { some: { profileId } },
+              },
+            },
+          ],
+          status: "RESOLVED",
+        },
       });
-      const taskIds = bindings.map((binding) => binding.taskExecutionId);
+      const taskIds = [
+        ...new Set(bindings.map((binding) => binding.taskExecutionId)),
+      ];
       await tx.browserProfileReservation.updateMany({
         data: {
           leaseExpiresAt: null,
@@ -909,9 +935,12 @@ export class UserBrowserProfilesService {
           status: "WAITING_INPUT",
           version: { increment: 1 },
         },
-        where: { resolvedProfileId: profileId, status: "RESOLVED" },
+        where: { status: "RESOLVED", taskExecutionId: { in: taskIds } },
       });
       if (taskIds.length) {
+        await tx.taskDeploymentProfileBinding.deleteMany({
+          where: { taskExecutionId: { in: taskIds } },
+        });
         await tx.taskExecution.updateMany({
           data: {
             currentStage: "PROFILE_RESOLUTION",

@@ -484,7 +484,7 @@ describe("Agent Runtime browser verification executor", () => {
     );
   });
 
-  it("waits for browser capacity within the same Runtime task", async () => {
+  it("does not hold a Runtime lane while browser capacity is unavailable", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "response-after-capacity",
       output: [
@@ -499,15 +499,12 @@ describe("Agent Runtime browser verification executor", () => {
       ],
     });
     const controlPlane = {
-      acquireBrowser: vi
-        .fn()
-        .mockResolvedValueOnce({
-          browserExecutionId: "ab91fa7b-afd8-42be-982b-e860de0fca67",
-          reason: "NO_AVAILABLE_SLOT",
-          retryAfterMs: 1,
-          status: "WAITING_CAPACITY",
-        })
-        .mockResolvedValueOnce(acquiredBrowser),
+      acquireBrowser: vi.fn().mockResolvedValueOnce({
+        browserExecutionId: "ab91fa7b-afd8-42be-982b-e860de0fca67",
+        reason: "NO_AVAILABLE_SLOT",
+        retryAfterMs: 1,
+        status: "WAITING_CAPACITY",
+      }),
       appendEvent: vi.fn().mockResolvedValue({}),
       browserCommand: vi.fn(),
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
@@ -518,19 +515,14 @@ describe("Agent Runtime browser verification executor", () => {
       10,
     );
 
-    const outcome = await executor.execute(
-      task,
-      lease,
-      new AbortController().signal,
-    );
-
-    expect(outcome.kind).toBe("WAITING_HUMAN");
-    expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(2);
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
+    await expect(
+      executor.execute(task, lease, new AbortController().signal),
+    ).rejects.toThrow("Browser admission was lost");
+    expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
   });
 
-  it("stops a capacity wait when the Runtime task is cancelled", async () => {
+  it("reports a lost admission without starting the model", async () => {
     const create = vi.fn();
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue({
@@ -548,15 +540,10 @@ describe("Agent Runtime browser verification executor", () => {
       controlPlane as never,
       10,
     );
-    const controller = new AbortController();
-
-    const execution = executor.execute(task, lease, controller.signal);
-    await vi.waitFor(() =>
-      expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(1),
-    );
-    controller.abort(new Error("Run cancellation requested."));
-
-    await expect(execution).rejects.toThrow("Run cancellation requested.");
+    await expect(
+      executor.execute(task, lease, new AbortController().signal),
+    ).rejects.toThrow("Browser admission was lost");
+    expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(1);
     expect(create).not.toHaveBeenCalled();
   });
 

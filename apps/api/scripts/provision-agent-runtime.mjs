@@ -31,9 +31,14 @@ try {
       },
       where: { scopes: { has: "runtime:lease" }, teamId: team.id },
     }),
+    prisma.agentRuntimeCredential.updateMany({
+      data: { revokedAt: new Date() },
+      where: { pool: "MIXED", revokedAt: null, teamId: team.id },
+    }),
     prisma.agentRuntimeCredential.upsert({
       create: {
         name: options.name,
+        pool: options.pool,
         teamId: team.id,
         tokenHash,
         tokenHint: `dvp_rt_••••${token.slice(-4)}`,
@@ -42,6 +47,7 @@ try {
         expiresAt: null,
         lastUsedAt: null,
         revokedAt: null,
+        pool: options.pool,
         tokenHash,
         tokenHint: `dvp_rt_••••${token.slice(-4)}`,
       },
@@ -53,7 +59,7 @@ try {
 
   process.stdout.write(
     [
-      `Agent Runtime credential provisioned for team ${team.slug}.`,
+      `Agent Runtime ${options.pool} credential provisioned for team ${team.slug}.`,
       "The plaintext token is shown once; store it in the Runtime deployment:",
       `DEVPROOF_AGENT_RUNTIME_TOKEN=${token}`,
     ].join("\n") + "\n",
@@ -70,22 +76,30 @@ function parseOptions(args) {
     const value = args[index + 1];
     if (!key?.startsWith("--") || !value) {
       throw new Error(
-        "Usage: pnpm runtime:provision -- --team <slug> [--name <name>]",
+        "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION> [--name <name>]",
       );
     }
     values.set(key.slice(2), value.trim());
   }
   for (const key of values.keys()) {
-    if (!["name", "team"].includes(key)) {
+    if (!["name", "pool", "team"].includes(key)) {
       throw new Error(`Unknown option: --${key}`);
     }
   }
   const team = values.get("team");
-  const name = values.get("name") ?? "Agent Runtime";
+  const pool = values.get("pool");
+  if (!pool || !["SPEC_ANALYSIS", "BROWSER_EXECUTION"].includes(pool)) {
+    throw new Error("--pool must be SPEC_ANALYSIS or BROWSER_EXECUTION.");
+  }
+  const name =
+    values.get("name") ??
+    (pool === "SPEC_ANALYSIS"
+      ? "Spec Analysis Runtime"
+      : "Browser Execution Runtime");
   if (!team || !name) {
     throw new Error(
-      "Usage: pnpm runtime:provision -- --team <slug> [--name <name>]",
+      "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION> [--name <name>]",
     );
   }
-  return { name, team };
+  return { name, pool, team };
 }

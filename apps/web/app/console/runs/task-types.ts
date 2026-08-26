@@ -16,6 +16,12 @@ export interface TaskCaseExecution {
     requestedAt: string | null;
     status: string;
   };
+  deployment: {
+    id: string;
+    key: string;
+    name: string;
+    targetUrl: string;
+  };
   executionOrdinal: number;
   id: string;
   run: TaskRunSummary | null;
@@ -84,6 +90,14 @@ export interface TaskDetail {
   createdAt: string;
   currentStage: string;
   deadlineAt: string;
+  deployments: Array<{
+    enabled: boolean;
+    environment: unknown;
+    id: string;
+    key: string;
+    name: string;
+    targetUrl: string;
+  }>;
   environment: unknown;
   executionDisposition: string | null;
   finishedAt: string | null;

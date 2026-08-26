@@ -3,6 +3,106 @@ import { describe, expect, it, vi } from "vitest";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
 
 describe("TaskProfileResolverService", () => {
+  it("binds a distinct ready Profile to every Deployment hostname", async () => {
+    const tx = {
+      notificationOutbox: { createMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
+      taskExecution: { update: vi.fn() },
+      taskExecutionEvent: { create: vi.fn() },
+      taskExecutionStage: { updateMany: vi.fn() },
+      taskProfileBinding: { update: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) =>
+        callback(tx),
+      ),
+      taskExecution: {
+        findUnique: vi.fn().mockResolvedValue({
+          deployments: [
+            {
+              id: "deployment-a",
+              targetUrl: "https://staging.example.com",
+            },
+            {
+              id: "deployment-b",
+              targetUrl: "https://production.example.com",
+            },
+          ],
+          environmentSnapshot: {
+            targetUrl: "https://staging.example.com",
+          },
+          id: "task-multi-deployment",
+          inputSnapshot: {
+            idempotencyKey: "multi-deployment-key",
+            issueRef: "ENG-200",
+            kind: "ISSUE_SPEC",
+            profilePolicy: {
+              onUnavailable: "WAIT_FOR_PROFILE",
+              scope: { authRole: "default", environmentKey: "default" },
+              strategy: "REQUESTER",
+            },
+            targetUrl: "https://staging.example.com",
+          },
+          kind: "ISSUE_SPEC",
+          lifecycle: "RUNNING",
+          notificationContext: {},
+          profileBinding: {
+            id: "binding-multi",
+            status: "PENDING",
+            triggerSource: "CONSOLE",
+            version: 1,
+          },
+          requestedByUserId: "user-1",
+          specificationSnapshots: [],
+          stages: [
+            { status: "SUCCEEDED", type: "SPEC_ANALYSIS" },
+            { startedAt: null, type: "PROFILE_RESOLUTION" },
+          ],
+          teamId: "team-1",
+          title: "ENG-200",
+        }),
+      },
+      taskProfileBinding: {
+        findUnique: vi.fn().mockResolvedValue({ status: "RESOLVED" }),
+      },
+    };
+    const profiles = {
+      provisionForTask: vi.fn(),
+      resolveProfile: vi
+        .fn()
+        .mockResolvedValueOnce({ id: "profile-a" })
+        .mockResolvedValueOnce({ id: "profile-b" }),
+    };
+    const service = new TaskProfileResolverService(
+      prisma as never,
+      profiles as never,
+    );
+
+    await expect(service.resolve("task-multi-deployment")).resolves.toEqual({
+      status: "RESOLVED",
+    });
+    expect(tx.taskDeploymentProfileBinding.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          deploymentId: "deployment-a",
+          profileId: "profile-a",
+          taskExecutionId: "task-multi-deployment",
+          teamId: "team-1",
+        },
+        {
+          deploymentId: "deployment-b",
+          profileId: "profile-b",
+          taskExecutionId: "task-multi-deployment",
+          teamId: "team-1",
+        },
+      ],
+    });
+    expect(profiles.provisionForTask).not.toHaveBeenCalled();
+  });
+
   it("rebuilds a deleted requester Profile from the task target", async () => {
     const tx = {
       notificationOutbox: {
@@ -11,6 +111,10 @@ describe("TaskProfileResolverService", () => {
       taskExecution: { update: vi.fn() },
       taskExecutionEvent: { create: vi.fn() },
       taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       taskProfileBinding: { update: vi.fn() },
     };
     const prisma = {
@@ -121,6 +225,10 @@ describe("TaskProfileResolverService", () => {
       taskExecution: { update: vi.fn() },
       taskExecutionEvent: { create: vi.fn() },
       taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       taskProfileBinding: { update: vi.fn() },
     };
     const prisma = {
@@ -208,6 +316,10 @@ describe("TaskProfileResolverService", () => {
       taskExecution: { update: vi.fn() },
       taskExecutionEvent: { create: vi.fn() },
       taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       taskProfileBinding: { update: vi.fn() },
     };
     const prisma = {
@@ -297,6 +409,10 @@ describe("TaskProfileResolverService", () => {
         taskExecution: { update: vi.fn() },
         taskExecutionEvent: { create: vi.fn() },
         taskExecutionStage: { updateMany: vi.fn() },
+        taskDeploymentProfileBinding: {
+          createMany: vi.fn(),
+          deleteMany: vi.fn(),
+        },
         taskProfileBinding: { update: vi.fn() },
       }),
     );
@@ -355,6 +471,10 @@ describe("TaskProfileResolverService", () => {
       taskExecution: { update: vi.fn((value) => updates.push(value)) },
       taskExecutionEvent: { create: vi.fn() },
       taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       taskProfileBinding: { update: vi.fn() },
     };
     const prisma = {
@@ -457,6 +577,10 @@ describe("TaskProfileResolverService", () => {
       taskExecution: { update: vi.fn() },
       taskExecutionEvent: { create: vi.fn() },
       taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: {
+        createMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       taskProfileBinding: { update: vi.fn() },
     };
     const prisma = {

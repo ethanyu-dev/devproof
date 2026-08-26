@@ -20,6 +20,10 @@ import { PrismaService } from "../database/prisma.service.js";
 import { enqueueTaskWaitingNotification } from "./task-waiting-notification.js";
 
 const bindingInclude = {
+  deployments: {
+    select: { id: true, targetUrl: true },
+    where: { enabled: true },
+  },
   profileBinding: true,
   specificationSnapshots: {
     orderBy: { generatedAt: "desc" as const },
@@ -104,6 +108,9 @@ export class TaskProfileResolverService {
     }
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
+      await tx.taskDeploymentProfileBinding.deleteMany({
+        where: { taskExecutionId: task.id },
+      });
       await tx.taskProfileBinding.update({
         data: {
           externalIdentitySnapshot: {},
@@ -210,8 +217,15 @@ export class TaskProfileResolverService {
     if (input.kind !== "ISSUE_SPEC") return task.profileBinding;
     const policy = taskProfilePolicySchema.parse(input.profilePolicy);
     const environment = record(task.environmentSnapshot);
+    const deployments = task.deployments ?? [];
+    const deploymentTargetUrls = deployments.map(
+      (deployment) => deployment.targetUrl,
+    );
     const targetUrl =
-      typeof environment.targetUrl === "string" ? environment.targetUrl : null;
+      deploymentTargetUrls[0] ??
+      (typeof environment.targetUrl === "string"
+        ? environment.targetUrl
+        : null);
     const targetHostname = targetUrl
       ? new URL(targetUrl).hostname
       : policy.scope.hostname;
@@ -237,68 +251,111 @@ export class TaskProfileResolverService {
     if ("code" in owner) {
       return this.unavailable(task, policy, owner, targetHostname);
     }
-    const profile = await this.profiles.resolveProfile({
-      ownerUserId: owner.userId,
-      policy,
-      targetHostname,
-      teamId: task.teamId,
-      triggerSource,
-    });
-    if (!profile) {
+    const deploymentProfiles: Array<{
+      deploymentId: string;
+      profileId: string;
+    }> = [];
+    const pendingProfiles: Array<{
+      deploymentId: string | null;
+      profile: Awaited<
+        ReturnType<UserBrowserProfilesService["provisionForTask"]>
+      >;
+      targetUrl: string;
+    }> = [];
+    const targets = deployments.length
+      ? deployments
+      : targetUrl
+        ? [{ id: null, targetUrl }]
+        : [];
+    for (const deployment of targets) {
+      const hostname = new URL(deployment.targetUrl).hostname;
+      const profile = await this.profiles.resolveProfile({
+        ownerUserId: owner.userId,
+        policy,
+        targetHostname: hostname,
+        teamId: task.teamId,
+        triggerSource,
+      });
+      if (profile) {
+        if (deployment.id) {
+          deploymentProfiles.push({
+            deploymentId: deployment.id,
+            profileId: profile.id,
+          });
+        }
+        continue;
+      }
       const pendingProfile =
-        targetUrl &&
         policy.strategy !== "EXPLICIT_PROFILE" &&
         policy.onUnavailable === "WAIT_FOR_PROFILE"
           ? await this.profiles.provisionForTask({
               authRole: policy.scope.authRole,
               environmentKey: policy.scope.environmentKey,
               ownerUserId: owner.userId,
-              targetUrl,
+              targetUrl: deployment.targetUrl,
               teamId: task.teamId,
               triggerSource,
             })
           : null;
+      pendingProfiles.push({
+        deploymentId: deployment.id,
+        profile: pendingProfile,
+        targetUrl: deployment.targetUrl,
+      });
+    }
+    if (pendingProfiles.length) {
+      const firstPending = pendingProfiles.find(
+        (item) => item.profile,
+      )?.profile;
+      const allReady = pendingProfiles.every(
+        (item) => item.profile?.status === "READY",
+      );
       return this.unavailable(
         task,
         policy,
-        pendingProfile
+        firstPending
           ? {
-              code:
-                pendingProfile.status === "READY"
-                  ? "PROFILE_ACCESS_APPROVAL_REQUIRED"
-                  : "PROFILE_LOGIN_REQUIRED",
-              message:
-                pendingProfile.status === "READY"
-                  ? "The profile owner must approve this task entry before execution."
-                  : "The profile owner must complete browser login before execution.",
+              code: allReady
+                ? "PROFILE_ACCESS_APPROVAL_REQUIRED"
+                : "PROFILE_LOGIN_REQUIRED",
+              message: allReady
+                ? "The profile owner must approve access for every Deployment before execution."
+                : "The profile owner must complete browser login for every Deployment before execution.",
               snapshot: {
                 ...owner.snapshot,
-                pendingProfileId: pendingProfile.id,
+                pendingProfiles: pendingProfiles.map((item) => ({
+                  deploymentId: item.deploymentId,
+                  profileId: item.profile?.id ?? null,
+                  targetUrl: item.targetUrl,
+                })),
               },
             }
           : {
               code: "PROFILE_NOT_READY_OR_NOT_AUTHORIZED",
               message:
-                "No READY profile owned by the selected user grants this trigger access to the target hostname.",
+                "No READY profile owned by the selected user grants this trigger access to every Deployment hostname.",
               snapshot: owner.snapshot,
             },
         targetHostname,
-        pendingProfile
+        firstPending
           ? {
               ownerUserId: owner.userId,
-              requestedProfileId: pendingProfile.id,
+              requestedProfileId: firstPending.id,
             }
           : { ownerUserId: owner.userId },
       );
     }
+    const primaryProfileId =
+      deploymentProfiles[0]?.profileId ?? policy.profileId ?? null;
     return this.succeed(
       task,
       policy,
-      profile.id,
+      primaryProfileId,
       owner.userId,
       targetHostname,
       now,
       owner.snapshot,
+      deploymentProfiles,
     );
   }
 
@@ -496,6 +553,9 @@ export class TaskProfileResolverService {
         : "BROWSER_PROFILE";
     await this.prisma.$transaction(async (tx) => {
       if (!sameWaitingState) {
+        await tx.taskDeploymentProfileBinding.deleteMany({
+          where: { taskExecutionId: task.id },
+        });
         await tx.taskProfileBinding.update({
           data: {
             externalIdentitySnapshot: json(failure.snapshot ?? {}),
@@ -597,12 +657,28 @@ export class TaskProfileResolverService {
     targetHostname: string | undefined,
     now: Date,
     snapshot: Record<string, unknown> = {},
+    deploymentProfiles: Array<{
+      deploymentId: string;
+      profileId: string;
+    }> = [],
   ) {
     const binding = task.profileBinding;
     if (!binding) return null;
     const environment = record(task.environmentSnapshot);
     const targetAvailable = typeof environment.targetUrl === "string";
     await this.prisma.$transaction(async (tx) => {
+      await tx.taskDeploymentProfileBinding.deleteMany({
+        where: { taskExecutionId: task.id },
+      });
+      if (deploymentProfiles.length) {
+        await tx.taskDeploymentProfileBinding.createMany({
+          data: deploymentProfiles.map((deploymentProfile) => ({
+            ...deploymentProfile,
+            taskExecutionId: task.id,
+            teamId: task.teamId,
+          })),
+        });
+      }
       await tx.taskProfileBinding.update({
         data: {
           externalIdentitySnapshot: json(snapshot),
@@ -654,6 +730,7 @@ export class TaskProfileResolverService {
           {
             hostname: targetHostname ?? null,
             profileId,
+            deploymentProfiles,
             strategy: policy.strategy,
           },
         ),

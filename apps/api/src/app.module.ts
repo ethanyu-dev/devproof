@@ -3,6 +3,8 @@ import { APP_INTERCEPTOR } from "@nestjs/core";
 
 import { AgentRuntimeTaskController } from "./agent-runtime/agent-runtime-task.controller.js";
 import { AgentRuntimeTaskService } from "./agent-runtime/agent-runtime-task.service.js";
+import { AgentRuntimeControlController } from "./agent-runtime/agent-runtime-control.controller.js";
+import { AgentRuntimeControlService } from "./agent-runtime/agent-runtime-control.service.js";
 import { UnifiedBrowserExecutionService } from "./agent-runtime/unified-browser-execution.service.js";
 import { SpecAnalysisRuntimeController } from "./agent-runtime/spec-analysis-runtime.controller.js";
 import { SpecAnalysisRuntimeService } from "./agent-runtime/spec-analysis-runtime.service.js";
@@ -76,6 +78,8 @@ import { TaskExecutionWorker } from "./task-executions/task-execution.worker.js"
 import { VerificationController } from "./verification/verification.controller.js";
 import { VerificationService } from "./verification/verification.service.js";
 import { BrowserExecutionRunner } from "./verification/browser-execution-runner.service.js";
+import { BrowserAdmissionService } from "./verification/browser-admission.service.js";
+import { BrowserAdmissionWorker } from "./verification/browser-admission.worker.js";
 import { ExecutionRunnerController } from "./verification/verification.controller.js";
 import { ExecutionRunnerRegistry } from "./verification/execution-runner-registry.service.js";
 import { NotificationOutboxWorker } from "./verification/notification-outbox-worker.service.js";
@@ -87,6 +91,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
 
 @Module({
   controllers: [
+    AgentRuntimeControlController,
     AgentRuntimeTaskController,
     SpecAnalysisRuntimeController,
     AuthController,
@@ -113,6 +118,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     VerificationMcpController,
   ],
   providers: [
+    AgentRuntimeControlService,
     AgentModelConfigurationService,
     AgentRuntimeTaskService,
     SpecAnalysisRuntimeService,
@@ -123,6 +129,8 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     UserBrowserProfilesService,
     BrowserRuntimeService,
     BrowserProfileLifecycleWorker,
+    BrowserAdmissionService,
+    BrowserAdmissionWorker,
     BrowserExecutionRunner,
     ConsoleService,
     CredentialCipherService,

@@ -13,9 +13,29 @@ const terminalTaskLifecycles = ["COMPLETED", "CANCELLED", "TIMED_OUT"] as const;
 export class ProfileReservationService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async acquire(taskExecutionId: string) {
+  async acquire(taskExecutionId: string, deploymentId?: string) {
     const task = await this.prisma.taskExecution.findUnique({
       include: {
+        deployments: {
+          select: { id: true, targetUrl: true },
+          where: {
+            enabled: true,
+            ...(deploymentId ? { id: deploymentId } : {}),
+          },
+        },
+        deploymentProfileBindings: {
+          include: {
+            profile: {
+              include: {
+                grants: { where: { revokedAt: null } },
+                owner: {
+                  include: { memberships: { select: { teamId: true } } },
+                },
+              },
+            },
+          },
+          ...(deploymentId ? { where: { deploymentId } } : {}),
+        },
         profileBinding: {
           include: {
             resolvedProfile: {
@@ -31,7 +51,9 @@ export class ProfileReservationService {
       },
       where: { id: taskExecutionId },
     });
-    const profile = task?.profileBinding?.resolvedProfile;
+    const profile =
+      task?.deploymentProfileBindings?.[0]?.profile ??
+      task?.profileBinding?.resolvedProfile;
     if (!task || !profile) return { acquired: true as const, profile: null };
     const now = new Date();
     if (
@@ -55,7 +77,10 @@ export class ProfileReservationService {
       });
       return { acquired: false as const, profile };
     }
-    const targetHostname = environmentHostname(task.environmentSnapshot);
+    const targetHostnames = environmentHostnames(
+      task.environmentSnapshot,
+      task.deployments ?? [],
+    );
     const triggerSource = task.profileBinding.triggerSource;
     const ownerActive =
       profile.owner.status === "ACTIVE" &&
@@ -64,11 +89,13 @@ export class ProfileReservationService {
       );
     const grantActive =
       triggerSource !== null &&
-      targetHostname !== null &&
-      profile.grants.some(
-        (grant) =>
-          grant.triggerSource === triggerSource &&
-          hostnameMatchesPattern(targetHostname, grant.hostnamePattern),
+      targetHostnames.length > 0 &&
+      targetHostnames.every((targetHostname) =>
+        profile.grants.some(
+          (grant) =>
+            grant.triggerSource === triggerSource &&
+            hostnameMatchesPattern(targetHostname, grant.hostnamePattern),
+        ),
       );
     if (!ownerActive || !grantActive) {
       await this.invalidateBinding(task.id, task.teamId, profile.id);
@@ -184,12 +211,22 @@ export class ProfileReservationService {
           version: { increment: 1 },
         },
         where: {
-          resolvedProfileId: profileId,
+          OR: [
+            { resolvedProfileId: profileId },
+            {
+              taskExecution: {
+                deploymentProfileBindings: { some: { profileId } },
+              },
+            },
+          ],
           status: "RESOLVED",
           taskExecutionId,
         },
       });
       if (invalidated.count !== 1) return;
+      await tx.taskDeploymentProfileBinding.deleteMany({
+        where: { taskExecutionId },
+      });
       await tx.browserProfileReservation.updateMany({
         data: {
           leaseExpiresAt: null,
@@ -354,12 +391,27 @@ export class ProfileReservationService {
   }
 }
 
-function environmentHostname(value: Prisma.JsonValue) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (typeof value.targetUrl !== "string") return null;
-  try {
-    return new URL(value.targetUrl).hostname;
-  } catch {
-    return null;
-  }
+function environmentHostnames(
+  value: Prisma.JsonValue,
+  deployments: readonly { targetUrl: string }[] | undefined,
+) {
+  const configuredDeployments = deployments ?? [];
+  const urls = configuredDeployments.length
+    ? configuredDeployments.map((deployment) => deployment.targetUrl)
+    : value && typeof value === "object" && !Array.isArray(value)
+      ? typeof value.targetUrl === "string"
+        ? [value.targetUrl]
+        : []
+      : [];
+  return Array.from(
+    new Set(
+      urls.flatMap((url) => {
+        try {
+          return [new URL(url).hostname];
+        } catch {
+          return [];
+        }
+      }),
+    ),
+  );
 }

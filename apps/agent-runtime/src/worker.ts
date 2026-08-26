@@ -23,14 +23,19 @@ import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 
 export class AgentRuntimeWorker {
   private readonly executor: BrowserVerificationExecutor;
+  private readonly instanceWorkerId: string;
+  private readonly lanes = new Map<
+    string,
+    { draining: boolean; promise: Promise<void> }
+  >();
   private readonly specExecutor: SpecAnalysisExecutor;
-  private preferSpec = true;
 
   constructor(
     private readonly config: RuntimeConfig,
     private readonly controlPlane: ControlPlaneClient,
     modelClient: ResponsesClientFactory,
   ) {
+    this.instanceWorkerId = `${config.DEVPROOF_AGENT_WORKER_ID}:${randomUUID()}`;
     this.executor = new BrowserVerificationExecutor(
       modelClient,
       controlPlane,
@@ -45,49 +50,98 @@ export class AgentRuntimeWorker {
 
   async run(signal: AbortSignal) {
     log("runtime.started", {
-      workerId: this.config.DEVPROOF_AGENT_WORKER_ID,
+      workerId: this.instanceWorkerId,
     });
-    while (!signal.aborted) {
-      try {
-        const task = await this.claimNext(signal);
-        if (!task) {
+    try {
+      while (!signal.aborted) {
+        try {
+          const allocation = await this.controlPlane.register(
+            this.instanceWorkerId,
+            signal,
+          );
+          this.reconcileLanes("spec", allocation.specConcurrency, signal);
+          this.reconcileLanes("browser", allocation.browserConcurrency, signal);
+          await delay(allocation.refreshAfterMs, signal);
+        } catch (error) {
+          if (signal.aborted) break;
+          log("runtime.registration.failed", { error: errorMessage(error) });
           await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
-          continue;
         }
-        if (task.kind === "SPEC_ANALYSIS") {
-          await this.executeSpecTask(task.task, signal);
+      }
+    } finally {
+      for (const lane of this.lanes.values()) lane.draining = true;
+      await Promise.allSettled(
+        [...this.lanes.values()].map((lane) => lane.promise),
+      );
+    }
+  }
+
+  private reconcileLanes(
+    pool: "spec" | "browser",
+    desired: number,
+    signal: AbortSignal,
+  ) {
+    for (let index = 0; index < desired; index += 1) {
+      const key = `${pool}:${index}`;
+      const existing = this.lanes.get(key);
+      if (existing) {
+        existing.draining = false;
+        continue;
+      }
+      const lane = { draining: false, promise: Promise.resolve() };
+      lane.promise = this.runLane(pool, index, lane, signal).finally(() => {
+        if (this.lanes.get(key) === lane) this.lanes.delete(key);
+      });
+      this.lanes.set(key, lane);
+    }
+    for (const [key, lane] of this.lanes) {
+      if (!key.startsWith(`${pool}:`)) continue;
+      const index = Number(key.slice(pool.length + 1));
+      if (index >= desired) lane.draining = true;
+    }
+  }
+
+  private async runLane(
+    pool: "spec" | "browser",
+    index: number,
+    lane: { draining: boolean },
+    signal: AbortSignal,
+  ) {
+    const workerId = `${this.instanceWorkerId}:${pool}:${index}`;
+    while (!signal.aborted && !lane.draining) {
+      try {
+        if (pool === "spec") {
+          const task = await this.controlPlane.claimSpec(workerId, signal);
+          if (task) {
+            await this.executeSpecTask(task, signal, workerId);
+            continue;
+          }
         } else {
-          await this.executeTask(task.task, signal);
+          const task = await this.controlPlane.claim(workerId, signal);
+          if (task) {
+            await this.executeTask(task, signal, workerId);
+            continue;
+          }
         }
+        await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
       } catch (error) {
         if (signal.aborted) return;
-        log("runtime.poll.failed", { error: errorMessage(error) });
+        log("runtime.pool_lane.failed", {
+          error: errorMessage(error),
+          pool,
+          workerId,
+        });
         await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
       }
     }
   }
 
-  private async claimNext(signal: AbortSignal) {
-    const workerId = this.config.DEVPROOF_AGENT_WORKER_ID;
-    const first = this.preferSpec ? "SPEC_ANALYSIS" : "BROWSER_VERIFICATION";
-    this.preferSpec = !this.preferSpec;
-    if (first === "SPEC_ANALYSIS") {
-      const spec = await this.controlPlane.claimSpec(workerId, signal);
-      if (spec) return { kind: "SPEC_ANALYSIS" as const, task: spec };
-      const browser = await this.controlPlane.claim(workerId, signal);
-      return browser
-        ? { kind: "BROWSER_VERIFICATION" as const, task: browser }
-        : null;
-    }
-    const browser = await this.controlPlane.claim(workerId, signal);
-    if (browser)
-      return { kind: "BROWSER_VERIFICATION" as const, task: browser };
-    const spec = await this.controlPlane.claimSpec(workerId, signal);
-    return spec ? { kind: "SPEC_ANALYSIS" as const, task: spec } : null;
-  }
-
-  private async executeTask(task: RuntimeTaskLease, shutdown: AbortSignal) {
-    const lease = activeLease(task, this.config.DEVPROOF_AGENT_WORKER_ID);
+  private async executeTask(
+    task: RuntimeTaskLease,
+    shutdown: AbortSignal,
+    workerId: string,
+  ) {
+    const lease = activeLease(task, workerId);
     const controller = new AbortController();
     const deadline = new RuntimeDeadlineController(
       controller,
@@ -148,8 +202,9 @@ export class AgentRuntimeWorker {
   private async executeSpecTask(
     task: RuntimeSpecAnalysisTaskLease,
     shutdown: AbortSignal,
+    workerId: string,
   ) {
-    const lease = activeLease(task, this.config.DEVPROOF_AGENT_WORKER_ID);
+    const lease = activeLease(task, workerId);
     const controller = new AbortController();
     const deadline = new RuntimeDeadlineController(
       controller,

@@ -42,6 +42,66 @@ function fixture(protocolMinor: number | null = 4, online = true) {
 }
 
 describe("BrowserRuntimeService managed configuration", () => {
+  it("reports separate A/B queue capacity and their configured total", async () => {
+    const runtimes = [
+      { id: "runtime-a", maxConcurrency: 4, name: "Browser A" },
+      { id: "runtime-b", maxConcurrency: 8, name: "Browser B" },
+    ];
+    const prisma = {
+      browserExecution: {
+        count: vi.fn().mockResolvedValue(5),
+        groupBy: vi.fn().mockResolvedValue([
+          { _count: { _all: 7 }, targetRuntimeId: "runtime-a" },
+          { _count: { _all: 1 }, targetRuntimeId: "runtime-b" },
+        ]),
+      },
+      browserRuntime: { findMany: vi.fn().mockResolvedValue(runtimes) },
+      browserRuntimeSlot: {
+        groupBy: vi.fn().mockResolvedValue([
+          { _count: { _all: 4 }, runtimeId: "runtime-a" },
+          { _count: { _all: 3 }, runtimeId: "runtime-b" },
+        ]),
+      },
+    };
+    const service = new BrowserRuntimeService(
+      prisma as never,
+      {} as never,
+      { isRuntimeOnline: vi.fn().mockResolvedValue(true) } as never,
+      {} as never,
+    );
+
+    await expect(service.capacity(current)).resolves.toEqual({
+      availableCapacity: 5,
+      configuredCapacity: 12,
+      drainingCapacity: 0,
+      flexibleWaiting: 5,
+      nodes: [
+        {
+          available: 0,
+          configured: 4,
+          draining: 0,
+          id: "runtime-a",
+          name: "Browser A",
+          occupied: 4,
+          online: true,
+          waiting: 7,
+        },
+        {
+          available: 5,
+          configured: 8,
+          draining: 0,
+          id: "runtime-b",
+          name: "Browser B",
+          occupied: 3,
+          online: true,
+          waiting: 1,
+        },
+      ],
+      occupiedCapacity: 7,
+      schedulableCapacity: 12,
+    });
+  });
+
   it("persists and audits capacity while pushing network policy to a compatible online Runtime", async () => {
     const { audit, hub, prisma, runtime, service } = fixture();
 

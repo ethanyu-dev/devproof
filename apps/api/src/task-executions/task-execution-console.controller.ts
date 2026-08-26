@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import {
   taskDeploymentTargetInputSchema,
+  taskDeploymentsInputSchema,
   taskExecutionCreateInputSchema,
   taskProfileSelectionInputSchema,
   taskStageRetryInputSchema,
@@ -112,6 +113,19 @@ export class TaskExecutionConsoleController {
     );
   }
 
+  @Post(":id/deployments")
+  setDeployments(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.setDeployments(
+      taskToolContext(current),
+      id,
+      parseBody(taskDeploymentsInputSchema, body),
+    );
+  }
+
   @Post(":id/profile")
   selectProfile(
     @CurrentAuth() current: AuthContext,
@@ -148,6 +162,21 @@ export class TaskExecutionConsoleController {
     @Param("caseId") caseId: string,
   ) {
     return this.tasks.rerunCase(taskToolContext(current), id, caseId);
+  }
+
+  @Post(":id/cases/:caseId/deployments/:deploymentId/rerun")
+  rerunCaseDeployment(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+    @Param("deploymentId") deploymentId: string,
+  ) {
+    return this.tasks.rerunCase(
+      taskToolContext(current),
+      id,
+      caseId,
+      deploymentId,
+    );
   }
 
   @Post(":id/cancel")

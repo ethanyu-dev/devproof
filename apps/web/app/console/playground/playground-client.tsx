@@ -57,6 +57,12 @@ interface BrowserProfileOption {
   status: string;
 }
 
+interface DeploymentDraft {
+  id: number;
+  name: string;
+  targetUrl: string;
+}
+
 const terminalLifecycles = new Set(["COMPLETED", "CANCELLED", "TIMED_OUT"]);
 
 function tone(
@@ -101,7 +107,9 @@ export function PlaygroundClient() {
     "EPHEMERAL" | "REQUESTER" | "ISSUE_ASSIGNEE" | "EXPLICIT_PROFILE"
   >("EPHEMERAL");
   const [profileId, setProfileId] = useState("");
-  const [specTargetUrl, setSpecTargetUrl] = useState("");
+  const [specDeployments, setSpecDeployments] = useState<DeploymentDraft[]>([
+    { id: 1, name: "Preview", targetUrl: "" },
+  ]);
   const [directTargetUrl, setDirectTargetUrl] = useState("https://example.com");
   const [goal, setGoal] = useState(
     "打开目标页面，确认页面可以访问并检查页面标题，然后采集截图作为证据。",
@@ -188,6 +196,14 @@ export function PlaygroundClient() {
 
   async function createTask() {
     if (submittingRef.current) return;
+    const deployments = specDeployments
+      .filter((deployment) => deployment.targetUrl.trim())
+      .map((deployment, index) => ({
+        environment: {},
+        key: `deployment-${index + 1}`,
+        name: deployment.name.trim() || `验证环境 ${index + 1}`,
+        targetUrl: deployment.targetUrl.trim(),
+      }));
     const request =
       mode === "ISSUE_SPEC"
         ? {
@@ -200,7 +216,7 @@ export function PlaygroundClient() {
               scope: { authRole: "default", environmentKey: "default" },
               strategy: profileStrategy,
             },
-            ...(specTargetUrl ? { targetUrl: specTargetUrl } : {}),
+            ...(deployments.length ? { deployments } : {}),
           }
         : {
             acceptanceCriterion,
@@ -404,12 +420,79 @@ export function PlaygroundClient() {
                     value={issueRef}
                   />
                 </Field>
-                <Field label="Deployment URL（可选）">
-                  <Input
-                    onChange={(event) => setSpecTargetUrl(event.target.value)}
-                    placeholder="未填写时尝试从 Pull Request 获取"
-                    value={specTargetUrl}
-                  />
+                <Field label="验证环境（可选，可添加多个）">
+                  <div className="dp-deployment-editor">
+                    {specDeployments.map((deployment, index) => (
+                      <div className="dp-deployment-row" key={deployment.id}>
+                        <Input
+                          aria-label={`验证环境 ${index + 1} 名称`}
+                          onChange={(event) =>
+                            setSpecDeployments((current) =>
+                              current.map((item) =>
+                                item.id === deployment.id
+                                  ? { ...item, name: event.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          placeholder="环境名称，例如 Staging"
+                          value={deployment.name}
+                        />
+                        <Input
+                          aria-label={`验证环境 ${index + 1} URL`}
+                          onChange={(event) =>
+                            setSpecDeployments((current) =>
+                              current.map((item) =>
+                                item.id === deployment.id
+                                  ? { ...item, targetUrl: event.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                          placeholder="https://preview.example.com"
+                          value={deployment.targetUrl}
+                        />
+                        {specDeployments.length > 1 ? (
+                          <Button
+                            onClick={() =>
+                              setSpecDeployments((current) =>
+                                current.filter(
+                                  (item) => item.id !== deployment.id,
+                                ),
+                              )
+                            }
+                            type="button"
+                            variant="secondary"
+                          >
+                            删除
+                          </Button>
+                        ) : null}
+                      </div>
+                    ))}
+                    <Button
+                      disabled={specDeployments.length >= 20}
+                      onClick={() =>
+                        setSpecDeployments((current) => [
+                          ...current,
+                          {
+                            id:
+                              Math.max(0, ...current.map((item) => item.id)) +
+                              1,
+                            name: `验证环境 ${current.length + 1}`,
+                            targetUrl: "",
+                          },
+                        ])
+                      }
+                      type="button"
+                      variant="secondary"
+                    >
+                      添加验证环境
+                    </Button>
+                    <small>
+                      全部留空时，系统仍会尝试使用 Pull Request 的 Deployment
+                      URL。
+                    </small>
+                  </div>
                 </Field>
                 <Field label="浏览器登录身份">
                   <Select

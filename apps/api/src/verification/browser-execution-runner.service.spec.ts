@@ -23,6 +23,72 @@ describe("Browser Runtime protocol selection", () => {
   });
 });
 
+describe("Browser Runtime flexible pool selection", () => {
+  it("prefers the idle node and preserves capacity for its pinned queues", async () => {
+    const runtimes = [
+      {
+        capabilities: [],
+        id: "runtime-a",
+        maxConcurrency: 4,
+        protocolMajor: 1,
+        protocolMinor: 7,
+      },
+      {
+        capabilities: [],
+        id: "runtime-b",
+        maxConcurrency: 8,
+        protocolMajor: 1,
+        protocolMinor: 7,
+      },
+    ];
+    const prisma = {
+      browserExecution: {
+        groupBy: vi
+          .fn()
+          .mockResolvedValue([
+            { _count: { _all: 6 }, targetRuntimeId: "runtime-a" },
+          ]),
+      },
+      browserRuntime: { findMany: vi.fn().mockResolvedValue(runtimes) },
+      browserRuntimeSlot: {
+        groupBy: vi
+          .fn()
+          .mockResolvedValue([{ _count: { _all: 4 }, runtimeId: "runtime-a" }]),
+      },
+      runtimeRoutingRule: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const runner = new BrowserExecutionRunner(
+      prisma as never,
+      { isRuntimeOnline: vi.fn().mockResolvedValue(true) } as never,
+      {} as never,
+      {} as never,
+    );
+    const request = verificationRequestSchema.parse({
+      acceptanceCriteria: [{ description: "Page loads", id: "loads" }],
+      execution: {
+        requiredCapabilities: ["browser"],
+        targetUrl: "https://unmatched.example.net",
+      },
+      goal: "Verify the page",
+      idempotencyKey: "flexible-runtime-selection",
+    });
+
+    const selection = await (
+      runner as unknown as {
+        selectRuntimes: (
+          teamId: string,
+          request: typeof request,
+        ) => Promise<{ runtimes: typeof runtimes }>;
+      }
+    ).selectRuntimes("team-1", request);
+
+    expect(selection.runtimes.map((runtime) => runtime.id)).toEqual([
+      "runtime-b",
+      "runtime-a",
+    ]);
+  });
+});
+
 describe("Browser Runtime persistent Profile affinity", () => {
   it("routes a reused Profile back to the Runtime that last held it", async () => {
     const prisma = {
