@@ -62,6 +62,8 @@ export class TaskExecutionConsoleController {
         "WAITING_HUMAN",
         "PASSED",
         "FAILED",
+        "VERIFICATION_FAILED",
+        "EXECUTION_FAILED",
         "COMPLETED",
         "CANCELLED",
         "TIMED_OUT",

@@ -31,6 +31,11 @@ import {
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
 import { RunTrajectory } from "./run-trajectory";
+import {
+  executionDispositionLabel,
+  taskOutcomeDisplay,
+  verificationVerdictLabel,
+} from "./task-outcome";
 import type {
   TaskCase,
   TaskCaseExecution,
@@ -60,7 +65,8 @@ interface TaskFilters {
     | "ACTIVE"
     | "WAITING_HUMAN"
     | "PASSED"
-    | "FAILED"
+    | "VERIFICATION_FAILED"
+    | "EXECUTION_FAILED"
     | "COMPLETED"
     | "CANCELLED"
     | "TIMED_OUT";
@@ -94,6 +100,7 @@ function tone(
       "CANCELLED",
       "TIMED_OUT",
       "NOT_RUN",
+      "BLOCKED",
       "AGENT_ERROR",
       "PROVIDER_ERROR",
       "BROWSER_UNAVAILABLE",
@@ -113,10 +120,6 @@ function tone(
   )
     return "warning";
   return "neutral";
-}
-
-function taskStatus(task: TaskSummary) {
-  return task.verdict ?? task.executionDisposition ?? task.lifecycle;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -329,8 +332,9 @@ function TaskListClient({ initialId }: { initialId?: string | undefined }) {
             <option value="ALL">全部状态</option>
             <option value="ACTIVE">进行中</option>
             <option value="WAITING_HUMAN">等待人工操作</option>
-            <option value="PASSED">已通过</option>
-            <option value="FAILED">失败</option>
+            <option value="PASSED">验证通过</option>
+            <option value="VERIFICATION_FAILED">验证未通过</option>
+            <option value="EXECUTION_FAILED">任务执行失败</option>
             <option value="COMPLETED">已完成</option>
             <option value="CANCELLED">已取消</option>
             <option value="TIMED_OUT">已超时</option>
@@ -597,6 +601,7 @@ function TaskRow({
 
   const displayed = detail ?? task;
   const active = !terminalLifecycles.has(displayed.lifecycle);
+  const outcome = taskOutcomeDisplay(displayed);
   return (
     <article className={`dp-task-row ${expanded ? "is-expanded" : ""}`}>
       <div className="dp-task-row-summary">
@@ -608,9 +613,9 @@ function TaskRow({
         >
           <span>
             <strong title={displayed.title}>{displayed.title}</strong>
-            <Badge tone={tone(taskStatus(displayed))}>
-              {displayLabel(taskStatus(displayed))}
-            </Badge>
+            <span title={outcome.description ?? undefined}>
+              <Badge tone={tone(outcome.toneStatus)}>{outcome.label}</Badge>
+            </span>
           </span>
           <small>
             {displayLabel(displayed.kind)} ·{" "}
@@ -812,15 +817,15 @@ function TaskStatusPanel({
             </Badge>
           </div>
           <div>
-            <span>执行</span>
+            <span>任务执行</span>
             <Badge tone={tone(detail.executionDisposition)}>
-              {displayLabel(detail.executionDisposition)}
+              {executionDispositionLabel(detail.executionDisposition)}
             </Badge>
           </div>
           <div>
-            <span>判定</span>
+            <span>验证判定</span>
             <Badge tone={tone(detail.verdict)}>
-              {displayLabel(detail.verdict)}
+              {verificationVerdictLabel(detail.verdict)}
             </Badge>
           </div>
         </div>
@@ -1125,12 +1130,8 @@ function SpecificationSnapshot({ detail }: { detail: TaskDetail }) {
 function CaseCard({ testCase }: { testCase: TaskCase }) {
   const execution = testCase.executions.at(-1) ?? null;
   const run = execution?.run ?? null;
-  const status =
-    run?.verdict ??
-    run?.executionDisposition ??
-    run?.lifecycle ??
-    execution?.dispatch.status ??
-    "PENDING";
+  const outcome = run ? taskOutcomeDisplay(run) : null;
+  const status = outcome?.toneStatus ?? execution?.dispatch.status ?? "PENDING";
   return (
     <Card className="dp-verification-detail dp-specification-case">
       <div className="dp-section-head">
@@ -1139,7 +1140,9 @@ function CaseCard({ testCase }: { testCase: TaskCase }) {
             {testCase.position + 1}. {testCase.name}
           </b>
         </span>
-        <Badge tone={tone(status)}>{displayLabel(status)}</Badge>
+        <Badge tone={tone(status)}>
+          {outcome?.label ?? displayLabel(status)}
+        </Badge>
       </div>
       <div className="dp-spec-run-state">
         <span>
@@ -1155,13 +1158,9 @@ function CaseCard({ testCase }: { testCase: TaskCase }) {
           </Badge>
         </span>
         <span>
-          结果{" "}
-          <Badge
-            tone={tone(run?.verdict ?? run?.executionDisposition ?? "PENDING")}
-          >
-            {displayLabel(
-              run?.verdict ?? run?.executionDisposition ?? "PENDING",
-            )}
+          验证判定{" "}
+          <Badge tone={tone(run?.verdict ?? "PENDING")}>
+            {verificationVerdictLabel(run?.verdict ?? null)}
           </Badge>
         </span>
       </div>
@@ -1262,19 +1261,14 @@ function RunLinkCard({
   name: string;
   run: TaskDetail["runs"][number];
 }) {
+  const outcome = taskOutcomeDisplay(run);
   return (
     <Card className="dp-verification-detail dp-specification-case">
       <div className="dp-section-head">
         <span>
           <b>{name}</b>
         </span>
-        <Badge
-          tone={tone(run.verdict ?? run.executionDisposition ?? run.lifecycle)}
-        >
-          {displayLabel(
-            run.verdict ?? run.executionDisposition ?? run.lifecycle,
-          )}
-        </Badge>
+        <Badge tone={tone(outcome.toneStatus)}>{outcome.label}</Badge>
       </div>
       <div className="dp-specification-case-body">
         <small>

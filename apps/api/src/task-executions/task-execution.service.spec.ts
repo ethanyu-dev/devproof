@@ -407,6 +407,41 @@ describe("TaskExecutionService rerun", () => {
       expect.objectContaining({ skip: 0, take: 10, where }),
     );
     expect(count).toHaveBeenCalledWith({ where });
+
+    await service.listPage(current, 1, 10, {
+      status: "VERIFICATION_FAILED",
+    });
+    expect(findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { teamId: "team-1", verdict: "FAILED" },
+      }),
+    );
+
+    await service.listPage(current, 1, 10, { status: "EXECUTION_FAILED" });
+    expect(findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: {
+          OR: [
+            { lifecycle: "TIMED_OUT" },
+            {
+              executionDisposition: {
+                in: [
+                  "NOT_RUN",
+                  "BLOCKED",
+                  "AGENT_ERROR",
+                  "PROVIDER_ERROR",
+                  "BROWSER_UNAVAILABLE",
+                  "RUNTIME_LOST",
+                ],
+              },
+              lifecycle: "COMPLETED",
+            },
+          ],
+          teamId: "team-1",
+          verdict: null,
+        },
+      }),
+    );
   });
 });
 

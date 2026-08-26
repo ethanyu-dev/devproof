@@ -160,6 +160,8 @@ export interface TaskListFilters {
     | "WAITING_HUMAN"
     | "PASSED"
     | "FAILED"
+    | "VERIFICATION_FAILED"
+    | "EXECUTION_FAILED"
     | "COMPLETED"
     | "CANCELLED"
     | "TIMED_OUT";
@@ -173,8 +175,30 @@ function taskStatusWhere(
     return { lifecycle: { in: ["QUEUED", "RUNNING", "WAITING_INPUT"] } };
   }
   if (status === "WAITING_HUMAN") return { lifecycle: "WAITING_HUMAN" };
-  if (status === "PASSED" || status === "FAILED") {
-    return { verdict: status };
+  if (status === "PASSED") return { verdict: status };
+  if (status === "FAILED" || status === "VERIFICATION_FAILED") {
+    return { verdict: "FAILED" };
+  }
+  if (status === "EXECUTION_FAILED") {
+    return {
+      OR: [
+        { lifecycle: "TIMED_OUT" },
+        {
+          executionDisposition: {
+            in: [
+              "NOT_RUN",
+              "BLOCKED",
+              "AGENT_ERROR",
+              "PROVIDER_ERROR",
+              "BROWSER_UNAVAILABLE",
+              "RUNTIME_LOST",
+            ],
+          },
+          lifecycle: "COMPLETED",
+        },
+      ],
+      verdict: null,
+    };
   }
   return { lifecycle: status };
 }
