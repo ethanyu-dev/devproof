@@ -222,6 +222,157 @@ describe("TaskExecutionService profile ownership", () => {
   });
 });
 
+describe("TaskExecutionService Spec Runtime rerun", () => {
+  const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
+  const caseId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
+  const previousExecutionId = "fa078e55-f887-4f67-b8ef-229b976ee56f";
+  const nextExecutionId = "0da63e02-7680-4a93-9721-6af09e6a4f04";
+  const current = {
+    credential: { id: "credential-1", name: "Console user", scopes: [] },
+    team: { id: "6f090d88-8987-487f-8338-1a734beab6a6", name: "Team" },
+  } as never;
+
+  it("queues the next execution ordinal while preserving the completed Runtime", async () => {
+    const taskExecutionFindFirst = vi.fn().mockResolvedValue({
+      cancelRequestedAt: null,
+      caseExecutions: [
+        {
+          caseId,
+          executionOrdinal: 1,
+          id: previousExecutionId,
+          run: { lifecycle: "COMPLETED" },
+        },
+      ],
+      deadlineAt: new Date(Date.now() + 60 * 60 * 1_000),
+      id: taskId,
+      kind: "ISSUE_SPEC",
+      stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
+    });
+    const taskCaseExecutionCreate = vi.fn().mockResolvedValue({
+      executionOrdinal: 2,
+      id: nextExecutionId,
+    });
+    const taskExecutionStageUpdate = vi.fn().mockResolvedValue({});
+    const taskExecutionUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const taskExecutionEventCreate = vi.fn().mockResolvedValue({});
+    const tx = {
+      taskCaseExecution: { create: taskCaseExecutionCreate },
+      taskExecution: {
+        findFirst: taskExecutionFindFirst,
+        updateMany: taskExecutionUpdateMany,
+      },
+      taskExecutionEvent: { create: taskExecutionEventCreate },
+      taskExecutionStage: { update: taskExecutionStageUpdate },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (operation: (client: typeof tx) => Promise<unknown>) =>
+          operation(tx),
+      ),
+    };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const dispatch = vi
+      .spyOn(
+        service as unknown as {
+          dispatchPendingForTask: (id: string) => Promise<void>;
+        },
+        "dispatchPendingForTask",
+      )
+      .mockResolvedValue(undefined);
+    vi.spyOn(service, "detail").mockResolvedValue({ id: taskId } as never);
+
+    await expect(service.rerunCase(current, taskId, caseId)).resolves.toEqual({
+      id: taskId,
+    });
+
+    expect(taskCaseExecutionCreate).toHaveBeenCalledWith({
+      data: {
+        caseId,
+        executionOrdinal: 2,
+        taskExecutionId: taskId,
+      },
+      select: { executionOrdinal: true, id: true },
+    });
+    expect(taskExecutionStageUpdate).toHaveBeenCalledWith({
+      data: {
+        finishedAt: null,
+        lastError: expect.anything(),
+        status: "RUNNING",
+        waitingReason: null,
+      },
+      where: { id: "execution-stage-1" },
+    });
+    expect(taskExecutionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentStage: "SPEC_EXECUTION",
+          lifecycle: "RUNNING",
+          verdict: null,
+        }),
+      }),
+    );
+    expect(taskExecutionEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "task.case.rerun_queued",
+        payload: expect.objectContaining({
+          caseExecutionId: nextExecutionId,
+          caseId,
+          executionOrdinal: 2,
+          previousCaseExecutionId: previousExecutionId,
+        }),
+        taskExecutionId: taskId,
+      }),
+    });
+    expect(dispatch).toHaveBeenCalledWith(taskId);
+  });
+
+  it("rejects a rerun while the latest Runtime is still active", async () => {
+    const tx = {
+      taskExecution: {
+        findFirst: vi.fn().mockResolvedValue({
+          cancelRequestedAt: null,
+          caseExecutions: [
+            {
+              caseId,
+              executionOrdinal: 1,
+              id: previousExecutionId,
+              run: { lifecycle: "RUNNING" },
+            },
+          ],
+          deadlineAt: new Date(Date.now() + 60 * 60 * 1_000),
+          id: taskId,
+          kind: "ISSUE_SPEC",
+          stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
+        }),
+      },
+    };
+    const service = new TaskExecutionService(
+      {
+        $transaction: vi.fn(
+          async (operation: (client: typeof tx) => Promise<unknown>) =>
+            operation(tx),
+        ),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      service.rerunCase(current, taskId, caseId),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+});
+
 describe("TaskExecutionService rerun", () => {
   it("creates a fresh Issue task from the original immutable input", async () => {
     const sourceTaskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
