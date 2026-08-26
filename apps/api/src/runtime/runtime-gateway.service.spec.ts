@@ -123,6 +123,58 @@ describe("RuntimeGatewayService capacity ownership", () => {
   });
 });
 
+describe("RuntimeGatewayService terminal session ownership", () => {
+  it("excludes sessions with a close timestamp from reconnect reconciliation", async () => {
+    const { handleHello, prisma, service, socket } = fixture();
+
+    await handleHello.call(service, socket, hello("0.2.14"));
+
+    expect(prisma.browserRuntimeSession.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          closedAt: null,
+          status: { in: expect.arrayContaining(["LOST"]) },
+        }),
+      }),
+    );
+  });
+
+  it("asks the Runtime to close a local session that cannot be renewed", async () => {
+    const { handleHeartbeat, prisma, service, socket } = fixture();
+    const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
+    const heartbeat = runtimeClientMessageSchema.parse({
+      activeSessions: [
+        {
+          fencingToken: "7",
+          leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+          sessionId,
+          state: "OPEN",
+        },
+      ],
+      maxConcurrency: 4,
+      sentAt: new Date().toISOString(),
+      type: "runtime.heartbeat",
+    });
+
+    await handleHeartbeat.call(
+      service,
+      socket,
+      "6f090d88-8987-487f-8338-1a734beab6a6",
+      heartbeat,
+    );
+
+    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ closedAt: null, id: sessionId }),
+      }),
+    );
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      closeSessions: [sessionId],
+      type: "runtime.heartbeat.ack",
+    });
+  });
+});
+
 describe("RuntimeGatewayService user Profile protocol floor", () => {
   it("does not restore a user Profile on a Runtime older than protocol v1.9", async () => {
     const updateProfile = vi.fn().mockResolvedValue({ count: 1 });

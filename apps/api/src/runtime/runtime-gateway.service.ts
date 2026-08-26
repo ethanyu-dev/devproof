@@ -353,7 +353,11 @@ export class RuntimeGatewayService {
           take: 1,
         },
       },
-      where: { runtimeId, status: { in: [...ACTIVE_STATUSES] } },
+      where: {
+        closedAt: null,
+        runtimeId,
+        status: { in: [...ACTIVE_STATUSES] },
+      },
     });
     await this.prisma.browserRuntimeSession.updateMany({
       data: { protocolMinor },
@@ -656,6 +660,7 @@ export class RuntimeGatewayService {
           id: local.sessionId,
           leaseToken: local.leaseToken,
           runtimeId,
+          closedAt: null,
           status: { in: [...ACTIVE_STATUSES] },
         },
       });
