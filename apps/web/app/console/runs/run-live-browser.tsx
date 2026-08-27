@@ -7,7 +7,8 @@ import type {
 } from "react";
 import { createPortal } from "react-dom";
 import { CircleAlert, LoaderCircle, MonitorPlay, Radio, X } from "lucide-react";
-import { Badge, Button } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 import { consoleApi } from "@/lib/api";
 import { displayLabel, displayMessage } from "@/lib/display-text";

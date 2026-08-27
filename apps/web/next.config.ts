@@ -14,11 +14,7 @@ const config: NextConfig = {
   },
   output: "standalone",
   reactStrictMode: true,
-  transpilePackages: [
-    "@devproof/ui",
-    "@devproof/contracts",
-    "@devproof/runtime-protocol",
-  ],
+  transpilePackages: ["@devproof/contracts", "@devproof/runtime-protocol"],
   async headers() {
     return [
       {

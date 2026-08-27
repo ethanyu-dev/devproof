@@ -42,8 +42,26 @@ Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户�
 - API：NestJS 11、Fastify
 - Data：PostgreSQL 17、Prisma 7
 - Contracts：Zod 4
-- UI：独立的 @devproof/ui，无圆角、216px Console 侧栏、48px 顶栏与 DevProof 设计令牌
+- UI：基于 Tailwind CSS 4 的本地 shadcn/ui 组件、按角色收敛的 Console 壳层与单一浅色视觉主题
 - Runtime：独立 Node.js daemon，通过一次性 Token 注册，长期凭证只保存在运行机器
+
+### 本地 Console 角色
+
+Console 默认使用普通成员视图，只展示团队全部任务及任务需要的浏览器登录流程。开发或演示完整管理控制台时，在浏览器 Console 执行：
+
+```js
+localStorage.setItem("devproof.admin", "true");
+location.reload();
+```
+
+恢复普通成员视图：
+
+```js
+localStorage.removeItem("devproof.admin");
+location.reload();
+```
+
+该开关只控制当前浏览器中的前端展示，不是权限边界；生产环境的管理员授权仍需由后端实现。
 
 ## 核心角色
 

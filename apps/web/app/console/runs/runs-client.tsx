@@ -20,7 +20,9 @@ import {
   TriangleAlert,
   XCircle,
 } from "lucide-react";
-import { Badge, Button, Card } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -390,6 +392,7 @@ function RunListClient() {
             {loading ? "刷新中…" : "刷新"}
           </Button>
         }
+        description="查看团队的全部浏览器验证执行。"
         title="任务执行"
       />
       <Card className="dp-verification-list dp-verification-list-view">
@@ -624,9 +627,20 @@ function RunDetailClient({ id }: { id: string }) {
   const passedCriteria = criteria.filter(
     (criterion) => criterion.status === "PASSED",
   ).length;
+  const browserRuntimeNames = detail
+    ? [
+        ...new Set(
+          detail.browserExecutions.flatMap((execution) =>
+            execution.runtimeSession?.runtime.name
+              ? [execution.runtimeSession.runtime.name]
+              : [],
+          ),
+        ),
+      ]
+    : [];
 
   return (
-    <>
+    <div className="dp-run-detail-page">
       <PageHeader
         actions={
           <>
@@ -660,6 +674,7 @@ function RunDetailClient({ id }: { id: string }) {
             </Button>
           </>
         }
+        description="先查看验证结论与操作回放，需要排查时再展开技术详情。"
         title="执行详情"
       />
       <Link className="dp-back-link" href="/console/runs">
@@ -716,140 +731,161 @@ function RunDetailClient({ id }: { id: string }) {
                     <small>操作步骤</small>
                   </span>
                   <span>
-                    <b>{videos.length}</b>
-                    <small>完整视频</small>
+                    <b
+                      title={
+                        browserRuntimeNames.length
+                          ? browserRuntimeNames.join(" / ")
+                          : undefined
+                      }
+                    >
+                      {browserRuntimeNames[0] ?? "待分配"}
+                      {browserRuntimeNames.length > 1
+                        ? ` +${browserRuntimeNames.length - 1}`
+                        : ""}
+                    </b>
+                    <small>浏览器节点</small>
                   </span>
                 </div>
               </Card>
             ) : null}
 
-            {videos.length > 0 || stepScreenshots.length > 0 ? (
-              <Card className="dp-verification-detail dp-run-card dp-run-media-card">
-                <div className="dp-section-head">
-                  <span>
-                    <Film />
-                    <b>操作回放</b>
-                  </span>
-                  <small>
-                    {videos.length > 0
-                      ? "由每一步操作后的真实截图自动生成"
-                      : "视频生成中，步骤截图已可查看"}
-                  </small>
-                </div>
-                {videos.map((video) => (
-                  <div className="dp-run-video" key={video.id}>
-                    {video.downloadUrl ? (
-                      <video
-                        controls
-                        playsInline
-                        poster={
-                          stepScreenshots.at(-1)?.downloadUrl ?? undefined
-                        }
-                        preload="metadata"
-                        src={video.downloadUrl}
-                      >
-                        当前浏览器不支持 WebM 视频，请使用下方链接下载查看。
-                      </video>
-                    ) : null}
-                    <div>
-                      <span>
-                        <b>{video.label || "完整操作视频"}</b>
-                        <small>
-                          {evidenceMetadata(video).frameCount
-                            ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
-                            : ""}
-                          {video.runtimeArtifact
-                            ? formatByteSize(video.runtimeArtifact.byteSize)
-                            : "已上传对象存储"}
-                        </small>
-                      </span>
-                      {video.downloadUrl ? (
-                        <a href={video.downloadUrl} download>
-                          <Download /> 下载视频
-                        </a>
-                      ) : null}
-                    </div>
+            <div className="dp-run-decision-grid">
+              {videos.length > 0 || stepScreenshots.length > 0 ? (
+                <Card className="dp-verification-detail dp-run-card dp-run-media-card">
+                  <div className="dp-section-head">
+                    <span>
+                      <Film />
+                      <b>操作回放</b>
+                    </span>
+                    <small>
+                      {videos.length > 0
+                        ? "真实浏览器操作回放"
+                        : "视频生成中，步骤截图已可查看"}
+                    </small>
                   </div>
-                ))}
-                {stepScreenshots.length > 0 ? (
-                  <details className="dp-run-step-details">
-                    <summary>
-                      <ImageIcon /> 查看全部 {stepScreenshots.length} 个操作步骤
-                    </summary>
-                    <div className="dp-run-step-grid">
-                      {stepScreenshots.map((screenshot, index) => (
-                        <a
-                          href={screenshot.downloadUrl ?? undefined}
-                          key={screenshot.id}
-                          rel="noreferrer"
-                          target="_blank"
+                  {videos.map((video) => (
+                    <div className="dp-run-video" key={video.id}>
+                      {video.downloadUrl ? (
+                        <video
+                          controls
+                          playsInline
+                          poster={
+                            stepScreenshots.at(-1)?.downloadUrl ?? undefined
+                          }
+                          preload="metadata"
+                          src={video.downloadUrl}
                         >
-                          <img
-                            alt={`步骤 ${index + 1}：${stepCommand(screenshot)}`}
-                            loading="lazy"
-                            src={screenshot.downloadUrl ?? undefined}
-                          />
-                          <span>
-                            <b>步骤 {index + 1}</b>
-                            <small>{stepCommand(screenshot)}</small>
-                          </span>
-                        </a>
-                      ))}
-                    </div>
-                  </details>
-                ) : null}
-              </Card>
-            ) : terminal ? (
-              <Card className="dp-verification-detail dp-run-card dp-run-media-empty">
-                <Film />
-                <span>
-                  <b>本次执行没有生成操作视频</b>
-                  <small>
-                    需要浏览器执行节点协议 v1.10
-                    或更新版本；升级后请重启执行节点。
-                  </small>
-                </span>
-              </Card>
-            ) : null}
-
-            <div className="dp-run-overview-row">
-              <Card className="dp-verification-detail dp-run-card dp-run-goal-card">
-                <div className="dp-section-head">
-                  <span>
-                    <b>任务目标</b>
-                  </span>
-                </div>
-                <p className="dp-run-goal-copy">{detail.goal}</p>
-              </Card>
-              <Card className="dp-verification-detail dp-run-card dp-run-criteria-card">
-                <div className="dp-section-head">
-                  <span>
-                    <b>验收标准</b>
-                  </span>
-                  <span className="dp-count">{criteria.length}</span>
-                </div>
-                {criteria.length === 0 ? (
-                  <p className="dp-run-card-copy">未声明验收标准。</p>
-                ) : (
-                  criteria.map((criterion) => (
-                    <div className="dp-run-criterion" key={criterion.id}>
-                      <div className="dp-run-criterion-head">
-                        <b>{criterion.id}</b>
-                        {criterion.status ? (
-                          <Badge tone={tone(criterion.status)}>
-                            {displayLabel(criterion.status)}
-                          </Badge>
-                        ) : criterion.required ? (
-                          <small>必需</small>
+                          当前浏览器不支持 WebM 视频，请使用下方链接下载查看。
+                        </video>
+                      ) : null}
+                      <div>
+                        <span>
+                          <b>{video.label || "完整操作视频"}</b>
+                          <small>
+                            {evidenceMetadata(video).frameCount
+                              ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
+                              : ""}
+                            {video.runtimeArtifact
+                              ? formatByteSize(video.runtimeArtifact.byteSize)
+                              : "已上传对象存储"}
+                          </small>
+                        </span>
+                        {video.downloadUrl ? (
+                          <a href={video.downloadUrl} download>
+                            <Download /> 下载视频
+                          </a>
                         ) : null}
                       </div>
-                      <p>{criterion.description}</p>
-                      {criterion.summary ? (
-                        <small>{criterion.summary}</small>
-                      ) : null}
                     </div>
-                  ))
-                )}
+                  ))}
+                  {stepScreenshots.length > 0 ? (
+                    <details className="dp-run-step-details">
+                      <summary>
+                        <ImageIcon /> 查看全部 {stepScreenshots.length}{" "}
+                        个操作步骤
+                      </summary>
+                      <div className="dp-run-step-grid">
+                        {stepScreenshots.map((screenshot, index) => (
+                          <a
+                            href={screenshot.downloadUrl ?? undefined}
+                            key={screenshot.id}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            <img
+                              alt={`步骤 ${index + 1}：${stepCommand(screenshot)}`}
+                              loading="lazy"
+                              src={screenshot.downloadUrl ?? undefined}
+                            />
+                            <span>
+                              <b>步骤 {index + 1}</b>
+                              <small>{stepCommand(screenshot)}</small>
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                </Card>
+              ) : (
+                <Card className="dp-verification-detail dp-run-card dp-run-media-empty">
+                  <Film />
+                  <span>
+                    <b>
+                      {terminal ? "本次执行没有生成操作视频" : "操作视频生成中"}
+                    </b>
+                    <small>
+                      {terminal
+                        ? "需要浏览器执行节点协议 v1.10 或更新版本。"
+                        : "执行过程中会逐步生成截图与操作回放。"}
+                    </small>
+                  </span>
+                </Card>
+              )}
+
+              <Card className="dp-verification-detail dp-run-card dp-run-key-info-card">
+                <div className="dp-section-head">
+                  <span>
+                    <b>关键验证信息</b>
+                  </span>
+                  <Badge tone={outcome?.tone ?? "neutral"}>
+                    {passedCriteria}/{criteria.length} 通过
+                  </Badge>
+                </div>
+                <div className="dp-run-key-info-scroll">
+                  <section>
+                    <span className="dp-run-key-label">任务目标</span>
+                    <p className="dp-run-goal-copy">{detail.goal}</p>
+                  </section>
+                  <section>
+                    <div className="dp-run-key-section-head">
+                      <span className="dp-run-key-label">验收标准</span>
+                      <small>{criteria.length} 项</small>
+                    </div>
+                    {criteria.length === 0 ? (
+                      <p className="dp-run-card-copy">未声明验收标准。</p>
+                    ) : (
+                      criteria.map((criterion) => (
+                        <div className="dp-run-criterion" key={criterion.id}>
+                          <div className="dp-run-criterion-head">
+                            <b>{criterion.id}</b>
+                            {criterion.status ? (
+                              <Badge tone={tone(criterion.status)}>
+                                {displayLabel(criterion.status)}
+                              </Badge>
+                            ) : criterion.required ? (
+                              <small>必需</small>
+                            ) : null}
+                          </div>
+                          <p>{criterion.description}</p>
+                          {criterion.summary ? (
+                            <small>{criterion.summary}</small>
+                          ) : null}
+                        </div>
+                      ))
+                    )}
+                  </section>
+                </div>
               </Card>
             </div>
 
@@ -857,19 +893,25 @@ function RunDetailClient({ id }: { id: string }) {
               <summary>
                 <span>
                   <Activity />
-                  <b>查看尝试、全部证据与技术详情</b>
+                  <b>运行记录与证据</b>
                 </span>
                 <small>
                   {detail.attempts.length} 次尝试 · {detail.evidences.length}{" "}
-                  条证据 · {trajectoryPage.records.length} 条轨迹
+                  条证据 · 浏览器节点{" "}
+                  {browserRuntimeNames.join(" / ") || "待分配"}
                 </small>
               </summary>
               <div className="dp-run-technical-body">
                 <div className="dp-run-result-row">
                   <Card className="dp-verification-detail dp-run-card dp-run-result-card">
                     <div className="dp-section-head">
-                      <span>
-                        <b>执行结果</b>
+                      <span className="dp-run-result-title">
+                        <b>执行尝试</b>
+                        <small>
+                          <Monitor />
+                          {browserRuntimeNames.join(" / ") ||
+                            "等待分配浏览器节点"}
+                        </small>
                       </span>
                       <Badge
                         tone={tone(
@@ -947,37 +989,41 @@ function RunDetailClient({ id }: { id: string }) {
                         尚未产生 Screenshot、DOM、Network 或 Console 证据。
                       </p>
                     ) : (
-                      detail.evidences.map((evidence) => (
-                        <div className="dp-run-evidence" key={evidence.id}>
-                          <p>
-                            <b>{displayLabel(evidence.kind)}</b>
-                            {evidence.label ? ` · ${evidence.label}` : ""}
-                          </p>
-                          <small>
-                            {evidence.externalId}
-                            {evidence.runtimeArtifact
-                              ? ` · ${evidence.runtimeArtifact.contentType} · ${evidence.runtimeArtifact.byteSize} bytes`
-                              : ""}
-                          </small>
-                          {evidence.downloadUrl ? (
-                            <a
-                              href={evidence.downloadUrl}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              <Download /> 查看证据
-                            </a>
-                          ) : businessReferenceUrl(evidence) ? (
-                            <a
-                              href={businessReferenceUrl(evidence) ?? undefined}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              <ExternalLink /> 查看业务来源
-                            </a>
-                          ) : null}
-                        </div>
-                      ))
+                      <div className="dp-run-evidence-grid">
+                        {detail.evidences.map((evidence) => (
+                          <div className="dp-run-evidence" key={evidence.id}>
+                            <p>
+                              <b>{displayLabel(evidence.kind)}</b>
+                              {evidence.label ? ` · ${evidence.label}` : ""}
+                            </p>
+                            <small>
+                              {evidence.externalId}
+                              {evidence.runtimeArtifact
+                                ? ` · ${evidence.runtimeArtifact.contentType} · ${formatByteSize(evidence.runtimeArtifact.byteSize)}`
+                                : ""}
+                            </small>
+                            {evidence.downloadUrl ? (
+                              <a
+                                href={evidence.downloadUrl}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                <Download /> 查看证据
+                              </a>
+                            ) : businessReferenceUrl(evidence) ? (
+                              <a
+                                href={
+                                  businessReferenceUrl(evidence) ?? undefined
+                                }
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                <ExternalLink /> 查看业务来源
+                              </a>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </Card>
                 </div>
@@ -1105,7 +1151,7 @@ function RunDetailClient({ id }: { id: string }) {
           ) : null}
         </>
       )}
-    </>
+    </div>
   );
 }
 

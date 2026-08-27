@@ -42,8 +42,26 @@ Browser Runtime is the first Execution Runner, not the platform boundary. The us
 - API: NestJS 11 and Fastify
 - Data: PostgreSQL 17 and Prisma 7
 - Contracts: Zod 4
-- UI: standalone `@devproof/ui`, with square corners, a 216 px Console sidebar, a 48 px top bar, and DevProof design tokens
+- UI: local shadcn/ui components on Tailwind CSS 4, with a role-aware Console shell and a single light visual theme
 - Runtime: an independent Node.js daemon registered with a one-time token; long-lived credentials remain on the runtime host
+
+### Local Console role
+
+The Console uses the member view by default. It shows every team Task and only the Browser login flow needed by those Tasks. For development or demos, enable the complete admin Console from the browser console:
+
+```js
+localStorage.setItem("devproof.admin", "true");
+location.reload();
+```
+
+Return to the member view with:
+
+```js
+localStorage.removeItem("devproof.admin");
+location.reload();
+```
+
+This flag controls presentation in the current browser only; it is not an authorization boundary. Production admin authorization must still be enforced by the backend.
 
 ## Core roles
 
