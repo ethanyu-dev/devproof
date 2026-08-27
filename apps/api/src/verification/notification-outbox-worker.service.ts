@@ -7,10 +7,12 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { FeishuIntegrationService } from "../integrations/feishu-integration.service.js";
+import { buildFeishuTaskCard } from "../integrations/feishu-task-card.js";
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { redactText } from "../observability/observability.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
 import { GithubAccessService } from "../console/github-access.service.js";
+import { taskNotificationContext } from "../task-executions/task-waiting-notification.js";
 
 export function signFeishuWebhook(timestamp: string, secret: string): string {
   return createHmac("sha256", `${timestamp}\n${secret}`)
@@ -206,9 +208,23 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     if (claimed.count !== 1) return;
     const row = await this.prisma.notificationOutbox.findUniqueOrThrow({
       include: {
-        executionRun: { select: { traceId: true } },
+        executionRun: {
+          select: {
+            taskExecutionId: true,
+            traceId: true,
+            taskExecution: {
+              select: { notificationContext: true, title: true },
+            },
+          },
+        },
         run: { select: { traceId: true } },
-        taskExecution: { select: { traceId: true } },
+        taskExecution: {
+          select: {
+            notificationContext: true,
+            title: true,
+            traceId: true,
+          },
+        },
       },
       where: { id },
     });
@@ -225,7 +241,20 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       } else if (row.channel === "GITHUB") {
         await this.sendGithub(row.teamId, row.payload);
       } else {
-        await this.sendFeishu(row.id, row.payload);
+        const taskExecution =
+          row.taskExecution ?? row.executionRun?.taskExecution;
+        await this.sendFeishu(
+          row.id,
+          row.payload,
+          taskExecution
+            ? {
+                notificationContext: taskExecution.notificationContext,
+                taskExecutionId:
+                  row.taskExecutionId ?? row.executionRun?.taskExecutionId,
+                taskTitle: taskExecution.title,
+              }
+            : undefined,
+        );
       }
       await this.prisma.$transaction(async (tx) => {
         await tx.notificationOutbox.update({
@@ -340,35 +369,42 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async sendFeishu(deliveryId: string, payloadValue: Prisma.JsonValue) {
+  private async sendFeishu(
+    deliveryId: string,
+    payloadValue: Prisma.JsonValue,
+    task?: {
+      notificationContext: Prisma.JsonValue;
+      taskExecutionId: string | null | undefined;
+      taskTitle: string;
+    },
+  ) {
     const config = env();
     const payload = payloadValue as Record<string, unknown>;
-    const checkpointId = String(
-      payload.checkpointId ??
-        payload.interventionId ??
-        payload.taskExecutionId ??
-        "",
-    );
     const consoleUrl = feishuConsoleUrl(config.WEB_ORIGIN, payload);
-    const isCompletion = payload.notificationKind === "TASK_COMPLETED";
-    const completion = taskCompletionPresentation(payload);
-    const title = isCompletion
-      ? `DevProof · ${completion.label}`
-      : payload.notificationKind === "TASK_WAITING_INPUT"
-        ? "DevProof 任务等待输入"
-        : "DevProof 人工检查点";
-    const prompt = String(payload.prompt ?? "");
-    const goal = String(payload.goal ?? "");
-    const counts = record(payload.counts);
-    const completionSummary = `场景 ${countValue(counts.total)} · 通过 ${countValue(counts.passed)} · 失败 ${countValue(counts.failed)} · 未确定 ${countValue(counts.inconclusive)}`;
-    if (typeof payload.feishuReplyToMessageId === "string") {
-      await this.feishu.replyToMessage(
-        payload.feishuReplyToMessageId,
+    const card = buildFeishuTaskCard(payload, consoleUrl, task?.taskTitle);
+    const context = taskNotificationContext(task?.notificationContext);
+    const cardMessageId =
+      context.feishu?.cardMessageId ?? stringValue(payload.feishuCardMessageId);
+    if (cardMessageId) {
+      await this.feishu.updateCardMessage(cardMessageId, card);
+      return;
+    }
+    const replyToMessageId =
+      context.feishu?.replyToMessageId ??
+      stringValue(payload.feishuReplyToMessageId);
+    if (replyToMessageId) {
+      const createdCardMessageId = await this.feishu.replyCardToMessage(
+        replyToMessageId,
         deliveryId,
-        isCompletion
-          ? `【${title}】\n任务：${goal}\n${completionSummary}\n查看逐步截图与执行视频：${consoleUrl}`
-          : `【${title}】\n任务：${goal}\n需要处理：${prompt}\n${consoleUrl}`,
+        card,
       );
+      if (task?.taskExecutionId) {
+        await this.rememberTaskCard(
+          task.taskExecutionId,
+          replyToMessageId,
+          createdCardMessageId,
+        );
+      }
       return;
     }
     if (!config.FEISHU_NOTIFICATION_WEBHOOK_URL) {
@@ -380,37 +416,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       : undefined;
     const body = {
       ...(signature ? { sign: signature, timestamp } : {}),
-      card: {
-        elements: [
-          {
-            tag: "div",
-            text: {
-              content: isCompletion
-                ? `**任务**\n${goal}\n\n**结果**\n${completionSummary}`
-                : `**目标**\n${goal}\n\n**需要人工处理**\n${prompt}\n\n编号：${checkpointId}`,
-              tag: "lark_md",
-            },
-          },
-          {
-            actions: [
-              {
-                tag: "button",
-                text: {
-                  content: isCompletion ? "查看完整结果" : "打开 DevProof 处理",
-                  tag: "plain_text",
-                },
-                type: "primary",
-                url: consoleUrl,
-              },
-            ],
-            tag: "action",
-          },
-        ],
-        header: {
-          template: isCompletion ? completion.template : "orange",
-          title: { content: title, tag: "plain_text" },
-        },
-      },
+      card,
       msg_type: "interactive",
     };
     const response = await fetch(config.FEISHU_NOTIFICATION_WEBHOOK_URL, {
@@ -430,6 +436,29 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     if ((result.code ?? result.StatusCode ?? 0) !== 0) {
       throw new Error(`Feishu rejected notification: ${result.msg ?? text}`);
     }
+  }
+
+  private async rememberTaskCard(
+    taskExecutionId: string,
+    replyToMessageId: string,
+    cardMessageId: string,
+  ) {
+    const task = await this.prisma.taskExecution.findUnique({
+      select: { notificationContext: true },
+      where: { id: taskExecutionId },
+    });
+    if (!task) return;
+    const notificationContext = record(task.notificationContext);
+    const feishu = record(notificationContext.feishu);
+    await this.prisma.taskExecution.update({
+      data: {
+        notificationContext: json({
+          ...notificationContext,
+          feishu: { ...feishu, cardMessageId, replyToMessageId },
+        }),
+      },
+      where: { id: taskExecutionId },
+    });
   }
 
   private async sendGithub(teamId: string, payloadValue: Prisma.JsonValue) {
@@ -565,4 +594,12 @@ function record(value: unknown): Record<string, unknown> {
 
 function countValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function json(value: unknown): Prisma.InputJsonValue {
+  return value as Prisma.InputJsonValue;
 }

@@ -8,6 +8,10 @@ import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { TaskExecutionService } from "../task-executions/task-execution.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
+import {
+  buildFeishuTaskCard,
+  type FeishuTaskCard,
+} from "./feishu-task-card.js";
 
 interface FeishuEventMetadata {
   appId: string;
@@ -273,12 +277,21 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         },
         where: { id: row.id },
       });
-      await this.replyBestEffort(
-        row.id,
-        metadata.message.messageId,
-        row.externalEventId,
-        `DevProof 任务已创建：${task.title}\n策略：${profileStrategy}\n${env().WEB_ORIGIN}/console/runs`,
-      );
+      await this.replyTaskCardBestEffort({
+        card: buildFeishuTaskCard(
+          {
+            goal: task.title,
+            notificationKind: "TASK_CREATED",
+            taskExecutionId: task.id,
+          },
+          `${env().WEB_ORIGIN.replace(/\/$/u, "")}/console/runs?task=${encodeURIComponent(task.id)}`,
+          task.title,
+        ),
+        dedupeKey: row.externalEventId,
+        integrationEventId: row.id,
+        replyToMessageId: metadata.message.messageId,
+        taskExecutionId: task.id,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.prisma.inboundIntegrationEvent.update({
@@ -405,30 +418,127 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async replyTaskCardBestEffort(input: {
+    card: FeishuTaskCard;
+    dedupeKey: string;
+    integrationEventId: string;
+    replyToMessageId: string;
+    taskExecutionId: string;
+  }) {
+    try {
+      const cardMessageId = await this.replyCardToMessage(
+        input.replyToMessageId,
+        input.dedupeKey,
+        input.card,
+      );
+      const task = await this.prisma.taskExecution.findUnique({
+        select: { notificationContext: true },
+        where: { id: input.taskExecutionId },
+      });
+      const notificationContext = asRecord(task?.notificationContext);
+      const feishu = asRecord(notificationContext.feishu);
+      await this.prisma.taskExecution.update({
+        data: {
+          notificationContext: json({
+            ...notificationContext,
+            feishu: {
+              ...feishu,
+              cardMessageId,
+              replyToMessageId: input.replyToMessageId,
+            },
+          }),
+        },
+        where: { id: input.taskExecutionId },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Feishu task card reply failed: ${message}`);
+      await this.prisma.inboundIntegrationEvent.update({
+        data: {
+          error: json({ code: "FEISHU_REPLY_FAILED", message }),
+        },
+        where: { id: input.integrationEventId },
+      });
+    }
+  }
+
   async replyToMessage(messageId: string, dedupeKey: string, text: string) {
     const token = await this.tenantAccessToken();
-    const url = new URL(
+    const response = await fetch(
       `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
-    );
-    url.searchParams.set("uuid", dedupeKey);
-    const response = await fetch(url, {
-      body: JSON.stringify({
-        content: JSON.stringify({ text }),
-        msg_type: "text",
-      }),
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json; charset=utf-8",
+      {
+        body: JSON.stringify({
+          content: JSON.stringify({ text }),
+          msg_type: "text",
+          uuid: dedupeKey,
+        }),
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json; charset=utf-8",
+        },
+        method: "POST",
+        signal: AbortSignal.timeout(10_000),
       },
-      method: "POST",
-      signal: AbortSignal.timeout(10_000),
-    });
+    );
     const result = asRecord(await response.json().catch(() => ({})));
     if (!response.ok || Number(result.code) !== 0) {
       throw new Error(
         `Feishu reply failed: ${String(result.msg ?? response.status)}`,
       );
     }
+  }
+
+  async replyCardToMessage(
+    messageId: string,
+    dedupeKey: string,
+    card: FeishuTaskCard,
+  ) {
+    const result = await this.requestMessageApi(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+      {
+        content: JSON.stringify(card),
+        msg_type: "interactive",
+        uuid: dedupeKey,
+      },
+      "POST",
+    );
+    const cardMessageId = asRecord(result.data).message_id;
+    if (typeof cardMessageId !== "string" || !cardMessageId) {
+      throw new Error("Feishu card reply did not return a message id.");
+    }
+    return cardMessageId;
+  }
+
+  async updateCardMessage(messageId: string, card: FeishuTaskCard) {
+    await this.requestMessageApi(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
+      { content: JSON.stringify(card) },
+      "PATCH",
+    );
+  }
+
+  private async requestMessageApi(
+    url: string,
+    body: Record<string, unknown>,
+    method: "PATCH" | "POST",
+  ) {
+    const token = await this.tenantAccessToken();
+    const response = await fetch(url, {
+      body: JSON.stringify(body),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      method,
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = asRecord(await response.json().catch(() => ({})));
+    if (!response.ok || Number(result.code) !== 0) {
+      throw new Error(
+        `Feishu message request failed: ${String(result.msg ?? response.status)}`,
+      );
+    }
+    return result;
   }
 
   private async tenantAccessToken() {

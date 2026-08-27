@@ -225,7 +225,7 @@ Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制
 
 开启 `FEISHU_BOT_ENABLED` 后，配置机器人的稳定 `FEISHU_BOT_OPEN_ID`，并在飞书开发者后台把加密事件订阅回调配置为 `/integrations/feishu/events`，订阅 `im.message.receive_v1` 并授予读取群消息、读取用户身份和回复消息所需权限。服务端验证原始请求签名、时间窗、verification token、app id、tenant key 和被 @ 的 bot open_id，按 event id 幂等入库后异步创建 Task。群内使用 `@DevProof ENG-123 https://preview.example.com`；默认采用发起人 Profile，可加 `--owner` 使用 Issue owner，或 `--ephemeral` 强制临时会话。用户须先通过飞书 SSO 登录一次以建立稳定身份映射。
 
-Task 进入终态后，控制面通过 durable outbox 回复原飞书消息（或群机器人 Webhook），并把同一份汇总结果幂等回写到关联的 GitHub PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。通知链接打开最终结果，可查看逐步截图和 R2 中的操作视频。GitHub 回写要求路由命中的 Console PAT 对目标仓库具备 Issue/PR comment 写权限。
+飞书发起的 Task 会回复一张简洁的交互卡片；任务创建、等待人工协助和最终判定都会更新同一张卡片，并通过按钮引导到 Console 处理或查看完整结果。Task 进入终态后，控制面通过 durable outbox 更新该卡片（仅配置群机器人 Webhook 时发送独立卡片），并把同一份汇总结果幂等回写到关联的 GitHub PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。结果链接可查看逐步截图和 R2 中的操作视频。GitHub 回写要求路由命中的 Console PAT 对目标仓库具备 Issue/PR comment 写权限。
 
 飞书 HITL 通知使用群自定义机器人：
 
