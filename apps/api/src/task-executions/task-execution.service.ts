@@ -1161,11 +1161,20 @@ export class TaskExecutionService {
       ...input,
       idempotencyKey: `rerun:${id}:${randomUUID()}`,
     });
+    const originalFeishuContext = taskNotificationContext(
+      task.notificationContext,
+    ).feishu;
     const rerun = await this.createParsed(current, rerunInput, false, {
       ...actor,
       notificationContext:
         actor.notificationContext ??
-        taskNotificationContext(task.notificationContext),
+        (originalFeishuContext?.replyToMessageId
+          ? {
+              feishu: {
+                replyToMessageId: originalFeishuContext.replyToMessageId,
+              },
+            }
+          : {}),
     });
     await this.prisma.taskExecutionEvent.createMany({
       data: [

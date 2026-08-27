@@ -1,15 +1,21 @@
 import { createHash } from "node:crypto";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   decryptFeishuPayload,
   extractIssueRef,
+  FeishuIntegrationService,
   isTargetBotMentioned,
   normalizeFeishuEvent,
   profileStrategyFromText,
   verifyFeishuSignature,
 } from "./feishu-integration.service.js";
+import { buildFeishuTaskCard } from "./feishu-task-card.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Feishu integration security and parsing", () => {
   it("verifies the exact raw request and rejects stale or altered requests", () => {
@@ -148,6 +154,68 @@ describe("Feishu integration security and parsing", () => {
     expect(profileStrategyFromText("ENG-123 --owner")).toBe("ISSUE_ASSIGNEE");
     expect(profileStrategyFromText("ENG-123 --owner --ephemeral")).toBe(
       "EPHEMERAL",
+    );
+  });
+});
+
+describe("Feishu interactive message API", () => {
+  it("replies with an interactive card and later updates that exact message", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: 0,
+            expire: 7200,
+            tenant_access_token: "tenant-token",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ code: 0, data: { message_id: "card-message-1" } }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 0 }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new FeishuIntegrationService({} as never, {} as never);
+    const createdCard = buildFeishuTaskCard(
+      { goal: "ENG-123", notificationKind: "TASK_CREATED" },
+      "https://devproof.example.com/console/runs?task=task-1",
+    );
+    const completedCard = buildFeishuTaskCard(
+      {
+        goal: "ENG-123",
+        notificationKind: "TASK_COMPLETED",
+        verdict: "PASSED",
+      },
+      "https://devproof.example.com/console/runs?task=task-1",
+    );
+
+    await expect(
+      service.replyCardToMessage("source-message", "delivery-1", createdCard),
+    ).resolves.toBe("card-message-1");
+    await service.updateCardMessage("card-message-1", completedCard);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://open.feishu.cn/open-apis/im/v1/messages/source-message/reply",
+      expect.objectContaining({
+        body: expect.stringContaining('"msg_type":"interactive"'),
+        method: "POST",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://open.feishu.cn/open-apis/im/v1/messages/card-message-1",
+      expect.objectContaining({
+        body: expect.stringContaining("DevProof · 验证通过"),
+        method: "PATCH",
+      }),
     );
   });
 });

@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   feishuConsoleUrl,
   githubTaskResultComment,
+  NotificationOutboxWorker,
   signAgentResumeWebhook,
   signFeishuWebhook,
   taskCompletionPresentation,
@@ -88,6 +89,58 @@ describe("task completion notifications", () => {
     expect(githubTaskResultComment(payload, "https://example.com")).toContain(
       "<!-- devproof-task:task-1 -->",
     );
+  });
+});
+
+describe("Feishu task card delivery", () => {
+  it("updates the stored card for later HITL and completion states", async () => {
+    const feishu = {
+      replyCardToMessage: vi.fn(),
+      updateCardMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const worker = new NotificationOutboxWorker(
+      {} as never,
+      feishu as never,
+      {} as never,
+    );
+    const sendFeishu = Reflect.get(worker, "sendFeishu") as (
+      deliveryId: string,
+      payload: Record<string, unknown>,
+      task: Record<string, unknown>,
+    ) => Promise<void>;
+
+    await sendFeishu.call(
+      worker,
+      "delivery-1",
+      {
+        goal: "A verbose case-level goal",
+        interventionId: "intervention-1",
+        prompt: "Complete MFA in the preserved browser session.",
+        runId: "run-1",
+        runKind: "EXECUTION_RUN",
+      },
+      {
+        notificationContext: {
+          feishu: {
+            cardMessageId: "card-message-1",
+            replyToMessageId: "source-message-1",
+          },
+        },
+        taskExecutionId: "task-1",
+        taskTitle: "ENG-123",
+      },
+    );
+
+    expect(feishu.updateCardMessage).toHaveBeenCalledWith(
+      "card-message-1",
+      expect.objectContaining({
+        header: expect.objectContaining({ template: "orange" }),
+      }),
+    );
+    expect(feishu.replyCardToMessage).not.toHaveBeenCalled();
+    expect(
+      JSON.stringify(feishu.updateCardMessage.mock.calls[0]?.[1]),
+    ).not.toContain("Complete MFA");
   });
 });
 

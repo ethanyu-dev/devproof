@@ -2,7 +2,8 @@ import { Prisma } from "@prisma/client";
 
 export interface TaskNotificationContext {
   feishu?: {
-    replyToMessageId: string;
+    cardMessageId?: string;
+    replyToMessageId?: string;
   };
 }
 
@@ -53,8 +54,7 @@ export async function enqueueTaskWaitingNotification(
     String(input.generation),
     "feishu",
   ].join(":");
-  const replyToMessageId = taskNotificationContext(input.notificationContext)
-    .feishu?.replyToMessageId;
+  const feishu = taskNotificationContext(input.notificationContext).feishu;
   const created = await tx.notificationOutbox.createMany({
     data: [
       {
@@ -62,8 +62,11 @@ export async function enqueueTaskWaitingNotification(
         dedupeKey,
         eventType: "task.waiting_input",
         payload: json({
-          ...(replyToMessageId
-            ? { feishuReplyToMessageId: replyToMessageId }
+          ...(feishu?.cardMessageId
+            ? { feishuCardMessageId: feishu.cardMessageId }
+            : {}),
+          ...(feishu?.replyToMessageId
+            ? { feishuReplyToMessageId: feishu.replyToMessageId }
             : {}),
           goal: input.title,
           input: input.input,
@@ -104,8 +107,7 @@ export async function enqueueTaskCompletionNotifications(
   tx: Prisma.TransactionClient,
   input: TaskCompletionNotificationInput,
 ) {
-  const replyToMessageId = taskNotificationContext(input.notificationContext)
-    .feishu?.replyToMessageId;
+  const feishu = taskNotificationContext(input.notificationContext).feishu;
   const commonPayload = {
     counts: input.counts,
     executionDisposition: input.executionDisposition,
@@ -127,8 +129,11 @@ export async function enqueueTaskCompletionNotifications(
       eventType: "task.completed",
       payload: json({
         ...commonPayload,
-        ...(replyToMessageId
-          ? { feishuReplyToMessageId: replyToMessageId }
+        ...(feishu?.cardMessageId
+          ? { feishuCardMessageId: feishu.cardMessageId }
+          : {}),
+        ...(feishu?.replyToMessageId
+          ? { feishuReplyToMessageId: feishu.replyToMessageId }
           : {}),
       }),
       taskExecutionId: input.taskExecutionId,
@@ -175,10 +180,17 @@ export function taskNotificationContext(
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const feishu = value.feishu;
   if (!feishu || typeof feishu !== "object" || Array.isArray(feishu)) return {};
+  const cardMessageId = feishu.cardMessageId;
   const replyToMessageId = feishu.replyToMessageId;
-  return typeof replyToMessageId === "string" && replyToMessageId.length > 0
-    ? { feishu: { replyToMessageId } }
-    : {};
+  const normalized = {
+    ...(typeof cardMessageId === "string" && cardMessageId.length > 0
+      ? { cardMessageId }
+      : {}),
+    ...(typeof replyToMessageId === "string" && replyToMessageId.length > 0
+      ? { replyToMessageId }
+      : {}),
+  };
+  return Object.keys(normalized).length > 0 ? { feishu: normalized } : {};
 }
 
 export function taskWaitingPrompt(reason: string) {

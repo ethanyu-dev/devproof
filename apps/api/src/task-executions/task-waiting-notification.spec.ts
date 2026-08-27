@@ -112,8 +112,18 @@ describe("task waiting notifications", () => {
 
   it("normalizes stored context and gives users a concrete action", () => {
     expect(
-      taskNotificationContext({ feishu: { replyToMessageId: "message-1" } }),
-    ).toEqual({ feishu: { replyToMessageId: "message-1" } });
+      taskNotificationContext({
+        feishu: {
+          cardMessageId: "card-message-1",
+          replyToMessageId: "message-1",
+        },
+      }),
+    ).toEqual({
+      feishu: {
+        cardMessageId: "card-message-1",
+        replyToMessageId: "message-1",
+      },
+    });
     expect(
       taskNotificationContext({ feishu: { replyToMessageId: 1 } }),
     ).toEqual({});
