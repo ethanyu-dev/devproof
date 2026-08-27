@@ -26,16 +26,14 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import {
-  Badge,
-  Button,
-  Card,
-  Field,
-  Input,
-  Select,
-  Textarea,
-  Toggle,
-} from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
+import { Toggle } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -898,6 +896,7 @@ export function AccessClient() {
             {loading ? "刷新中…" : "刷新状态"}
           </Button>
         }
+        description="管理执行节点、代码平台凭证、模型与 Agent 接入 Token。"
         title="接入配置"
       />
 

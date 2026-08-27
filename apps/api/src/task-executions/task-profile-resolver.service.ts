@@ -192,9 +192,22 @@ export class TaskProfileResolverService {
       },
     });
     let resolved = 0;
+    const failures: Array<{ error: unknown; taskId: string }> = [];
     for (const task of tasks) {
-      const result = await this.resolve(task.id).catch(() => null);
-      if (result?.status === "RESOLVED") resolved += 1;
+      try {
+        const result = await this.resolve(task.id);
+        if (result?.status === "RESOLVED") resolved += 1;
+      } catch (error) {
+        failures.push({ error, taskId: task.id });
+      }
+    }
+    if (failures.length) {
+      throw new AggregateError(
+        failures.map(({ error }) => error),
+        `Profile resolution failed for ${failures.length} task(s): ${failures
+          .map(({ taskId }) => taskId)
+          .join(", ")}`,
+      );
     }
     return resolved;
   }

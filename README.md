@@ -42,8 +42,26 @@ Browser Runtime is the first Execution Runner, not the platform boundary. The us
 - API: NestJS 11 and Fastify
 - Data: PostgreSQL 17 and Prisma 7
 - Contracts: Zod 4
-- UI: standalone `@devproof/ui`, with square corners, a 216 px Console sidebar, a 48 px top bar, and DevProof design tokens
+- UI: local shadcn/ui components on Tailwind CSS 4, with a role-aware Console shell and a single light visual theme
 - Runtime: an independent Node.js daemon registered with a one-time token; long-lived credentials remain on the runtime host
+
+### Local Console role
+
+The Console uses the member view by default. It shows every team Task and only the Browser login flow needed by those Tasks. For development or demos, enable the complete admin Console from the browser console:
+
+```js
+localStorage.setItem("devproof.admin", "true");
+location.reload();
+```
+
+Return to the member view with:
+
+```js
+localStorage.removeItem("devproof.admin");
+location.reload();
+```
+
+This flag controls presentation in the current browser only; it is not an authorization boundary. Production admin authorization must still be enforced by the backend.
 
 ## Core roles
 
@@ -108,7 +126,7 @@ Requirements: Node.js 24, pnpm 10, and Docker.
        pnpm prisma:deploy
        pnpm dev
 
-5. In Console → Access → Agent Models, configure the team-wide ordered model list. Each entry contains a Base URL, encrypted API Key, Model ID, and Display Name. The list order controls fallback and recovery priority. Spec Analysis and Browser Execution use separate Agent Runtime identities. Provision one token for each deployment with `pnpm --filter @devproof/api runtime:provision -- --team default --pool SPEC_ANALYSIS` and `pnpm --filter @devproof/api runtime:provision -- --team default --pool BROWSER_EXECUTION`, then store the corresponding one-time token as `DEVPROOF_AGENT_RUNTIME_TOKEN` in each Runtime process. The pool-separation migration revokes every legacy combined Runtime token, so provision both pool-specific tokens immediately after deploying it. Browser worker concurrency is assigned dynamically from the sum of the online Browser execution nodes' Console-managed capacities; do not configure a separate Browser pool concurrency environment variable. Operators can approve an exact private or HTTP model gateway with `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST`.
+5. In Console → Access → Agent Models, configure the team-wide ordered model list. Each entry contains a Base URL, encrypted API Key, Model ID, and Display Name. The list order controls fallback and recovery priority. Spec Analysis and Browser Execution use separate Agent Runtime identities. Provision one token for each deployment with `pnpm --filter @devproof/api runtime:provision -- --team default --pool SPEC_ANALYSIS` and `pnpm --filter @devproof/api runtime:provision -- --team default --pool BROWSER_EXECUTION`. Local `pnpm dev` reads the one-time tokens from `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` and `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN` and starts both processes; standalone Runtime deployments store their corresponding token as `DEVPROOF_AGENT_RUNTIME_TOKEN`. The pool-separation migration revokes every legacy combined Runtime token, so provision both pool-specific tokens immediately after deploying it. Browser worker concurrency is assigned dynamically from the sum of the online Browser execution nodes' Console-managed capacities; do not configure a separate Browser pool concurrency environment variable. Operators can approve an exact private or HTTP model gateway with `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST`.
 
 6. Spec analysis for Issue Tasks is executed by Agent Runtime. The Agent reads the Issue, linked PR metadata, diffs, code pinned to the PR head SHA, and optional knowledge results through credential-isolated read-only control-plane tools, then submits an immutable source-cited `agent-spec-v2`. Configure `SPEC_ANALYSIS_MODE=AGENT`; use `SHADOW` to record a comparison with the legacy deterministic generator or `DETERMINISTIC` for rollback. Linear prefers the official GraphQL API through `LINEAR_API_TOKEN`, with `LINEAR_MCP_BEARER_TOKEN` as a fallback. Configure encrypted GitHub PAT entries in Console → Access and a read-only Knowledge MCP when required. Every model turn, structured analysis summary, tool call, validation correction, and final Spec is recorded in the Task trajectory; raw hidden chain-of-thought and credentials are never recorded.
 

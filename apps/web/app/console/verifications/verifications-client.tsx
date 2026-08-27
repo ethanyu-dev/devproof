@@ -9,7 +9,11 @@ import {
   FlaskConical,
   RefreshCw,
 } from "lucide-react";
-import { Badge, Button, Card, Field, Input } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
 import { PageHeader } from "@/components/page-header";
 import { FormMessage, LoadingState } from "@/components/settings-layout";
@@ -278,12 +282,11 @@ function VerificationDetailClient({ id }: { id: string }) {
       <PageHeader
         actions={
           <>
-            <Link
-              className="dp-button dp-button-secondary"
-              href="/console/verifications"
-            >
-              <ArrowLeft /> 返回列表
-            </Link>
+            <Button asChild variant="secondary">
+              <Link href="/console/verifications">
+                <ArrowLeft /> 返回列表
+              </Link>
+            </Button>
             <Button
               onClick={() =>
                 void load().catch((error: Error) =>

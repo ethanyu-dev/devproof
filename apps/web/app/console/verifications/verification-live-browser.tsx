@@ -12,7 +12,8 @@ import {
   RotateCcw,
   Square,
 } from "lucide-react";
-import { Badge, Button } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";

@@ -24,7 +24,9 @@ import {
   Trash2,
 } from "lucide-react";
 import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
-import { Badge, Button, Card } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -169,7 +171,10 @@ export function ProfilesClient() {
 
   return (
     <>
-      <PageHeader title="浏览器身份" />
+      <PageHeader
+        description="登录状态只保存在执行节点；在任务要求时完成登录、MFA 或授权。"
+        title="浏览器身份"
+      />
       {message ? (
         <div className="dp-runtime-message">
           <FormMessage message={message.text} tone={message.tone} />

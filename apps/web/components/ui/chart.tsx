@@ -3,6 +3,8 @@
 import * as React from "react";
 import * as RechartsPrimitive from "recharts";
 
+import { cn } from "@/lib/utils";
+
 export type ChartConfig = Record<
   string,
   {
@@ -33,7 +35,11 @@ export function ChartContainer({
   return (
     <ChartContext.Provider value={config}>
       <div
-        className={`dp-chart-container${className ? ` ${className}` : ""}`}
+        data-slot="chart"
+        className={cn(
+          "relative flex w-full min-w-0 justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line]:stroke-border/60 [&_.recharts-layer]:outline-none [&_.recharts-sector]:outline-none [&_.recharts-surface]:outline-none",
+          className,
+        )}
         {...props}
       >
         <RechartsPrimitive.ResponsiveContainer>
@@ -73,9 +79,9 @@ export function ChartTooltipContent({
   if (!active || !payload?.length) return null;
 
   return (
-    <div className="dp-chart-tooltip">
-      {label ? <b>{label}</b> : null}
-      <div>
+    <div className="grid min-w-32 gap-1.5 rounded-lg border border-border/80 bg-background px-3 py-2 text-xs shadow-xl">
+      {label ? <b className="font-medium">{label}</b> : null}
+      <div className="grid gap-1.5">
         {payload.map((item, index) => {
           const key = String(
             item.payload?.status ?? item.dataKey ?? item.name ?? index,
@@ -89,10 +95,15 @@ export function ChartTooltipContent({
             itemConfig?.color;
 
           return (
-            <span key={key}>
-              <i style={color ? { background: color } : undefined} />
-              <small>{itemLabel as React.ReactNode}</small>
-              <strong>
+            <span className="flex items-center gap-2" key={key}>
+              <i
+                className="size-2 rounded-[2px]"
+                style={color ? { background: color } : undefined}
+              />
+              <small className="flex-1 text-muted-foreground">
+                {itemLabel as React.ReactNode}
+              </small>
+              <strong className="font-mono font-medium tabular-nums">
                 {valueFormatter
                   ? valueFormatter(item.value, item)
                   : String(item.value ?? "—")}

@@ -40,17 +40,18 @@ function reportDatabaseTarget() {
   }
 }
 
-function start(packageName) {
+function start(packageName, options = {}) {
+  const { env = {}, label = packageName } = options;
   const child = spawn("pnpm", ["--filter", packageName, "dev"], {
     detached,
-    env: process.env,
+    env: { ...process.env, ...env },
     stdio: "inherit",
   });
   children.add(child);
   child.once("exit", (code, signal) => {
     if (shuttingDown) return;
     process.stderr.write(
-      `${packageName} dev exited unexpectedly (${signal ?? code ?? "unknown"}).\n`,
+      `${label} dev exited unexpectedly (${signal ?? code ?? "unknown"}).\n`,
     );
     void shutdown(code && code > 0 ? code : 1);
   });
@@ -102,14 +103,49 @@ try {
   process.stdout.write(
     "DevProof API is healthy; starting Web and Agent Runtimes.\n",
   );
-  const agentRuntimeToken =
+  const specAnalysisRuntimeToken =
+    process.env.DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN;
+  const browserExecutionRuntimeToken =
+    process.env.DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN;
+  const legacyAgentRuntimeToken =
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN ??
     process.env.DEVPROOF_RUNTIME_TOKEN;
-  if (agentRuntimeToken) {
+
+  if (specAnalysisRuntimeToken) {
+    start("@devproof/agent-runtime", {
+      env: {
+        DEVPROOF_AGENT_RUNTIME_TOKEN: specAnalysisRuntimeToken,
+        DEVPROOF_AGENT_WORKER_ID: "local-spec-analysis",
+      },
+      label: "Spec Analysis Agent Runtime",
+    });
+  }
+  if (browserExecutionRuntimeToken) {
+    start("@devproof/agent-runtime", {
+      env: {
+        DEVPROOF_AGENT_RUNTIME_TOKEN: browserExecutionRuntimeToken,
+        DEVPROOF_AGENT_WORKER_ID: "local-browser-execution",
+      },
+      label: "Browser Execution Agent Runtime",
+    });
+  }
+
+  if (
+    !specAnalysisRuntimeToken &&
+    !browserExecutionRuntimeToken &&
+    legacyAgentRuntimeToken
+  ) {
     start("@devproof/agent-runtime");
-  } else {
+  } else if (!specAnalysisRuntimeToken && !browserExecutionRuntimeToken) {
     process.stdout.write(
-      "Agent Runtime is disabled until DEVPROOF_AGENT_RUNTIME_TOKEN is configured.\n",
+      "Agent Runtimes are disabled until pool-specific Runtime tokens are configured.\n",
+    );
+  } else if (!specAnalysisRuntimeToken || !browserExecutionRuntimeToken) {
+    const missingPool = specAnalysisRuntimeToken
+      ? "BROWSER_EXECUTION"
+      : "SPEC_ANALYSIS";
+    process.stdout.write(
+      `The ${missingPool} Agent Runtime is disabled until its pool-specific token is configured.\n`,
     );
   }
   start("@devproof/web");

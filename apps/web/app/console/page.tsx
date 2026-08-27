@@ -1,279 +1,222 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
+  Activity,
   ArrowRight,
   Bot,
-  CircleAlert,
-  CircleHelp,
-  Eye,
-  FileCheck2,
+  Cable,
+  CircleCheck,
+  FileSearch,
   MonitorUp,
   Pause,
   Play,
-  Route,
-  Send,
-  Settings2,
   ShieldCheck,
   UserRound,
 } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { PageHeader } from "@/components/page-header";
 
-export const metadata: Metadata = { title: "使用指南" };
+export const metadata: Metadata = { title: "平台指南" };
 
-const configSteps = [
+const setupSteps = [
   {
-    detail: "运行一次性配对命令，让执行节点上线。",
+    description: "注册至少一个 Browser Runtime，并确认当前可调度容量。",
+    href: "/console/access",
     icon: MonitorUp,
-    link: "/console/access",
-    linkLabel: "注册执行节点",
-    title: "接入执行节点",
+    label: "配置执行节点",
   },
   {
-    detail: "设置域名路由、不可用策略和人工接管开关。",
-    icon: Settings2,
-    link: "/console/access",
-    linkLabel: "配置策略",
-    title: "设置执行策略",
-  },
-  {
-    detail: "配置 Base URL、API Key、Model ID 与显示名称。",
+    description: "添加 Agent 模型，列表顺序会决定故障下沉优先级。",
+    href: "/console/access",
     icon: Bot,
-    link: "/console/access",
-    linkLabel: "配置模型",
-    title: "配置 Agent 模型",
+    label: "配置模型",
   },
-];
+  {
+    description: "签发 MCP Token，让 Codex 或其他 Agent 提交任务。",
+    href: "/console/access",
+    icon: Cable,
+    label: "连接任务入口",
+  },
+] as const;
+
+const flow = [
+  {
+    copy: "接收 Issue、目标与验收标准",
+    icon: FileSearch,
+    label: "任务入口",
+  },
+  {
+    copy: "分析上下文并生成可执行 Case",
+    icon: Bot,
+    label: "Agent Runtime",
+  },
+  {
+    copy: "在隔离浏览器中执行并采集证据",
+    icon: MonitorUp,
+    label: "执行节点",
+  },
+  {
+    copy: "聚合判定、截图与操作回放",
+    icon: CircleCheck,
+    label: "结果与证据",
+  },
+] as const;
+
+const handoffSteps = [
+  { copy: "保留浏览器会话与身份租约", icon: Pause, title: "任务暂停" },
+  {
+    copy: "敏感输入不进入提示词和制品",
+    icon: UserRound,
+    title: "成员接管",
+  },
+  {
+    copy: "使用新的租约恢复同一次任务",
+    icon: Play,
+    title: "继续执行",
+  },
+] as const;
 
 export default function ConsoleIndexPage() {
   return (
-    <div className="dp-guide">
+    <div>
       <PageHeader
         actions={
-          <Link className="dp-guide-primary-action" href="/console/access">
-            开始配置
-            <ArrowRight />
-          </Link>
+          <Button asChild>
+            <Link href="/console/access">
+              开始配置 <ArrowRight />
+            </Link>
+          </Button>
         }
-        title="使用指南"
+        description="管理员快速了解 DevProof 的任务闭环，并完成首次接入。"
+        title="平台指南"
       />
 
-      <section className="dp-guide-section" id="framework">
-        <h2 className="dp-console-section-title">运行架构</h2>
-
-        <div className="dp-guide-architecture">
-          <article className="dp-guide-architecture-node is-producer">
-            <header>
-              <span>
-                <Send />
-              </span>
-              <div>
-                <small>01 / 任务入口</small>
-                <h3>Task Producer</h3>
-              </div>
-            </header>
-            <p>提交目标与验收标准，并读取任务生命周期和最终结果。</p>
-            <div className="dp-guide-chips">
-              <span>Codex</span>
-              <span>Playground</span>
-              <span>自定义集成</span>
-            </div>
-            <ul>
-              <li>创建 Task</li>
-              <li>查询状态与结果</li>
-              <li>取消或触发重试</li>
-            </ul>
-          </article>
-
-          <div className="dp-guide-architecture-link is-producer-link">
-            <span>TEAM TOKEN</span>
-            <ArrowRight />
-            <b>MCP / TASK HTTP</b>
-          </div>
-
-          <article className="dp-guide-architecture-node is-devproof">
-            <header>
-              <span>DP</span>
-              <div>
-                <small>02 / 唯一控制面</small>
-                <h3>DevProof</h3>
-              </div>
-            </header>
-            <p>持有 Task、Run、重试、租约、人工接管与证据的唯一业务状态。</p>
-            <div className="dp-guide-core-grid">
-              <span>
-                <FileCheck2 />
-                <b>任务编排</b>
-                <small>Stage + Attempt</small>
-              </span>
-              <span>
-                <Route />
-                <b>租约与路由</b>
-                <small>分配执行环境</small>
-              </span>
-              <span>
-                <Eye />
-                <b>证据</b>
-                <small>截图 + 事件轨迹</small>
-              </span>
-              <span>
-                <Pause />
-                <b>人工接管检查点</b>
-                <small>暂停 + 通知 + 恢复</small>
-              </span>
-            </div>
-          </article>
-
-          <div className="dp-guide-architecture-link is-row-break">
-            <span>RUNTIME LEASE</span>
-            <ArrowRight />
-            <b>CLAIM / OUTCOME</b>
-          </div>
-
-          <article className="dp-guide-architecture-node is-agent">
-            <header>
-              <span>
-                <Bot />
-              </span>
-              <div>
-                <small>03 / 模型循环</small>
-                <h3>Agent Runtime</h3>
-              </div>
-            </header>
-            <p>领取具体 Run，在无业务状态的 Worker 中执行模型与工具循环。</p>
-            <div className="dp-guide-chips">
-              <span>Model</span>
-              <span>Browser Executor</span>
-            </div>
-            <ul>
-              <li>模型推理与工具调用</li>
-              <li>Heartbeat 与恢复</li>
-              <li>回传结构化 Outcome</li>
-            </ul>
-          </article>
-
-          <div className="dp-guide-architecture-link is-runner-link">
-            <span>控制面路由</span>
-            <ArrowRight />
-            <b>RUNNER PROTOCOL</b>
-          </div>
-
-          <article className="dp-guide-architecture-node is-runner">
-            <header>
-              <span>
-                <MonitorUp />
-              </span>
-              <div>
-                <small>04 / 执行环境</small>
-                <h3>执行节点</h3>
-              </div>
-            </header>
-            <p>执行具体环境动作，并把制品和运行事件交回控制面。</p>
-            <div className="dp-guide-runner-window">
-              <i />
-              <i />
-              <i />
-              <strong>Playwright / 浏览器会话</strong>
-            </div>
-            <ul>
-              <li>页面导航与检查</li>
-              <li>持久化浏览器身份</li>
-              <li>截图证据</li>
-            </ul>
-          </article>
-        </div>
-
-        <div className="dp-guide-hitl">
-          <article className="dp-guide-hitl-state">
-            <header>
-              <CircleHelp />
-              <span>
-                <small>DEVPROOF 人工接管</small>
-                <h3>暂停、接管、恢复同一个 Run</h3>
-              </span>
-            </header>
-            <p>
-              Agent 调用 request_human_input 后，DevProof 创建一次性检查点，将
-              Run 置为
-              WAITING_HUMAN，并保留原浏览器会话、执行槽位与浏览器身份租约。
-            </p>
-            <div className="dp-guide-state-line">
-              <span>
-                <Pause />
-                <b>暂停 Run</b>
-                <small>检查点 + 通知</small>
-              </span>
-              <ArrowRight />
-              <span className="active">
-                <UserRound />
-                <b>人工接管</b>
-                <small>原页面 · 单控制者</small>
-              </span>
-              <ArrowRight />
-              <span>
-                <Play />
-                <b>恢复 Attempt</b>
-                <small>响应 + 新租约</small>
-              </span>
-            </div>
-          </article>
-
-          <article className="dp-guide-hitl-cases">
-            <div>
-              <UserRound />
-              <span>
-                <b>身份与安全校验</b>
-                <small>登录、MFA、CAPTCHA 或验证码；敏感输入不留存。</small>
-              </span>
-            </div>
-            <div>
-              <ShieldCheck />
-              <span>
-                <b>审批与业务判断</b>
-                <small>授权、审批或必须由负责人确认的业务分支。</small>
-              </span>
-            </div>
-            <div>
-              <CircleAlert />
-              <span>
-                <b>不用于执行故障</b>
-                <small>
-                  执行节点离线、页面异常或证据不足应等待、重试、失败或标记不确定。
-                </small>
-              </span>
-            </div>
-          </article>
-        </div>
+      <section className="grid gap-4 lg:grid-cols-4">
+        {flow.map((item, index) => {
+          const Icon = item.icon;
+          return (
+            <Card className="relative overflow-hidden" key={item.label}>
+              <CardHeader>
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="grid size-9 place-items-center rounded-lg bg-primary/8 text-primary">
+                    <Icon className="size-4" />
+                  </span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    0{index + 1}
+                  </span>
+                </div>
+                <CardTitle className="text-sm">{item.label}</CardTitle>
+                <CardDescription>{item.copy}</CardDescription>
+              </CardHeader>
+              {index < flow.length - 1 ? (
+                <ArrowRight className="absolute -right-2 top-1/2 z-10 hidden size-4 -translate-y-1/2 text-muted-foreground lg:block" />
+              ) : null}
+            </Card>
+          );
+        })}
       </section>
 
-      <section className="dp-guide-section" id="configuration">
-        <h2 className="dp-console-section-title">配置步骤</h2>
+      <section className="mt-8 grid gap-5 xl:grid-cols-[1.25fr_0.75fr]">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle>首次配置</CardTitle>
+                <CardDescription className="mt-1.5">
+                  完成三项配置后即可从 Agent 或试验场提交真实任务。
+                </CardDescription>
+              </div>
+              <Badge variant="secondary">3 个步骤</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {setupSteps.map((step, index) => {
+              const Icon = step.icon;
+              return (
+                <Link
+                  className="group flex items-center gap-4 rounded-xl border border-border/80 p-4 transition-colors hover:bg-muted/60"
+                  href={step.href}
+                  key={step.label}
+                >
+                  <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-muted text-muted-foreground group-hover:bg-primary/8 group-hover:text-primary">
+                    <Icon className="size-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <strong className="block text-sm font-medium">
+                      {index + 1}. {step.label}
+                    </strong>
+                    <small className="mt-1 block text-sm leading-5 text-muted-foreground">
+                      {step.description}
+                    </small>
+                  </span>
+                  <ArrowRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+                </Link>
+              );
+            })}
+          </CardContent>
+        </Card>
 
-        <div className="dp-guide-config-flow">
-          {configSteps.map((step, index) => {
-            const Icon = step.icon;
-            return (
-              <article key={step.title}>
-                <div className="dp-guide-config-number">
-                  <span>0{index + 1}</span>
-                  {index < configSteps.length - 1 ? <i /> : null}
+        <Card className="bg-primary text-primary-foreground">
+          <CardHeader>
+            <span className="mb-4 grid size-10 place-items-center rounded-xl bg-white/10">
+              <ShieldCheck className="size-5" />
+            </span>
+            <CardTitle>人工接管不会创建新会话</CardTitle>
+            <CardDescription className="text-primary-foreground/65">
+              登录、验证码与 MFA 都在原任务的浏览器页面中完成，恢复后 Agent
+              会从同一个检查点继续。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-2">
+              {handoffSteps.map(({ copy, icon: Icon, title }) => (
+                <div
+                  className="flex items-start gap-3 rounded-lg bg-white/[0.06] p-3"
+                  key={title}
+                >
+                  <Icon className="mt-0.5 size-4 shrink-0 text-indigo-200" />
+                  <span>
+                    <b className="block text-xs font-medium">{title}</b>
+                    <small className="mt-0.5 block text-xs leading-5 text-primary-foreground/60">
+                      {copy}
+                    </small>
+                  </span>
                 </div>
-                <div className="dp-guide-config-card">
-                  <header>
-                    <Icon />
-                    <h3>{step.title}</h3>
-                  </header>
-                  <p>{step.detail}</p>
-                  <Link href={step.link}>
-                    {step.linkLabel}
-                    <ArrowRight />
-                  </Link>
-                </div>
-              </article>
-            );
-          })}
-        </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       </section>
+
+      <Card className="mt-5">
+        <CardContent className="flex flex-col items-start justify-between gap-4 pt-0 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-3">
+            <span className="grid size-9 place-items-center rounded-lg bg-emerald-50 text-emerald-700">
+              <Activity className="size-4" />
+            </span>
+            <span>
+              <strong className="block text-sm font-medium">
+                准备验证配置？
+              </strong>
+              <small className="mt-0.5 block text-sm text-muted-foreground">
+                在任务试验场提交一个最小任务，确认整条链路是否可用。
+              </small>
+            </span>
+          </div>
+          <Button asChild variant="outline">
+            <Link href="/console/playground">打开任务试验场</Link>
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   );
 }

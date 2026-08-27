@@ -1,8 +1,11 @@
 .root {
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
   overflow: visible;
   border: 1px solid var(--ek-border);
   background: var(--ek-surface);
+  contain: inline-size;
 }
 
 .toolbar,
@@ -152,8 +155,15 @@
 
 .content {
   display: grid;
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
+  max-height: min(64svh, 620px);
   align-items: start;
+  overflow-x: clip;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .content[data-inspecting="true"] {
@@ -162,6 +172,10 @@
 
 .ledger {
   min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
 }
 
 .loadOlder,
@@ -315,12 +329,18 @@
 
 .inspector {
   position: sticky;
-  top: 12px;
+  top: 0;
+  z-index: 2;
   display: grid;
-  max-height: calc(100svh - 72px);
+  min-width: 0;
+  max-width: 100%;
+  max-height: min(64svh, 620px);
   gap: 12px;
   align-self: start;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border-left: 1px solid var(--ek-border-2);
   background: var(--ek-bg);
   padding: 14px;
@@ -406,6 +426,8 @@
 }
 
 .inspectorValue pre {
+  width: 100%;
+  max-width: 100%;
   max-height: 280px;
   overflow: auto;
   margin: 0;
@@ -416,8 +438,8 @@
     SFMono-Regular,
     Menlo,
     monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: pre;
+  overflow-wrap: normal;
 }
 
 @media (max-width: 900px) {
@@ -426,11 +448,17 @@
   }
 
   .inspector {
-    position: static;
-    max-height: none;
-    overflow: visible;
+    position: sticky;
+    top: 0;
+    grid-row: 1;
+    max-height: min(55svh, 480px);
+    overflow: auto;
     border-top: 1px solid var(--ek-border-2);
     border-left: 0;
+  }
+
+  .content[data-inspecting="true"] .ledger {
+    grid-row: 2;
   }
 }
 

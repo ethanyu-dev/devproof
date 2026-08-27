@@ -13,14 +13,20 @@ import {
   Download,
   ExternalLink,
   FileSearch,
-  ListChecks,
+  Layers3,
   PlayCircle,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   Search,
   XCircle,
 } from "lucide-react";
-import { Badge, Button, Card, Field, Input, Select } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -31,11 +37,7 @@ import {
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
 import { RunTrajectory } from "./run-trajectory";
-import {
-  executionDispositionLabel,
-  taskOutcomeDisplay,
-  verificationVerdictLabel,
-} from "./task-outcome";
+import { taskOutcomeDisplay, verificationVerdictLabel } from "./task-outcome";
 import type {
   TaskCase,
   TaskCaseExecution,
@@ -292,6 +294,7 @@ function TaskListClient({ initialId }: { initialId?: string | undefined }) {
             刷新
           </Button>
         }
+        description="查看团队的全部任务，处理等待项，并下钻到每一次浏览器执行与证据。"
         title="任务执行"
       />
       {message ? (
@@ -497,7 +500,7 @@ function TaskRow({
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [trajectory, setTrajectory] = useState<RunTrajectoryRecord[]>([]);
-  const [view, setView] = useState<"trajectory" | "status">("status");
+  const [view, setView] = useState<"logs" | "specs">("specs");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const loadingRef = useRef(false);
@@ -630,25 +633,36 @@ function TaskRow({
         <div className="dp-task-row-actions">
           {displayed.kind !== "LEGACY_RUN" ? (
             <Button
+              aria-label="重新运行任务"
               disabled={busy}
               onClick={() => void rerun()}
+              size="icon-sm"
+              title="重新运行任务"
               variant="secondary"
             >
-              <RotateCcw /> 重新运行
+              <RotateCcw />
             </Button>
           ) : null}
           {active ? (
             <Button
+              aria-label="取消任务"
               disabled={busy}
               onClick={() => void cancel()}
+              size="icon-sm"
+              title="取消任务"
               variant="danger"
             >
-              <XCircle /> 取消任务
+              <XCircle />
             </Button>
           ) : null}
-          <Button onClick={onToggle} variant="secondary">
+          <Button
+            aria-label={expanded ? "收起任务" : "展开任务"}
+            onClick={onToggle}
+            size="icon-sm"
+            title={expanded ? "收起任务" : "展开任务"}
+            variant="secondary"
+          >
             {expanded ? <ChevronUp /> : <ChevronDown />}
-            {expanded ? "收起" : "展开"}
           </Button>
         </div>
       </div>
@@ -670,59 +684,33 @@ function TaskRow({
                 role="tablist"
               >
                 <button
-                  aria-selected={view === "status"}
-                  onClick={() => setView("status")}
+                  aria-selected={view === "specs"}
+                  onClick={() => setView("specs")}
                   role="tab"
                   type="button"
                 >
-                  <ListChecks /> 任务状态
+                  <Layers3 /> Spec &amp; Runtime
                   <span>{detail.cases.length || detail.runs.length}</span>
                 </button>
                 <button
-                  aria-selected={view === "trajectory"}
-                  onClick={() => setView("trajectory")}
+                  aria-selected={view === "logs"}
+                  onClick={() => setView("logs")}
                   role="tab"
                   type="button"
                 >
-                  <Activity /> 执行轨迹 <span>{trajectory.length}</span>
+                  <ScrollText /> 日志
+                  <span>{trajectory.length}</span>
                 </button>
               </div>
-              {view === "trajectory" ? (
-                <div className="dp-task-trajectory-panel" role="tabpanel">
-                  <div className="dp-task-trajectory-scope">
-                    <FileSearch />
-                    <span>
-                      <b>Spec 生成阶段</b>
-                      仅展示 Issue 分析与 Spec 生成轨迹；每个 Spec
-                      的执行明细请从执行链接下钻查看。
-                    </span>
-                  </div>
-                  {detail.kind === "ISSUE_SPEC" ? (
-                    <RunTrajectory
-                      loadingOlder={false}
-                      onLoadOlder={async () => undefined}
-                      page={{
-                        hasMore: false,
-                        nextBefore: null,
-                        records: trajectory,
-                      }}
-                    />
-                  ) : (
-                    <p className="dp-task-empty-copy">
-                      直接任务不经过 Spec 生成阶段。
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <div className="dp-task-status-panel" role="tabpanel">
-                  <TaskStatusPanel
-                    busy={busy}
-                    detail={detail}
-                    events={events}
-                    onMutate={mutate}
-                  />
-                </div>
-              )}
+              <div className="dp-task-status-panel" role="tabpanel">
+                <TaskStatusPanel
+                  busy={busy}
+                  detail={detail}
+                  onMutate={mutate}
+                  trajectory={trajectory}
+                  view={view}
+                />
+              </div>
             </>
           ) : null}
         </div>
@@ -734,13 +722,15 @@ function TaskRow({
 function TaskStatusPanel({
   busy,
   detail,
-  events,
   onMutate,
+  trajectory,
+  view,
 }: {
   busy: boolean;
   detail: TaskDetail;
-  events: TaskEvent[];
   onMutate: (path: string, body?: unknown) => Promise<TaskDetail | null>;
+  trajectory: RunTrajectoryRecord[];
+  view: "logs" | "specs";
 }) {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -767,6 +757,10 @@ function TaskStatusPanel({
     analysis?.lastError ??
     [...(analysis?.attempts ?? [])].reverse().find((attempt) => attempt.error)
       ?.error;
+  const showStages =
+    !terminalLifecycles.has(detail.lifecycle) ||
+    Boolean(detail.waitingReason) ||
+    stages.some((stage) => ["FAILED", "RUNNING"].includes(stage.status));
 
   useEffect(() => {
     if (!detail.waitingReason?.startsWith("PROFILE_")) return;
@@ -796,425 +790,420 @@ function TaskStatusPanel({
 
   return (
     <>
-      {exportError ? <FormMessage message={exportError} tone="error" /> : null}
-      <div className="dp-task-status-toolbar">
-        <span>
-          <b>完整任务日志</b>
-          <small>包含 Spec 分析和每个 Spec 的全部执行日志。</small>
-        </span>
-        <Button
-          disabled={exporting}
-          onClick={() => void exportAllLogs()}
-          variant="secondary"
-        >
-          <Download /> {exporting ? "正在导出…" : "导出全部日志"}
-        </Button>
-      </div>
-      <Card className="dp-task-overview">
-        <div className="dp-run-status-grid">
-          <div>
-            <span>生命周期</span>
-            <Badge tone={tone(detail.lifecycle)}>
-              {displayLabel(detail.lifecycle)}
-            </Badge>
-          </div>
-          <div>
-            <span>任务执行</span>
-            <Badge tone={tone(detail.executionDisposition)}>
-              {executionDispositionLabel(detail.executionDisposition)}
-            </Badge>
-          </div>
-          <div>
-            <span>验证判定</span>
-            <Badge tone={tone(detail.verdict)}>
-              {verificationVerdictLabel(detail.verdict)}
-            </Badge>
-          </div>
-        </div>
-        <div className="dp-task-counts">
-          <span>
-            执行单元 <b>{detail.counts.total}</b>
-          </span>
-          <span>
-            通过 <b>{detail.counts.passed}</b>
-          </span>
-          <span>
-            失败 <b>{detail.counts.failed}</b>
-          </span>
-          <span>
-            运行中 <b>{detail.counts.running}</b>
-          </span>
-          <span>
-            待执行 <b>{detail.counts.waiting}</b>
-          </span>
-          <span>
-            阻塞 <b>{detail.counts.blocked}</b>
-          </span>
-        </div>
-        {detail.deployments.length ? (
-          <div className="dp-task-deployments">
-            {detail.deployments.map((deployment) => (
-              <span key={deployment.id}>
-                <b>{deployment.name}</b>
-                <small>{deployment.targetUrl}</small>
-              </span>
+      <section className="dp-task-detail-section" hidden={view !== "specs"}>
+        {showStages ? (
+          <div className="dp-task-stage-grid">
+            {stages.map((stage, index) => (
+              <StageCard
+                allowRetry={detail.kind === "ISSUE_SPEC"}
+                busy={busy}
+                index={index + 1}
+                key={stage.id}
+                onRetry={() =>
+                  void onMutate(`/stages/${stage.type}/retry`, {
+                    reason: "Manual retry from console",
+                  })
+                }
+                stage={stage}
+              />
             ))}
           </div>
         ) : null}
-      </Card>
 
-      <div className="dp-task-stage-grid">
-        {stages.map((stage, index) => (
-          <StageCard
-            allowRetry={detail.kind === "ISSUE_SPEC"}
-            busy={busy}
-            index={index + 1}
-            key={stage.id}
-            onRetry={() =>
-              void onMutate(`/stages/${stage.type}/retry`, {
-                reason: "Manual retry from console",
-              })
-            }
-            stage={stage}
-          />
-        ))}
-      </div>
-
-      {analysis?.status === "FAILED" && analysisFailure ? (
-        <div className="dp-task-analysis-failure" role="alert">
-          <div>
-            <Badge tone="danger">Spec 分析失败</Badge>
-            <strong>
-              {errorMessage(analysisFailure) ??
-                "分析 Worker 未返回可读错误信息。"}
-            </strong>
+        {analysis?.status === "FAILED" && analysisFailure ? (
+          <div className="dp-task-analysis-failure" role="alert">
+            <div>
+              <Badge tone="danger">Spec 分析失败</Badge>
+              <strong>
+                {errorMessage(analysisFailure) ??
+                  "分析 Worker 未返回可读错误信息。"}
+              </strong>
+            </div>
+            <details>
+              <summary>查看完整失败原因</summary>
+              <pre>{prettyValue(analysisFailure)}</pre>
+            </details>
           </div>
-          <details>
-            <summary>查看完整失败原因</summary>
-            <pre>{prettyValue(analysisFailure)}</pre>
-          </details>
-        </div>
-      ) : null}
+        ) : null}
 
-      {detail.waitingReason === "DEPLOYMENT_TARGET_REQUIRED" ? (
-        <Card className="dp-task-input-card">
-          <div className="dp-section-head">
-            <span>
-              <PlayCircle />
-              <b>继续 Spec 执行</b>
-            </span>
-            <Badge tone="warning">等待部署地址</Badge>
-          </div>
-          <div className="dp-playground-form">
-            <Field label="验证环境（可添加多个）">
-              <div className="dp-deployment-editor">
-                {deploymentDrafts.map((deployment, index) => (
-                  <div className="dp-deployment-row" key={deployment.id}>
-                    <Input
-                      aria-label={`验证环境 ${index + 1} 名称`}
-                      onChange={(event) =>
-                        setDeploymentDrafts((current) =>
-                          current.map((item) =>
-                            item.id === deployment.id
-                              ? { ...item, name: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                      placeholder="环境名称"
-                      value={deployment.name}
-                    />
-                    <Input
-                      aria-label={`验证环境 ${index + 1} URL`}
-                      onChange={(event) =>
-                        setDeploymentDrafts((current) =>
-                          current.map((item) =>
-                            item.id === deployment.id
-                              ? { ...item, targetUrl: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                      placeholder="https://preview.example.com"
-                      value={deployment.targetUrl}
-                    />
-                    {deploymentDrafts.length > 1 ? (
-                      <Button
-                        onClick={() =>
+        {detail.waitingReason === "DEPLOYMENT_TARGET_REQUIRED" ? (
+          <Card className="dp-task-input-card">
+            <div className="dp-section-head">
+              <span>
+                <PlayCircle />
+                <b>继续 Spec 执行</b>
+              </span>
+              <Badge tone="warning">等待部署地址</Badge>
+            </div>
+            <div className="dp-playground-form">
+              <Field label="验证环境（可添加多个）">
+                <div className="dp-deployment-editor">
+                  {deploymentDrafts.map((deployment, index) => (
+                    <div className="dp-deployment-row" key={deployment.id}>
+                      <Input
+                        aria-label={`验证环境 ${index + 1} 名称`}
+                        onChange={(event) =>
                           setDeploymentDrafts((current) =>
-                            current.filter((item) => item.id !== deployment.id),
+                            current.map((item) =>
+                              item.id === deployment.id
+                                ? { ...item, name: event.target.value }
+                                : item,
+                            ),
                           )
                         }
-                        variant="secondary"
-                      >
-                        删除
-                      </Button>
-                    ) : null}
-                  </div>
-                ))}
-                <Button
-                  disabled={deploymentDrafts.length >= 20}
-                  onClick={() =>
-                    setDeploymentDrafts((current) => [
-                      ...current,
-                      {
-                        id: Math.max(0, ...current.map((item) => item.id)) + 1,
-                        name: `验证环境 ${current.length + 1}`,
-                        targetUrl: "",
-                      },
-                    ])
-                  }
-                  variant="secondary"
-                >
-                  添加验证环境
-                </Button>
-              </div>
-            </Field>
-            <Button
-              disabled={
-                busy ||
-                !deploymentDrafts.some((deployment) =>
-                  Boolean(deployment.targetUrl.trim()),
-                )
-              }
-              onClick={() => {
-                const deployments = deploymentDrafts
-                  .filter((deployment) => deployment.targetUrl.trim())
-                  .map((deployment, index) => ({
-                    environment: {},
-                    key: `deployment-${index + 1}`,
-                    name: deployment.name.trim() || `验证环境 ${index + 1}`,
-                    targetUrl: deployment.targetUrl.trim(),
-                  }));
-                void onMutate("/deployments", { deployments });
-              }}
-            >
-              提交并执行全部 Spec × Deployment
-            </Button>
-          </div>
-        </Card>
-      ) : null}
-
-      {detail.waitingReason?.startsWith("PROFILE_") &&
-      detail.profileBinding?.requestedProfile ? (
-        <Card className="dp-task-input-card">
-          <div className="dp-section-head">
-            <span>
-              <PlayCircle />
-              <b>完成网页登录</b>
-            </span>
-            <Badge tone="warning">等待浏览器身份所有人</Badge>
-          </div>
-          <div className="dp-playground-form">
-            <p>
-              系统已根据任务目标自动准备浏览器身份「
-              {detail.profileBinding.requestedProfile.displayName}
-              」。无需填写域名或验证规则，
-              {detail.profileBinding.requestedProfile.owner.name}
-              只需完成登录并确认授权。
-            </p>
-            <Link
-              className="dp-button dp-button-primary"
-              href={`/console/profiles?profile=${detail.profileBinding.requestedProfile.id}`}
-            >
-              前往登录
-            </Link>
-          </div>
-        </Card>
-      ) : detail.waitingReason?.startsWith("PROFILE_") ? (
-        <Card className="dp-task-input-card">
-          <div className="dp-section-head">
-            <span>
-              <PlayCircle />
-              <b>选择浏览器登录身份</b>
-            </span>
-            <Badge tone="warning">等待浏览器身份</Badge>
-          </div>
-          <div className="dp-playground-form">
-            <Field
-              description={profileStrategyDescriptions[profileStrategy]}
-              label="浏览器身份策略"
-            >
-              <Select
-                onChange={(event) =>
-                  setProfileStrategy(
-                    event.target.value as typeof profileStrategy,
+                        placeholder="环境名称"
+                        value={deployment.name}
+                      />
+                      <Input
+                        aria-label={`验证环境 ${index + 1} URL`}
+                        onChange={(event) =>
+                          setDeploymentDrafts((current) =>
+                            current.map((item) =>
+                              item.id === deployment.id
+                                ? { ...item, targetUrl: event.target.value }
+                                : item,
+                            ),
+                          )
+                        }
+                        placeholder="https://preview.example.com"
+                        value={deployment.targetUrl}
+                      />
+                      {deploymentDrafts.length > 1 ? (
+                        <Button
+                          onClick={() =>
+                            setDeploymentDrafts((current) =>
+                              current.filter(
+                                (item) => item.id !== deployment.id,
+                              ),
+                            )
+                          }
+                          variant="secondary"
+                        >
+                          删除
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                  <Button
+                    disabled={deploymentDrafts.length >= 20}
+                    onClick={() =>
+                      setDeploymentDrafts((current) => [
+                        ...current,
+                        {
+                          id:
+                            Math.max(0, ...current.map((item) => item.id)) + 1,
+                          name: `验证环境 ${current.length + 1}`,
+                          targetUrl: "",
+                        },
+                      ])
+                    }
+                    variant="secondary"
+                  >
+                    添加验证环境
+                  </Button>
+                </div>
+              </Field>
+              <Button
+                disabled={
+                  busy ||
+                  !deploymentDrafts.some((deployment) =>
+                    Boolean(deployment.targetUrl.trim()),
                   )
                 }
-                value={profileStrategy}
+                onClick={() => {
+                  const deployments = deploymentDrafts
+                    .filter((deployment) => deployment.targetUrl.trim())
+                    .map((deployment, index) => ({
+                      environment: {},
+                      key: `deployment-${index + 1}`,
+                      name: deployment.name.trim() || `验证环境 ${index + 1}`,
+                      targetUrl: deployment.targetUrl.trim(),
+                    }));
+                  void onMutate("/deployments", { deployments });
+                }}
               >
-                <option value="REQUESTER">使用我的浏览器身份</option>
-                <option value="ISSUE_ASSIGNEE">
-                  使用 Issue 负责人的浏览器身份
-                </option>
-                <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
-                <option value="EPHEMERAL">改用临时会话</option>
-              </Select>
-            </Field>
-            {profileStrategy === "EXPLICIT_PROFILE" ? (
-              <Field label="可用浏览器身份">
-                <Select
-                  value={profileId}
-                  onChange={(event) => setProfileId(event.target.value)}
+                提交并执行全部 Spec × Deployment
+              </Button>
+            </div>
+          </Card>
+        ) : null}
+
+        {detail.waitingReason?.startsWith("PROFILE_") &&
+        detail.profileBinding?.requestedProfile ? (
+          <Card className="dp-task-input-card">
+            <div className="dp-section-head">
+              <span>
+                <PlayCircle />
+                <b>完成网页登录</b>
+              </span>
+              <Badge tone="warning">等待浏览器身份所有人</Badge>
+            </div>
+            <div className="dp-playground-form">
+              <p>
+                系统已根据任务目标自动准备浏览器身份「
+                {detail.profileBinding.requestedProfile.displayName}
+                」。无需填写域名或验证规则，
+                {detail.profileBinding.requestedProfile.owner.name}
+                只需完成登录并确认授权。
+              </p>
+              <Button asChild>
+                <Link
+                  href={`/console/profiles?profile=${detail.profileBinding.requestedProfile.id}`}
                 >
-                  <option value="">请选择</option>
-                  {profiles
-                    .filter((profile) => profile.status === "READY")
-                    .map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.displayName}
-                      </option>
-                    ))}
+                  前往登录
+                </Link>
+              </Button>
+            </div>
+          </Card>
+        ) : detail.waitingReason?.startsWith("PROFILE_") ? (
+          <Card className="dp-task-input-card">
+            <div className="dp-section-head">
+              <span>
+                <PlayCircle />
+                <b>选择浏览器登录身份</b>
+              </span>
+              <Badge tone="warning">等待浏览器身份</Badge>
+            </div>
+            <div className="dp-playground-form">
+              <Field
+                description={profileStrategyDescriptions[profileStrategy]}
+                label="浏览器身份策略"
+              >
+                <Select
+                  onChange={(event) =>
+                    setProfileStrategy(
+                      event.target.value as typeof profileStrategy,
+                    )
+                  }
+                  value={profileStrategy}
+                >
+                  <option value="REQUESTER">使用我的浏览器身份</option>
+                  <option value="ISSUE_ASSIGNEE">
+                    使用 Issue 负责人的浏览器身份
+                  </option>
+                  <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
+                  <option value="EPHEMERAL">改用临时会话</option>
                 </Select>
               </Field>
-            ) : null}
-            <Button
-              disabled={
-                busy || (profileStrategy === "EXPLICIT_PROFILE" && !profileId)
-              }
-              onClick={() =>
-                void onMutate("/profile", {
-                  profilePolicy: {
-                    onUnavailable: "WAIT_FOR_PROFILE",
-                    ...(profileStrategy === "EXPLICIT_PROFILE"
-                      ? { profileId }
-                      : {}),
-                    scope: { authRole: "default", environmentKey: "default" },
-                    strategy: profileStrategy,
-                  },
-                })
-              }
-            >
-              提交身份选择
-            </Button>
-          </div>
-        </Card>
-      ) : null}
-
-      <div className="dp-specification-detail-layout dp-task-detail-layout">
-        <SpecificationSnapshot detail={detail} />
-        <div className="dp-specification-case-list">
-          {detail.kind === "DIRECT_RUN" || detail.kind === "LEGACY_RUN"
-            ? detail.runs.map((run, index) => (
-                <RunLinkCard
-                  key={run.runId}
-                  name={`直接执行 #${index + 1}`}
-                  run={run}
-                />
-              ))
-            : detail.cases.map((testCase) => (
-                <CaseCard
-                  busy={busy}
-                  canRerun={
-                    detail.cancelRequestedAt === null &&
-                    new Date(detail.deadlineAt).getTime() - Date.now() >= 30_000
-                  }
-                  key={testCase.id}
-                  onRerun={() => void onMutate(`/cases/${testCase.id}/rerun`)}
-                  testCase={testCase}
-                />
-              ))}
-        </div>
-      </div>
-
-      <Card className="dp-verification-detail dp-task-events">
-        <div className="dp-section-head">
-          <span>
-            <b>任务事件</b>
-          </span>
-          <span className="dp-count">{events.length}</span>
-        </div>
-        <div className="dp-run-event-list">
-          {events.map((event) => (
-            <div className="dp-run-event" key={event.sequence}>
-              <p>
-                #{event.sequence} · {displayLabel(event.kind)}
-              </p>
-              <small>
-                {displayLabel(event.actor)} ·{" "}
-                {new Date(event.occurredAt).toLocaleString("zh-CN")}
-              </small>
+              {profileStrategy === "EXPLICIT_PROFILE" ? (
+                <Field label="可用浏览器身份">
+                  <Select
+                    value={profileId}
+                    onChange={(event) => setProfileId(event.target.value)}
+                  >
+                    <option value="">请选择</option>
+                    {profiles
+                      .filter((profile) => profile.status === "READY")
+                      .map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.displayName}
+                        </option>
+                      ))}
+                  </Select>
+                </Field>
+              ) : null}
+              <Button
+                disabled={
+                  busy || (profileStrategy === "EXPLICIT_PROFILE" && !profileId)
+                }
+                onClick={() =>
+                  void onMutate("/profile", {
+                    profilePolicy: {
+                      onUnavailable: "WAIT_FOR_PROFILE",
+                      ...(profileStrategy === "EXPLICIT_PROFILE"
+                        ? { profileId }
+                        : {}),
+                      scope: { authRole: "default", environmentKey: "default" },
+                      strategy: profileStrategy,
+                    },
+                  })
+                }
+              >
+                提交身份选择
+              </Button>
             </div>
-          ))}
+          </Card>
+        ) : null}
+        <div className="dp-specification-detail-layout dp-task-detail-layout">
+          <SpecificationSnapshot detail={detail} />
+          <div className="dp-specification-case-list">
+            {detail.kind === "DIRECT_RUN" || detail.kind === "LEGACY_RUN"
+              ? detail.runs.map((run, index) => (
+                  <RunLinkCard
+                    key={run.runId}
+                    name={`直接执行 #${index + 1}`}
+                    run={run}
+                  />
+                ))
+              : detail.cases.map((testCase) => (
+                  <CaseCard
+                    busy={busy}
+                    canRerun={
+                      detail.cancelRequestedAt === null &&
+                      new Date(detail.deadlineAt).getTime() - Date.now() >=
+                        30_000
+                    }
+                    key={testCase.id}
+                    onRerun={() => void onMutate(`/cases/${testCase.id}/rerun`)}
+                    testCase={testCase}
+                  />
+                ))}
+          </div>
         </div>
-      </Card>
+      </section>
+
+      <section
+        className="dp-task-detail-section dp-task-log-module"
+        hidden={view !== "logs"}
+      >
+        {exportError ? (
+          <FormMessage message={exportError} tone="error" />
+        ) : null}
+        <div className="dp-task-status-toolbar">
+          <span>
+            <b>完整任务日志</b>
+          </span>
+          <Button
+            disabled={exporting}
+            onClick={() => void exportAllLogs()}
+            size="sm"
+            variant="secondary"
+          >
+            <Download /> {exporting ? "正在导出…" : "导出全部日志"}
+          </Button>
+        </div>
+        <div className="dp-task-trajectory-panel">
+          {detail.kind === "ISSUE_SPEC" ? (
+            <RunTrajectory
+              loadingOlder={false}
+              onLoadOlder={async () => undefined}
+              page={{
+                hasMore: false,
+                nextBefore: null,
+                records: trajectory,
+              }}
+            />
+          ) : (
+            <p className="dp-task-empty-copy">直接任务不经过 Spec 分析。</p>
+          )}
+        </div>
+      </section>
     </>
   );
+}
+
+function summarizeCaseExecution(testCase: TaskCase) {
+  const executions = latestTaskCaseExecutions(testCase.executions);
+  const active = executions.find(
+    (execution) =>
+      execution.run && !terminalLifecycles.has(execution.run.lifecycle),
+  );
+  const pending = executions.find((execution) => !execution.run);
+  const outcomes = executions.flatMap((execution) =>
+    execution.run ? [taskOutcomeDisplay(execution.run)] : [],
+  );
+  const aggregateOutcome =
+    outcomes.find((outcome) => outcome.toneStatus === "FAILED") ??
+    outcomes.find((outcome) => outcome.toneStatus === "INCONCLUSIVE") ??
+    outcomes[0];
+  const status =
+    active?.run?.lifecycle ??
+    pending?.dispatch.status ??
+    aggregateOutcome?.toneStatus ??
+    "PENDING";
+  return {
+    active,
+    aggregateOutcome,
+    dispatchStatus:
+      pending?.dispatch.status ?? (executions.length ? "LINKED" : "PENDING"),
+    executionStatus:
+      active?.run?.lifecycle ??
+      (executions.length && executions.every((execution) => execution.run)
+        ? "COMPLETED"
+        : "PENDING"),
+    executions,
+    pending,
+    status,
+  };
 }
 
 function SpecificationSnapshot({ detail }: { detail: TaskDetail }) {
   const analysis = detail.stages.find(
     (stage) => stage.type === "SPEC_ANALYSIS",
   );
+  const emptyMessage =
+    detail.kind === "DIRECT_RUN"
+      ? "直接任务不需要生成 Spec。"
+      : detail.lifecycle === "CANCELLED"
+        ? "任务在分析完成前已取消；未完成的 Spec 不会保存或展示。"
+        : analysis?.status === "FAILED"
+          ? "Spec 分析失败，没有生成可执行的 Case。"
+          : "分析 Worker 尚未生成 Spec。";
   return (
-    <Card className="dp-verification-detail dp-specification-snapshot">
-      <div className="dp-section-head">
+    <details className="dp-verification-detail dp-specification-snapshot">
+      <summary className="dp-specification-snapshot-summary">
+        <FileSearch />
         <span>
-          <FileSearch />
           <b>Spec 分析快照</b>
+          <small>{detail.specification?.summary ?? emptyMessage}</small>
         </span>
         <Badge tone={tone(analysis?.status ?? "PENDING")}>
           {displayLabel(analysis?.status ?? "PENDING")}
         </Badge>
-      </div>
-      {detail.specification ? (
-        <>
-          <div className="dp-specification-facts">
-            <p>{detail.specification.summary}</p>
-            <p>
-              Generator: {detail.specification.generatorKind} ·{" "}
-              {detail.specification.generatorVersion}
-            </p>
-            <code>{detail.specification.sourceHash}</code>
-          </div>
-          {detail.specification.diagnostics.length ? (
-            <div className="dp-specification-diagnostics">
-              {detail.specification.diagnostics.map((diagnostic, index) => (
-                <div
-                  key={`${diagnostic.source}:${diagnostic.code}:${diagnostic.reference ?? "none"}:${index}`}
-                >
-                  <span>
-                    <Badge
-                      tone={
-                        diagnostic.level === "ERROR"
-                          ? "danger"
-                          : diagnostic.level === "WARNING"
-                            ? "warning"
-                            : "neutral"
-                      }
-                    >
-                      {displayLabel(diagnostic.level)}
-                    </Badge>
-                    {diagnostic.source} · {diagnostic.code}
-                  </span>
-                  <p>{diagnostic.message}</p>
-                </div>
-              ))}
+        <ChevronDown className="dp-specification-snapshot-chevron" />
+      </summary>
+      <div className="dp-specification-snapshot-body">
+        {detail.specification ? (
+          <>
+            <div className="dp-specification-facts">
+              <p>{detail.specification.summary}</p>
+              <p>
+                Generator: {detail.specification.generatorKind} ·{" "}
+                {detail.specification.generatorVersion}
+              </p>
+              <code>{detail.specification.sourceHash}</code>
             </div>
-          ) : null}
-          {detail.specification.primaryPullRequestUrl ? (
-            <a
-              className="dp-specification-external-link"
-              href={detail.specification.primaryPullRequestUrl}
-              rel="noreferrer"
-              target="_blank"
-            >
-              查看关联 Pull Request <ExternalLink />
-            </a>
-          ) : null}
-        </>
-      ) : (
-        <p className="dp-task-empty-copy">
-          {detail.kind === "DIRECT_RUN"
-            ? "直接任务不需要生成 Spec。"
-            : detail.lifecycle === "CANCELLED"
-              ? "任务在分析完成前已取消；未完成的 Spec 不会保存或展示。"
-              : analysis?.status === "FAILED"
-                ? "Spec 分析失败，没有生成可执行的 Case。"
-                : "分析 Worker 尚未生成 Spec。"}
-        </p>
-      )}
-    </Card>
+            {detail.specification.diagnostics.length ? (
+              <div className="dp-specification-diagnostics">
+                {detail.specification.diagnostics.map((diagnostic, index) => (
+                  <div
+                    key={`${diagnostic.source}:${diagnostic.code}:${diagnostic.reference ?? "none"}:${index}`}
+                  >
+                    <span>
+                      <Badge
+                        tone={
+                          diagnostic.level === "ERROR"
+                            ? "danger"
+                            : diagnostic.level === "WARNING"
+                              ? "warning"
+                              : "neutral"
+                        }
+                      >
+                        {displayLabel(diagnostic.level)}
+                      </Badge>
+                      {diagnostic.source} · {diagnostic.code}
+                    </span>
+                    <p>{diagnostic.message}</p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {detail.specification.primaryPullRequestUrl ? (
+              <a
+                className="dp-specification-external-link"
+                href={detail.specification.primaryPullRequestUrl}
+                rel="noreferrer"
+                target="_blank"
+              >
+                查看关联 Pull Request <ExternalLink />
+              </a>
+            ) : null}
+          </>
+        ) : (
+          <p className="dp-task-empty-copy">{emptyMessage}</p>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -1229,93 +1218,50 @@ function CaseCard({
   onRerun: () => void;
   testCase: TaskCase;
 }) {
-  const executions = latestTaskCaseExecutions(testCase.executions);
-  const active = executions.find(
-    (execution) =>
-      execution.run && !terminalLifecycles.has(execution.run.lifecycle),
-  );
-  const pending = executions.find((execution) => !execution.run);
-  const outcomes = executions.flatMap((execution) =>
-    execution.run ? [taskOutcomeDisplay(execution.run)] : [],
-  );
-  const aggregateOutcome =
-    outcomes.find((outcome) => outcome.toneStatus === "FAILED") ??
-    outcomes.find((outcome) => outcome.toneStatus === "INCONCLUSIVE") ??
-    outcomes[0];
+  const {
+    active,
+    aggregateOutcome,
+    dispatchStatus,
+    executionStatus,
+    executions,
+    pending,
+    status,
+  } = summarizeCaseExecution(testCase);
   const rerunnable =
     executions.length > 0 &&
     executions.every(
       (execution) =>
         execution.run && terminalLifecycles.has(execution.run.lifecycle),
     );
-  const status =
-    active?.run?.lifecycle ??
-    pending?.dispatch.status ??
-    aggregateOutcome?.toneStatus ??
-    "PENDING";
-  const dispatchStatus =
-    pending?.dispatch.status ?? (executions.length ? "LINKED" : "PENDING");
-  const executionStatus =
-    active?.run?.lifecycle ??
-    (executions.length && executions.every((execution) => execution.run)
-      ? "COMPLETED"
-      : "PENDING");
   return (
-    <Card className="dp-verification-detail dp-specification-case">
-      <div className="dp-section-head">
+    <details className="dp-verification-detail dp-specification-case">
+      <summary className="dp-specification-case-summary">
+        <ChevronDown className="dp-specification-case-chevron" />
         <span>
           <b>
             {testCase.position + 1}. {testCase.name}
           </b>
+          <small>
+            {testCase.definition.criteria?.length ?? 0} 条验收 ·{" "}
+            {testCase.executions.length} 个 Runtime
+          </small>
         </span>
-        <span className="dp-specification-case-actions">
-          <Badge tone={tone(status)}>
-            {active || pending
-              ? displayLabel(status)
-              : (aggregateOutcome?.label ?? displayLabel(status))}
-          </Badge>
-          {rerunnable ? (
-            <Button
-              disabled={busy || !canRerun}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "确认重跑该 Spec Runtime？当前执行及证据会保留，并新建一次执行。",
-                  )
-                ) {
-                  onRerun();
-                }
-              }}
-              title={
-                canRerun
-                  ? "保留当前记录并创建新的 Runtime"
-                  : "任务已取消或剩余时间不足，无法重跑 Runtime"
-              }
-              variant="secondary"
-            >
-              <RotateCcw /> 重跑 Runtime
-            </Button>
-          ) : null}
-        </span>
-      </div>
+        <Badge tone={tone(status)}>
+          {active || pending
+            ? displayLabel(status)
+            : (aggregateOutcome?.label ?? displayLabel(status))}
+        </Badge>
+      </summary>
       <div className="dp-spec-run-state">
         <span>
-          派发{" "}
-          <Badge tone={tone(dispatchStatus)}>
-            {displayLabel(dispatchStatus)}
-          </Badge>
+          派发 <b>{displayLabel(dispatchStatus)}</b>
         </span>
         <span>
-          执行{" "}
-          <Badge tone={tone(executionStatus)}>
-            {displayLabel(executionStatus)}
-          </Badge>
+          执行 <b>{displayLabel(executionStatus)}</b>
         </span>
         <span>
-          验证判定{" "}
-          <Badge tone={tone(aggregateOutcome?.toneStatus ?? "PENDING")}>
-            {aggregateOutcome?.label ?? verificationVerdictLabel(null)}
-          </Badge>
+          判定{" "}
+          <b>{aggregateOutcome?.label ?? verificationVerdictLabel(null)}</b>
         </span>
       </div>
       <div className="dp-specification-case-body">
@@ -1343,24 +1289,81 @@ function CaseCard({
         {testCase.executions.map((item) => (
           <CaseExecutionLink execution={item} key={item.id} />
         ))}
+        {rerunnable ? (
+          <div className="dp-specification-case-actions">
+            <Button
+              disabled={busy || !canRerun}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "确认重跑该 Spec Runtime？当前执行及证据会保留，并新建一次执行。",
+                  )
+                ) {
+                  onRerun();
+                }
+              }}
+              size="sm"
+              title={
+                canRerun
+                  ? "保留当前记录并创建新的 Runtime"
+                  : "任务已取消或剩余时间不足，无法重跑 Runtime"
+              }
+              variant="secondary"
+            >
+              <RotateCcw /> 重跑 Runtime
+            </Button>
+          </div>
+        ) : null}
       </div>
-    </Card>
+    </details>
   );
 }
 
 function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
+  const status = execution.run?.lifecycle ?? execution.dispatch.status;
+  const outcome = execution.run ? taskOutcomeDisplay(execution.run) : null;
+  const content = (
+    <>
+      <span>
+        <b>{execution.deployment.name}</b>
+        <small>
+          Runtime #{execution.executionOrdinal} ·{" "}
+          {execution.deployment.targetUrl}
+        </small>
+      </span>
+      {execution.run ? (
+        <small>
+          尝试 {execution.run.currentAttemptNumber}/{execution.run.maxAttempts}{" "}
+          · 证据 {execution.run.evidenceCount}
+        </small>
+      ) : (
+        <small>派发尝试 {execution.dispatch.attempts}</small>
+      )}
+      <Badge tone={tone(outcome?.toneStatus ?? status)}>
+        {outcome?.label ?? displayLabel(status)}
+      </Badge>
+      {execution.run ? <ExternalLink /> : null}
+    </>
+  );
   if (execution.run) {
     return (
-      <Link href={`/console/executions/${execution.run.runId}`}>
-        {execution.deployment.name} · 执行 #{execution.executionOrdinal}{" "}
-        <ExternalLink />
+      <Link
+        className="dp-spec-runtime-row"
+        href={`/console/executions/${execution.run.runId}`}
+      >
+        {content}
       </Link>
     );
   }
   const failure = errorMessage(execution.dispatch.lastError);
-  return failure ? (
-    <small className="dp-spec-dispatch-error">{failure}</small>
-  ) : null;
+  return (
+    <div className="dp-spec-runtime-pending">
+      <div className="dp-spec-runtime-row">{content}</div>
+      {failure ? (
+        <small className="dp-spec-dispatch-error">{failure}</small>
+      ) : null}
+    </div>
+  );
 }
 
 function latestTaskCaseExecutions(executions: readonly TaskCaseExecution[]) {

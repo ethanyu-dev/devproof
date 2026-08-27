@@ -16,15 +16,14 @@ import {
   RefreshCw,
   Route,
 } from "lucide-react";
-import {
-  Badge,
-  Button,
-  Card,
-  Field,
-  Input,
-  Select,
-  Toggle,
-} from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
+import { Toggle } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -292,7 +291,8 @@ export function PlaygroundClient() {
             <RefreshCw /> 刷新环境
           </Button>
         }
-        title="集成试验场"
+        description="管理员用于验证 Issue、模型和执行节点是否已经正确接入。"
+        title="任务试验场"
       />
       {readinessError ? (
         <div className="dp-runtime-message">
@@ -550,15 +550,13 @@ export function PlaygroundClient() {
                   />
                 </Field>
                 <Field label="Agent 目标">
-                  <textarea
-                    className="dp-textarea"
+                  <Textarea
                     onChange={(event) => setGoal(event.target.value)}
                     value={goal}
                   />
                 </Field>
                 <Field label="验收标准">
-                  <textarea
-                    className="dp-textarea"
+                  <Textarea
                     onChange={(event) =>
                       setAcceptanceCriterion(event.target.value)
                     }

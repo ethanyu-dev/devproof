@@ -45,7 +45,15 @@ export class HealthService {
   private async collectReadiness() {
     const [database, redis, objectStorage] = await Promise.all([
       this.check("database", async () => {
-        await this.prisma.$queryRaw`SELECT 1`;
+        const [schema] = await this.prisma.$queryRaw<
+          Array<{ taskDeploymentProfileBindings: string | null }>
+        >`SELECT to_regclass('public.task_deployment_profile_bindings')::text
+            AS "taskDeploymentProfileBindings"`;
+        if (!schema?.taskDeploymentProfileBindings) {
+          throw new Error(
+            "Required database relation task_deployment_profile_bindings is missing; run committed migrations before starting the API.",
+          );
+        }
       }),
       this.check("redis", async () => {
         if (!(await this.redis.ping()))

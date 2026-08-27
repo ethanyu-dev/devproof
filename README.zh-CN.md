@@ -42,8 +42,26 @@ Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户�
 - API：NestJS 11、Fastify
 - Data：PostgreSQL 17、Prisma 7
 - Contracts：Zod 4
-- UI：独立的 @devproof/ui，无圆角、216px Console 侧栏、48px 顶栏与 DevProof 设计令牌
+- UI：基于 Tailwind CSS 4 的本地 shadcn/ui 组件、按角色收敛的 Console 壳层与单一浅色视觉主题
 - Runtime：独立 Node.js daemon，通过一次性 Token 注册，长期凭证只保存在运行机器
+
+### 本地 Console 角色
+
+Console 默认使用普通成员视图，只展示团队全部任务及任务需要的浏览器登录流程。开发或演示完整管理控制台时，在浏览器 Console 执行：
+
+```js
+localStorage.setItem("devproof.admin", "true");
+location.reload();
+```
+
+恢复普通成员视图：
+
+```js
+localStorage.removeItem("devproof.admin");
+location.reload();
+```
+
+该开关只控制当前浏览器中的前端展示，不是权限边界；生产环境的管理员授权仍需由后端实现。
 
 ## 核心角色
 
@@ -108,7 +126,7 @@ Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户�
        pnpm prisma:deploy
        pnpm dev
 
-5. 在 Console → 接入配置 → Agent 模型配置中维护团队级有序模型列表。每项只包含 Base URL、加密 API Key、Model ID 和 Display Name；列表顺序同时决定故障下沉与恢复优先级。Agent Runtime Token 属于独立的部署身份，执行 `pnpm --filter @devproof/api runtime:provision -- --team default` 后，将仅显示一次的 Token 配置为 Runtime 进程的 `DEVPROOF_AGENT_RUNTIME_TOKEN`。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。重启 `pnpm dev` 后 Web 与 API 始终启动，内部凭据存在时再启动 Agent Runtime。
+5. 在 Console → 接入配置 → Agent 模型配置中维护团队级有序模型列表。每项只包含 Base URL、加密 API Key、Model ID 和 Display Name；列表顺序同时决定故障下沉与恢复优先级。Spec 分析与浏览器执行使用独立的 Agent Runtime 身份，分别执行 `pnpm --filter @devproof/api runtime:provision -- --team default --pool SPEC_ANALYSIS` 和 `pnpm --filter @devproof/api runtime:provision -- --team default --pool BROWSER_EXECUTION`。本地开发时，将仅显示一次的两个 Token 分别配置为 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` 和 `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`，`pnpm dev` 会自动启动两个 Runtime 进程；独立部署的 Runtime 进程仍将对应 Token 配置为 `DEVPROOF_AGENT_RUNTIME_TOKEN`。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。
 
 6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
 

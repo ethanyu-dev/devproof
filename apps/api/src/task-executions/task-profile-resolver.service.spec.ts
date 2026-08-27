@@ -3,6 +3,29 @@ import { describe, expect, it, vi } from "vitest";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
 
 describe("TaskProfileResolverService", () => {
+  it("surfaces unexpected resolution failures after processing the batch", async () => {
+    const prisma = {
+      taskExecution: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([{ id: "task-a" }, { id: "task-b" }]),
+      },
+    };
+    const service = new TaskProfileResolverService(
+      prisma as never,
+      {} as never,
+    );
+    const resolve = vi
+      .spyOn(service, "resolve")
+      .mockRejectedValueOnce(new Error("missing relation"))
+      .mockResolvedValueOnce({ status: "RESOLVED" } as never);
+
+    await expect(service.reconcile()).rejects.toThrow(
+      "Profile resolution failed for 1 task(s): task-a",
+    );
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
   it("binds a distinct ready Profile to every Deployment hostname", async () => {
     const tx = {
       notificationOutbox: { createMany: vi.fn() },

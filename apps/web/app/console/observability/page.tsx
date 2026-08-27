@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Button, Card } from "@devproof/ui";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Bar,
   BarChart,
@@ -401,7 +402,7 @@ function StatusOverview({ overview }: { overview: Overview }) {
                 }
                 cursor={false}
               />
-              <Bar dataKey="rate" radius={[0, 4, 4, 0]}>
+              <Bar barSize={24} dataKey="rate" radius={[0, 4, 4, 0]}>
                 {successRates.map((item) => (
                   <Cell fill={item.fill} key={item.group} />
                 ))}
@@ -527,6 +528,7 @@ export default function ObservabilityPage() {
             {isRefreshing ? "刷新中" : "刷新"}
           </Button>
         }
+        description="检查控制面依赖、后台任务、工具调用与团队操作记录。"
         title="系统监控"
       />
       {error && !initialLoadFailed ? (

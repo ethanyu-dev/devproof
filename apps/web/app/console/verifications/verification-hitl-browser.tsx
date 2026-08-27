@@ -23,7 +23,10 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
-import { Badge, Button, Field, Input } from "@devproof/ui";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
 import { consoleApi } from "@/lib/api";
 import { BrowserInputQueue } from "@/lib/browser-input-queue";
