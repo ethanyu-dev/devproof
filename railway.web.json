@@ -10,7 +10,6 @@
       "/packages/contracts/**",
       "/packages/runtime-protocol/**",
       "/packages/test-domain/**",
-      "/packages/ui/**",
       "/package.json",
       "/pnpm-lock.yaml",
       "/pnpm-workspace.yaml",
