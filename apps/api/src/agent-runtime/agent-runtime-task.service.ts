@@ -59,6 +59,30 @@ const retryPolicySchema = z.object({
 
 type RunDeadlinePolicy = z.infer<typeof runDeadlinePolicySchema>;
 
+export function deadlinePolicyPausesHumanWait(policy: RunDeadlinePolicy) {
+  return policy.mode === "FIXED" || policy.refundHumanWait;
+}
+
+export function hitlWaitDeadline(input: {
+  currentDeadlineAtMs: number;
+  pauseHumanWait: boolean;
+  policyTimeoutSeconds: number;
+  requestedAtMs: number;
+  requestedExpiresAtMs?: number;
+}) {
+  const policyExpiresAtMs =
+    input.requestedAtMs + input.policyTimeoutSeconds * 1_000;
+  return new Date(
+    Math.min(
+      input.requestedExpiresAtMs ?? policyExpiresAtMs,
+      policyExpiresAtMs,
+      input.pauseHumanWait
+        ? Number.POSITIVE_INFINITY
+        : input.currentDeadlineAtMs,
+    ),
+  );
+}
+
 interface AdaptiveDeadlineState {
   activeOperation: string | null;
   activeOperationKey: string | null;
@@ -645,21 +669,21 @@ export class AgentRuntimeTaskService {
             throw new ConflictException("HITL is disabled for this Run.");
           }
           const requestedAt = new Date();
-          const refundHumanWait =
-            policy.deadline.mode === "ADAPTIVE" &&
-            policy.deadline.refundHumanWait;
-          const deadlineCap = refundHumanWait
-            ? task.run.hardDeadlineAt
-            : task.run.deadlineAt;
-          const expiresAt = new Date(
-            Math.min(
-              input.outcome.intervention.expiresAt
-                ? Date.parse(input.outcome.intervention.expiresAt)
-                : requestedAt.getTime() + policy.hitl.timeoutSeconds * 1_000,
-              deadlineCap.getTime(),
-            ),
-          );
-          const pausedExecutionRemainingMs = refundHumanWait
+          const pauseHumanWait = deadlinePolicyPausesHumanWait(policy.deadline);
+          const expiresAt = hitlWaitDeadline({
+            currentDeadlineAtMs: task.run.deadlineAt.getTime(),
+            pauseHumanWait,
+            policyTimeoutSeconds: policy.hitl.timeoutSeconds,
+            requestedAtMs: requestedAt.getTime(),
+            ...(input.outcome.intervention.expiresAt
+              ? {
+                  requestedExpiresAtMs: Date.parse(
+                    input.outcome.intervention.expiresAt,
+                  ),
+                }
+              : {}),
+          });
+          const pausedExecutionRemainingMs = pauseHumanWait
             ? Math.max(0, task.run.deadlineAt.getTime() - requestedAt.getTime())
             : null;
           const intervention = await tx.humanIntervention.create({
@@ -676,7 +700,7 @@ export class AgentRuntimeTaskService {
               teamId,
             },
           });
-          if (refundHumanWait) {
+          if (pauseHumanWait) {
             const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
             const waitingSnapshot = runtimeTaskSnapshotSchema.parse({
               ...snapshot,

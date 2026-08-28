@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   executionCounts,
+  taskDeadlineElapsed,
   TaskExecutionService,
 } from "./task-execution.service.js";
 import { resetEnvForTests } from "../config/env.js";
@@ -129,6 +130,116 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
         process.env.POST_RUN_ANALYSIS_ENABLED = previousEnabled;
       }
       resetEnvForTests();
+    }
+  });
+});
+
+describe("TaskExecutionService human resume deadlines", () => {
+  it("pauses parent task timeout projection while a child Run waits for HITL", () => {
+    const now = new Date("2026-08-28T02:00:00.000Z");
+
+    expect(
+      taskDeadlineElapsed({
+        deadlineAt: new Date(now.getTime() - 60_000),
+        lifecycle: "WAITING_HUMAN",
+        now,
+        waitingForHuman: true,
+      }),
+    ).toBe(false);
+    expect(
+      taskDeadlineElapsed({
+        deadlineAt: new Date(now.getTime() - 60_000),
+        lifecycle: "RUNNING",
+        now,
+        waitingForHuman: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts an expired waiting task and restarts its full window when deployments are provided", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
+      const tx = {
+        taskCaseExecution: { createMany: vi.fn(), deleteMany: vi.fn() },
+        taskDeployment: {
+          create: vi.fn().mockResolvedValue({ id: "deployment-1" }),
+          deleteMany: vi.fn(),
+        },
+        taskExecution: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        taskExecutionEvent: { create: vi.fn() },
+        taskExecutionStage: { updateMany: vi.fn() },
+      };
+      const prisma = {
+        $transaction: vi.fn((callback) => callback(tx)),
+        taskExecution: {
+          findFirst: vi.fn().mockResolvedValue({
+            deadlineAt: new Date(now.getTime() - 60_000),
+            environmentSnapshot: {},
+            executionRuns: [],
+            id: taskId,
+            inputSnapshot: {
+              idempotencyKey: "expired-issue-resume",
+              issueRef: "PROD-6781",
+              kind: "ISSUE_SPEC",
+            },
+            kind: "ISSUE_SPEC",
+            lifecycle: "WAITING_INPUT",
+            specificationSnapshots: [{ cases: [] }],
+            stages: [{ status: "SUCCEEDED", type: "SPEC_ANALYSIS" }],
+          }),
+        },
+      };
+      const profileResolver = {
+        resolve: vi.fn().mockResolvedValue({ status: "WAITING_INPUT" }),
+      };
+      const service = new TaskExecutionService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        profileResolver as never,
+        {} as never,
+        {} as never,
+      );
+      vi.spyOn(service, "detail").mockResolvedValue({ id: taskId } as never);
+
+      await service.setDeployments(
+        {
+          credential: { id: "credential-1", name: "Console", scopes: [] },
+          team: { id: "team-1", name: "Team" },
+        } as never,
+        taskId,
+        {
+          deployments: [
+            {
+              environment: {},
+              key: "preview",
+              name: "Preview",
+              targetUrl: "https://preview.example.com",
+            },
+          ],
+        },
+      );
+
+      expect(tx.taskExecution.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: new Date(now.getTime() + 7_200_000),
+            lifecycle: "RUNNING",
+          }),
+          where: {
+            cancelRequestedAt: null,
+            id: taskId,
+            lifecycle: "WAITING_INPUT",
+          },
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -205,6 +205,7 @@ export class ProfileReservationService {
         data: {
           failureCode: reason.code,
           failureMessage: reason.message,
+          requestedProfileId: profileId,
           resolvedAt: null,
           resolvedProfileId: null,
           status: "WAITING_INPUT",

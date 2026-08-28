@@ -115,18 +115,24 @@ describe("ProfileReservationService", () => {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
     };
-    const revoked = { ...readyProfile(), grants: [] };
+    const revoked = {
+      ...readyProfile(),
+      grants: [],
+      id: "profile-secondary",
+    };
     const prisma = {
       $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) =>
         callback(tx),
       ),
       taskExecution: {
         findUnique: vi.fn().mockResolvedValue({
+          deploymentProfileBindings: [{ profile: revoked }],
           environmentSnapshot: { targetUrl: "https://app.example.com" },
           id: "task-3",
           lifecycle: "RUNNING",
           profileBinding: {
-            resolvedProfile: revoked,
+            requestedProfileId: "profile-1",
+            resolvedProfile: readyProfile(),
             status: "RESOLVED",
             triggerSource: "CONSOLE",
           },
@@ -136,14 +142,17 @@ describe("ProfileReservationService", () => {
     };
     const service = new ProfileReservationService(prisma as never);
 
-    await expect(service.acquire("task-3")).resolves.toMatchObject({
+    await expect(
+      service.acquire("task-3", "deployment-secondary"),
+    ).resolves.toMatchObject({
       acquired: false,
-      profile: { id: "profile-1" },
+      profile: { id: "profile-secondary" },
     });
     expect(tx.taskProfileBinding.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           failureCode: "PROFILE_AUTHORIZATION_CHANGED",
+          requestedProfileId: "profile-secondary",
           status: "WAITING_INPUT",
         }),
       }),
@@ -205,6 +214,7 @@ describe("ProfileReservationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           failureCode: "PROFILE_INACTIVITY_EXPIRED",
+          requestedProfileId: "profile-1",
           status: "WAITING_INPUT",
         }),
       }),

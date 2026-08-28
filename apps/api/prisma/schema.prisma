@@ -113,6 +113,13 @@ enum TaskProfileResolutionStatus {
   REJECTED
 }
 
+enum TaskProfileRecoveryStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 enum ProfileUnavailablePolicy {
   WAIT_FOR_PROFILE
   FAIL
@@ -521,6 +528,7 @@ model Team {
   browserProfileReservations    BrowserProfileReservation[]
   browserProfileUsages          BrowserProfileUsage[]
   taskDeploymentProfileBindings TaskDeploymentProfileBinding[]
+  taskProfileRecoveryEvents     TaskProfileRecoveryEvent[]
   inboundIntegrationEvents      InboundIntegrationEvent[]
   postRunAnalysisJobs           PostRunAnalysisJob[]
   postRunAnalysisEvents         PostRunAnalysisEvent[]
@@ -1593,6 +1601,7 @@ model UserBrowserProfile {
   runtimeSessions       BrowserRuntimeSession[]
   executionRuns         ExecutionRun[]
   deploymentBindings    TaskDeploymentProfileBinding[]
+  taskRecoveryEvents    TaskProfileRecoveryEvent[]
 
   @@unique([teamId, ownerUserId, scopeKey], map: "user_browser_profiles_team_owner_scope_key")
   @@unique([teamId, runtimeProfileKey], map: "user_browser_profiles_team_runtime_key_key")
@@ -1648,6 +1657,30 @@ model TaskProfileBinding {
   @@index([status, updatedAt], map: "task_profile_bindings_status_updated_idx")
   @@index([resolvedProfileId, status], map: "task_profile_bindings_profile_status_idx")
   @@map("task_profile_bindings")
+}
+
+model TaskProfileRecoveryEvent {
+  id             String                    @id @default(uuid()) @db.Uuid
+  teamId         String                    @map("team_id") @db.Uuid
+  profileId      String                    @map("profile_id") @db.Uuid
+  source         String
+  resumedAt      DateTime                  @map("resumed_at") @db.Timestamptz
+  status         TaskProfileRecoveryStatus @default(PENDING)
+  attempts       Int                       @default(0)
+  nextAttemptAt  DateTime                  @default(now()) @map("next_attempt_at") @db.Timestamptz
+  cursorTaskId   String?                   @map("cursor_task_id") @db.Uuid
+  leaseToken     String?                   @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?                 @map("lease_expires_at") @db.Timestamptz
+  lastError      String?                   @map("last_error")
+  completedAt    DateTime?                 @map("completed_at") @db.Timestamptz
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime                  @updatedAt @map("updated_at") @db.Timestamptz
+  team           Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  profile        UserBrowserProfile        @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt, leaseExpiresAt], map: "task_profile_recovery_events_status_retry_idx")
+  @@index([profileId, createdAt], map: "task_profile_recovery_events_profile_created_idx")
+  @@map("task_profile_recovery_events")
 }
 
 model BrowserProfileReservation {

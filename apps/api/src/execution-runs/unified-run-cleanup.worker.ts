@@ -95,13 +95,8 @@ export class UnifiedRunCleanupWorker implements OnModuleInit, OnModuleDestroy {
       const policy = runHitlPolicySchema.parse(rawPolicy ?? {});
       const now = new Date();
       await this.prisma.$transaction(async (tx) => {
-        const claimed = await tx.humanIntervention.updateMany({
-          data: { resolvedAt: now, status: "EXPIRED" },
-          where: { id: intervention.id, status: "PENDING" },
-        });
-        if (claimed.count !== 1) return;
         const cancelled = policy.onTimeout === "CANCEL";
-        await tx.executionRun.updateMany({
+        const runClaim = await tx.executionRun.updateMany({
           data: {
             ...(cancelled ? { cancelRequestedAt: now } : {}),
             executionDisposition: intervention.run.startedAt
@@ -113,6 +108,28 @@ export class UnifiedRunCleanupWorker implements OnModuleInit, OnModuleDestroy {
           },
           where: { id: intervention.runId, lifecycle: "WAITING_HUMAN" },
         });
+        if (runClaim.count !== 1) {
+          await tx.humanIntervention.updateMany({
+            data: { resolvedAt: now, status: "EXPIRED" },
+            where: {
+              expiresAt: { lte: now },
+              id: intervention.id,
+              status: "PENDING",
+            },
+          });
+          return;
+        }
+        const interventionClaim = await tx.humanIntervention.updateMany({
+          data: { resolvedAt: now, status: "EXPIRED" },
+          where: {
+            expiresAt: { lte: now },
+            id: intervention.id,
+            status: "PENDING",
+          },
+        });
+        if (interventionClaim.count !== 1) {
+          throw new Error("Human intervention expiry claim was lost.");
+        }
         await tx.agentRuntimeTask.updateMany({
           data: {
             cancelRequestedAt: cancelled ? now : null,
