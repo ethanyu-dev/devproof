@@ -4,6 +4,7 @@ import {
   executionCounts,
   TaskExecutionService,
 } from "./task-execution.service.js";
+import { resetEnvForTests } from "../config/env.js";
 
 describe("executionCounts", () => {
   it("keeps queued, running and blocked counts mutually meaningful", () => {
@@ -46,6 +47,89 @@ describe("executionCounts", () => {
       total: 3,
       waiting: 1,
     });
+  });
+});
+
+describe("TaskExecutionService post-run analysis enqueue", () => {
+  it("enqueues analysis in the same transaction that cancels an Issue task", async () => {
+    const previousEnabled = process.env.POST_RUN_ANALYSIS_ENABLED;
+    process.env.POST_RUN_ANALYSIS_ENABLED = "true";
+    resetEnvForTests();
+    const createMany = vi.fn().mockResolvedValue({ count: 1 });
+    const transactionClient = {
+      postRunAnalysisJob: { createMany },
+      taskCaseExecution: {
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      taskExecution: {
+        findUnique: vi.fn().mockResolvedValue({
+          kind: "ISSUE_SPEC",
+          postRunAnalysisGeneration: 1,
+          teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      taskExecutionEvent: { create: vi.fn().mockResolvedValue({}) },
+      taskExecutionStage: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskStageAttempt: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    const task = {
+      executionRuns: [],
+      id: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
+      kind: "ISSUE_SPEC",
+      lifecycle: "RUNNING",
+      postRunAnalysisGeneration: 1,
+      teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
+    };
+    const service = new TaskExecutionService(
+      {
+        $transaction: vi
+          .fn()
+          .mockImplementation(
+            (operation: (tx: typeof transactionClient) => unknown) =>
+              operation(transactionClient),
+          ),
+        taskExecution: { findFirst: vi.fn().mockResolvedValue(task) },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { releaseTask: vi.fn().mockResolvedValue(undefined) } as never,
+      {} as never,
+    );
+    vi.spyOn(service, "detail").mockResolvedValue({ id: task.id } as never);
+
+    try {
+      await service.cancel(
+        {
+          credential: { id: "credential-1" },
+          team: { id: task.teamId },
+        } as never,
+        task.id,
+      );
+
+      expect(createMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            generation: task.postRunAnalysisGeneration,
+            taskExecutionId: task.id,
+            teamId: task.teamId,
+          }),
+        ],
+        skipDuplicates: true,
+      });
+    } finally {
+      if (previousEnabled === undefined) {
+        delete process.env.POST_RUN_ANALYSIS_ENABLED;
+      } else {
+        process.env.POST_RUN_ANALYSIS_ENABLED = previousEnabled;
+      }
+      resetEnvForTests();
+    }
   });
 });
 
@@ -289,6 +373,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
     const taskExecutionUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const taskExecutionEventCreate = vi.fn().mockResolvedValue({});
     const tx = {
+      postRunAnalysisJob: { findMany: vi.fn().mockResolvedValue([]) },
       taskCaseExecution: { create: taskCaseExecutionCreate },
       taskExecution: {
         findFirst: taskExecutionFindFirst,
@@ -348,6 +433,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
         data: expect.objectContaining({
           currentStage: "SPEC_EXECUTION",
           lifecycle: "RUNNING",
+          postRunAnalysisGeneration: { increment: 1 },
           verdict: null,
         }),
       }),
@@ -632,7 +718,7 @@ describe("TaskExecutionService rerun", () => {
 });
 
 describe("TaskExecutionService log export", () => {
-  it("exports analysis attempts and every Runtime event without a page limit", async () => {
+  it("exports the immutable v2 task log bundle", async () => {
     const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
     const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
     const occurredAt = new Date("2026-08-20T08:00:00.000Z");
@@ -829,6 +915,14 @@ describe("TaskExecutionService log export", () => {
         taskId: "runtime-task-1",
       },
     ]);
+    const bundle = {
+      runEvents: [
+        { evidenceRef: "run-event://run-event-1", sequence: "1" },
+        { evidenceRef: "run-event://run-event-501", sequence: "501" },
+      ],
+      schemaVersion: "devproof.task-logs.v2",
+    };
+    const build = vi.fn().mockResolvedValue({ bundle });
     const service = new TaskExecutionService(
       {
         runEvent: { findMany: runEventFindMany },
@@ -837,6 +931,10 @@ describe("TaskExecutionService log export", () => {
       } as never,
       {} as never,
       {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { build } as never,
     );
     const current = {
       credential: { id: "credential-1", name: "Console user", scopes: [] },
@@ -845,34 +943,7 @@ describe("TaskExecutionService log export", () => {
 
     const exported = await service.exportLogs(current, taskId);
 
-    expect(exported.schemaVersion).toBe("devproof.task-logs.v1");
-    expect(exported.specAnalysis.stage?.attempts[0]?.input).toEqual({
-      issueRef: "ENG-124",
-    });
-    expect(exported.specAnalysis.events).toEqual([
-      expect.objectContaining({ kind: "task.stage.succeeded" }),
-    ]);
-    expect(exported.specAnalysis.sources).toEqual([
-      expect.objectContaining({
-        content: "Issue description",
-        contentHash: "analysis-source-hash",
-        id: "analysis-source-1",
-      }),
-    ]);
-    expect(exported.specRuns[0]).toMatchObject({
-      case: { id: "case-1", name: "Open dashboard" },
-      logs: [{ sequence: "1" }, { sequence: "501" }],
-      run: { id: runId },
-    });
-    expect(exported.task.deployments).toEqual([
-      expect.objectContaining({
-        id: deployment.id,
-        key: deployment.key,
-        targetUrl: deployment.targetUrl,
-      }),
-    ]);
-    expect(exported.taskEvents).toHaveLength(1);
-    expect(runEventFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");
-    expect(taskEventFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");
+    expect(exported).toEqual(bundle);
+    expect(build).toHaveBeenCalledWith("team-1", taskId);
   });
 });

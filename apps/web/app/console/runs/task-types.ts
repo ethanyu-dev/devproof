@@ -77,6 +77,9 @@ export interface TaskStage {
 
 export interface TaskDetail {
   cancelRequestedAt: string | null;
+  capabilities: {
+    postRunAnalysis: boolean;
+  };
   cases: TaskCase[];
   counts: {
     blocked: number;
@@ -177,4 +180,62 @@ export interface TaskEvent {
   occurredAt: string;
   payload: unknown;
   sequence: string;
+}
+
+export interface PostRunAnalysisDetail {
+  analyzerVersion: string;
+  attemptNumber: number;
+  createdAt: string;
+  error: unknown;
+  eventCursor: string | null;
+  events: Array<{
+    actor: string;
+    kind: string;
+    occurredAt: string;
+    payload: unknown;
+    sequence: string;
+  }>;
+  eventsHasMore: boolean;
+  eventsTruncated: boolean;
+  findings: Array<{
+    attemptNumber: number | null;
+    category: string;
+    component: string;
+    confidence: number;
+    evidenceRefs: string[];
+    failureClass: string;
+    id: string;
+    impact: string;
+    phase: string;
+    recommendation: string;
+    rootCause: string;
+    runId: string | null;
+    runtimeId: string | null;
+    severity: string;
+    title: string;
+  }>;
+  finishedAt: string | null;
+  generation: number;
+  id: string;
+  input: {
+    byteSize: number | null;
+    completeness: unknown;
+    schemaVersion: string;
+    sha256: string;
+  } | null;
+  maxAttempts: number;
+  startedAt: string | null;
+  status: string;
+  updatedAt: string;
+  workItem: {
+    body: string;
+    createdAt: string;
+    externalRef: string | null;
+    findingCount: number;
+    id: string;
+    provider: string;
+    status: string;
+    title: string;
+    updatedAt: string;
+  } | null;
 }

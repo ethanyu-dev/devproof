@@ -29,6 +29,7 @@ enum RuntimeStatus {
 enum AgentRuntimePool {
   SPEC_ANALYSIS
   BROWSER_EXECUTION
+  POST_RUN_ANALYSIS
   MIXED
 }
 
@@ -393,6 +394,22 @@ enum TaskCaseDispatchStatus {
   CANCELLED
 }
 
+enum PostRunAnalysisStatus {
+  PENDING_CAPTURE
+  CAPTURING
+  READY
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ImprovementWorkItemStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+}
+
 model User {
   id                              String                     @id @default(uuid()) @db.Uuid
   name                            String?
@@ -505,6 +522,10 @@ model Team {
   browserProfileUsages          BrowserProfileUsage[]
   taskDeploymentProfileBindings TaskDeploymentProfileBinding[]
   inboundIntegrationEvents      InboundIntegrationEvent[]
+  postRunAnalysisJobs           PostRunAnalysisJob[]
+  postRunAnalysisEvents         PostRunAnalysisEvent[]
+  analysisFindings              AnalysisFinding[]
+  improvementWorkItems          ImprovementWorkItem[]
 
   @@map("teams")
 }
@@ -1168,6 +1189,7 @@ model TaskExecution {
   cancelRequestedAt         DateTime?                      @map("cancel_requested_at") @db.Timestamptz
   projectionNeededAt        DateTime?                      @map("projection_needed_at") @db.Timestamptz
   projectedAt               DateTime?                      @map("projected_at") @db.Timestamptz
+  postRunAnalysisGeneration Int                            @default(1) @map("post_run_analysis_generation")
   legacySpecificationId     String?                        @map("legacy_specification_id") @db.Uuid
   migrationSource           String                         @default("NATIVE") @map("migration_source")
   sourceSnapshotComplete    Boolean                        @default(true) @map("source_snapshot_complete")
@@ -1191,6 +1213,8 @@ model TaskExecution {
   browserProfileUsages      BrowserProfileUsage[]
   inboundIntegrationEvents  InboundIntegrationEvent[]
   notifications             NotificationOutbox[]
+  postRunAnalyses           PostRunAnalysisJob[]
+  improvementWorkItems      ImprovementWorkItem[]
 
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
@@ -1395,6 +1419,125 @@ model TaskExecutionEvent {
   @@unique([taskExecutionId, sequence])
   @@index([teamId, taskExecutionId, sequence])
   @@map("task_execution_events")
+}
+
+/// A sidecar analysis of a terminal Issue task. It is deliberately separate
+/// from TaskExecution stages so analysis failure cannot change the test result.
+model PostRunAnalysisJob {
+  id                        String                 @id @default(uuid()) @db.Uuid
+  teamId                    String                 @map("team_id") @db.Uuid
+  taskExecutionId           String                 @map("task_execution_id") @db.Uuid
+  analyzerVersion           String                 @map("analyzer_version")
+  generation                Int                    @default(1)
+  status                    PostRunAnalysisStatus  @default(PENDING_CAPTURE)
+  attemptNumber             Int                    @default(0) @map("attempt_number")
+  maxAttempts               Int                    @default(3) @map("max_attempts")
+  inputStorageKey           String?                @map("input_storage_key")
+  captureStorageKey         String?                @map("capture_storage_key")
+  captureEvidenceStorageKey String?                @map("capture_evidence_storage_key")
+  inputSha256               String?                @map("input_sha256") @db.Char(64)
+  inputByteSize             Int?                   @map("input_byte_size")
+  inputCompleteness         Json                   @default("{}") @map("input_completeness")
+  inputManifest             Json                   @default("{}") @map("input_manifest")
+  result                    Json?
+  error                     Json?
+  leaseOwner                String?                @map("lease_owner")
+  leaseToken                String?                @map("lease_token") @db.Uuid
+  leaseExpiresAt            DateTime?              @map("lease_expires_at") @db.Timestamptz
+  fencingToken              BigInt                 @default(0) @map("fencing_token")
+  completionId              String?                @unique @map("completion_id") @db.Uuid
+  deadlineAt                DateTime               @map("deadline_at") @db.Timestamptz
+  queuedAt                  DateTime               @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt                 DateTime?              @map("started_at") @db.Timestamptz
+  finishedAt                DateTime?              @map("finished_at") @db.Timestamptz
+  createdAt                 DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                 DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  team                      Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution             TaskExecution          @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  events                    PostRunAnalysisEvent[]
+  findings                  AnalysisFinding[]
+  workItem                  ImprovementWorkItem?
+
+  @@unique([taskExecutionId, analyzerVersion, generation], map: "post_run_analysis_jobs_task_analyzer_generation_key")
+  @@index([teamId, status, createdAt])
+  @@index([status, leaseExpiresAt, createdAt])
+  @@map("post_run_analysis_jobs")
+}
+
+model PostRunAnalysisEvent {
+  id         String             @id @default(uuid()) @db.Uuid
+  teamId     String             @map("team_id") @db.Uuid
+  analysisId String             @map("analysis_id") @db.Uuid
+  sequence   BigInt             @default(autoincrement())
+  actor      String
+  kind       String
+  payload    Json               @default("{}")
+  occurredAt DateTime           @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  team       Team               @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  analysis   PostRunAnalysisJob @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@unique([analysisId, sequence])
+  @@index([teamId, analysisId, sequence])
+  @@map("post_run_analysis_events")
+}
+
+model AnalysisFinding {
+  id             String               @id @default(uuid()) @db.Uuid
+  teamId         String               @map("team_id") @db.Uuid
+  analysisId     String               @map("analysis_id") @db.Uuid
+  workItemId     String?              @map("work_item_id") @db.Uuid
+  fingerprint    String               @db.Char(64)
+  category       String
+  severity       String
+  confidence     Float
+  attemptNumber  Int?                 @map("attempt_number")
+  title          String
+  rootCause      String               @map("root_cause")
+  impact         String
+  recommendation String
+  component      String
+  phase          String
+  failureClass   String               @map("failure_class")
+  runId          String?              @map("run_id") @db.Uuid
+  runtimeId      String?              @map("runtime_id") @db.Uuid
+  evidenceRefs   String[]             @default([]) @map("evidence_refs")
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  team           Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  analysis       PostRunAnalysisJob   @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  workItem       ImprovementWorkItem? @relation(fields: [workItemId], references: [id], onDelete: SetNull)
+
+  @@unique([analysisId, fingerprint])
+  @@index([teamId, fingerprint, createdAt])
+  @@index([workItemId])
+  @@index([runId])
+  @@index([runtimeId])
+  @@map("analysis_findings")
+}
+
+model ImprovementWorkItem {
+  id                    String                    @id @default(uuid()) @db.Uuid
+  teamId                String                    @map("team_id") @db.Uuid
+  sourceTaskExecutionId String                    @map("source_task_execution_id") @db.Uuid
+  analysisId            String                    @unique @map("analysis_id") @db.Uuid
+  dedupeKey             String                    @map("dedupe_key") @db.Char(64)
+  status                ImprovementWorkItemStatus @default(OPEN)
+  provider              String                    @default("INTERNAL")
+  externalRef           String?                   @map("external_ref")
+  title                 String
+  body                  String
+  findingCount          Int                       @map("finding_count")
+  createdAt             DateTime                  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime                  @updatedAt @map("updated_at") @db.Timestamptz
+  team                  Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  sourceTaskExecution   TaskExecution             @relation(fields: [sourceTaskExecutionId], references: [id], onDelete: Cascade)
+  analysis              PostRunAnalysisJob        @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  findings              AnalysisFinding[]
+
+  @@unique([teamId, dedupeKey])
+  @@index([teamId, status, createdAt(sort: Desc)])
+  @@index([sourceTaskExecutionId])
+  @@map("improvement_work_items")
 }
 
 model UserExternalIdentity {

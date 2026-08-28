@@ -35,6 +35,7 @@ describe("Agent Runtime pool registration", () => {
         { protocol: { minor: 4 }, workerId: "browser-worker" },
       ),
     ).resolves.toEqual({
+      analysisConcurrency: 0,
       browserConcurrency: 12,
       pools: ["BROWSER_EXECUTION"],
       refreshAfterMs: 5_000,
@@ -60,9 +61,10 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "SPEC_ANALYSIS" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 4 }, workerId: "spec-worker" },
+        { protocol: { minor: 7 }, workerId: "spec-worker" },
       ),
     ).resolves.toMatchObject({
+      analysisConcurrency: 0,
       browserConcurrency: 0,
       pools: ["SPEC_ANALYSIS"],
       specConcurrency: 1,
@@ -78,8 +80,22 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "MIXED" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 4 }, workerId: "legacy-worker" },
+        { protocol: { minor: 7 }, workerId: "legacy-worker" },
       ),
     ).rejects.toThrow("MIXED");
+  });
+
+  it("rejects registration clients older than the compatible v4 baseline", async () => {
+    const service = new AgentRuntimeControlService({} as never, {} as never);
+
+    await expect(
+      service.register(
+        {
+          credential: { pool: "SPEC_ANALYSIS" },
+          team: { id: teamId },
+        } as never,
+        { protocol: { minor: 3 }, workerId: "outdated-worker" },
+      ),
+    ).rejects.toThrow("minor 4 or newer");
   });
 });

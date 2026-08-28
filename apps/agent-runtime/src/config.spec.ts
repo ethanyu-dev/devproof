@@ -8,6 +8,7 @@ const managedKeys = [
   "DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST",
   "DEVPROOF_AGENT_POLL_INTERVAL_MS",
   "DEVPROOF_AGENT_TOOL_LIMIT",
+  "DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT",
   "DEVPROOF_AGENT_WORKER_ID",
   "DEVPROOF_RUNTIME_TOKEN",
   "FLOWPROOF_POLL_INTERVAL_MS",
@@ -37,6 +38,7 @@ describe("Agent Runtime configuration", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
     process.env.DEVPROOF_AGENT_POLL_INTERVAL_MS = "900";
     process.env.DEVPROOF_AGENT_TOOL_LIMIT = "42";
+    process.env.DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT = "320";
     process.env.DEVPROOF_AGENT_WORKER_ID = "agent-worker-1";
     process.env.DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST = "model-gateway.internal";
 
@@ -45,6 +47,7 @@ describe("Agent Runtime configuration", () => {
       DEVPROOF_AGENT_RUNTIME_TOKEN: "agent-runtime-token",
       DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: "model-gateway.internal",
       DEVPROOF_AGENT_TOOL_LIMIT: 42,
+      DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: 320,
       DEVPROOF_AGENT_WORKER_ID: "agent-worker-1",
     });
   });
@@ -59,6 +62,7 @@ describe("Agent Runtime configuration", () => {
       DEVPROOF_AGENT_POLL_INTERVAL_MS: 800,
       DEVPROOF_AGENT_RUNTIME_TOKEN: "legacy-runtime-token",
       DEVPROOF_AGENT_TOOL_LIMIT: 30,
+      DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: 64,
       DEVPROOF_AGENT_WORKER_ID: "legacy-worker",
     });
   });

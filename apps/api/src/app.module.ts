@@ -8,6 +8,8 @@ import { AgentRuntimeControlService } from "./agent-runtime/agent-runtime-contro
 import { UnifiedBrowserExecutionService } from "./agent-runtime/unified-browser-execution.service.js";
 import { SpecAnalysisRuntimeController } from "./agent-runtime/spec-analysis-runtime.controller.js";
 import { SpecAnalysisRuntimeService } from "./agent-runtime/spec-analysis-runtime.service.js";
+import { PostRunAnalysisRuntimeController } from "./agent-runtime/post-run-analysis-runtime.controller.js";
+import { PostRunAnalysisRuntimeService } from "./agent-runtime/post-run-analysis-runtime.service.js";
 
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthGuard } from "./auth/auth.guard.js";
@@ -75,6 +77,10 @@ import { TaskExecutionService } from "./task-executions/task-execution.service.j
 import { TaskProfileResolverService } from "./task-executions/task-profile-resolver.service.js";
 import { ProfileReservationService } from "./task-executions/profile-reservation.service.js";
 import { TaskExecutionWorker } from "./task-executions/task-execution.worker.js";
+import { PostRunAnalysisConsoleController } from "./post-run-analysis/post-run-analysis-console.controller.js";
+import { PostRunAnalysisService } from "./post-run-analysis/post-run-analysis.service.js";
+import { PostRunAnalysisWorker } from "./post-run-analysis/post-run-analysis.worker.js";
+import { TaskLogBundleService } from "./post-run-analysis/task-log-bundle.service.js";
 import { VerificationController } from "./verification/verification.controller.js";
 import { VerificationService } from "./verification/verification.service.js";
 import { BrowserExecutionRunner } from "./verification/browser-execution-runner.service.js";
@@ -94,6 +100,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     AgentRuntimeControlController,
     AgentRuntimeTaskController,
     SpecAnalysisRuntimeController,
+    PostRunAnalysisRuntimeController,
     AuthController,
     UserBrowserProfilesController,
     ConsoleController,
@@ -111,6 +118,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     RunHitlBrowserController,
     TaskExecutionController,
     TaskExecutionConsoleController,
+    PostRunAnalysisConsoleController,
     TestSpecificationController,
     TestSpecificationConsoleController,
     VerificationController,
@@ -122,6 +130,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     AgentModelConfigurationService,
     AgentRuntimeTaskService,
     SpecAnalysisRuntimeService,
+    PostRunAnalysisRuntimeService,
     UnifiedBrowserExecutionService,
     AuditService,
     AuthGuard,
@@ -167,6 +176,9 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     TaskProfileResolverService,
     ProfileReservationService,
     TaskExecutionWorker,
+    PostRunAnalysisService,
+    PostRunAnalysisWorker,
+    TaskLogBundleService,
     TestDataService,
     TestSpecificationService,
     ToolAuthGuard,

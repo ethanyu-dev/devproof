@@ -76,7 +76,7 @@ function parseOptions(args) {
     const value = args[index + 1];
     if (!key?.startsWith("--") || !value) {
       throw new Error(
-        "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION> [--name <name>]",
+        "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION|POST_RUN_ANALYSIS> [--name <name>]",
       );
     }
     values.set(key.slice(2), value.trim());
@@ -88,17 +88,24 @@ function parseOptions(args) {
   }
   const team = values.get("team");
   const pool = values.get("pool");
-  if (!pool || !["SPEC_ANALYSIS", "BROWSER_EXECUTION"].includes(pool)) {
-    throw new Error("--pool must be SPEC_ANALYSIS or BROWSER_EXECUTION.");
+  if (
+    !pool ||
+    !["SPEC_ANALYSIS", "BROWSER_EXECUTION", "POST_RUN_ANALYSIS"].includes(pool)
+  ) {
+    throw new Error(
+      "--pool must be SPEC_ANALYSIS, BROWSER_EXECUTION, or POST_RUN_ANALYSIS.",
+    );
   }
   const name =
     values.get("name") ??
     (pool === "SPEC_ANALYSIS"
       ? "Spec Analysis Runtime"
-      : "Browser Execution Runtime");
+      : pool === "POST_RUN_ANALYSIS"
+        ? "Post-run Analysis Runtime"
+        : "Browser Execution Runtime");
   if (!team || !name) {
     throw new Error(
-      "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION> [--name <name>]",
+      "Usage: pnpm runtime:provision -- --team <slug> --pool <SPEC_ANALYSIS|BROWSER_EXECUTION|POST_RUN_ANALYSIS> [--name <name>]",
     );
   }
   return { name, pool, team };

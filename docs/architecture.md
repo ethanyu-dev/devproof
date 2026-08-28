@@ -72,6 +72,8 @@ The runner boundary is intentionally capability-based so HTTP, shell, container,
 
 A Direct Task skips the first two stages and creates one Run. Each Run owns its attempts, Agent Runtime Task, Browser Execution, interventions, evidence, and outcome. Parent Task status is a projection of its stages and child Runs.
 
+Terminal Issue Tasks may also enqueue a post-run optimization analysis sidecar. It is deliberately not a fourth Task stage: capture or model failures never delay notification, alter the Task lifecycle, or replace the original execution verdict. After browser cleanup reaches a terminal state (or a bounded capture grace period expires), the control plane stores an immutable `devproof.task-logs.v2` bundle and leases analysis to the isolated `POST_RUN_ANALYSIS` Agent Runtime pool. Evidence-validated findings are persisted separately and deduplicated into an internal improvement work item. See [Post-run optimization analysis](post-run-analysis.md).
+
 The public entry point is `POST /v2/tasks`. `POST /v2/runs` remains an upgrade-compatible wrapper that creates a Direct Task. Legacy specification and verification endpoints are read-only compatibility surfaces and must not receive new product traffic.
 
 ## State ownership

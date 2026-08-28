@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeTaskLease } from "@devproof/agent-runtime-protocol";
+import type {
+  RuntimePostRunAnalysisTaskLease,
+  RuntimeTaskLease,
+} from "@devproof/agent-runtime-protocol";
 
-import { classifyFailure, RuntimeDeadlineController } from "./worker.js";
+import {
+  AgentRuntimeWorker,
+  classifyFailure,
+  classifyPostRunAnalysisFailure,
+  RuntimeDeadlineController,
+} from "./worker.js";
+import { ControlPlaneError } from "./control-plane.client.js";
 
 const task = {
   snapshot: { attemptNumber: 2 },
@@ -61,6 +70,92 @@ describe("Agent Runtime failure classification", () => {
       executionDisposition: "AGENT_ERROR",
       kind: "FATAL_FAILURE",
     });
+  });
+
+  it("does not retry a deterministic post-run context overflow", () => {
+    const outcome = classifyPostRunAnalysisFailure(
+      new Error("Your input exceeds the context window of this model."),
+      { snapshot: { attemptNumber: 2 } } as RuntimePostRunAnalysisTaskLease,
+    );
+
+    expect(outcome).toMatchObject({
+      error: {
+        code: "POST_RUN_ANALYSIS_CONTEXT_EXCEEDED",
+        failureClass: "TOOL_EXECUTION",
+      },
+      executionDisposition: "AGENT_ERROR",
+      kind: "FATAL_FAILURE",
+    });
+  });
+});
+
+describe("Agent Runtime post-run outcome submission", () => {
+  it("converts a rejected completed report into a retryable terminal outcome", async () => {
+    const submitPostRunAnalysisOutcome = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ControlPlaneError(400, {
+          message: "Invalid analysis finding runtime location",
+        }),
+      )
+      .mockResolvedValueOnce({ accepted: true, jobStatus: "READY" });
+    const controlPlane = {
+      appendPostRunAnalysisEvent: vi.fn().mockResolvedValue({ accepted: true }),
+      heartbeatPostRunAnalysis: vi.fn(),
+      submitPostRunAnalysisOutcome,
+    };
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_TOOL_LIMIT: 10,
+        DEVPROOF_AGENT_WORKER_ID: "worker-1",
+      } as never,
+      controlPlane as never,
+      vi.fn() as never,
+    );
+    (
+      worker as unknown as {
+        postRunAnalysisExecutor: {
+          execute(): Promise<unknown>;
+        };
+      }
+    ).postRunAnalysisExecutor = {
+      execute: vi.fn().mockResolvedValue({
+        kind: "ANALYSIS_COMPLETED",
+        report: { findings: [], summary: "分析完成。" },
+      }),
+    };
+    const postRunTask = {
+      fencingToken: "3",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      snapshot: {
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
+      },
+      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+    } as RuntimePostRunAnalysisTaskLease;
+
+    await (
+      worker as unknown as {
+        executePostRunAnalysisTask(
+          task: RuntimePostRunAnalysisTaskLease,
+          signal: AbortSignal,
+          workerId: string,
+        ): Promise<void>;
+      }
+    ).executePostRunAnalysisTask(
+      postRunTask,
+      new AbortController().signal,
+      "worker-1",
+    );
+
+    expect(submitPostRunAnalysisOutcome).toHaveBeenCalledTimes(2);
+    expect(submitPostRunAnalysisOutcome.mock.calls[1]?.[1]).toMatchObject({
+      error: { code: "POST_RUN_ANALYSIS_REPORT_REJECTED" },
+      kind: "RETRYABLE_FAILURE",
+    });
+    expect(submitPostRunAnalysisOutcome.mock.calls[0]?.[2]).not.toBe(
+      submitPostRunAnalysisOutcome.mock.calls[1]?.[2],
+    );
   });
 });
 
