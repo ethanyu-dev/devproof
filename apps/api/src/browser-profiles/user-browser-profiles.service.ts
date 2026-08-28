@@ -30,10 +30,20 @@ import {
 } from "../verification/runtime-routing.js";
 
 const PROFILE_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const PROFILE_CONTROL_PURPOSES = [
+  "PROFILE_PREPARATION",
+  "PROFILE_VERIFICATION",
+] as const;
 
 const profileInclude = {
   assignedRuntime: {
-    select: { id: true, name: true, status: true, lastSeenAt: true },
+    select: {
+      deviceInfo: true,
+      id: true,
+      lastSeenAt: true,
+      name: true,
+      status: true,
+    },
   },
   grants: { orderBy: { createdAt: "asc" as const } },
   owner: { select: { avatarUrl: true, email: true, id: true, name: true } },
@@ -46,6 +56,7 @@ const profileInclude = {
       status: true,
     },
     take: 1,
+    where: { purpose: { in: [...PROFILE_CONTROL_PURPOSES] } },
   },
 } satisfies Prisma.UserBrowserProfileInclude;
 
@@ -421,7 +432,9 @@ export class UserBrowserProfilesService {
     if (!profile.verificationUrl) {
       throw new ConflictException("Profile verificationUrl is not configured.");
     }
-    const existing = profile.runtimeSessions[0];
+    const existing = profile.runtimeSessions.find((session) =>
+      isProfileControlPurpose(session.purpose),
+    );
     if (
       existing &&
       ["OPENING", "ACTIVE", "HUMAN_CONTROL"].includes(existing.status)
@@ -542,8 +555,10 @@ export class UserBrowserProfilesService {
 
   async verify(current: AuthContext, id: string) {
     const profile = await this.owned(current, id);
-    const session = profile.runtimeSessions.find((candidate) =>
-      ["ACTIVE", "HUMAN_CONTROL"].includes(candidate.status),
+    const session = profile.runtimeSessions.find(
+      (candidate) =>
+        isProfileControlPurpose(candidate.purpose) &&
+        ["ACTIVE", "HUMAN_CONTROL"].includes(candidate.status),
     );
     if (!session) {
       throw new ConflictException("Profile preparation session is not active.");
@@ -993,6 +1008,7 @@ export class UserBrowserProfilesService {
       where: {
         humanControlExpiresAt: { gt: new Date() },
         humanControllerUserId: current.user.id,
+        purpose: { in: [...PROFILE_CONTROL_PURPOSES] },
         status: "HUMAN_CONTROL",
         teamId: current.team.id,
         userBrowserProfileId: profileId,
@@ -1181,6 +1197,10 @@ function normalizedHostname(value: string | URL) {
   const hostname =
     typeof value === "string" ? new URL(value).hostname : value.hostname;
   return hostname.toLowerCase().replace(/\.$/u, "");
+}
+
+function isProfileControlPurpose(value: string) {
+  return PROFILE_CONTROL_PURPOSES.some((purpose) => purpose === value);
 }
 
 function json(value: unknown): Prisma.InputJsonValue {

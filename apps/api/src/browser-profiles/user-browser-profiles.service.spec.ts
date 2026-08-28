@@ -86,7 +86,13 @@ describe("UserBrowserProfilesService", () => {
     );
     vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
       id: "profile-1",
-      runtimeSessions: [{ id: "session-1", status: "ACTIVE" }],
+      runtimeSessions: [
+        {
+          id: "session-1",
+          purpose: "PROFILE_PREPARATION",
+          status: "ACTIVE",
+        },
+      ],
       verificationRules: {
         loginUrlPatterns: ["*/login*", "*/signin*"],
         provisionedBy: "TASK_TARGET",
@@ -267,7 +273,9 @@ describe("UserBrowserProfilesService", () => {
       vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
         grants: [],
         id: "profile-1",
-        runtimeSessions: [{ id: "session-1", status }],
+        runtimeSessions: [
+          { id: "session-1", purpose: "PROFILE_PREPARATION", status },
+        ],
         status: "REAUTH_REQUIRED",
         verificationRules: {},
         verificationUrl: "https://app.example.com/login",
@@ -313,6 +321,112 @@ describe("UserBrowserProfilesService", () => {
       );
     },
   );
+
+  it("does not reuse an active execution session for Profile preparation", async () => {
+    const execute = vi.fn().mockResolvedValue({ status: "SUCCEEDED" });
+    const takeover = vi.fn().mockResolvedValue(undefined);
+    const create = vi
+      .fn()
+      .mockResolvedValue({ id: "preparation-session", status: "ACTIVE" });
+    const update = vi.fn().mockResolvedValue(undefined);
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { update, updateMany } } as never,
+      {} as never,
+      { create, execute, takeover } as never,
+      {} as never,
+      {} as never,
+      { record: vi.fn() } as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      assignedRuntimeId: "runtime-1",
+      grants: [],
+      id: "profile-1",
+      runtimeSessions: [
+        { id: "execution-session", purpose: "EXECUTION", status: "ACTIVE" },
+      ],
+      status: "REAUTH_REQUIRED",
+      verificationRules: {},
+      verificationUrl: "https://app.example.com/login",
+      version: 3,
+    } as never);
+    vi.spyOn(profiles as never, "selectRuntime" as never).mockResolvedValue(
+      "runtime-1" as never,
+    );
+
+    const result = await profiles.prepare(
+      {
+        sessionId: "session-cookie",
+        team: { id: "team-1", name: "Team", slug: "team" },
+        user: {
+          avatarUrl: null,
+          email: "user@example.com",
+          id: "user-1",
+          name: "User",
+        },
+      },
+      "profile-1",
+      { ttlSeconds: 300 },
+    );
+
+    expect(result.sessionId).toBe("preparation-session");
+    expect(create).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        purpose: "PROFILE_PREPARATION",
+        userBrowserProfileId: "profile-1",
+      }),
+    );
+    expect(takeover).toHaveBeenCalledWith(
+      expect.anything(),
+      "preparation-session",
+      { ttlSeconds: 300 },
+    );
+    expect(execute).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "execution-session",
+      expect.anything(),
+    );
+  });
+
+  it("does not verify or close an execution session through Profile controls", async () => {
+    const close = vi.fn();
+    const execute = vi.fn();
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { update: vi.fn() } } as never,
+      {} as never,
+      { close, execute } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeSessions: [
+        { id: "execution-session", purpose: "EXECUTION", status: "ACTIVE" },
+      ],
+      verificationRules: {},
+      verificationUrl: "https://app.example.com/",
+    } as never);
+
+    await expect(
+      profiles.verify(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("Profile preparation session is not active");
+    expect(execute).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
 
   it("rolls back only the preparation version owned by the failed request", async () => {
     const updateMany = vi

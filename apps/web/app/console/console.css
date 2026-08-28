@@ -3617,6 +3617,7 @@
 .dp-browser-handoff-header-actions,
 .dp-browser-handoff-status,
 .dp-browser-handoff-copy small,
+.dp-browser-handoff-runtime,
 .dp-browser-handoff-claim,
 .dp-browser-handoff-unavailable,
 .dp-browser-handoff-guide,
@@ -3665,6 +3666,33 @@
 .dp-browser-handoff-copy p,
 .dp-browser-handoff-copy small {
   margin: 0;
+}
+
+.dp-browser-handoff-runtime {
+  min-width: 0;
+  gap: 10px;
+  border: 1px solid var(--ek-border-2);
+  background: var(--ek-surface);
+  padding: 10px 12px;
+}
+
+.dp-browser-handoff-runtime > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.dp-browser-handoff-runtime b,
+.dp-browser-handoff-runtime small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-browser-handoff-runtime small {
+  color: var(--ek-muted);
+  font-size: 11px;
 }
 
 .dp-browser-handoff-copy p {
