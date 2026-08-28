@@ -20,6 +20,7 @@ import {
 import { PrismaService } from "../database/prisma.service.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { summarizeValue } from "../observability/observability.service.js";
+import { refreshedTaskDeadline } from "../task-executions/task-deadline.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 
 function json(value: unknown): Prisma.InputJsonValue {
@@ -654,7 +655,11 @@ export class ExecutionRunService {
   ) {
     await this.prisma.$transaction(async (tx) => {
       const intervention = await tx.humanIntervention.findFirst({
-        include: { browserControlLease: true, run: true, task: true },
+        include: {
+          browserControlLease: true,
+          run: { include: { taskExecution: true } },
+          task: true,
+        },
         where: { id: interventionId, runId, teamId: current.team.id },
       });
       if (!intervention) {
@@ -682,6 +687,19 @@ export class ExecutionRunService {
       }
 
       const now = new Date();
+      const parentTask = intervention.run.taskExecution;
+      if (
+        parentTask &&
+        (parentTask.cancelRequestedAt ||
+          ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+            parentTask.lifecycle,
+          ))
+      ) {
+        throw new ConflictException("The parent task is already terminal.");
+      }
+      const refreshedParentDeadlineAt = parentTask
+        ? refreshedTaskDeadline(parentTask.inputSnapshot, now)
+        : null;
       const snapshot = runtimeTaskSnapshotSchema.parse(
         intervention.task.snapshot,
       );
@@ -696,13 +714,21 @@ export class ExecutionRunService {
       const hardDeadlineAt =
         intervention.run.hardDeadlineAt ?? currentDeadlineAt;
       const refundHumanWait =
-        deadlinePolicy.mode === "ADAPTIVE" &&
-        deadlinePolicy.refundHumanWait &&
+        (deadlinePolicy.mode === "FIXED" || deadlinePolicy.refundHumanWait) &&
         intervention.pausedExecutionRemainingMs !== null;
+      const resumedHardDeadlineAt = refundHumanWait
+        ? new Date(
+            Math.min(
+              hardDeadlineAt.getTime() +
+                Math.max(0, now.getTime() - intervention.requestedAt.getTime()),
+              refreshedParentDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+            ),
+          )
+        : hardDeadlineAt;
       const resumedDeadlineAt = refundHumanWait
         ? new Date(
             Math.min(
-              hardDeadlineAt.getTime(),
+              resumedHardDeadlineAt.getTime(),
               now.getTime() + intervention.pausedExecutionRemainingMs!,
             ),
           )
@@ -710,7 +736,7 @@ export class ExecutionRunService {
       const resumedSnapshot = runtimeTaskSnapshotSchema.parse({
         ...snapshot,
         deadlineAt: resumedDeadlineAt.toISOString(),
-        hardDeadlineAt: hardDeadlineAt.toISOString(),
+        hardDeadlineAt: resumedHardDeadlineAt.toISOString(),
         executionPolicy: {
           ...snapshot.executionPolicy,
           resume: {
@@ -720,15 +746,63 @@ export class ExecutionRunService {
           },
         },
       });
-      await tx.humanIntervention.update({
+      if (parentTask && refreshedParentDeadlineAt) {
+        const parentClaim = await tx.taskExecution.updateMany({
+          data: {
+            deadlineAt: refreshedParentDeadlineAt,
+            projectionNeededAt: now,
+          },
+          where: {
+            cancelRequestedAt: null,
+            id: parentTask.id,
+            lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+          },
+        });
+        if (parentClaim.count !== 1) {
+          throw new ConflictException("The parent task is already terminal.");
+        }
+      }
+      const runClaim = await tx.executionRun.updateMany({
+        data: {
+          executionDisposition: null,
+          deadlineAt: resumedDeadlineAt,
+          finishedAt: null,
+          hardDeadlineAt: resumedHardDeadlineAt,
+          lifecycle: "QUEUED",
+          verdict: null,
+        },
+        where: {
+          cancelRequestedAt: null,
+          id: runId,
+          lifecycle: "WAITING_HUMAN",
+          teamId: current.team.id,
+        },
+      });
+      if (runClaim.count !== 1) {
+        throw new ConflictException(
+          "The run can no longer accept human input.",
+        );
+      }
+      const interventionClaim = await tx.humanIntervention.updateMany({
         data: {
           resolvedAt: now,
           resolvedBy: current.credential.id,
           response: json(input.response),
           status: "RESOLVED",
         },
-        where: { id: interventionId },
+        where: {
+          id: interventionId,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          runId,
+          status: "PENDING",
+          teamId: current.team.id,
+        },
       });
+      if (interventionClaim.count !== 1) {
+        throw new ConflictException(
+          "The human intervention can no longer be resolved.",
+        );
+      }
       await tx.agentRuntimeTask.update({
         data: {
           completionId: null,
@@ -751,16 +825,6 @@ export class ExecutionRunService {
         },
         where: { id: intervention.attemptId },
       });
-      await tx.executionRun.update({
-        data: {
-          executionDisposition: null,
-          deadlineAt: resumedDeadlineAt,
-          finishedAt: null,
-          lifecycle: "QUEUED",
-          verdict: null,
-        },
-        where: { id: runId },
-      });
       await tx.runEvent.create({
         data: {
           actor: "HUMAN",
@@ -768,8 +832,14 @@ export class ExecutionRunService {
           kind: "human.intervention.resolved",
           payload: json({
             interventionId,
+            ...(refreshedParentDeadlineAt
+              ? {
+                  parentTaskDeadlineAt: refreshedParentDeadlineAt.toISOString(),
+                }
+              : {}),
             refundedHumanWait: refundHumanWait,
             resumedDeadlineAt: resumedDeadlineAt.toISOString(),
+            resumedHardDeadlineAt: resumedHardDeadlineAt.toISOString(),
             resolvedAt: now.toISOString(),
           }),
           runId,

@@ -52,11 +52,26 @@ import {
   type TaskNotificationContext,
 } from "./task-waiting-notification.js";
 import { ProfileReservationService } from "./profile-reservation.service.js";
+import { refreshedTaskDeadline } from "./task-deadline.js";
 
 const ANALYSIS_WORKER = `task-analysis:${process.pid}`;
 const CASE_DISPATCH_MAX_ATTEMPTS = 3;
 const DISPATCH_RETRY_DELAY_MS = 5_000;
 const MINIMUM_CHILD_RUN_WINDOW_MS = 30_000;
+
+export function taskDeadlineElapsed(input: {
+  deadlineAt: Date;
+  lifecycle: string;
+  now: Date;
+  waitingForHuman: boolean;
+}) {
+  return (
+    input.lifecycle === "TIMED_OUT" ||
+    (!input.waitingForHuman &&
+      input.deadlineAt <= input.now &&
+      !["COMPLETED", "CANCELLED"].includes(input.lifecycle))
+  );
+}
 
 const taskDetailInclude = {
   analysisSources: { orderBy: { createdAt: "asc" as const } },
@@ -533,11 +548,6 @@ export class TaskExecutionService {
         "The deployment target is immutable after Case execution starts.",
       );
     }
-    if (task.deadlineAt <= new Date()) {
-      throw new ConflictException(
-        "The task deadline has passed; create a new task instead.",
-      );
-    }
     const environment = record(task.environmentSnapshot);
     const primary = deployments[0]!;
     const target = new URL(primary.targetUrl);
@@ -553,10 +563,12 @@ export class TaskExecutionService {
       );
     }
     const now = new Date();
+    const refreshedDeadlineAt = refreshedTaskDeadline(task.inputSnapshot, now);
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.taskExecution.updateMany({
         data: {
           currentStage: "PROFILE_RESOLUTION",
+          deadlineAt: refreshedDeadlineAt,
           environmentSnapshot: json({
             ...environment,
             allowedHosts: [target.hostname],
@@ -571,7 +583,6 @@ export class TaskExecutionService {
         },
         where: {
           cancelRequestedAt: null,
-          deadlineAt: { gt: now },
           id,
           lifecycle: "WAITING_INPUT",
         },
@@ -613,6 +624,7 @@ export class TaskExecutionService {
       });
       await tx.taskExecutionEvent.create({
         data: event(current.team.id, id, "HUMAN", "task.input.provided", {
+          deadlineAt: refreshedDeadlineAt.toISOString(),
           input: "DEPLOYMENT_TARGET",
           deployments: deployments.map((deployment) => ({
             key: deployment.key,
@@ -1190,6 +1202,9 @@ export class TaskExecutionService {
         verdict: run.verdict,
       },
     }));
+    const waitingForHuman = [...issueCases, ...directCases].some(
+      (item) => item.run?.lifecycle === "WAITING_HUMAN",
+    );
     const projection = projectTaskExecution({
       analysisStatus: analysis.status,
       cancelRequested: Boolean(task.cancelRequestedAt),
@@ -1203,10 +1218,12 @@ export class TaskExecutionService {
         task.kind === "LEGACY_RUN" ||
         task.deployments.length > 0 ||
         typeof environment.targetUrl === "string",
-      timedOut:
-        task.lifecycle === "TIMED_OUT" ||
-        (task.deadlineAt <= new Date() &&
-          !["COMPLETED", "CANCELLED"].includes(task.lifecycle)),
+      timedOut: taskDeadlineElapsed({
+        deadlineAt: task.deadlineAt,
+        lifecycle: task.lifecycle,
+        now: new Date(),
+        waitingForHuman,
+      }),
     });
     const now = new Date();
     const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(

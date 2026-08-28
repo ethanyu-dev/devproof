@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   ConflictException,
@@ -18,6 +18,11 @@ import { UserBrowserProfilesService } from "../browser-profiles/user-browser-pro
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { enqueueTaskWaitingNotification } from "./task-waiting-notification.js";
+import { refreshedTaskDeadline } from "./task-deadline.js";
+
+const PROFILE_RECOVERY_BATCH_SIZE = 100;
+const PROFILE_RECOVERY_LEASE_MS = 30_000;
+const PROFILE_RECOVERY_MAX_ATTEMPTS = 10;
 
 const bindingInclude = {
   deployments: {
@@ -107,6 +112,7 @@ export class TaskProfileResolverService {
       );
     }
     const now = new Date();
+    const refreshedDeadlineAt = refreshedTaskDeadline(task.inputSnapshot, now);
     await this.prisma.$transaction(async (tx) => {
       await tx.taskDeploymentProfileBinding.deleteMany({
         where: { taskExecutionId: task.id },
@@ -135,6 +141,7 @@ export class TaskProfileResolverService {
       await tx.taskExecution.update({
         data: {
           currentStage: "PROFILE_RESOLUTION",
+          deadlineAt: refreshedDeadlineAt,
           inputSnapshot: json({
             ...parsedInput,
             profilePolicy: input.profilePolicy,
@@ -164,6 +171,7 @@ export class TaskProfileResolverService {
           "HUMAN",
           "task.profile.selection_updated",
           {
+            deadlineAt: refreshedDeadlineAt.toISOString(),
             requesterClaimed: claimRequester,
             strategy: input.profilePolicy.strategy,
           },
@@ -174,6 +182,7 @@ export class TaskProfileResolverService {
   }
 
   async reconcile(limit = 25) {
+    await this.recoverProfileTasks(limit);
     const tasks = await this.prisma.taskExecution.findMany({
       orderBy: { updatedAt: "asc" },
       select: { id: true },
@@ -210,6 +219,144 @@ export class TaskProfileResolverService {
       );
     }
     return resolved;
+  }
+
+  private async recoverProfileTasks(limit: number) {
+    const now = new Date();
+    await this.prisma.taskProfileRecoveryEvent.updateMany({
+      data: {
+        lastError: "Profile task recovery lease expired.",
+        leaseExpiresAt: null,
+        leaseToken: null,
+        nextAttemptAt: now,
+        status: "FAILED",
+      },
+      where: {
+        leaseExpiresAt: { lte: now },
+        status: "PROCESSING",
+      },
+    });
+    const events = await this.prisma.taskProfileRecoveryEvent.findMany({
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
+      take: limit,
+      where: {
+        attempts: { lt: PROFILE_RECOVERY_MAX_ATTEMPTS },
+        nextAttemptAt: { lte: now },
+        status: { in: ["PENDING", "FAILED"] },
+      },
+    });
+    for (const event of events) await this.processProfileRecovery(event.id);
+  }
+
+  private async processProfileRecovery(eventId: string) {
+    const claimedAt = new Date();
+    const leaseToken = randomUUID();
+    const claimed = await this.prisma.taskProfileRecoveryEvent.updateMany({
+      data: {
+        leaseExpiresAt: new Date(
+          claimedAt.getTime() + PROFILE_RECOVERY_LEASE_MS,
+        ),
+        leaseToken,
+        status: "PROCESSING",
+      },
+      where: {
+        id: eventId,
+        nextAttemptAt: { lte: claimedAt },
+        status: { in: ["PENDING", "FAILED"] },
+      },
+    });
+    if (claimed.count !== 1) return;
+    const recovery =
+      await this.prisma.taskProfileRecoveryEvent.findUniqueOrThrow({
+        where: { id: eventId },
+      });
+    try {
+      const tasks = await this.prisma.taskExecution.findMany({
+        orderBy: { id: "asc" },
+        select: { id: true, inputSnapshot: true },
+        take: PROFILE_RECOVERY_BATCH_SIZE,
+        where: {
+          cancelRequestedAt: null,
+          ...(recovery.cursorTaskId
+            ? { id: { gt: recovery.cursorTaskId } }
+            : {}),
+          lifecycle: "WAITING_INPUT",
+          profileBinding: {
+            failureCode: { startsWith: "PROFILE_" },
+            requestedProfileId: recovery.profileId,
+            status: "WAITING_INPUT",
+          },
+          waitingReason: { startsWith: "PROFILE_" },
+        },
+      });
+      const skipped: string[] = [];
+      for (const task of tasks) {
+        let deadlineAt: Date;
+        try {
+          deadlineAt = refreshedTaskDeadline(
+            task.inputSnapshot,
+            recovery.resumedAt,
+          );
+        } catch (error) {
+          skipped.push(
+            `${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          continue;
+        }
+        await this.prisma.taskExecution.updateMany({
+          data: {
+            deadlineAt,
+            projectionNeededAt: recovery.resumedAt,
+          },
+          where: {
+            cancelRequestedAt: null,
+            id: task.id,
+            lifecycle: "WAITING_INPUT",
+            profileBinding: {
+              failureCode: { startsWith: "PROFILE_" },
+              requestedProfileId: recovery.profileId,
+              status: "WAITING_INPUT",
+            },
+            waitingReason: { startsWith: "PROFILE_" },
+          },
+        });
+      }
+      const completed = tasks.length < PROFILE_RECOVERY_BATCH_SIZE;
+      await this.prisma.taskProfileRecoveryEvent.updateMany({
+        data: {
+          completedAt: completed ? new Date() : null,
+          cursorTaskId: tasks.at(-1)?.id ?? recovery.cursorTaskId,
+          lastError: skipped.length
+            ? `Skipped invalid task snapshots: ${skipped.join("; ")}`.slice(
+                0,
+                4_000,
+              )
+            : null,
+          leaseExpiresAt: null,
+          leaseToken: null,
+          nextAttemptAt: new Date(),
+          status: completed ? "COMPLETED" : "PENDING",
+        },
+        where: { id: eventId, leaseToken, status: "PROCESSING" },
+      });
+    } catch (error) {
+      const backoffSeconds = Math.min(3_600, 2 ** recovery.attempts * 5);
+      await this.prisma.taskProfileRecoveryEvent.updateMany({
+        data: {
+          attempts: { increment: 1 },
+          lastError: (error instanceof Error
+            ? error.message
+            : String(error)
+          ).slice(0, 4_000),
+          leaseExpiresAt: null,
+          leaseToken: null,
+          nextAttemptAt: new Date(Date.now() + backoffSeconds * 1_000),
+          status: "FAILED",
+        },
+        where: { id: eventId, leaseToken, status: "PROCESSING" },
+      });
+    }
   }
 
   async resolve(taskExecutionId: string) {
@@ -679,6 +826,10 @@ export class TaskProfileResolverService {
     if (!binding) return null;
     const environment = record(task.environmentSnapshot);
     const targetAvailable = typeof environment.targetUrl === "string";
+    const refreshedDeadlineAt =
+      task.lifecycle === "WAITING_INPUT"
+        ? refreshedTaskDeadline(task.inputSnapshot, now)
+        : null;
     await this.prisma.$transaction(async (tx) => {
       await tx.taskDeploymentProfileBinding.deleteMany({
         where: { taskExecutionId: task.id },
@@ -728,6 +879,7 @@ export class TaskProfileResolverService {
       await tx.taskExecution.update({
         data: {
           currentStage: "SPEC_EXECUTION",
+          ...(refreshedDeadlineAt ? { deadlineAt: refreshedDeadlineAt } : {}),
           lifecycle: targetAvailable ? "RUNNING" : "WAITING_INPUT",
           projectionNeededAt: targetAvailable ? now : null,
           waitingReason: targetAvailable ? null : "DEPLOYMENT_TARGET_REQUIRED",
@@ -741,6 +893,9 @@ export class TaskProfileResolverService {
           "CONTROL_PLANE",
           "task.profile.resolved",
           {
+            ...(refreshedDeadlineAt
+              ? { deadlineAt: refreshedDeadlineAt.toISOString() }
+              : {}),
             hostname: targetHostname ?? null,
             profileId,
             deploymentProfiles,

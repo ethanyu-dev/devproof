@@ -122,12 +122,14 @@ describe("UserBrowserProfilesService", () => {
   it("activates a pending entry only for the automatic Profile target", async () => {
     const upsert = vi.fn();
     const update = vi.fn();
+    const recoveryCreate = vi.fn();
     const audit = { record: vi.fn() };
     const profiles = new UserBrowserProfilesService(
       {
         $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
           callback({
             browserProfileGrant: { upsert },
+            taskProfileRecoveryEvent: { create: recoveryCreate },
             userBrowserProfile: { update },
           }),
         ),
@@ -176,6 +178,14 @@ describe("UserBrowserProfilesService", () => {
         }),
       }),
     );
+    expect(recoveryCreate).toHaveBeenCalledWith({
+      data: {
+        profileId: "profile-1",
+        resumedAt: expect.any(Date),
+        source: "PROFILE_GRANTS_APPROVED",
+        teamId: "team-1",
+      },
+    });
     expect(audit.record).toHaveBeenCalledWith(
       expect.anything(),
       "browser_profile.grants_approved",

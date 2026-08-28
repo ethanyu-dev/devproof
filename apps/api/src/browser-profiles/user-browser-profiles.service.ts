@@ -617,6 +617,14 @@ export class UserBrowserProfilesService {
           },
           where: { id },
         });
+        await tx.taskProfileRecoveryEvent.create({
+          data: {
+            profileId: profile.id,
+            resumedAt: now,
+            source: "PROFILE_VERIFIED",
+            teamId: profile.teamId,
+          },
+        });
       });
       await this.audit.record(
         current,
@@ -651,9 +659,17 @@ export class UserBrowserProfilesService {
     const approvedSources = pendingTriggerSources(profile.verificationRules);
     if (!approvedSources.length) return this.serialize(profile);
     const now = new Date();
-    await this.prisma.$transaction((tx) =>
-      this.activatePendingGrants(tx, profile, approvedSources, now),
-    );
+    await this.prisma.$transaction(async (tx) => {
+      await this.activatePendingGrants(tx, profile, approvedSources, now);
+      await tx.taskProfileRecoveryEvent.create({
+        data: {
+          profileId: profile.id,
+          resumedAt: now,
+          source: "PROFILE_GRANTS_APPROVED",
+          teamId: profile.teamId,
+        },
+      });
+    });
     await this.audit.record(
       current,
       "browser_profile.grants_approved",

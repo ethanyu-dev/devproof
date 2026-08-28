@@ -5,7 +5,9 @@ import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
 import {
   AgentRuntimeTaskService,
   completedOutcomeEvidenceError,
+  deadlinePolicyPausesHumanWait,
   decideAdaptiveDeadlineExtension,
+  hitlWaitDeadline,
 } from "./agent-runtime-task.service.js";
 
 const snapshot = runtimeTaskSnapshotSchema.parse({
@@ -210,6 +212,60 @@ const adaptivePolicy = {
   refundHumanWait: true,
   slowModelThresholdSeconds: 60,
 };
+
+describe("HITL wait deadline", () => {
+  const requestedAtMs = Date.parse("2026-08-28T02:00:00.000Z");
+
+  it("pauses execution for fixed deadlines and refundable adaptive deadlines", () => {
+    expect(deadlinePolicyPausesHumanWait({ mode: "FIXED" })).toBe(true);
+    expect(
+      deadlinePolicyPausesHumanWait({
+        ...adaptivePolicy,
+        refundHumanWait: true,
+      }),
+    ).toBe(true);
+    expect(
+      deadlinePolicyPausesHumanWait({
+        ...adaptivePolicy,
+        refundHumanWait: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("uses the independent HITL timeout when human wait is refundable", () => {
+    expect(
+      hitlWaitDeadline({
+        currentDeadlineAtMs: requestedAtMs + 60_000,
+        pauseHumanWait: true,
+        policyTimeoutSeconds: 3_600,
+        requestedAtMs,
+      }).toISOString(),
+    ).toBe("2026-08-28T03:00:00.000Z");
+  });
+
+  it("keeps the execution deadline as the cap when pausing is disabled", () => {
+    expect(
+      hitlWaitDeadline({
+        currentDeadlineAtMs: requestedAtMs + 60_000,
+        pauseHumanWait: false,
+        policyTimeoutSeconds: 3_600,
+        requestedAtMs,
+      }).toISOString(),
+    ).toBe("2026-08-28T02:01:00.000Z");
+  });
+
+  it("honors an earlier Runtime-requested intervention expiry", () => {
+    expect(
+      hitlWaitDeadline({
+        currentDeadlineAtMs: requestedAtMs + 60_000,
+        pauseHumanWait: true,
+        policyTimeoutSeconds: 3_600,
+        requestedAtMs,
+        requestedExpiresAtMs: requestedAtMs + 30_000,
+      }).toISOString(),
+    ).toBe("2026-08-28T02:00:30.000Z");
+  });
+});
 
 function adaptiveState(
   overrides: Partial<

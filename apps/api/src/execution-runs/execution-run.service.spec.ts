@@ -202,10 +202,13 @@ describe("ExecutionRunService HITL resume", () => {
         where: { id: taskId },
       }),
     );
-    expect(tx.executionRun.update).toHaveBeenCalledWith(
+    expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ lifecycle: "QUEUED" }),
-        where: { id: runId },
+        where: expect.objectContaining({
+          id: runId,
+          lifecycle: "WAITING_HUMAN",
+        }),
       }),
     );
     expect(tx.runEvent.create).toHaveBeenCalledWith(
@@ -254,7 +257,7 @@ describe("ExecutionRunService HITL resume", () => {
       response: { approved: true },
     });
 
-    const resumedDeadlineAt = tx.executionRun.update.mock.calls[0]?.[0].data
+    const resumedDeadlineAt = tx.executionRun.updateMany.mock.calls[0]?.[0].data
       .deadlineAt as Date;
     expect(resumedDeadlineAt.getTime()).toBeGreaterThanOrEqual(
       beforeResolve + 45_000,
@@ -267,6 +270,190 @@ describe("ExecutionRunService HITL resume", () => {
         data: expect.objectContaining({ deadlineAt: resumedDeadlineAt }),
       }),
     );
+  });
+
+  it("refreshes the parent task window and excludes human wait from the Run hard deadline", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const tx = transactionClient();
+      const parentTaskId = "d4076202-4620-4d34-accc-0a553acaf426";
+      const requestedAt = new Date(now.getTime() - 10 * 60_000);
+      const originalHardDeadlineAt = new Date(now.getTime() + 2 * 60_000);
+      tx.humanIntervention.findFirst.mockResolvedValue(
+        intervention({
+          pausedExecutionRemainingMs: 45_000,
+          requestedAt,
+          run: {
+            deadlineAt: new Date(now.getTime() + 60 * 60_000),
+            executionPolicy: {
+              ...snapshot.executionPolicy,
+              deadline: {
+                extensionStepSeconds: 180,
+                finalizationReserveSeconds: 60,
+                maxExtensionSeconds: 900,
+                maxModelCallSeconds: 300,
+                mode: "ADAPTIVE",
+                refundHumanWait: true,
+                slowModelThresholdSeconds: 60,
+              },
+            },
+            hardDeadlineAt: originalHardDeadlineAt,
+            lifecycle: "WAITING_HUMAN",
+            taskExecution: {
+              id: parentTaskId,
+              inputSnapshot: {
+                idempotencyKey: "issue-hitl-resume",
+                issueRef: "PROD-6781",
+                kind: "ISSUE_SPEC",
+              },
+              lifecycle: "WAITING_HUMAN",
+            },
+          },
+        }),
+      );
+      const prisma = {
+        $transaction: vi.fn((callback) => callback(tx)),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      };
+      const service = new ExecutionRunService(prisma as never, {} as never);
+
+      await service.resolveIntervention(current, runId, interventionId, {
+        response: { approved: true },
+      });
+
+      expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: new Date(now.getTime() + 45_000),
+            hardDeadlineAt: new Date(
+              originalHardDeadlineAt.getTime() + 10 * 60_000,
+            ),
+          }),
+        }),
+      );
+      expect(tx.taskExecution.updateMany).toHaveBeenCalledWith({
+        data: {
+          deadlineAt: new Date(now.getTime() + 7_200_000),
+          projectionNeededAt: now,
+        },
+        where: {
+          cancelRequestedAt: null,
+          id: parentTaskId,
+          lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores the full remaining window for a fixed Run after HITL", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const tx = transactionClient();
+      const requestedAt = new Date(now.getTime() - 10 * 60_000);
+      const originalDeadlineAt = new Date(requestedAt.getTime() + 60_000);
+      tx.humanIntervention.findFirst.mockResolvedValue(
+        intervention({
+          pausedExecutionRemainingMs: 60_000,
+          requestedAt,
+          run: {
+            deadlineAt: new Date(now.getTime() + 30 * 60_000),
+            executionPolicy: {
+              ...snapshot.executionPolicy,
+              deadline: { mode: "FIXED" },
+            },
+            hardDeadlineAt: originalDeadlineAt,
+            lifecycle: "WAITING_HUMAN",
+            taskExecution: null,
+          },
+        }),
+      );
+      const prisma = {
+        $transaction: vi.fn((callback) => callback(tx)),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      };
+      const service = new ExecutionRunService(prisma as never, {} as never);
+
+      await service.resolveIntervention(current, runId, interventionId, {
+        response: { approved: true },
+      });
+
+      expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: new Date(now.getTime() + 60_000),
+            hardDeadlineAt: new Date(now.getTime() + 60_000),
+            lifecycle: "QUEUED",
+          }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not requeue a Run that was cancelled after it was read", async () => {
+    const tx = transactionClient();
+    tx.executionRun.updateMany.mockResolvedValue({ count: 0 });
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({ browserControlLease: null }),
+    );
+    const prisma = {
+      $transaction: vi.fn((callback) => callback(tx)),
+      executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+
+    await expect(
+      service.resolveIntervention(current, runId, interventionId, {
+        response: { approved: true },
+      }),
+    ).rejects.toThrow("can no longer accept human input");
+    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
+    expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
+  });
+
+  it("does not resume a Run when its parent becomes terminal after the read", async () => {
+    const tx = transactionClient();
+    tx.taskExecution.updateMany.mockResolvedValue({ count: 0 });
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({
+        run: {
+          deadlineAt: new Date(snapshot.deadlineAt),
+          executionPolicy: snapshot.executionPolicy,
+          hardDeadlineAt: new Date(snapshot.deadlineAt),
+          lifecycle: "WAITING_HUMAN",
+          taskExecution: {
+            cancelRequestedAt: null,
+            id: "d4076202-4620-4d34-accc-0a553acaf426",
+            inputSnapshot: {
+              idempotencyKey: "parent-terminal-race",
+              issueRef: "PROD-6781",
+              kind: "ISSUE_SPEC",
+            },
+            lifecycle: "WAITING_HUMAN",
+          },
+        },
+      }),
+    );
+    const prisma = {
+      $transaction: vi.fn((callback) => callback(tx)),
+      executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+
+    await expect(
+      service.resolveIntervention(current, runId, interventionId, {
+        response: { approved: true },
+      }),
+    ).rejects.toThrow("parent task is already terminal");
+    expect(tx.executionRun.updateMany).not.toHaveBeenCalled();
+    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
   });
 
   it("rejects resolution while the browser is still controlled", async () => {
@@ -323,14 +510,15 @@ function transactionClient() {
     browserRuntimeProfileLease: { updateMany: vi.fn() },
     browserRuntimeSession: { updateMany: vi.fn() },
     browserRuntimeSlot: { updateMany: vi.fn() },
-    executionRun: { update: vi.fn() },
+    executionRun: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     humanIntervention: {
       findFirst: vi.fn(),
-      update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     notificationOutbox: { create: vi.fn() },
     runAttempt: { update: vi.fn() },
     runEvent: { create: vi.fn() },
+    taskExecution: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
   };
 }
 

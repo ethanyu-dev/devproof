@@ -3,8 +3,72 @@ import { describe, expect, it, vi } from "vitest";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
 
 describe("TaskProfileResolverService", () => {
+  it("restarts the full task window when a human updates Profile selection", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const tx = {
+        taskDeploymentProfileBinding: { deleteMany: vi.fn() },
+        taskExecution: { update: vi.fn() },
+        taskExecutionEvent: { create: vi.fn() },
+        taskExecutionStage: { updateMany: vi.fn() },
+        taskProfileBinding: { update: vi.fn() },
+      };
+      const prisma = {
+        $transaction: vi.fn((callback) => callback(tx)),
+        taskExecution: {
+          findFirst: vi.fn().mockResolvedValue({
+            executionRuns: [],
+            id: "task-profile-resume",
+            inputSnapshot: {
+              idempotencyKey: "profile-resume-key",
+              issueRef: "PROD-6781",
+              kind: "ISSUE_SPEC",
+            },
+            kind: "ISSUE_SPEC",
+            lifecycle: "WAITING_INPUT",
+            profileBinding: { id: "binding-1" },
+            requestedByUserId: "user-1",
+          }),
+        },
+      };
+      const service = new TaskProfileResolverService(
+        prisma as never,
+        {} as never,
+      );
+      vi.spyOn(service, "resolve").mockResolvedValue({
+        status: "RESOLVED",
+      } as never);
+
+      await service.select("team-1", "user-1", "task-profile-resume", {
+        profilePolicy: {
+          onUnavailable: "WAIT_FOR_PROFILE",
+          scope: { authRole: "default", environmentKey: "default" },
+          strategy: "EPHEMERAL",
+        },
+      });
+
+      expect(tx.taskExecution.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: new Date(now.getTime() + 7_200_000),
+            lifecycle: "RUNNING",
+          }),
+          where: { id: "task-profile-resume" },
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("surfaces unexpected resolution failures after processing the batch", async () => {
     const prisma = {
+      taskProfileRecoveryEvent: {
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn(),
+      },
       taskExecution: {
         findMany: vi
           .fn()
@@ -24,6 +88,139 @@ describe("TaskProfileResolverService", () => {
       "Profile resolution failed for 1 task(s): task-a",
     );
     expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it("durably refreshes Profile-waiting task deadlines in bounded batches", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const recoveryId = "c9892583-0abe-46bb-88d6-a6d39bdb92bb";
+      const taskUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const taskFindMany = vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            id: "d4076202-4620-4d34-accc-0a553acaf426",
+            inputSnapshot: {
+              idempotencyKey: "durable-profile-recovery",
+              issueRef: "PROD-6781",
+              kind: "ISSUE_SPEC",
+            },
+          },
+        ])
+        .mockResolvedValueOnce([]);
+      const recoveryUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const prisma = {
+        taskExecution: {
+          findMany: taskFindMany,
+          updateMany: taskUpdateMany,
+        },
+        taskProfileRecoveryEvent: {
+          findMany: vi.fn().mockResolvedValue([{ id: recoveryId }]),
+          findUniqueOrThrow: vi.fn().mockResolvedValue({
+            attempts: 0,
+            cursorTaskId: null,
+            id: recoveryId,
+            profileId: "profile-1",
+            resumedAt: now,
+          }),
+          updateMany: recoveryUpdateMany,
+        },
+      };
+      const service = new TaskProfileResolverService(
+        prisma as never,
+        {} as never,
+      );
+
+      await expect(service.reconcile()).resolves.toBe(0);
+
+      expect(taskUpdateMany).toHaveBeenCalledWith({
+        data: {
+          deadlineAt: new Date(now.getTime() + 7_200_000),
+          projectionNeededAt: now,
+        },
+        where: {
+          cancelRequestedAt: null,
+          id: "d4076202-4620-4d34-accc-0a553acaf426",
+          lifecycle: "WAITING_INPUT",
+          profileBinding: {
+            failureCode: { startsWith: "PROFILE_" },
+            requestedProfileId: "profile-1",
+            status: "WAITING_INPUT",
+          },
+          waitingReason: { startsWith: "PROFILE_" },
+        },
+      });
+      expect(recoveryUpdateMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "COMPLETED" }),
+          where: expect.objectContaining({
+            id: recoveryId,
+            status: "PROCESSING",
+          }),
+        }),
+      );
+      expect(taskFindMany).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ take: 100 }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a failed Profile recovery event without rolling back Profile state", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-08-28T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const recoveryId = "c9892583-0abe-46bb-88d6-a6d39bdb92bb";
+      const recoveryUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const prisma = {
+        taskExecution: {
+          findMany: vi
+            .fn()
+            .mockRejectedValueOnce(new Error("task database offline"))
+            .mockResolvedValueOnce([]),
+        },
+        taskProfileRecoveryEvent: {
+          findMany: vi.fn().mockResolvedValue([{ id: recoveryId }]),
+          findUniqueOrThrow: vi.fn().mockResolvedValue({
+            attempts: 0,
+            cursorTaskId: null,
+            id: recoveryId,
+            profileId: "profile-1",
+            resumedAt: now,
+          }),
+          updateMany: recoveryUpdateMany,
+        },
+      };
+      const service = new TaskProfileResolverService(
+        prisma as never,
+        {} as never,
+      );
+
+      await expect(service.reconcile()).resolves.toBe(0);
+
+      expect(recoveryUpdateMany).toHaveBeenLastCalledWith({
+        data: {
+          attempts: { increment: 1 },
+          lastError: "task database offline",
+          leaseExpiresAt: null,
+          leaseToken: null,
+          nextAttemptAt: new Date(now.getTime() + 5_000),
+          status: "FAILED",
+        },
+        where: {
+          id: recoveryId,
+          leaseToken: expect.any(String),
+          status: "PROCESSING",
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("binds a distinct ready Profile to every Deployment hostname", async () => {

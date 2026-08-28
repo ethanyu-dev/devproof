@@ -3,6 +3,56 @@ import { describe, expect, it, vi } from "vitest";
 import { UnifiedRunCleanupWorker } from "./unified-run-cleanup.worker.js";
 
 describe("UnifiedRunCleanupWorker deadline races", () => {
+  it("claims the Run before the intervention to match resume lock ordering", async () => {
+    const executionRunUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const interventionUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const tx = {
+      agentRuntimeTask: { updateMany: vi.fn() },
+      executionRun: { updateMany: executionRunUpdateMany },
+      humanIntervention: { updateMany: interventionUpdateMany },
+      runAttempt: { updateMany: vi.fn() },
+      runEvent: { create: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn((callback) => callback(tx)),
+      browserExecution: { findMany: vi.fn().mockResolvedValue([]) },
+      executionRun: { findMany: vi.fn().mockResolvedValue([]) },
+      humanIntervention: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            attemptId: "attempt-1",
+            expiresAt: new Date(Date.now() - 1_000),
+            id: "intervention-1",
+            run: {
+              executionPolicy: {
+                hitl: {
+                  enabled: true,
+                  notificationChannels: [],
+                  onTimeout: "INCONCLUSIVE",
+                  timeoutSeconds: 3_600,
+                },
+              },
+              startedAt: new Date(),
+            },
+            runId: "run-1",
+            taskId: "task-1",
+            teamId: "team-1",
+          },
+        ]),
+      },
+    };
+    const worker = new UnifiedRunCleanupWorker(
+      prisma as never,
+      { releaseForExecutionRun: vi.fn() } as never,
+    );
+
+    await worker.tick();
+
+    expect(executionRunUpdateMany.mock.invocationCallOrder[0]).toBeLessThan(
+      interventionUpdateMany.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it("rechecks the deadline when claiming a run selected for expiry", async () => {
     const executionRunUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
     const tx = {
