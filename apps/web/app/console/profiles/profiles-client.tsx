@@ -19,6 +19,7 @@ import {
   LoaderCircle,
   Maximize2,
   Minimize2,
+  Monitor,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -52,7 +53,13 @@ interface Profile {
     id: string;
     status: string;
   } | null;
-  assignedRuntime: { id: string; name: string; status: string } | null;
+  assignedRuntime: {
+    deviceInfo: string;
+    id: string;
+    lastSeenAt: string | null;
+    name: string;
+    status: string;
+  } | null;
   authRole: string;
   configurationSource: "MANUAL" | "TASK";
   createdAt: string;
@@ -561,6 +568,29 @@ function ProfileBrowser({
         </small>
       </div>
 
+      {profile.assignedRuntime ? (
+        <div
+          aria-label={`已分配浏览器执行节点 ${profile.assignedRuntime.name}`}
+          className="dp-browser-handoff-runtime"
+        >
+          <Monitor />
+          <span>
+            <small>已分配浏览器执行节点</small>
+            <b>{profile.assignedRuntime.name}</b>
+            <small>
+              {profile.assignedRuntime.deviceInfo ||
+                `Runtime ${profile.assignedRuntime.id.slice(0, 8)}`}
+              {profile.assignedRuntime.lastSeenAt
+                ? ` · 最近心跳 ${formatDate(profile.assignedRuntime.lastSeenAt)}`
+                : ""}
+            </small>
+          </span>
+          <Badge tone={runtimeTone(profile.assignedRuntime.status)}>
+            {displayLabel(profile.assignedRuntime.status)}
+          </Badge>
+        </div>
+      ) : null}
+
       {operationError || error ? (
         <div className="dp-browser-handoff-error">
           <CircleAlert /> {operationError ?? error}
@@ -835,6 +865,17 @@ function profileTone(
       ? "warning"
       : ["LOST", "DISABLED"].includes(status)
         ? "danger"
+        : "neutral";
+}
+function runtimeTone(
+  status: string,
+): "success" | "warning" | "danger" | "neutral" {
+  return status === "ONLINE"
+    ? "success"
+    : status === "REVOKED"
+      ? "danger"
+      : status === "OFFLINE"
+        ? "warning"
         : "neutral";
 }
 function formatDate(value: string | null) {
