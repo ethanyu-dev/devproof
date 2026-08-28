@@ -46,6 +46,25 @@ async function fixtureServer() {
       <button onclick="fetch('/api').then(r => document.querySelector('#fault').textContent=String(r.status))">Fetch API</button>
       <button onclick="fetch('/api-json').then(r => r.json()).then(() => document.querySelector('#json-status').textContent='JSON loaded')">Fetch JSON</button>
       <div id="count">0</div><div id="fault"></div><div id="json-status"></div>
+      <main>
+        <a href="/solution/ai"><h3>人工智能解决方案</h3><span>了解详情</span></a>
+        <div role="tabpanel">AI panel</div>
+        <div role="tabpanel" hidden>Edge panel</div>
+        <div class="late-visible" hidden>Hidden 1</div>
+        <div class="late-visible" hidden>Hidden 2</div>
+        <div class="late-visible" hidden>Hidden 3</div>
+        <div class="late-visible" hidden>Hidden 4</div>
+        <div class="late-visible" hidden>Hidden 5</div>
+        <div class="late-visible">Only late visible candidate</div>
+        <button class="late-ambiguous" hidden>Hidden A</button>
+        <button class="late-ambiguous" hidden>Hidden B</button>
+        <button class="late-ambiguous" hidden>Hidden C</button>
+        <button class="late-ambiguous" hidden>Hidden D</button>
+        <button class="late-ambiguous" hidden>Hidden E</button>
+        <button class="late-ambiguous">Visible F</button>
+        <button class="late-ambiguous">Visible G</button>
+      </main>
+      <footer><a href="/solution/ai">人工智能解决方案</a></footer>
       <div id="shadow-host"></div>
       <iframe src="/frame"></iframe>
       <script>
@@ -149,6 +168,70 @@ describe("BrowserSessionManager E2E", () => {
       await execute("page.fill", {
         target: { ref: nameRef },
         text: "DevProof",
+      });
+
+      const panelSnapshot = (await execute("page.snapshot", {
+        target: { selector: '[role="tabpanel"]' },
+      })) as { result?: { content?: string } };
+      expect(panelSnapshot.result?.content).toContain("AI panel");
+      expect(panelSnapshot.result?.content).not.toContain("Edge panel");
+
+      const lateVisibleSnapshot = (await execute("page.snapshot", {
+        target: { selector: ".late-visible" },
+      })) as { result?: { content?: string } };
+      expect(lateVisibleSnapshot.result?.content).toContain(
+        "Only late visible candidate",
+      );
+
+      let lateAmbiguousError: unknown;
+      try {
+        await execute("page.click", {
+          target: { selector: ".late-ambiguous" },
+        });
+      } catch (error) {
+        lateAmbiguousError = error;
+      }
+      expect(lateAmbiguousError).toMatchObject({
+        code: "LOCATOR_AMBIGUOUS",
+        details: {
+          count: 7,
+          returnedCandidates: 5,
+          truncated: true,
+          visibleCount: 2,
+        },
+      });
+
+      let locatorError: unknown;
+      try {
+        await execute("page.click", {
+          target: { selector: 'a[href="/solution/ai"]' },
+        });
+      } catch (error) {
+        locatorError = error;
+      }
+      expect(locatorError).toMatchObject({
+        code: "LOCATOR_AMBIGUOUS",
+        details: {
+          candidates: [
+            expect.objectContaining({
+              href: `${origin}/solution/ai`,
+              index: 0,
+              role: "link",
+              visible: true,
+            }),
+            expect.objectContaining({
+              href: `${origin}/solution/ai`,
+              index: 1,
+              landmark: "footer",
+              role: "link",
+              visible: true,
+            }),
+          ],
+          count: 2,
+          visibleCount: 2,
+        },
+        recoveryAction: "RESNAPSHOT_AND_RETARGET",
+        retryable: false,
       });
 
       const shadowSnapshot = (await execute("page.snapshot", {

@@ -544,6 +544,8 @@ read_analysis_bundle 只用于 Manifest 与定点证据确实不足的情况；�
 每次 read_analysis_manifest、read_analysis_bundle 或 read_analysis_evidence 都必须在 analysisSummary 中维护不超过 16000 字符的滚动分析状态：保留阶段时间线、异常候选、关键 ID、evidenceRef 和已排除原因。系统会丢弃更早的原始分块，只保留该摘要与最新分块。
 日志包只包含制品元数据；遇到与判断相关的 artifact:// 文本证据时，使用 read_analysis_evidence 读取正文。图片和视频只能依据元数据，不能臆测其内容。
 区分产品缺陷、Spec 缺口、测试不稳定、Agent 推理、工具协议、运行环境和可观测性问题。基础设施失败不能被描述为产品失败。
+分析浏览器命令失败时，必须区分“相同命令不应原样重试”和“Agent 是否仍可重新观察并更换定位器继续执行”；不能仅因 error.retryable=false 就声称整个 Attempt 无法恢复。LOCATOR_AMBIGUOUS 属于自动化定位不确定性，除非有独立产品证据，否则不能作为产品 FAILED 的依据。
+每个定位类 finding 应尽量还原“操作意图 → 原 locator → 候选差异 → Agent 恢复动作 → 最终影响”的完整链路。若用多个失败 case 证明系统性问题，必须分别引用支持这些 case 的 evidenceRef，不能只引用其中一条命令。
 每个 finding 必须引用日志包中真实存在的 evidenceRef，不能编造引用，并填写 phase、failureClass，以及能够确认时对应的 runId、runtimeId、attemptNumber；无法确认的 ID 使用 null。置信度不足时不要生成 finding。
 所有用户可见内容使用简体中文；标识符、URL、代码符号和枚举保持原样。不要泄露凭据、Cookie、Token、浏览器 Profile 数据或隐藏思维链。`;
 }

@@ -34,9 +34,22 @@ export interface ModelResponse {
 
 interface ToolExecutionResult {
   browserCommandCount: number;
+  locatorRecoveryState?: LocatorRecoveryState | null;
   outcome?: RuntimeOutcome;
   output: unknown;
 }
+
+interface LocatorRecoveryState {
+  criterionId?: string;
+  exhausted: boolean;
+  failedCommandType: string;
+  failedFrameContext: string | null;
+  failedTargetSelectors: string[];
+  recoveryToken: string;
+  retargetAttempts: number;
+}
+
+type RuntimeActionCommand = z.infer<typeof runtimeActionCommandInputSchema>;
 
 export interface ResponsesClient {
   responses: {
@@ -131,6 +144,7 @@ export class BrowserVerificationExecutor {
     );
     let browserCommandCount = 0;
     let preserveBrowserForHuman = false;
+    let locatorRecoveryState: LocatorRecoveryState | null = null;
     let segmentErrorMessage: string | undefined;
     let segmentStatus: "FAILED" | "SUCCEEDED" | "WAITING_HUMAN" = "FAILED";
     let step = 0;
@@ -277,6 +291,7 @@ export class BrowserVerificationExecutor {
               criterionResults,
               evidence,
               lease,
+              locatorRecoveryState,
               signal,
               task,
             });
@@ -312,6 +327,9 @@ export class BrowserVerificationExecutor {
             },
           });
           browserCommandCount = result.browserCommandCount;
+          if (result.locatorRecoveryState !== undefined) {
+            locatorRecoveryState = result.locatorRecoveryState;
+          }
           if (result.outcome) {
             preserveBrowserForHuman = result.outcome.kind === "WAITING_HUMAN";
             segmentStatus = preserveBrowserForHuman
@@ -391,12 +409,40 @@ export class BrowserVerificationExecutor {
     );
   }
 
+  private async captureLocatorRecoverySnapshot(input: {
+    command: RuntimeActionCommand;
+    evidence: Map<string, RuntimeEvidenceRef>;
+    lease: ActiveLease;
+    signal: AbortSignal;
+  }): Promise<{ attempted: boolean; snapshot: unknown }> {
+    const recoveryCommand = locatorRecoveryCommand(input.command);
+    if (!recoveryCommand) return { attempted: false, snapshot: null };
+    try {
+      const snapshot = await this.controlPlane.browserCommand(
+        input.lease,
+        recoveryCommand,
+        input.signal,
+      );
+      collectEvidence(snapshot, input.evidence);
+      return { attempted: true, snapshot };
+    } catch (error) {
+      return {
+        attempted: true,
+        snapshot: {
+          accepted: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
   private async executeTool(input: {
     browserCommandCount: number;
     call: ModelFunctionCall;
     criterionResults: Map<string, z.infer<typeof recordCriterionInputSchema>>;
     evidence: Map<string, RuntimeEvidenceRef>;
     lease: ActiveLease;
+    locatorRecoveryState: LocatorRecoveryState | null;
     signal: AbortSignal;
     task: RuntimeTaskLease;
   }): Promise<ToolExecutionResult> {
@@ -411,9 +457,34 @@ export class BrowserVerificationExecutor {
     }
 
     if (input.call.name === "browser_command") {
-      const parsed = runtimeActionCommandInputSchema.safeParse(raw);
+      const browserArguments = browserCommandArguments(raw);
+      if (!browserArguments.success) {
+        return correction(input.browserCommandCount, browserArguments.error);
+      }
+      const parsed = runtimeActionCommandInputSchema.safeParse(
+        browserArguments.command,
+      );
       if (!parsed.success) {
         return correction(input.browserCommandCount, parsed.error.message);
+      }
+      const activeRecovery = input.locatorRecoveryState;
+      const retargetAttempt =
+        activeRecovery !== null &&
+        isLocatorRetargetAttempt(activeRecovery, parsed.data);
+      if (retargetAttempt && activeRecovery.exhausted) {
+        return {
+          browserCommandCount: input.browserCommandCount,
+          locatorRecoveryState: activeRecovery,
+          output: {
+            accepted: false,
+            error: `${activeRecovery.failedCommandType} 已用完两次重新定位机会。请停止继续操作，并将受影响的验收标准记录为 INCONCLUSIVE。`,
+            locatorRecovery: locatorRecoveryDetails({
+              error: null,
+              recoveryState: activeRecovery,
+              snapshot: null,
+            }),
+          },
+        };
       }
       try {
         const result = await this.controlPlane.browserCommand(
@@ -422,11 +493,128 @@ export class BrowserVerificationExecutor {
           input.signal,
         );
         collectEvidence(result, input.evidence);
+        const commandError = browserCommandError(result);
+
+        if (activeRecovery && retargetAttempt) {
+          const retargetAttempts = activeRecovery.retargetAttempts + 1;
+          const acknowledged = locatorRetargetAcknowledged(
+            activeRecovery,
+            parsed.data,
+            browserArguments.locatorRecoveryToken,
+          );
+          if (acknowledged && browserCommandSucceeded(result)) {
+            return {
+              browserCommandCount: input.browserCommandCount + 1,
+              locatorRecoveryState: null,
+              output: result,
+            };
+          }
+          const recoveryState: LocatorRecoveryState = {
+            ...activeRecovery,
+            exhausted: retargetAttempts >= 2,
+            retargetAttempts,
+          };
+          const recoverySnapshot = recoveryState.exhausted
+            ? { attempted: false, snapshot: null }
+            : await this.captureLocatorRecoverySnapshot({
+                command: parsed.data,
+                evidence: input.evidence,
+                lease: input.lease,
+                signal: input.signal,
+              });
+          return {
+            browserCommandCount:
+              input.browserCommandCount +
+              1 +
+              (recoverySnapshot.attempted ? 1 : 0),
+            locatorRecoveryState: recoveryState,
+            output: locatorRecoveryOutput({
+              acknowledged,
+              error: commandError,
+              recoveryState,
+              result,
+              snapshot: recoverySnapshot.snapshot,
+            }),
+          };
+        }
+
+        if (commandError?.code === "LOCATOR_AMBIGUOUS") {
+          const recoveryState: LocatorRecoveryState = {
+            exhausted: false,
+            failedCommandType: parsed.data.commandType,
+            failedFrameContext: commandFrameContext(parsed.data),
+            failedTargetSelectors: commandTargetSelectors(parsed.data),
+            recoveryToken: input.call.call_id,
+            retargetAttempts: 0,
+          };
+          const recoverySnapshot = await this.captureLocatorRecoverySnapshot({
+            command: parsed.data,
+            evidence: input.evidence,
+            lease: input.lease,
+            signal: input.signal,
+          });
+          return {
+            browserCommandCount:
+              input.browserCommandCount +
+              1 +
+              (recoverySnapshot.attempted ? 1 : 0),
+            locatorRecoveryState: recoveryState,
+            output: locatorRecoveryOutput({
+              acknowledged: false,
+              error: commandError,
+              recoveryState,
+              result,
+              snapshot: recoverySnapshot.snapshot,
+            }),
+          };
+        }
+
         return {
           browserCommandCount: input.browserCommandCount + 1,
           output: result,
         };
       } catch (error) {
+        if (activeRecovery && retargetAttempt) {
+          const retargetAttempts = activeRecovery.retargetAttempts + 1;
+          const recoveryState: LocatorRecoveryState = {
+            ...activeRecovery,
+            exhausted: retargetAttempts >= 2,
+            retargetAttempts,
+          };
+          const recoverySnapshot = recoveryState.exhausted
+            ? { attempted: false, snapshot: null }
+            : await this.captureLocatorRecoverySnapshot({
+                command: parsed.data,
+                evidence: input.evidence,
+                lease: input.lease,
+                signal: input.signal,
+              });
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          const commandError = thrownBrowserCommandError(error, errorMessage);
+          return {
+            browserCommandCount:
+              input.browserCommandCount +
+              1 +
+              (recoverySnapshot.attempted ? 1 : 0),
+            locatorRecoveryState: recoveryState,
+            output: locatorRecoveryOutput({
+              acknowledged: locatorRetargetAcknowledged(
+                activeRecovery,
+                parsed.data,
+                browserArguments.locatorRecoveryToken,
+              ),
+              error: commandError,
+              recoveryState,
+              result: {
+                accepted: false,
+                error: commandError,
+                status: "FAILED",
+              },
+              snapshot: recoverySnapshot.snapshot,
+            }),
+          };
+        }
         return correction(
           input.browserCommandCount + 1,
           error instanceof Error ? error.message : String(error),
@@ -477,9 +665,37 @@ export class BrowserVerificationExecutor {
           );
         }
       }
+      if (
+        parsed.data.status === "FAILED" &&
+        input.locatorRecoveryState &&
+        (!input.locatorRecoveryState.criterionId ||
+          input.locatorRecoveryState.criterionId === parsed.data.criterionId)
+      ) {
+        const recoveryState = {
+          ...input.locatorRecoveryState,
+          criterionId: parsed.data.criterionId,
+        };
+        return {
+          browserCommandCount: input.browserCommandCount,
+          locatorRecoveryState: recoveryState,
+          output: {
+            accepted: false,
+            error: recoveryState.exhausted
+              ? `${recoveryState.failedCommandType} 的定位问题在两次重新定位后仍未解决。这属于自动化不确定性，不能记录为产品 FAILED；请将验收标准 ${parsed.data.criterionId} 记录为 INCONCLUSIVE。`
+              : `${recoveryState.failedCommandType} 的 LOCATOR_AMBIGUOUS 尚未通过带恢复 token 的唯一 ref 或精确 selector 成功恢复，不能据此记录产品 FAILED；请继续重新定位，或将验收标准 ${parsed.data.criterionId} 记录为 INCONCLUSIVE。`,
+          },
+        };
+      }
       input.criterionResults.set(parsed.data.criterionId, parsed.data);
+      const settlesLocatorRecovery =
+        input.locatorRecoveryState !== null &&
+        ((input.locatorRecoveryState.criterionId === parsed.data.criterionId &&
+          parsed.data.status !== "FAILED") ||
+          (!input.locatorRecoveryState.criterionId &&
+            parsed.data.status === "INCONCLUSIVE"));
       return {
         browserCommandCount: input.browserCommandCount,
+        ...(settlesLocatorRecovery ? { locatorRecoveryState: null } : {}),
         output: { accepted: true },
       };
     }
@@ -601,6 +817,187 @@ function correction(browserCommandCount: number, message: string) {
     browserCommandCount,
     output: { accepted: false, error: message },
   };
+}
+
+function browserCommandError(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const error = (value as Record<string, unknown>).error;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return null;
+  return error as Record<string, unknown>;
+}
+
+function thrownBrowserCommandError(
+  error: unknown,
+  fallbackMessage: string,
+): Record<string, unknown> {
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    const record = error as Record<string, unknown>;
+    return {
+      ...record,
+      message:
+        typeof record.message === "string" ? record.message : fallbackMessage,
+    };
+  }
+  return { message: fallbackMessage };
+}
+
+function browserCommandArguments(raw: unknown):
+  | {
+      command: Record<string, unknown>;
+      locatorRecoveryToken?: string;
+      success: true;
+    }
+  | { error: string; success: false } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      error: "browser_command 参数必须是 JSON 对象。",
+      success: false,
+    };
+  }
+  const record = raw as Record<string, unknown>;
+  if (
+    record.locatorRecoveryToken !== undefined &&
+    (typeof record.locatorRecoveryToken !== "string" ||
+      record.locatorRecoveryToken.length < 1 ||
+      record.locatorRecoveryToken.length > 240)
+  ) {
+    return {
+      error: "locatorRecoveryToken 必须是 1 至 240 个字符的字符串。",
+      success: false,
+    };
+  }
+  const { locatorRecoveryToken, ...command } = record;
+  return {
+    command,
+    ...(typeof locatorRecoveryToken === "string"
+      ? { locatorRecoveryToken }
+      : {}),
+    success: true,
+  };
+}
+
+function locatorRecoveryCommand(
+  command: RuntimeActionCommand,
+): RuntimeActionCommand | null {
+  const payload = command.payload as Record<string, unknown>;
+  const candidate =
+    ["frame.click", "frame.fill"].includes(command.commandType) && payload.frame
+      ? { commandType: "frame.snapshot", payload: { frame: payload.frame } }
+      : { commandType: "page.snapshot", payload: {} };
+  const parsed = runtimeActionCommandInputSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function locatorRecoveryOutput(input: {
+  acknowledged: boolean;
+  error: Record<string, unknown> | null;
+  recoveryState: LocatorRecoveryState;
+  result: unknown;
+  snapshot: unknown;
+}) {
+  const original =
+    input.result &&
+    typeof input.result === "object" &&
+    !Array.isArray(input.result)
+      ? (input.result as Record<string, unknown>)
+      : { result: input.result };
+  return {
+    ...original,
+    locatorRecovery: locatorRecoveryDetails({
+      acknowledged: input.acknowledged,
+      error: input.error,
+      recoveryState: input.recoveryState,
+      snapshot: input.snapshot,
+    }),
+  };
+}
+
+function locatorRecoveryDetails(input: {
+  acknowledged?: boolean;
+  error: Record<string, unknown> | null;
+  recoveryState: LocatorRecoveryState;
+  snapshot: unknown;
+}) {
+  return {
+    action: "RESNAPSHOT_AND_RETARGET",
+    candidates:
+      input.error?.details &&
+      typeof input.error.details === "object" &&
+      !Array.isArray(input.error.details)
+        ? ((input.error.details as Record<string, unknown>).candidates ?? [])
+        : [],
+    exhausted: input.recoveryState.exhausted,
+    failedCommandType: input.recoveryState.failedCommandType,
+    guidance: input.recoveryState.exhausted
+      ? "两次重新定位仍未解决目标。不要继续猜测或使用 first/nth；将受影响的验收标准记录为 INCONCLUSIVE，不能记录为产品 FAILED。"
+      : input.acknowledged === false && input.recoveryState.retargetAttempts > 0
+        ? "本次操作没有正确确认原定位恢复：必须带回 locatorRecoveryToken，并使用 recovery snapshot 中的完整 ref，或使用包含原 selector 且增加页面区域/文本结构约束的 selector。已自动重新采集页面结构。"
+        : "已自动重新采集页面结构。请带回 locatorRecoveryToken，并从候选或 recovery snapshot 中选择与操作意图一致的完整 ref；若必须使用 selector，应在原 selector 上增加页面区域或文本结构约束。不要使用 first/nth 猜测。定位成功前不能据此记录产品 FAILED。",
+    maxRetargetAttempts: 2,
+    recoveryToken: input.recoveryState.recoveryToken,
+    retargetAttempts: input.recoveryState.retargetAttempts,
+    snapshot: input.snapshot,
+  };
+}
+
+function isLocatorRetargetAttempt(
+  recoveryState: LocatorRecoveryState,
+  command: RuntimeActionCommand,
+): boolean {
+  if (command.commandType !== recoveryState.failedCommandType) return false;
+  return "target" in (command.payload as Record<string, unknown>);
+}
+
+function locatorRetargetAcknowledged(
+  recoveryState: LocatorRecoveryState,
+  command: RuntimeActionCommand,
+  recoveryToken: string | undefined,
+): boolean {
+  if (recoveryToken !== recoveryState.recoveryToken) return false;
+  const payload = command.payload as Record<string, unknown>;
+  const target = payload.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    return false;
+  }
+  const targetRecord = target as Record<string, unknown>;
+  if (typeof targetRecord.ref === "string") return true;
+  const targetSelector = targetRecord.selector;
+  if (typeof targetSelector !== "string") return false;
+  if (commandFrameContext(command) !== recoveryState.failedFrameContext) {
+    return false;
+  }
+  return recoveryState.failedTargetSelectors.some(
+    (selector) =>
+      targetSelector !== selector && targetSelector.includes(selector),
+  );
+}
+
+function commandTargetSelectors(command: RuntimeActionCommand): string[] {
+  const payload = command.payload as Record<string, unknown>;
+  const target = payload.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) return [];
+  const selector = (target as Record<string, unknown>).selector;
+  return typeof selector === "string" ? [selector] : [];
+}
+
+function commandFrameContext(command: RuntimeActionCommand): string | null {
+  const payload = command.payload as Record<string, unknown>;
+  const frame = payload.frame;
+  if (frame && typeof frame === "object" && !Array.isArray(frame)) {
+    return JSON.stringify(frame);
+  }
+  const target = payload.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    return null;
+  }
+  const frameSelector = (target as Record<string, unknown>).frameSelector;
+  return typeof frameSelector === "string" ? frameSelector : null;
+}
+
+function browserCommandSucceeded(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.ok === true || record.status === "SUCCEEDED";
 }
 
 const CHINESE_TEXT = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
@@ -930,8 +1327,8 @@ function toolDefinitions(hitlEnabled = true) {
       type: "function",
       name: "browser_command",
       description:
-        "执行一次浏览器操作。先使用 page.navigate 和 page.snapshot，并复用返回的 ref；判断验收标准前要采集持久化证据。SPA 跳转优先等待特定 selector 或文本，不要优先使用 networkidle。NETWORK 证据需要响应数据时，调用 page.network，并设置 includeResponseBodies 和尽可能精确的 urlIncludes。",
-      parameters: openAiFunctionSchema(runtimeActionCommandInputSchema),
+        "执行一次浏览器操作。先使用 page.navigate 和 page.snapshot，并复用返回的 ref；判断验收标准前要采集持久化证据。若返回 LOCATOR_AMBIGUOUS，必须在后续重新定位操作中原样带回 locatorRecoveryToken，并使用自动附带的 recovery snapshot 选择唯一目标；不能原样重试 selector 或用 first/nth 猜测，也不能据此判定产品失败。SPA 跳转优先等待特定 selector 或文本，不要优先使用 networkidle。NETWORK 证据需要响应数据时，调用 page.network，并设置 includeResponseBodies 和尽可能精确的 urlIncludes。",
+      parameters: browserCommandFunctionSchema(),
       strict: false,
     },
     {
@@ -979,6 +1376,43 @@ function toolDefinitions(hitlEnabled = true) {
  */
 function openAiFunctionSchema(schema: z.ZodType) {
   return stripValidationFormats(z.toJSONSchema(schema));
+}
+
+function browserCommandFunctionSchema() {
+  return addLocatorRecoveryToken(
+    openAiFunctionSchema(runtimeActionCommandInputSchema),
+  );
+}
+
+function addLocatorRecoveryToken(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(addLocatorRecoveryToken);
+  if (!value || typeof value !== "object") return value;
+
+  const mapped = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      addLocatorRecoveryToken(child),
+    ]),
+  );
+  if (
+    mapped.properties &&
+    typeof mapped.properties === "object" &&
+    !Array.isArray(mapped.properties) &&
+    "commandType" in mapped.properties &&
+    "payload" in mapped.properties
+  ) {
+    mapped.properties = {
+      ...mapped.properties,
+      locatorRecoveryToken: {
+        description:
+          "仅在恢复 LOCATOR_AMBIGUOUS 时填写；必须原样复制最近一次 locatorRecovery.recoveryToken。",
+        maxLength: 240,
+        minLength: 1,
+        type: "string",
+      },
+    };
+  }
+  return mapped;
 }
 
 function stripValidationFormats(value: unknown): unknown {
@@ -1050,6 +1484,7 @@ function systemPrompt() {
 任务提供的业务引用是不可变的已观察证据；支持某条验收标准时，必须引用其准确的 externalId。
 客户端导航后要等待明确的 selector 或文本。除非确定应用最终会完全空闲，否则避免使用 networkidle。
 页面包含 wujie-app 微前端时，snapshot 和文本目标应限定在 wujie-app 内，不要使用通用 body 或 #root selector。
+browser_command 返回 LOCATOR_AMBIGUOUS 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
 只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并记录所有必需验收标准后，才能调用 finish_verification。
 所有用户可见的生成内容必须使用简体中文，包括验收标准摘要、HITL 提示、等待摘要和最终验证摘要。标识符、URL、代码符号、API 路径、工具名、枚举值和 evidence reference 保持原样，不要翻译。
