@@ -25,7 +25,7 @@ export function requireAgentRuntimeIdentity(current: ToolAuthContext) {
 
 export function requireAgentRuntimePool(
   current: ToolAuthContext,
-  pool: "SPEC_ANALYSIS" | "BROWSER_EXECUTION",
+  pool: "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS",
 ) {
   requireAgentRuntimeIdentity(current);
   const credentialPool = current.credential.pool ?? "MIXED";

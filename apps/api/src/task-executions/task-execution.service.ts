@@ -36,6 +36,11 @@ import { GithubAccessService } from "../console/github-access.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { redactText } from "../observability/observability.service.js";
+import { TaskLogBundleService } from "../post-run-analysis/task-log-bundle.service.js";
+import {
+  enqueuePostRunAnalysis,
+  supersedePostRunAnalyses,
+} from "../post-run-analysis/post-run-analysis.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
 import { IssueContextResolverService } from "../specifications/issue-context-resolver.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
@@ -150,14 +155,6 @@ type TaskDetailRow = Prisma.TaskExecutionGetPayload<{
   include: typeof taskDetailInclude;
 }>;
 
-const runtimeLogInclude = {
-  attempt: { select: { number: true } },
-} satisfies Prisma.RunEventInclude;
-
-type RuntimeLogRow = Prisma.RunEventGetPayload<{
-  include: typeof runtimeLogInclude;
-}>;
-
 export interface TaskRequestActor {
   kind: "USER" | "CREDENTIAL" | "INTEGRATION_EVENT" | "SYSTEM";
   notificationContext?: TaskNotificationContext;
@@ -226,6 +223,7 @@ export class TaskExecutionService {
     private readonly profileResolver: TaskProfileResolverService,
     private readonly reservations: ProfileReservationService,
     private readonly githubAccess: GithubAccessService,
+    private readonly logBundles?: TaskLogBundleService,
   ) {}
 
   async create(
@@ -484,118 +482,12 @@ export class TaskExecutionService {
   }
 
   async exportLogs(current: ToolAuthContext, id: string) {
-    const task = await this.prisma.taskExecution.findFirst({
-      include: taskDetailInclude,
-      where: { id, teamId: current.team.id },
-    });
-    if (!task)
-      throw new NotFoundException(`Task execution ${id} was not found.`);
-
-    const [taskEvents, runtimeEvents] = await Promise.all([
-      this.prisma.taskExecutionEvent.findMany({
-        orderBy: { sequence: "asc" },
-        where: { taskExecutionId: id, teamId: current.team.id },
-      }),
-      this.prisma.runEvent.findMany({
-        include: runtimeLogInclude,
-        orderBy: [{ runId: "asc" }, { sequence: "asc" }],
-        where: {
-          run: { taskExecutionId: id },
-          teamId: current.team.id,
-        },
-      }),
-    ]);
-    const caseExecutionByRunId = new Map(
-      task.caseExecutions.flatMap((execution) =>
-        execution.runId ? [[execution.runId, execution] as const] : [],
-      ),
-    );
-    const runtimeLogsByRunId = new Map<string, RuntimeLogRow[]>();
-    for (const log of runtimeEvents) {
-      const currentLogs = runtimeLogsByRunId.get(log.runId) ?? [];
-      currentLogs.push(log);
-      runtimeLogsByRunId.set(log.runId, currentLogs);
+    if (!this.logBundles) {
+      throw new ServiceUnavailableException(
+        "Task log bundle service is unavailable.",
+      );
     }
-    const analysis = task.stages.find(
-      (stage) => stage.type === "SPEC_ANALYSIS",
-    );
-    const taskEventLogs = taskEvents.map((eventRow) => ({
-      actor: eventRow.actor,
-      createdAt: eventRow.createdAt.toISOString(),
-      id: eventRow.id,
-      kind: eventRow.kind,
-      occurredAt: eventRow.occurredAt.toISOString(),
-      payload: eventRow.payload,
-      sequence: eventRow.sequence.toString(),
-    }));
-
-    return {
-      exportedAt: new Date().toISOString(),
-      schemaVersion: "devproof.task-logs.v1",
-      specAnalysis: {
-        events: taskEventLogs.filter((eventLog) =>
-          specAnalysisEvent(eventLog.kind, eventLog.payload, analysis?.status),
-        ),
-        sources: task.analysisSources.map((source) => ({
-          byteSize: source.byteSize,
-          content: source.content,
-          contentHash: source.contentHash,
-          createdAt: source.createdAt.toISOString(),
-          externalId: source.externalId,
-          id: source.id,
-          kind: source.kind,
-          label: source.label,
-          locator: source.locator,
-          revision: source.revision,
-          stageAttemptId: source.stageAttemptId,
-          uri: source.uri,
-        })),
-        specificationSnapshots: [...task.specificationSnapshots]
-          .reverse()
-          .map(toExportSpecificationSnapshot),
-        stage: analysis ? toExportStage(analysis) : null,
-      },
-      specRuns: task.executionRuns.map((run) =>
-        toExportRun(
-          run,
-          caseExecutionByRunId.get(run.id) ?? null,
-          runtimeLogsByRunId.get(run.id) ?? [],
-        ),
-      ),
-      task: {
-        cancelRequestedAt: iso(task.cancelRequestedAt),
-        createdAt: task.createdAt.toISOString(),
-        currentStage: task.currentStage,
-        deadlineAt: task.deadlineAt.toISOString(),
-        deployments: task.deployments.map((deployment) => ({
-          enabled: deployment.enabled,
-          environment: deployment.environmentSnapshot,
-          id: deployment.id,
-          key: deployment.key,
-          name: deployment.name,
-          targetUrl: deployment.targetUrl,
-        })),
-        environment: task.environmentSnapshot,
-        executionDisposition: task.executionDisposition,
-        finishedAt: iso(task.finishedAt),
-        id: task.id,
-        input: task.inputSnapshot,
-        kind: task.kind,
-        lifecycle: task.lifecycle,
-        migrationSource: task.migrationSource,
-        projectedAt: iso(task.projectedAt),
-        queuedAt: task.queuedAt.toISOString(),
-        source: { kind: task.sourceKind, ref: task.sourceRef },
-        sourceSnapshotComplete: task.sourceSnapshotComplete,
-        startedAt: iso(task.startedAt),
-        title: task.title,
-        traceId: task.traceId,
-        updatedAt: task.updatedAt.toISOString(),
-        verdict: task.verdict,
-        waitingReason: task.waitingReason,
-      },
-      taskEvents: taskEventLogs,
-    };
+    return (await this.logBundles.build(current.team.id, id)).bundle;
   }
 
   async setDeploymentTarget(
@@ -800,6 +692,10 @@ export class TaskExecutionService {
       }
       const nextNumber = stage.currentAttemptNumber + 1;
       await this.prisma.$transaction(async (tx) => {
+        await supersedePostRunAnalyses(tx, {
+          taskExecutionId: id,
+          teamId: current.team.id,
+        });
         await tx.taskStageAttempt.create({
           data: {
             inputSnapshot: task.inputSnapshot as Prisma.InputJsonValue,
@@ -822,6 +718,7 @@ export class TaskExecutionService {
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "QUEUED",
+            postRunAnalysisGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
             waitingReason: null,
@@ -858,6 +755,10 @@ export class TaskExecutionService {
       }
       const nextNumber = stage.currentAttemptNumber + 1;
       await this.prisma.$transaction(async (tx) => {
+        await supersedePostRunAnalyses(tx, {
+          taskExecutionId: id,
+          teamId: current.team.id,
+        });
         await tx.taskCaseExecution.updateMany({
           data: { dispatchStatus: "CANCELLED" },
           where: {
@@ -889,6 +790,7 @@ export class TaskExecutionService {
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "RUNNING",
+            postRunAnalysisGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
           },
@@ -1007,12 +909,17 @@ export class TaskExecutionService {
           },
           where: { id: executionStage.id },
         });
+        await supersedePostRunAnalyses(tx, {
+          taskExecutionId: task.id,
+          teamId: current.team.id,
+        });
         const reopened = await tx.taskExecution.updateMany({
           data: {
             currentStage: "SPEC_EXECUTION",
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "RUNNING",
+            postRunAnalysisGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
             waitingReason: null,
@@ -1123,6 +1030,9 @@ export class TaskExecutionService {
         data: event(current.team.id, id, "HUMAN", "task.cancel_requested", {
           requestedByCredentialId: current.credential.id,
         }),
+      });
+      await enqueuePostRunAnalysis(tx, {
+        taskExecutionId: task.id,
       });
     });
     for (const run of task.executionRuns) {
@@ -1399,6 +1309,9 @@ export class TaskExecutionService {
             lifecycle: projection.lifecycle,
             verdict: projection.verdict,
           }),
+        });
+        await enqueuePostRunAnalysis(tx, {
+          taskExecutionId: task.id,
         });
         await enqueueTaskCompletionNotifications(tx, {
           counts: completionCounts,
@@ -2220,6 +2133,9 @@ export class TaskExecutionService {
                 { stage: "SPEC_ANALYSIS" },
               ),
             });
+            await enqueuePostRunAnalysis(tx, {
+              taskExecutionId: attempt.stage.taskExecutionId,
+            });
           }
         }
         return;
@@ -2307,6 +2223,9 @@ export class TaskExecutionService {
               stage: "SPEC_ANALYSIS",
             },
           ),
+        });
+        await enqueuePostRunAnalysis(tx, {
+          taskExecutionId: attempt.stage.taskExecutionId,
         });
       }
     });
@@ -2831,186 +2750,6 @@ function taskBusinessReferences(
   return references;
 }
 
-function specAnalysisEvent(
-  kind: string,
-  payload: Prisma.JsonValue,
-  analysisStatus?: string,
-) {
-  if (
-    ["task.created", "task.rerun.created", "task.rerun.linked"].includes(kind)
-  ) {
-    return true;
-  }
-  if (
-    kind.startsWith("task.stage.") &&
-    record(payload).stage === "SPEC_ANALYSIS"
-  ) {
-    return true;
-  }
-  return (
-    analysisStatus !== "SUCCEEDED" &&
-    ["task.cancel_requested", "task.completed", "task.timed_out"].includes(kind)
-  );
-}
-
-function iso(value: Date | null) {
-  return value?.toISOString() ?? null;
-}
-
-function toExportStage(stage: TaskDetailRow["stages"][number]) {
-  return {
-    attempts: stage.attempts.map((attempt) => ({
-      createdAt: attempt.createdAt.toISOString(),
-      error: attempt.error,
-      finishedAt: iso(attempt.finishedAt),
-      id: attempt.id,
-      input: attempt.inputSnapshot,
-      number: attempt.number,
-      result: attempt.result,
-      startedAt: iso(attempt.startedAt),
-      status: attempt.status,
-      updatedAt: attempt.updatedAt.toISOString(),
-    })),
-    createdAt: stage.createdAt.toISOString(),
-    currentAttemptNumber: stage.currentAttemptNumber,
-    finishedAt: iso(stage.finishedAt),
-    id: stage.id,
-    lastError: stage.lastError,
-    maxAttempts: stage.maxAttempts,
-    startedAt: iso(stage.startedAt),
-    status: stage.status,
-    type: stage.type,
-    updatedAt: stage.updatedAt.toISOString(),
-    waitingReason: stage.waitingReason,
-  };
-}
-
-function toExportSpecificationSnapshot(
-  snapshot: TaskDetailRow["specificationSnapshots"][number],
-) {
-  return {
-    cases: snapshot.cases.map((testCase) => ({
-      createdAt: testCase.createdAt.toISOString(),
-      definition: testCase.definition,
-      definitionHash: testCase.definitionHash,
-      generatedAt: testCase.generatedAt.toISOString(),
-      id: testCase.id,
-      name: testCase.name,
-      position: testCase.position,
-    })),
-    completeness: snapshot.completeness,
-    context: snapshot.context,
-    createdAt: snapshot.createdAt.toISOString(),
-    diagnostics: snapshot.diagnostics,
-    generatedAt: snapshot.generatedAt.toISOString(),
-    generatorKind: snapshot.generatorKind,
-    generatorVersion: snapshot.generatorVersion,
-    id: snapshot.id,
-    primaryPullRequestUrl: snapshot.primaryPullRequestUrl,
-    sourceHash: snapshot.sourceHash,
-    stageAttemptId: snapshot.stageAttemptId,
-    summary: snapshot.summary,
-  };
-}
-
-function toExportRun(
-  run: TaskDetailRow["executionRuns"][number],
-  execution: TaskDetailRow["caseExecutions"][number] | null,
-  logs: RuntimeLogRow[],
-) {
-  return {
-    case: execution
-      ? {
-          definition: execution.testCase.definition,
-          definitionHash: execution.testCase.definitionHash,
-          id: execution.testCase.id,
-          name: execution.testCase.name,
-          position: execution.testCase.position,
-        }
-      : null,
-    execution: execution
-      ? {
-          createdAt: execution.createdAt.toISOString(),
-          dispatchAttempts: execution.dispatchAttempts,
-          dispatchLastError: execution.dispatchLastError,
-          dispatchRequestedAt: iso(execution.dispatchRequestedAt),
-          dispatchStatus: execution.dispatchStatus,
-          deployment: {
-            id: execution.deployment.id,
-            key: execution.deployment.key,
-            name: execution.deployment.name,
-            targetUrl: execution.deployment.targetUrl,
-          },
-          executionOrdinal: execution.executionOrdinal,
-          id: execution.id,
-          updatedAt: execution.updatedAt.toISOString(),
-        }
-      : null,
-    logs: logs.map((log) => ({
-      actor: log.actor,
-      attemptId: log.attemptId,
-      attemptNumber: log.attempt?.number ?? null,
-      createdAt: log.createdAt.toISOString(),
-      id: log.id,
-      kind: log.kind,
-      occurredAt: log.occurredAt.toISOString(),
-      payload: log.payload,
-      sequence: log.sequence.toString(),
-      taskId: log.taskId,
-    })),
-    run: {
-      cancelRequestedAt: iso(run.cancelRequestedAt),
-      createdAt: run.createdAt.toISOString(),
-      criteria: run.criteriaSnapshot,
-      currentAttemptNumber: run.currentAttemptNumber,
-      deadlineAt: run.deadlineAt.toISOString(),
-      environment: run.environmentSnapshot,
-      evidenceCount: run._count.evidences,
-      executionDisposition: run.executionDisposition,
-      executionPolicy: safeTaskRunExecutionPolicy(run),
-      finishedAt: iso(run.finishedAt),
-      goal: run.goal,
-      id: run.id,
-      interventionCount: run._count.interventions,
-      lifecycle: run.lifecycle,
-      maxAttempts: run.maxAttempts,
-      queuedAt: run.queuedAt.toISOString(),
-      source: { kind: run.sourceKind, ref: run.sourceId },
-      startedAt: iso(run.startedAt),
-      traceId: run.traceId,
-      updatedAt: run.updatedAt.toISOString(),
-      verdict: run.verdict,
-    },
-  };
-}
-
-function safeTaskRunExecutionPolicy(
-  run: TaskDetailRow["executionRuns"][number],
-) {
-  if (
-    !run.browserProfileId ||
-    !run.executionPolicy ||
-    typeof run.executionPolicy !== "object" ||
-    Array.isArray(run.executionPolicy)
-  ) {
-    return run.executionPolicy;
-  }
-  const policy = run.executionPolicy as Record<string, unknown>;
-  const browser =
-    policy.browser &&
-    typeof policy.browser === "object" &&
-    !Array.isArray(policy.browser)
-      ? (policy.browser as Record<string, unknown>)
-      : {};
-  return {
-    ...policy,
-    browser: {
-      ...browser,
-      profile: { id: run.browserProfileId, mode: "PERSISTENT" },
-    },
-  };
-}
-
 function toTaskDetail(row: TaskDetailRow) {
   const latestSnapshot = row.specificationSnapshots[0] ?? null;
   const cases = latestSnapshot?.cases ?? [];
@@ -3046,6 +2785,10 @@ function toTaskDetail(row: TaskDetailRow) {
   );
   return {
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+    capabilities: {
+      postRunAnalysis:
+        row.kind === "ISSUE_SPEC" && env().POST_RUN_ANALYSIS_ENABLED,
+    },
     cases: caseDetails,
     counts,
     createdAt: row.createdAt.toISOString(),

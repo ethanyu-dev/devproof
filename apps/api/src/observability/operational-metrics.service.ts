@@ -30,6 +30,8 @@ export class OperationalMetricsService {
       profileReservations,
       integrationEvents,
       oldestProfileWait,
+      postRunAnalyses,
+      improvementWorkItems,
     ] = await Promise.all([
       this.prisma.verificationRun.groupBy({ _count: true, by: ["status"] }),
       this.prisma.verificationRun.groupBy({
@@ -88,6 +90,14 @@ export class OperationalMetricsService {
       this.prisma.taskProfileBinding.aggregate({
         _min: { updatedAt: true },
         where: { status: "WAITING_INPUT" },
+      }),
+      this.prisma.postRunAnalysisJob.groupBy({
+        _count: true,
+        by: ["status"],
+      }),
+      this.prisma.improvementWorkItem.groupBy({
+        _count: true,
+        by: ["status"],
       }),
     ]);
     this.groupGauge(
@@ -154,6 +164,16 @@ export class OperationalMetricsService {
       "devproof_tool_invocations_15m",
       "Tool invocations started in the last fifteen minutes by status.",
       recentInvocations,
+    );
+    this.groupGauge(
+      "devproof_post_run_analysis_jobs",
+      "Post-run optimization analysis jobs by current status.",
+      postRunAnalyses,
+    );
+    this.groupGauge(
+      "devproof_improvement_work_items",
+      "Automatically generated improvement work items by current status.",
+      improvementWorkItems,
     );
     this.metrics.setGauge(
       "devproof_tool_invocation_oldest_started_age_seconds",

@@ -109,6 +109,45 @@ const envSchema = z
     SPEC_ANALYSIS_MODE: z
       .enum(["DETERMINISTIC", "AGENT", "SHADOW"])
       .default("AGENT"),
+    POST_RUN_ANALYSIS_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    POST_RUN_ANALYSIS_ANALYZER_VERSION: z
+      .string()
+      .trim()
+      .min(1)
+      .max(160)
+      .default("post-run-analysis-v3"),
+    POST_RUN_ANALYSIS_CAPTURE_GRACE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3600)
+      .default(30),
+    POST_RUN_ANALYSIS_DEADLINE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(60)
+      .max(86400)
+      .default(1800),
+    POST_RUN_ANALYSIS_MAX_ATTEMPTS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .default(3),
+    POST_RUN_ANALYSIS_MIN_CONFIDENCE: z.coerce
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.7),
+    POST_RUN_ANALYSIS_RECOVERY_LOOKBACK_HOURS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(720)
+      .default(24),
     REDIS_URL: z
       .string()
       .url()

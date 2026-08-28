@@ -1,5 +1,4 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
-import { AGENT_RUNTIME_PROTOCOL } from "@devproof/agent-runtime-protocol";
 import {
   RUNTIME_PROTOCOL,
   runtimeCommandMinimumMinor,
@@ -10,6 +9,7 @@ import { RedisService } from "../infrastructure/redis.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 
 const MAX_ASSIGNED_BROWSER_CONCURRENCY = 1_024;
+const AGENT_RUNTIME_REGISTRATION_MIN_MINOR = 4;
 
 @Injectable()
 export class AgentRuntimeControlService {
@@ -22,15 +22,15 @@ export class AgentRuntimeControlService {
     current: ToolAuthContext,
     input: { protocol: { minor: number }; workerId: string },
   ) {
-    if (input.protocol.minor < AGENT_RUNTIME_PROTOCOL.minor) {
+    if (input.protocol.minor < AGENT_RUNTIME_REGISTRATION_MIN_MINOR) {
       throw new BadRequestException(
-        `Agent Runtime protocol minor ${AGENT_RUNTIME_PROTOCOL.minor} or newer is required.`,
+        `Agent Runtime protocol minor ${AGENT_RUNTIME_REGISTRATION_MIN_MINOR} or newer is required.`,
       );
     }
     const pool = current.credential.pool ?? "MIXED";
     if (pool === "MIXED") {
       throw new BadRequestException(
-        "Legacy MIXED Agent Runtime credentials are disabled; provision separate SPEC_ANALYSIS and BROWSER_EXECUTION credentials.",
+        "Legacy MIXED Agent Runtime credentials are disabled; provision pool-specific Agent Runtime credentials.",
       );
     }
     const pools = [pool] as const;
@@ -69,6 +69,7 @@ export class AgentRuntimeControlService {
       );
     }
     return {
+      analysisConcurrency: pools.includes("POST_RUN_ANALYSIS") ? 1 : 0,
       browserConcurrency,
       pools: [...pools],
       refreshAfterMs: 5_000,

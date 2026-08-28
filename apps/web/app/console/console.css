@@ -6945,6 +6945,220 @@
   padding: 10px 12px;
 }
 
+.dp-post-run-analysis-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  padding: 8px 10px;
+  color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.dp-post-run-analysis-meta b {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.dp-post-run-analysis-body {
+  min-width: 0;
+}
+
+.dp-post-run-analysis-details {
+  overflow: hidden;
+  border-color: var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--card);
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details > summary {
+  min-height: 40px;
+  padding: 0 10px;
+  transition: background-color 120ms ease;
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details > summary:hover {
+  background: var(--muted);
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details > summary > span {
+  min-width: 0;
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details > summary b {
+  min-width: 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.dp-run-technical-details.dp-post-run-analysis-details
+  > summary
+  > svg:last-child {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  transition: transform 120ms ease;
+}
+
+.dp-post-run-analysis-details[open] > summary > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.dp-post-run-analysis-details > pre {
+  overflow: auto;
+  max-height: 360px;
+  margin: 0;
+  background: var(--muted);
+  padding: 10px 12px;
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  white-space: pre-wrap;
+}
+
+.dp-post-run-analysis-events {
+  max-height: 420px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+}
+
+.dp-post-run-analysis-events > article {
+  min-width: 0;
+  background: var(--card);
+}
+
+.dp-post-run-analysis-events > article + article {
+  border-top: 1px solid var(--border);
+}
+
+.dp-post-run-analysis-events header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+}
+
+.dp-post-run-analysis-events header > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dp-post-run-analysis-events strong {
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dp-post-run-analysis-events small,
+.dp-post-run-analysis-events time {
+  color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.dp-post-run-analysis-events time {
+  flex: 0 0 auto;
+}
+
+.dp-post-run-analysis-events pre {
+  overflow: auto;
+  max-height: 180px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+  padding: 8px 10px;
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.dp-post-run-analysis-findings {
+  display: grid;
+  gap: 8px;
+}
+
+.dp-post-run-analysis-finding {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--card);
+  padding: 10px;
+}
+
+.dp-post-run-analysis-finding > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.dp-post-run-analysis-finding strong {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dp-post-run-analysis-finding > p,
+.dp-post-run-analysis-finding > small,
+.dp-post-run-analysis-empty {
+  margin: 0;
+}
+
+.dp-post-run-analysis-finding > p,
+.dp-post-run-analysis-empty {
+  color: var(--foreground);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.dp-post-run-analysis-finding > small {
+  color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.dp-post-run-analysis-finding > .dp-post-run-analysis-details {
+  margin-top: 2px;
+}
+
+.dp-post-run-analysis-empty {
+  border: 1px dashed var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--card);
+  padding: 10px 12px;
+  color: var(--muted-foreground);
+}
+
+.dp-post-run-analysis-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .dp-task-detail-layout {
   grid-template-columns: 1fr;
   gap: 10px;

@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD } from "../post-run-analysis/task-log-bundle.service.js";
 import { RetentionWorker } from "./retention-worker.service.js";
 
-function fixture(counts: {
-  testRunArtifacts: number;
-  verificationArtifacts: number;
-}) {
+function fixture(
+  counts: {
+    testRunArtifacts: number;
+    verificationArtifacts: number;
+  },
+  postRunBundle = false,
+) {
   const queuedKeys: string[] = [];
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(1),
@@ -23,6 +27,10 @@ function fixture(counts: {
         },
       ),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    postRunAnalysisJob: {
+      count: vi.fn().mockResolvedValue(0),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     testRunArtifact: { count: vi.fn().mockResolvedValue(0) },
@@ -69,6 +77,22 @@ function fixture(counts: {
         })),
       ),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    postRunAnalysisJob: {
+      findMany: vi.fn().mockResolvedValue(
+        postRunBundle
+          ? [
+              {
+                id: "analysis-1",
+                inputManifest: {
+                  [POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD]:
+                    "post-run-analysis/team/task/job/bundle.json.evidence.ndjson",
+                },
+                inputStorageKey: "post-run-analysis/team/task/job/bundle.json",
+              },
+            ]
+          : [],
+      ),
     },
     toolInvocation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     verificationRun: {
@@ -125,5 +149,29 @@ describe("RetentionWorker", () => {
     expect(tx.browserRuntimeArtifact.deleteMany).toHaveBeenCalledWith({
       where: { id: { in: [] } },
     });
+  });
+
+  it("detaches and deletes expired post-run bundles without deleting findings", async () => {
+    const { storage, tx, worker } = fixture(
+      { testRunArtifacts: 1, verificationArtifacts: 1 },
+      true,
+    );
+
+    await worker.sweep();
+
+    expect(tx.postRunAnalysisJob.updateMany).toHaveBeenCalledWith({
+      data: { inputManifest: {}, inputStorageKey: null },
+      where: {
+        id: "analysis-1",
+        inputStorageKey: "post-run-analysis/team/task/job/bundle.json",
+        status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] },
+      },
+    });
+    expect(storage.delete).toHaveBeenCalledWith(
+      "post-run-analysis/team/task/job/bundle.json",
+    );
+    expect(storage.delete).toHaveBeenCalledWith(
+      "post-run-analysis/team/task/job/bundle.json.evidence.ndjson",
+    );
   });
 });

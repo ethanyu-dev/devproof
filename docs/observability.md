@@ -38,7 +38,7 @@ Deployment examples are in:
 - `ops/observability/prometheus-alerts.yml`
 - `ops/observability/grafana-dashboard.json`
 
-Metrics cover HTTP traffic, MCP/HTTP tools, model operations, Task and Stage state, Runtime connectivity and protocol failures, worker health, notification backlog, and artifact volume. If `TOOL_INVOCATION_STALE_SECONDS` changes, update the `DevProofToolInvocationStuck` alert threshold too.
+Metrics cover HTTP traffic, MCP/HTTP tools, model operations, Task and Stage state, Runtime connectivity and protocol failures, worker health, notification backlog, artifact volume, post-run analysis jobs, and generated improvement work items. If `TOOL_INVOCATION_STALE_SECONDS` changes, update the `DevProofToolInvocationStuck` alert threshold too.
 
 ## Structured logs
 
@@ -55,6 +55,7 @@ Browser Runtime uses a bounded in-memory outbox for `runtime.event`, `command.re
 - Closed Runtime Sessions and unreferenced Runtime Artifacts default to `RUNTIME_DATA_RETENTION_DAYS=30`.
 - Unbound tool invocations default to `TOOL_INVOCATION_RETENTION_DAYS=90`.
 - Control-plane audit events default to `AUDIT_RETENTION_DAYS=365`.
+- Post-run bundles are immutable object-storage inputs. Terminal bundle bodies are deleted through the durable object-deletion queue and their full database Manifest is cleared after `RUNTIME_DATA_RETENTION_DAYS`, while hashes, completeness, redacted reports, findings, and improvement work items remain.
 - Shared objects remain until the last durable reference is released.
 - A sweeper changes tool invocations left in `STARTED` after a process interruption to `FAILED / PROCESS_INTERRUPTED`.
 
@@ -85,6 +86,8 @@ Inspect the oldest `STARTED` invocation and its Runtime command. If the work is 
 ### DevProofAgentModelFailures
 
 Inspect `agent.model.failed` events, duration, provider configuration, gateway status, limits, and credentials. Only redacted previews are available in events; use provider-side request IDs when deeper diagnosis is required.
+
+For the `POST_RUN_ANALYSIS` pool, also inspect `devproof_post_run_analysis_jobs` and the job's `inputCompleteness`. `PENDING_CAPTURE` points to cleanup or capture lag, `READY` points to missing pool capacity or credentials, and `FAILED` exposes a bounded structured error and supports a manual retry from the Task detail page.
 
 ### DevProofHttpErrorRatioHigh
 

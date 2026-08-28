@@ -15,7 +15,7 @@ export interface ObservabilityContext {
 }
 
 const SENSITIVE_KEY =
-  /(?:authorization|cookie|password|passwd|secret|token|api[-_]?key|credential|session)/iu;
+  /(?:authorization|cookie|password|passwd|secret|token|api[-_]?key|credential|session|private[-_]?key|secret[-_]?access[-_]?key|access[-_]?key[-_]?id)/iu;
 const TRACEPARENT = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/iu;
 const LOG_PRIORITY = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 
@@ -37,10 +37,18 @@ function errorCode(error: unknown) {
 
 export function redactText(value: string) {
   return value
+    .replace(
+      /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu,
+      "[REDACTED_PRIVATE_KEY]",
+    )
     .replace(/\b(Bearer|Basic)\s+[a-z0-9._~+/=-]+/giu, "$1 [REDACTED]")
     .replace(/\b(?:dvp_sk_|sk-)[a-z0-9_-]{12,}/giu, "[REDACTED]")
     .replace(
-      /\b(password|passwd|secret|token|api[-_]?key)(\s*[=:]\s*|["']?\s*:\s*["'])([^\s,;&"'<>}]+)/giu,
+      /\b(authorization|cookie|set-cookie)(\s*[=:]\s*|["']?\s*:\s*["'])([^\r\n"'}]+)/giu,
+      "$1$2[REDACTED]",
+    )
+    .replace(
+      /\b(password|passwd|secret|token|api[-_]?key|credential|private[-_]?key|client[-_]?secret|secret[-_]?access[-_]?key|access[-_]?key[-_]?id)(\s*[=:]\s*|["']?\s*:\s*["'])([^\s,;&"'<>}]+)/giu,
       "$1$2[REDACTED]",
     )
     .replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => {

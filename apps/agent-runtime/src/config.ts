@@ -22,6 +22,12 @@ const configSchema = z
       .min(5)
       .max(200)
       .default(60),
+    DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(1_000)
+      .default(64),
     DEVPROOF_AGENT_WORKER_ID: z
       .string()
       .trim()
