@@ -396,6 +396,7 @@ describe("TaskProfileResolverService", () => {
       },
     };
     const profiles = {
+      ensurePendingTaskRequest: vi.fn().mockResolvedValue(true),
       provisionForTask: vi.fn().mockResolvedValue({
         id: "profile-1",
         status: "UNINITIALIZED",
@@ -424,6 +425,10 @@ describe("TaskProfileResolverService", () => {
       policy: expect.objectContaining({ strategy: "REQUESTER" }),
       targetHostname: "preview.example.com",
       teamId: "team-1",
+      triggerSource: "CONSOLE",
+    });
+    expect(profiles.ensurePendingTaskRequest).toHaveBeenCalledWith({
+      profileId: "profile-1",
       triggerSource: "CONSOLE",
     });
     expect(tx.taskProfileBinding.update).toHaveBeenCalledWith(
@@ -858,6 +863,137 @@ describe("TaskProfileResolverService", () => {
           payload: expect.objectContaining({ requesterClaimed: true }),
         }),
       }),
+    );
+  });
+
+  it("releases every obsolete pending Profile when a task switches to ephemeral", async () => {
+    const tx = {
+      taskExecution: { update: vi.fn() },
+      taskExecutionEvent: { create: vi.fn() },
+      taskExecutionStage: { updateMany: vi.fn() },
+      taskDeploymentProfileBinding: { deleteMany: vi.fn() },
+      taskProfileBinding: { update: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) =>
+        callback(tx),
+      ),
+      taskExecution: {
+        findFirst: vi.fn().mockResolvedValue({
+          executionRuns: [],
+          id: "task-public-page",
+          inputSnapshot: {
+            idempotencyKey: "task-public-page",
+            issueRef: "ENG-130",
+            kind: "ISSUE_SPEC",
+            profilePolicy: {
+              onUnavailable: "WAIT_FOR_PROFILE",
+              scope: { authRole: "default", environmentKey: "default" },
+              strategy: "REQUESTER",
+            },
+          },
+          kind: "ISSUE_SPEC",
+          lifecycle: "WAITING_INPUT",
+          profileBinding: {
+            externalIdentitySnapshot: {
+              pendingProfiles: [
+                { profileId: "profile-a" },
+                { profileId: "profile-b" },
+              ],
+            },
+            id: "binding-public-page",
+            requestedProfileId: "profile-a",
+            triggerSource: "FEISHU",
+          },
+          requestedByUserId: "user-1",
+        }),
+      },
+    };
+    const profiles = { releasePendingTaskRequest: vi.fn() };
+    const service = new TaskProfileResolverService(
+      prisma as never,
+      profiles as never,
+    );
+    vi.spyOn(service, "resolve").mockResolvedValue({
+      status: "RESOLVED",
+    } as never);
+
+    await service.select("team-1", "user-1", "task-public-page", {
+      profilePolicy: {
+        onUnavailable: "WAIT_FOR_PROFILE",
+        scope: { authRole: "default", environmentKey: "default" },
+        strategy: "EPHEMERAL",
+      },
+    });
+
+    expect(profiles.releasePendingTaskRequest).toHaveBeenCalledTimes(2);
+    expect(profiles.releasePendingTaskRequest).toHaveBeenNthCalledWith(
+      1,
+      {
+        profileId: "profile-a",
+        triggerSource: "FEISHU",
+      },
+      tx,
+    );
+    expect(profiles.releasePendingTaskRequest).toHaveBeenNthCalledWith(
+      2,
+      {
+        profileId: "profile-b",
+        triggerSource: "FEISHU",
+      },
+      tx,
+    );
+  });
+});
+
+describe("TaskProfileResolverService terminal request cleanup", () => {
+  it("releases every pending Profile reference in the caller transaction", async () => {
+    const tx = {
+      taskProfileBinding: {
+        findUnique: vi.fn().mockResolvedValue({
+          externalIdentitySnapshot: {
+            pendingProfiles: [
+              { profileId: "profile-a" },
+              { profileId: "profile-b" },
+            ],
+          },
+          requestedProfileId: "profile-a",
+          triggerSource: "ISSUE_ASSIGNEE",
+        }),
+      },
+    };
+    const releasePendingTaskRequest = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const service = new TaskProfileResolverService(
+      {} as never,
+      {
+        releasePendingTaskRequest,
+      } as never,
+    );
+
+    await expect(
+      service.releasePendingRequests("task-1", tx as never),
+    ).resolves.toBe(1);
+
+    expect(tx.taskProfileBinding.findUnique).toHaveBeenCalledWith({
+      select: {
+        externalIdentitySnapshot: true,
+        requestedProfileId: true,
+        triggerSource: true,
+      },
+      where: { taskExecutionId: "task-1" },
+    });
+    expect(releasePendingTaskRequest).toHaveBeenNthCalledWith(
+      1,
+      { profileId: "profile-a", triggerSource: "ISSUE_ASSIGNEE" },
+      tx,
+    );
+    expect(releasePendingTaskRequest).toHaveBeenNthCalledWith(
+      2,
+      { profileId: "profile-b", triggerSource: "ISSUE_ASSIGNEE" },
+      tx,
     );
   });
 });

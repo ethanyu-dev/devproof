@@ -86,6 +86,7 @@ enum ExternalIdentityProvider {
 enum UserBrowserProfileStatus {
   UNINITIALIZED
   PREPARING
+  VERIFYING
   READY
   REAUTH_REQUIRED
   MIGRATION_REQUIRED
@@ -1570,38 +1571,39 @@ model UserExternalIdentity {
 }
 
 model UserBrowserProfile {
-  id                    String                         @id @default(uuid()) @db.Uuid
-  teamId                String                         @map("team_id") @db.Uuid
-  ownerUserId           String                         @map("owner_user_id") @db.Uuid
-  assignedRuntimeId     String?                        @map("assigned_runtime_id") @db.Uuid
-  runtimeProfileKey     String                         @map("runtime_profile_key")
-  displayName           String                         @map("display_name")
-  scopeKey              String                         @map("scope_key")
-  environmentKey        String                         @default("default") @map("environment_key")
-  authRole              String                         @default("default") @map("auth_role")
-  status                UserBrowserProfileStatus       @default(UNINITIALIZED)
-  verificationUrl       String?                        @map("verification_url")
-  verificationRules     Json                           @default("{}") @map("verification_rules")
-  lastPreparedAt        DateTime?                      @map("last_prepared_at") @db.Timestamptz
-  lastVerifiedAt        DateTime?                      @map("last_verified_at") @db.Timestamptz
-  lastUsedAt            DateTime?                      @map("last_used_at") @db.Timestamptz
-  inactivityExpiresAt   DateTime?                      @map("inactivity_expires_at") @db.Timestamptz
-  verificationError     Json?                          @map("verification_error")
-  version               Int                            @default(1)
-  createdAt             DateTime                       @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt             DateTime                       @updatedAt @map("updated_at") @db.Timestamptz
-  team                  Team                           @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  owner                 User                           @relation("BrowserProfileOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
-  assignedRuntime       BrowserRuntime?                @relation(fields: [assignedRuntimeId], references: [id], onDelete: SetNull)
-  grants                BrowserProfileGrant[]
-  taskBindings          TaskProfileBinding[]           @relation("ResolvedTaskProfile")
-  requestedTaskBindings TaskProfileBinding[]           @relation("RequestedTaskProfile")
-  reservations          BrowserProfileReservation[]
-  usages                BrowserProfileUsage[]
-  runtimeSessions       BrowserRuntimeSession[]
-  executionRuns         ExecutionRun[]
-  deploymentBindings    TaskDeploymentProfileBinding[]
-  taskRecoveryEvents    TaskProfileRecoveryEvent[]
+  id                       String                         @id @default(uuid()) @db.Uuid
+  teamId                   String                         @map("team_id") @db.Uuid
+  ownerUserId              String                         @map("owner_user_id") @db.Uuid
+  assignedRuntimeId        String?                        @map("assigned_runtime_id") @db.Uuid
+  runtimeProfileKey        String                         @map("runtime_profile_key")
+  displayName              String                         @map("display_name")
+  scopeKey                 String                         @map("scope_key")
+  environmentKey           String                         @default("default") @map("environment_key")
+  authRole                 String                         @default("default") @map("auth_role")
+  status                   UserBrowserProfileStatus       @default(UNINITIALIZED)
+  verificationUrl          String?                        @map("verification_url")
+  verificationRules        Json                           @default("{}") @map("verification_rules")
+  verificationRulesVersion Int                            @default(1) @map("verification_rules_version")
+  lastPreparedAt           DateTime?                      @map("last_prepared_at") @db.Timestamptz
+  lastVerifiedAt           DateTime?                      @map("last_verified_at") @db.Timestamptz
+  lastUsedAt               DateTime?                      @map("last_used_at") @db.Timestamptz
+  inactivityExpiresAt      DateTime?                      @map("inactivity_expires_at") @db.Timestamptz
+  verificationError        Json?                          @map("verification_error")
+  version                  Int                            @default(1)
+  createdAt                DateTime                       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                DateTime                       @updatedAt @map("updated_at") @db.Timestamptz
+  team                     Team                           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  owner                    User                           @relation("BrowserProfileOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  assignedRuntime          BrowserRuntime?                @relation(fields: [assignedRuntimeId], references: [id], onDelete: SetNull)
+  grants                   BrowserProfileGrant[]
+  taskBindings             TaskProfileBinding[]           @relation("ResolvedTaskProfile")
+  requestedTaskBindings    TaskProfileBinding[]           @relation("RequestedTaskProfile")
+  reservations             BrowserProfileReservation[]
+  usages                   BrowserProfileUsage[]
+  runtimeSessions          BrowserRuntimeSession[]
+  executionRuns            ExecutionRun[]
+  deploymentBindings       TaskDeploymentProfileBinding[]
+  taskRecoveryEvents       TaskProfileRecoveryEvent[]
 
   @@unique([teamId, ownerUserId, scopeKey], map: "user_browser_profiles_team_owner_scope_key")
   @@unique([teamId, runtimeProfileKey], map: "user_browser_profiles_team_runtime_key_key")
@@ -1656,6 +1658,7 @@ model TaskProfileBinding {
 
   @@index([status, updatedAt], map: "task_profile_bindings_status_updated_idx")
   @@index([resolvedProfileId, status], map: "task_profile_bindings_profile_status_idx")
+  @@index([requestedProfileId, triggerSource, status], map: "task_profile_bindings_requested_source_status_idx")
   @@map("task_profile_bindings")
 }
 

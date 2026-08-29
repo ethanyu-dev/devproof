@@ -789,6 +789,7 @@ export const browserProfileTriggerSourceSchema = z.enum([
 export const userBrowserProfileStatusSchema = z.enum([
   "UNINITIALIZED",
   "PREPARING",
+  "VERIFYING",
   "READY",
   "REAUTH_REQUIRED",
   "MIGRATION_REQUIRED",

@@ -34,6 +34,7 @@ const PROFILE_CONTROL_PURPOSES = [
   "PROFILE_PREPARATION",
   "PROFILE_VERIFICATION",
 ] as const;
+const PROFILE_COMMAND_TIMEOUT_SECONDS = 15;
 
 const profileInclude = {
   assignedRuntime: {
@@ -56,7 +57,10 @@ const profileInclude = {
       status: true,
     },
     take: 1,
-    where: { purpose: { in: [...PROFILE_CONTROL_PURPOSES] } },
+    where: {
+      purpose: { in: [...PROFILE_CONTROL_PURPOSES] },
+      status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
+    },
   },
 } satisfies Prisma.UserBrowserProfileInclude;
 
@@ -250,25 +254,136 @@ export class UserBrowserProfilesService {
       profile.status === "READY" &&
       (!profile.inactivityExpiresAt ||
         profile.inactivityExpiresAt <= new Date());
-    if (needsApproval || expiredReady) {
-      profile = await this.prisma.userBrowserProfile.update({
+    if (expiredReady) {
+      await this.prisma.userBrowserProfile.updateMany({
         data: {
-          ...(needsApproval
-            ? {
-                verificationRules: json({
-                  ...rules,
-                  requestedTriggerSources: [...pending, input.triggerSource],
-                }),
-              }
-            : {}),
-          ...(expiredReady ? { status: "REAUTH_REQUIRED" as const } : {}),
+          status: "REAUTH_REQUIRED",
           version: { increment: 1 },
         },
+        where: { id: profile.id, status: "READY", version: profile.version },
+      });
+    }
+    if (needsApproval) {
+      await this.prisma.userBrowserProfile.updateMany({
+        data: {
+          verificationRules: json({
+            ...rules,
+            requestedTriggerSources: [...pending, input.triggerSource],
+          }),
+          verificationRulesVersion: { increment: 1 },
+        },
+        where: {
+          id: profile.id,
+          verificationRulesVersion: profile.verificationRulesVersion,
+        },
+      });
+    }
+    if (needsApproval || expiredReady) {
+      profile = await this.prisma.userBrowserProfile.findUniqueOrThrow({
         include: profileInclude,
         where: { id: profile.id },
       });
     }
     return this.serialize(profile);
+  }
+
+  async ensurePendingTaskRequest(input: {
+    profileId: string;
+    triggerSource: ProfileTriggerSource;
+  }) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const activeRequest = await this.findActiveTaskProfileRequest(
+        this.prisma,
+        input,
+      );
+      if (!activeRequest) return false;
+      const profile = await this.prisma.userBrowserProfile.findUnique({
+        select: {
+          grants: {
+            select: { id: true },
+            where: {
+              revokedAt: null,
+              triggerSource: input.triggerSource,
+            },
+          },
+          verificationRules: true,
+          verificationRulesVersion: true,
+        },
+        where: { id: input.profileId },
+      });
+      if (!profile || profile.grants.length) return false;
+      const pending = pendingTriggerSources(profile.verificationRules);
+      if (pending.includes(input.triggerSource)) return false;
+      const rules = verificationRuleRecord(profile.verificationRules);
+      const updated = await this.prisma.userBrowserProfile.updateMany({
+        data: {
+          verificationRules: json({
+            ...rules,
+            requestedTriggerSources: [...pending, input.triggerSource],
+          }),
+          verificationRulesVersion: { increment: 1 },
+        },
+        where: {
+          id: input.profileId,
+          verificationRulesVersion: profile.verificationRulesVersion,
+        },
+      });
+      if (updated.count === 1) return true;
+    }
+    throw new ConflictException(
+      "The browser profile access request changed concurrently.",
+    );
+  }
+
+  async releasePendingTaskRequest(
+    input: {
+      profileId: string;
+      triggerSource: ProfileTriggerSource;
+    },
+    tx?: Prisma.TransactionClient,
+  ) {
+    const database = tx ?? this.prisma;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const activeRequest = await this.findActiveTaskProfileRequest(
+        database,
+        input,
+      );
+      if (activeRequest) return false;
+
+      const profile = await database.userBrowserProfile.findUnique({
+        select: {
+          verificationRules: true,
+          verificationRulesVersion: true,
+        },
+        where: { id: input.profileId },
+      });
+      if (!profile) return false;
+      const rules = verificationRuleRecord(profile.verificationRules);
+      const pending = pendingTriggerSources(profile.verificationRules);
+      if (!pending.includes(input.triggerSource)) return false;
+      const remaining = pending.filter(
+        (source) => source !== input.triggerSource,
+      );
+      const { requestedTriggerSources: _requested, ...retainedRules } = rules;
+      const updated = await database.userBrowserProfile.updateMany({
+        data: {
+          verificationRules: json(
+            remaining.length
+              ? { ...retainedRules, requestedTriggerSources: remaining }
+              : retainedRules,
+          ),
+          verificationRulesVersion: { increment: 1 },
+        },
+        where: {
+          id: input.profileId,
+          verificationRulesVersion: profile.verificationRulesVersion,
+        },
+      });
+      if (updated.count === 1) return true;
+    }
+    throw new ConflictException(
+      "The browser profile access request changed concurrently.",
+    );
   }
 
   async update(
@@ -277,7 +392,7 @@ export class UserBrowserProfilesService {
     input: UserBrowserProfileUpdateInput,
   ) {
     const profile = await this.owned(current, id);
-    if (input.verificationUrl || input.grants) {
+    if (input.verificationUrl || input.verificationRules || input.grants) {
       const [activeRuns, activeSessions, resolvedBindings, deploymentBindings] =
         await Promise.all([
           this.prisma.executionRun.count({
@@ -348,7 +463,10 @@ export class UserBrowserProfilesService {
           data: {
             ...(input.displayName ? { displayName: input.displayName } : {}),
             ...(input.verificationRules
-              ? { verificationRules: json(input.verificationRules) }
+              ? {
+                  verificationRules: json(input.verificationRules),
+                  verificationRulesVersion: { increment: 1 },
+                }
               : {}),
             ...(input.verificationUrl
               ? { verificationUrl: input.verificationUrl }
@@ -426,7 +544,11 @@ export class UserBrowserProfilesService {
     input: UserBrowserProfilePrepareInput,
   ) {
     const profile = await this.owned(current, id);
-    if (profile.status === "DISABLED") {
+    if (
+      !["UNINITIALIZED", "PREPARING", "REAUTH_REQUIRED"].includes(
+        profile.status,
+      )
+    ) {
       throw new ConflictException("This browser profile cannot be prepared.");
     }
     if (!profile.verificationUrl) {
@@ -435,6 +557,11 @@ export class UserBrowserProfilesService {
     const existing = profile.runtimeSessions.find((session) =>
       isProfileControlPurpose(session.purpose),
     );
+    if (existing?.status === "CLOSING") {
+      throw new ConflictException(
+        "The previous browser profile session is still closing.",
+      );
+    }
     if (
       existing &&
       ["OPENING", "ACTIVE", "HUMAN_CONTROL"].includes(existing.status)
@@ -555,6 +682,16 @@ export class UserBrowserProfilesService {
 
   async verify(current: AuthContext, id: string) {
     const profile = await this.owned(current, id);
+    if (profile.status === "VERIFYING") {
+      throw new ConflictException(
+        "Browser profile verification is already in progress.",
+      );
+    }
+    if (!["PREPARING", "REAUTH_REQUIRED"].includes(profile.status)) {
+      throw new ConflictException(
+        "This browser profile is not awaiting verification.",
+      );
+    }
     const session = profile.runtimeSessions.find(
       (candidate) =>
         isProfileControlPurpose(candidate.purpose) &&
@@ -562,6 +699,20 @@ export class UserBrowserProfilesService {
     );
     if (!session) {
       throw new ConflictException("Profile preparation session is not active.");
+    }
+    const claimedVersion = profile.version + 1;
+    const claimed = await this.prisma.userBrowserProfile.updateMany({
+      data: {
+        status: "VERIFYING",
+        verificationError: Prisma.JsonNull,
+        version: { increment: 1 },
+      },
+      where: { id, status: profile.status, version: profile.version },
+    });
+    if (claimed.count !== 1) {
+      throw new ConflictException(
+        "Browser profile verification was started by another request.",
+      );
     }
     const rules = verificationRules(profile.verificationRules);
     try {
@@ -572,11 +723,13 @@ export class UserBrowserProfilesService {
             url: profile.verificationUrl,
             waitUntil: "domcontentloaded",
           },
+          timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
         });
       }
       const urlCommand = await this.sessions.execute(current, session.id, {
         commandType: "page.get_url",
         payload: {},
+        timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
       });
       const currentUrl = commandString(urlCommand?.result, "url");
       if (!currentUrl) {
@@ -607,6 +760,7 @@ export class UserBrowserProfilesService {
         const countCommand = await this.sessions.execute(current, session.id, {
           commandType: "locator.count",
           payload: { target: { selector: rules.authenticatedSelector } },
+          timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
         });
         if (commandNumber(countCommand?.result, "count") < 1) {
           throw new ConflictException(
@@ -614,22 +768,35 @@ export class UserBrowserProfilesService {
           );
         }
       }
-      if (session.status === "HUMAN_CONTROL") {
-        await this.sessions.release(current, session.id);
+      const closedSession = await this.sessions.close(current, session.id, {
+        timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
+      });
+      if (closedSession.status !== "CLOSED") {
+        throw new ConflictException(
+          "Browser Runtime disconnected before the profile could be saved.",
+        );
       }
-      await this.sessions.close(current, session.id);
       const now = new Date();
-      const approvedSources = pendingTriggerSources(profile.verificationRules);
+      let approvedSources: ProfileTriggerSource[] = [];
       await this.prisma.$transaction(async (tx) => {
-        await this.activatePendingGrants(tx, profile, approvedSources, now);
-        await tx.userBrowserProfile.update({
+        const finalized = await tx.userBrowserProfile.updateMany({
           data: {
             inactivityExpiresAt: new Date(now.getTime() + PROFILE_TTL_MS),
             lastUsedAt: now,
             lastVerifiedAt: now,
             status: "READY",
             verificationError: Prisma.JsonNull,
+            version: { increment: 1 },
           },
+          where: { id, status: "VERIFYING", version: claimedVersion },
+        });
+        if (finalized.count !== 1) {
+          throw new ConflictException(
+            "Browser profile verification was cancelled before it could be saved.",
+          );
+        }
+        const currentProfile = await tx.userBrowserProfile.findUniqueOrThrow({
+          include: profileInclude,
           where: { id },
         });
         await tx.taskProfileRecoveryEvent.create({
@@ -640,6 +807,15 @@ export class UserBrowserProfilesService {
             teamId: profile.teamId,
           },
         });
+        approvedSources = pendingTriggerSources(
+          currentProfile.verificationRules,
+        );
+        await this.activatePendingGrants(
+          tx,
+          currentProfile,
+          approvedSources,
+          now,
+        );
       });
       await this.audit.record(
         current,
@@ -650,18 +826,133 @@ export class UserBrowserProfilesService {
       );
       return this.serialize(await this.owned(current, id));
     } catch (error) {
-      await this.prisma.userBrowserProfile.update({
+      await this.prisma.userBrowserProfile.updateMany({
         data: {
           status: "REAUTH_REQUIRED",
           verificationError: json({
             code: "PROFILE_VERIFICATION_FAILED",
             message: error instanceof Error ? error.message : String(error),
           }),
+          version: { increment: 1 },
         },
-        where: { id },
+        where: { id, status: "VERIFYING", version: claimedVersion },
       });
       throw error;
     }
+  }
+
+  async closePreparation(current: AuthContext, id: string) {
+    const profile = await this.owned(current, id);
+    if (
+      !["UNINITIALIZED", "PREPARING", "VERIFYING", "REAUTH_REQUIRED"].includes(
+        profile.status,
+      )
+    ) {
+      throw new ConflictException(
+        "This browser profile does not have a preparation to close.",
+      );
+    }
+    const session = profile.runtimeSessions.find((candidate) =>
+      ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"].includes(
+        candidate.status,
+      ),
+    );
+    const nextStatus = profile.lastVerifiedAt
+      ? "REAUTH_REQUIRED"
+      : "UNINITIALIZED";
+    if (!session) {
+      const recovered = await this.prisma.userBrowserProfile.updateMany({
+        data: {
+          status: nextStatus,
+          verificationError: Prisma.JsonNull,
+          version: { increment: 1 },
+        },
+        where: { id, status: profile.status, version: profile.version },
+      });
+      if (recovered.count !== 1) {
+        throw new ConflictException(
+          "Browser profile verification changed before it could be closed.",
+        );
+      }
+      await this.audit.record(
+        current,
+        "browser_profile.preparation_closed",
+        "user_browser_profile",
+        id,
+        { sessionId: null },
+      );
+      return this.serialize(await this.owned(current, id));
+    }
+
+    const claimedVersion = profile.version + 1;
+    const claimed = await this.prisma.userBrowserProfile.updateMany({
+      data: {
+        status: "VERIFYING",
+        verificationError: Prisma.JsonNull,
+        version: { increment: 1 },
+      },
+      where: { id, status: profile.status, version: profile.version },
+    });
+    if (claimed.count !== 1) {
+      throw new ConflictException(
+        "Browser profile verification changed before it could be closed.",
+      );
+    }
+    let closed: Awaited<ReturnType<RuntimeSessionsService["close"]>>;
+    try {
+      closed = await this.sessions.close(current, session.id, {
+        timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
+      });
+    } catch (error) {
+      await this.prisma.userBrowserProfile.updateMany({
+        data: {
+          status: "LOST",
+          verificationError: json({
+            code: "PROFILE_PREPARATION_CLOSE_FAILED",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          version: { increment: 1 },
+        },
+        where: { id, status: "VERIFYING", version: claimedVersion },
+      });
+      throw error;
+    }
+    const closeConfirmed = closed.status === "CLOSED";
+    const closeFailed = ["FAILED", "LOST"].includes(closed.status);
+    const finalized = await this.prisma.userBrowserProfile.updateMany({
+      data: {
+        status: closeFailed ? "LOST" : nextStatus,
+        verificationError: closeFailed
+          ? json({
+              code: "PROFILE_PREPARATION_CLOSE_FAILED",
+              message:
+                "Browser Runtime could not confirm that the login window closed.",
+            })
+          : Prisma.JsonNull,
+        version: { increment: 1 },
+      },
+      where: { id, status: "VERIFYING", version: claimedVersion },
+    });
+    if (finalized.count !== 1) {
+      throw new ConflictException(
+        "Browser profile verification changed before it could be closed.",
+      );
+    }
+    if (!closeConfirmed) {
+      throw new ConflictException(
+        closeFailed
+          ? "Browser Runtime disconnected before the login window could be confirmed closed."
+          : "The browser login window is still closing. Please wait before logging in again.",
+      );
+    }
+    await this.audit.record(
+      current,
+      "browser_profile.preparation_closed",
+      "user_browser_profile",
+      id,
+      { sessionId: session.id },
+    );
+    return this.serialize(await this.owned(current, id));
   }
 
   async approve(current: AuthContext, id: string) {
@@ -706,10 +997,13 @@ export class UserBrowserProfilesService {
         "This browser profile cannot be reauthenticated.",
       );
     }
-    await this.prisma.userBrowserProfile.update({
-      data: { status: "REAUTH_REQUIRED" },
-      where: { id },
+    const claimed = await this.prisma.userBrowserProfile.updateMany({
+      data: { status: "REAUTH_REQUIRED", version: { increment: 1 } },
+      where: { id, status: profile.status, version: profile.version },
     });
+    if (claimed.count !== 1) {
+      throw new ConflictException("The profile state changed concurrently.");
+    }
     return this.prepare(current, id, input);
   }
 
@@ -800,7 +1094,12 @@ export class UserBrowserProfilesService {
       );
     }
     try {
-      await this.closeActiveSessions(current, id);
+      const allSessionsClosed = await this.closeActiveSessions(current, id);
+      if (!allSessionsClosed) {
+        throw new ConflictException(
+          "The profile cannot be deleted until every Runtime session is confirmed closed.",
+        );
+      }
     } catch (error) {
       await this.restoreLifecycleClaim(profile, "DISABLED", claimedVersion);
       throw error;
@@ -886,6 +1185,7 @@ export class UserBrowserProfilesService {
         userBrowserProfileId: profileId,
       },
     });
+    let allClosed = true;
     for (const session of sessions) {
       if (
         session.status === "HUMAN_CONTROL" &&
@@ -893,8 +1193,35 @@ export class UserBrowserProfilesService {
       ) {
         await this.sessions.release(current, session.id).catch(() => undefined);
       }
-      await this.sessions.close(current, session.id);
+      const closed = await this.sessions.close(current, session.id);
+      if (closed.status !== "CLOSED") allClosed = false;
     }
+    return allClosed;
+  }
+
+  private findActiveTaskProfileRequest(
+    database: Prisma.TransactionClient | PrismaService,
+    input: { profileId: string; triggerSource: ProfileTriggerSource },
+  ) {
+    return database.taskProfileBinding.findFirst({
+      select: { id: true },
+      where: {
+        OR: [
+          { requestedProfileId: input.profileId },
+          {
+            externalIdentitySnapshot: {
+              array_contains: [{ profileId: input.profileId }],
+              path: ["pendingProfiles"],
+            },
+          },
+        ],
+        status: { in: ["PENDING", "WAITING_INPUT"] },
+        taskExecution: {
+          lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+        },
+        triggerSource: input.triggerSource,
+      },
+    });
   }
 
   private restoreLifecycleClaim(
@@ -1038,6 +1365,7 @@ export class UserBrowserProfilesService {
         url: verificationUrl,
         waitUntil: "domcontentloaded",
       },
+      timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
     });
     if (navigation?.status !== "SUCCEEDED") {
       throw new ConflictException(
@@ -1122,7 +1450,7 @@ export class UserBrowserProfilesService {
     await tx.userBrowserProfile.update({
       data: {
         verificationRules: json(approvedRules),
-        version: { increment: 1 },
+        verificationRulesVersion: { increment: 1 },
       },
       where: { id: profile.id },
     });

@@ -699,11 +699,16 @@ export function extractIssueRef(text: string) {
 }
 
 export function profileStrategyFromText(text: string) {
-  return /(?:^|\s)--ephemeral(?:\s|$)|临时会话/iu.test(text)
-    ? ("EPHEMERAL" as const)
-    : /(?:^|\s)--owner(?:\s|$)|issue\s*owner|负责人/iu.test(text)
-      ? ("ISSUE_ASSIGNEE" as const)
-      : ("REQUESTER" as const);
+  if (
+    /(?:^|\s)--ephemeral(?:\s|$)|临时会话|无需登录|不需要登录|免登录/iu.test(
+      text,
+    )
+  ) {
+    return "EPHEMERAL" as const;
+  }
+  return /(?:^|\s)--owner(?:\s|$)|issue\s*owner|负责人/iu.test(text)
+    ? ("ISSUE_ASSIGNEE" as const)
+    : ("REQUESTER" as const);
 }
 
 function extractTargetUrl(text: string, issueRef: string) {

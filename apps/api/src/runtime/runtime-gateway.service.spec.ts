@@ -8,6 +8,7 @@ import { RuntimeGatewayService } from "./runtime-gateway.service.js";
 
 function fixture() {
   const prisma = {
+    $transaction: vi.fn(),
     browserRuntime: {
       findFirst: vi.fn().mockResolvedValue({
         enabled: true,
@@ -21,7 +22,21 @@ function fixture() {
       findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
+    browserRuntimeProfileLease: {
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    browserRuntimeSlot: {
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
   };
+  prisma.$transaction.mockImplementation(
+    async (
+      operation: Array<Promise<unknown>> | ((tx: typeof prisma) => unknown),
+    ) =>
+      Array.isArray(operation) ? Promise.all(operation) : operation(prisma),
+  );
   const redis = {
     disconnectOlderGateways: vi.fn().mockResolvedValue(undefined),
     instanceId: "gateway-instance-1",
@@ -171,6 +186,133 @@ describe("RuntimeGatewayService terminal session ownership", () => {
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [sessionId],
       type: "runtime.heartbeat.ack",
+    });
+  });
+
+  it("does not reactivate a closing session during reconnect", async () => {
+    const { prisma, service } = fixture();
+    const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
+    prisma.browserRuntimeSession.findMany.mockResolvedValue([
+      {
+        fencingToken: 7n,
+        id: sessionId,
+        leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+        profileKey: "profile-key",
+        profileMode: "PERSISTENT",
+        status: "CLOSING",
+        userBrowserProfile: null,
+        verificationRuns: [],
+      },
+    ]);
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    const reconcile = Reflect.get(service, "reconcile") as (
+      runtimeId: string,
+      sessions: Array<Record<string, unknown>>,
+      protocolMinor: number,
+    ) => Promise<Array<Record<string, unknown>>>;
+
+    const actions = await reconcile.call(
+      service,
+      "6f090d88-8987-487f-8338-1a734beab6a6",
+      [
+        {
+          fencingToken: "7",
+          leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+          profileKey: "profile-key",
+          profileMode: "PERSISTENT",
+          sessionId,
+          state: "OPEN",
+        },
+      ],
+      10,
+    );
+
+    expect(actions).toEqual([
+      expect.objectContaining({ action: "CLOSE_LOCAL", sessionId }),
+    ]);
+    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "ACTIVE" }),
+      }),
+    );
+  });
+
+  it("preserves CLOSING while asking the Runtime to force-close the session", async () => {
+    const { handleHeartbeat, prisma, service, socket } = fixture();
+    const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
+    prisma.browserRuntimeSession.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    const heartbeat = runtimeClientMessageSchema.parse({
+      activeSessions: [
+        {
+          fencingToken: "7",
+          leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+          sessionId,
+          state: "OPEN",
+        },
+      ],
+      maxConcurrency: 4,
+      sentAt: new Date().toISOString(),
+      type: "runtime.heartbeat",
+    });
+
+    await handleHeartbeat.call(
+      service,
+      socket,
+      "6f090d88-8987-487f-8338-1a734beab6a6",
+      heartbeat,
+    );
+
+    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.not.objectContaining({ status: expect.anything() }),
+        where: expect.objectContaining({ id: sessionId, status: "CLOSING" }),
+      }),
+    );
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      closeSessions: [sessionId],
+    });
+  });
+
+  it("releases leases only after a closing session disappears from heartbeats", async () => {
+    const { handleHeartbeat, prisma, service, socket } = fixture();
+    const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
+    const updatedAt = new Date("2026-08-28T01:00:00.000Z");
+    prisma.browserRuntimeSession.findMany.mockResolvedValue([
+      { id: sessionId, updatedAt },
+    ]);
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    const heartbeat = runtimeClientMessageSchema.parse({
+      activeSessions: [],
+      maxConcurrency: 4,
+      sentAt: new Date().toISOString(),
+      type: "runtime.heartbeat",
+    });
+
+    await handleHeartbeat.call(
+      service,
+      socket,
+      "6f090d88-8987-487f-8338-1a734beab6a6",
+      heartbeat,
+    );
+
+    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "CLOSED" }),
+        where: expect.objectContaining({
+          id: sessionId,
+          status: "CLOSING",
+          updatedAt,
+        }),
+      }),
+    );
+    expect(prisma.browserRuntimeSlot.deleteMany).toHaveBeenCalledWith({
+      where: { sessionId },
+    });
+    expect(prisma.browserRuntimeProfileLease.deleteMany).toHaveBeenCalledWith({
+      where: { sessionId },
     });
   });
 });

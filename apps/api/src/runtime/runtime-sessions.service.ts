@@ -432,61 +432,145 @@ export class RuntimeSessionsService {
     };
   }
 
-  async close(current: AuthContext, sessionId: string) {
-    const session = await this.ownedSession(current, sessionId);
-    if (["CLOSED", "FAILED", "LOST"].includes(session.status)) {
+  async close(
+    current: AuthContext,
+    sessionId: string,
+    options: { timeoutSeconds?: number } = {},
+  ): ReturnType<RuntimeSessionsService["detail"]> {
+    let session = await this.ownedSession(current, sessionId);
+    const timeoutSeconds =
+      options.timeoutSeconds ?? env().RUNTIME_COMMAND_TIMEOUT_SECONDS;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (["CLOSED", "FAILED", "LOST"].includes(session.status)) {
+        return this.detail(current, sessionId);
+      }
+      if (session.status === "CLOSING") {
+        return this.waitForClosingSession(current, sessionId, timeoutSeconds);
+      }
+      const claimed = await this.prisma.browserRuntimeSession.updateMany({
+        data: { status: "CLOSING" },
+        where: { id: sessionId, status: session.status },
+      });
+      if (claimed.count === 1) break;
+      const latest = await this.prisma.browserRuntimeSession.findUnique({
+        select: { status: true, userBrowserProfileId: true },
+        where: { id: sessionId },
+      });
+      if (!latest) {
+        throw new NotFoundException("Runtime session was not found.");
+      }
+      session = { ...session, ...latest };
+      if (attempt === 2) {
+        throw new ConflictException(
+          "Runtime session state changed while it was being closed.",
+        );
+      }
+    }
+    let closeError: unknown;
+    let closed: Awaited<ReturnType<RuntimeCommandDispatcher["execute"]>> = null;
+    try {
+      closed = await this.commands.execute({
+        commandType: "session.close",
+        sessionId,
+        source: "SYSTEM",
+        ...(options.timeoutSeconds === undefined
+          ? {}
+          : { timeoutSeconds: options.timeoutSeconds }),
+      });
+    } catch (error) {
+      closeError = error;
+    }
+    const closeFailure = closed?.error ?? {
+      code: "CLOSE_FAILED",
+      ...(closeError
+        ? {
+            message:
+              closeError instanceof Error
+                ? closeError.message
+                : String(closeError),
+          }
+        : {}),
+    };
+    if (closed?.status !== "SUCCEEDED") {
+      await this.prisma.browserRuntimeSession.updateMany({
+        data: {
+          humanControllerUserId: null,
+          humanControlExpiresAt: null,
+          lastError: json(closeFailure),
+        },
+        where: { id: sessionId, status: "CLOSING" },
+      });
+      await this.audit.record(
+        current,
+        "runtime.session.close_pending",
+        "browser_runtime_session",
+        sessionId,
+      );
       return this.detail(current, sessionId);
     }
-    await this.prisma.browserRuntimeSession.update({
-      data: { status: "CLOSING" },
-      where: { id: sessionId },
-    });
-    const closed = await this.commands.execute({
-      commandType: "session.close",
-      sessionId,
-      source: "SYSTEM",
-    });
     const closedAt = new Date();
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.update({
+    const finalized = await this.prisma.$transaction(async (tx) => {
+      const finalized = await tx.browserRuntimeSession.updateMany({
         data: {
           closedAt,
-          lastError:
-            closed?.status === "SUCCEEDED"
-              ? Prisma.JsonNull
-              : closed?.error
-                ? json(closed.error)
-                : json({ code: "CLOSE_FAILED" }),
-          status: closed?.status === "SUCCEEDED" ? "CLOSED" : "LOST",
+          humanControllerUserId: null,
+          humanControlExpiresAt: null,
+          lastError: Prisma.JsonNull,
+          status: "CLOSED",
         },
+        where: { id: sessionId, status: "CLOSING" },
+      });
+      if (finalized.count !== 1) return false;
+      await tx.browserRuntimeSlot.deleteMany({ where: { sessionId } });
+      await tx.browserRuntimeProfileLease.deleteMany({ where: { sessionId } });
+      if (session.userBrowserProfileId) {
+        await tx.userBrowserProfile.updateMany({
+          data: {
+            inactivityExpiresAt: new Date(
+              closedAt.getTime() + 30 * 24 * 60 * 60 * 1_000,
+            ),
+            lastUsedAt: closedAt,
+          },
+          where: { id: session.userBrowserProfileId },
+        });
+      }
+      return true;
+    });
+    if (finalized) {
+      await this.audit.record(
+        current,
+        "runtime.session.closed",
+        "browser_runtime_session",
+        sessionId,
+      );
+    }
+    return this.detail(current, sessionId);
+  }
+
+  private async waitForClosingSession(
+    current: AuthContext,
+    sessionId: string,
+    timeoutSeconds: number,
+  ): ReturnType<RuntimeSessionsService["detail"]> {
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (Date.now() < deadline) {
+      const session = await this.prisma.browserRuntimeSession.findUnique({
+        select: { status: true },
         where: { id: sessionId },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({ where: { sessionId } }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId },
-      }),
-      ...(session.userBrowserProfileId
-        ? [
-            this.prisma.userBrowserProfile.updateMany({
-              data: {
-                inactivityExpiresAt: new Date(
-                  closedAt.getTime() + 30 * 24 * 60 * 60 * 1_000,
-                ),
-                lastUsedAt: closedAt,
-              },
-              where: {
-                id: session.userBrowserProfileId,
-              },
-            }),
-          ]
-        : []),
-    ]);
-    await this.audit.record(
-      current,
-      "runtime.session.closed",
-      "browser_runtime_session",
-      sessionId,
-    );
+      });
+      if (!session) {
+        throw new NotFoundException("Runtime session was not found.");
+      }
+      if (["CLOSED", "FAILED", "LOST"].includes(session.status)) {
+        return this.detail(current, sessionId);
+      }
+      if (session.status !== "CLOSING") {
+        return this.close(current, sessionId, {
+          timeoutSeconds: Math.max(0.1, (deadline - Date.now()) / 1_000),
+        });
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
     return this.detail(current, sessionId);
   }
 
@@ -508,36 +592,63 @@ export class RuntimeSessionsService {
         },
       });
       if (claimed.count !== 1 && session.status !== "CLOSING") continue;
-      const closed = await this.commands.execute({
-        commandType: "session.close",
-        sessionId: session.id,
-        source: "SYSTEM",
-      });
+      let closeError: unknown;
+      let closed: Awaited<ReturnType<RuntimeCommandDispatcher["execute"]>> =
+        null;
+      try {
+        closed = await this.commands.execute({
+          commandType: "session.close",
+          sessionId: session.id,
+          source: "SYSTEM",
+        });
+      } catch (error) {
+        closeError = error;
+      }
+      if (closed?.status !== "SUCCEEDED") {
+        await this.prisma.browserRuntimeSession.updateMany({
+          data: {
+            humanControllerUserId: null,
+            humanControlExpiresAt: null,
+            lastError: json(
+              closed?.error ?? {
+                code: "CLOSE_FAILED",
+                ...(closeError
+                  ? {
+                      message:
+                        closeError instanceof Error
+                          ? closeError.message
+                          : String(closeError),
+                    }
+                  : {}),
+              },
+            ),
+          },
+          where: { id: session.id, status: "CLOSING" },
+        });
+        continue;
+      }
       const closedAt = new Date();
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.update({
+      const finalized = await this.prisma.$transaction(async (tx) => {
+        const finalized = await tx.browserRuntimeSession.updateMany({
           data: {
             closedAt,
             humanControllerUserId: null,
             humanControlExpiresAt: null,
-            lastError:
-              closed?.status === "SUCCEEDED"
-                ? Prisma.JsonNull
-                : closed?.error
-                  ? json(closed.error)
-                  : json({ code: "CLOSE_FAILED" }),
-            status: closed?.status === "SUCCEEDED" ? "CLOSED" : "LOST",
+            lastError: Prisma.JsonNull,
+            status: "CLOSED",
           },
-          where: { id: session.id },
-        }),
-        this.prisma.browserRuntimeSlot.deleteMany({
+          where: { id: session.id, status: "CLOSING" },
+        });
+        if (finalized.count !== 1) return false;
+        await tx.browserRuntimeSlot.deleteMany({
           where: { sessionId: session.id },
-        }),
-        this.prisma.browserRuntimeProfileLease.deleteMany({
+        });
+        await tx.browserRuntimeProfileLease.deleteMany({
           where: { sessionId: session.id },
-        }),
-      ]);
-      closedCount += 1;
+        });
+        return true;
+      });
+      if (finalized) closedCount += 1;
     }
     return closedCount;
   }

@@ -63,6 +63,7 @@ const displayLabels: Record<string, string> = {
   SPEC_CASE: "Spec Case",
   PLAYGROUND: "试验场",
   PREPARING: "准备中",
+  VERIFYING: "验证保存中",
   COMPLETED: "已完成",
   EXECUTED: "已执行",
   NOT_RUN: "未执行",

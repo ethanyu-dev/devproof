@@ -994,6 +994,7 @@ export class TaskExecutionService {
     if (!task)
       throw new NotFoundException(`Task execution ${id} was not found.`);
     if (["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle)) {
+      await this.profileResolver.releasePendingRequests(id);
       return this.detail(current, id);
     }
     const now = new Date();
@@ -1043,6 +1044,7 @@ export class TaskExecutionService {
           requestedByCredentialId: current.credential.id,
         }),
       });
+      await this.profileResolver.releasePendingRequests(id, tx);
       await enqueuePostRunAnalysis(tx, {
         taskExecutionId: task.id,
       });
@@ -1320,6 +1322,7 @@ export class TaskExecutionService {
         });
       }
       if (becameTerminal) {
+        await this.profileResolver.releasePendingRequests(task.id, tx);
         await tx.taskExecutionEvent.create({
           data: event(task.teamId, task.id, "CONTROL_PLANE", "task.completed", {
             executionDisposition: projection.executionDisposition,
@@ -2141,6 +2144,10 @@ export class TaskExecutionService {
             },
           });
           if (expired.count) {
+            await this.profileResolver.releasePendingRequests(
+              attempt.stage.taskExecutionId,
+              tx,
+            );
             await tx.taskExecutionEvent.create({
               data: event(
                 attempt.stage.taskExecution.teamId,

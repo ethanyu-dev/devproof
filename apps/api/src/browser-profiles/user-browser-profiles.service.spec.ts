@@ -70,6 +70,7 @@ describe("UserBrowserProfilesService", () => {
   });
 
   it("does not treat a same-origin login redirect as automatic verification", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ status: "SUCCEEDED" })
@@ -77,7 +78,7 @@ describe("UserBrowserProfilesService", () => {
         result: { url: "https://app.example.com/auth" },
       });
     const profiles = new UserBrowserProfilesService(
-      { userBrowserProfile: { update: vi.fn() } } as never,
+      { userBrowserProfile: { updateMany } } as never,
       {} as never,
       { execute } as never,
       {} as never,
@@ -93,6 +94,7 @@ describe("UserBrowserProfilesService", () => {
           status: "ACTIVE",
         },
       ],
+      status: "PREPARING",
       verificationRules: {
         loginUrlPatterns: ["*/login*", "*/signin*"],
         provisionedBy: "TASK_TARGET",
@@ -100,6 +102,7 @@ describe("UserBrowserProfilesService", () => {
         successUrlPatterns: ["https://app.example.com/*"],
       },
       verificationUrl: "https://app.example.com/",
+      version: 3,
     } as never);
 
     await expect(
@@ -122,6 +125,454 @@ describe("UserBrowserProfilesService", () => {
       expect.anything(),
       "session-1",
       expect.objectContaining({ commandType: "page.navigate" }),
+    );
+    expect(updateMany).toHaveBeenNthCalledWith(1, {
+      data: {
+        status: "VERIFYING",
+        verificationError: expect.anything(),
+        version: { increment: 1 },
+      },
+      where: { id: "profile-1", status: "PREPARING", version: 3 },
+    });
+  });
+
+  it("does not mark a Profile ready when Runtime close cannot confirm persistence", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const transaction = vi.fn();
+    const profiles = new UserBrowserProfilesService(
+      {
+        $transaction: transaction,
+        userBrowserProfile: { updateMany },
+      } as never,
+      {} as never,
+      {
+        close: vi.fn().mockResolvedValue({ status: "LOST" }),
+        execute: vi.fn().mockResolvedValue({
+          result: { url: "https://app.example.com/dashboard" },
+        }),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeSessions: [
+        {
+          id: "session-1",
+          purpose: "PROFILE_PREPARATION",
+          status: "ACTIVE",
+        },
+      ],
+      status: "PREPARING",
+      verificationRules: {
+        successUrlPatterns: ["https://app.example.com/*"],
+      },
+      verificationUrl: "https://app.example.com/login",
+      version: 2,
+    } as never);
+
+    await expect(
+      profiles.verify(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("disconnected before the profile could be saved");
+    expect(transaction).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "REAUTH_REQUIRED" }),
+        where: { id: "profile-1", status: "VERIFYING", version: 3 },
+      }),
+    );
+  });
+
+  it("rejects duplicate verification while a save is already running", async () => {
+    const profiles = service({});
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeSessions: [{ id: "session-1", status: "HUMAN_CONTROL" }],
+      status: "VERIFYING",
+    } as never);
+
+    await expect(
+      profiles.verify(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("already in progress");
+  });
+
+  it("closes a preparation without saving a new login state", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const sessions = { close: vi.fn().mockResolvedValue({ status: "CLOSED" }) };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { updateMany } } as never,
+      {} as never,
+      sessions as never,
+      {} as never,
+      {} as never,
+      audit as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never)
+      .mockResolvedValueOnce({
+        grants: [],
+        id: "profile-1",
+        lastVerifiedAt: null,
+        runtimeSessions: [{ id: "session-1", status: "HUMAN_CONTROL" }],
+        status: "VERIFYING",
+        verificationRules: {},
+        verificationUrl: "https://app.example.com/",
+        version: 8,
+      } as never)
+      .mockResolvedValueOnce({
+        grants: [],
+        id: "profile-1",
+        lastVerifiedAt: null,
+        runtimeSessions: [],
+        status: "UNINITIALIZED",
+        verificationRules: {},
+        verificationUrl: "https://app.example.com/",
+        version: 10,
+      } as never);
+
+    await profiles.closePreparation(
+      {
+        sessionId: "session-cookie",
+        team: { id: "team-1", name: "Team", slug: "team" },
+        user: {
+          avatarUrl: null,
+          email: "user@example.com",
+          id: "user-1",
+          name: "User",
+        },
+      },
+      "profile-1",
+    );
+
+    expect(updateMany).toHaveBeenNthCalledWith(1, {
+      data: {
+        status: "VERIFYING",
+        verificationError: expect.anything(),
+        version: { increment: 1 },
+      },
+      where: { id: "profile-1", status: "VERIFYING", version: 8 },
+    });
+    expect(updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "UNINITIALIZED" }),
+        where: { id: "profile-1", status: "VERIFYING", version: 9 },
+      }),
+    );
+    expect(sessions.close).toHaveBeenCalledWith(
+      expect.anything(),
+      "session-1",
+      { timeoutSeconds: 15 },
+    );
+  });
+
+  it("marks a preparation lost when Runtime cannot confirm close", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { updateMany } } as never,
+      {} as never,
+      { close: vi.fn().mockResolvedValue({ status: "LOST" }) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      lastVerifiedAt: null,
+      runtimeSessions: [{ id: "session-1", status: "HUMAN_CONTROL" }],
+      status: "PREPARING",
+      version: 2,
+    } as never);
+
+    await expect(
+      profiles.closePreparation(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("could be confirmed closed");
+    expect(updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "LOST" }),
+        where: { id: "profile-1", status: "VERIFYING", version: 3 },
+      }),
+    );
+  });
+
+  it("recovers a verifying Profile after its Runtime session disappeared", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const sessions = { close: vi.fn() };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { updateMany } } as never,
+      {} as never,
+      sessions as never,
+      {} as never,
+      {} as never,
+      audit as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never)
+      .mockResolvedValueOnce({
+        grants: [],
+        id: "profile-1",
+        lastVerifiedAt: new Date(),
+        runtimeSessions: [],
+        status: "VERIFYING",
+        verificationRules: {},
+        version: 4,
+      } as never)
+      .mockResolvedValueOnce({
+        grants: [],
+        id: "profile-1",
+        lastVerifiedAt: new Date(),
+        runtimeSessions: [],
+        status: "REAUTH_REQUIRED",
+        verificationRules: {},
+        version: 5,
+      } as never);
+
+    await profiles.closePreparation(
+      {
+        sessionId: "session-cookie",
+        team: { id: "team-1", name: "Team", slug: "team" },
+        user: {
+          avatarUrl: null,
+          email: "user@example.com",
+          id: "user-1",
+          name: "User",
+        },
+      },
+      "profile-1",
+    );
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "REAUTH_REQUIRED" }),
+        where: { id: "profile-1", status: "VERIFYING", version: 4 },
+      }),
+    );
+    expect(sessions.close).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.anything(),
+      "browser_profile.preparation_closed",
+      "user_browser_profile",
+      "profile-1",
+      { sessionId: null },
+    );
+  });
+
+  it("recovers a preparing Profile after its Runtime session disappeared", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const profiles = new UserBrowserProfilesService(
+      { userBrowserProfile: { updateMany } } as never,
+      {} as never,
+      { close: vi.fn() } as never,
+      {} as never,
+      {} as never,
+      { record: vi.fn().mockResolvedValue(undefined) } as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never)
+      .mockResolvedValueOnce({
+        id: "profile-1",
+        lastVerifiedAt: null,
+        runtimeSessions: [],
+        status: "PREPARING",
+        version: 6,
+      } as never)
+      .mockResolvedValueOnce({
+        grants: [],
+        id: "profile-1",
+        lastVerifiedAt: null,
+        runtimeSessions: [],
+        status: "UNINITIALIZED",
+        verificationRules: {},
+        version: 7,
+      } as never);
+
+    await profiles.closePreparation(
+      {
+        sessionId: "session-cookie",
+        team: { id: "team-1", name: "Team", slug: "team" },
+        user: {
+          avatarUrl: null,
+          email: "user@example.com",
+          id: "user-1",
+          name: "User",
+        },
+      },
+      "profile-1",
+    );
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "UNINITIALIZED" }),
+        where: { id: "profile-1", status: "PREPARING", version: 6 },
+      }),
+    );
+  });
+
+  it("does not let close revive a terminal Profile state", async () => {
+    const updateMany = vi.fn();
+    const profiles = service({ userBrowserProfile: { updateMany } });
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeSessions: [],
+      status: "DISABLED",
+      version: 9,
+    } as never);
+
+    await expect(
+      profiles.closePreparation(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("does not have a preparation");
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("removes an unused pending task source without changing other rules", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const profiles = service({
+      taskProfileBinding: { findFirst: vi.fn().mockResolvedValue(null) },
+      userBrowserProfile: {
+        findUnique: vi.fn().mockResolvedValue({
+          verificationRules: {
+            provisionedBy: "TASK_TARGET",
+            requestedTriggerSources: ["CONSOLE", "FEISHU"],
+          },
+          verificationRulesVersion: 6,
+        }),
+        updateMany,
+      },
+    });
+
+    await expect(
+      profiles.releasePendingTaskRequest({
+        profileId: "profile-1",
+        triggerSource: "CONSOLE",
+      }),
+    ).resolves.toBe(true);
+    expect(updateMany).toHaveBeenCalledWith({
+      data: {
+        verificationRules: {
+          provisionedBy: "TASK_TARGET",
+          requestedTriggerSources: ["FEISHU"],
+        },
+        verificationRulesVersion: { increment: 1 },
+      },
+      where: { id: "profile-1", verificationRulesVersion: 6 },
+    });
+  });
+
+  it("restores a pending source after the task binding has been persisted", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const profiles = service({
+      taskProfileBinding: {
+        findFirst: vi.fn().mockResolvedValue({ id: "binding-1" }),
+      },
+      userBrowserProfile: {
+        findUnique: vi.fn().mockResolvedValue({
+          grants: [],
+          verificationRules: { provisionedBy: "TASK_TARGET" },
+          verificationRulesVersion: 2,
+        }),
+        updateMany,
+      },
+    });
+
+    await expect(
+      profiles.ensurePendingTaskRequest({
+        profileId: "profile-secondary",
+        triggerSource: "FEISHU",
+      }),
+    ).resolves.toBe(true);
+    expect(updateMany).toHaveBeenCalledWith({
+      data: {
+        verificationRules: {
+          provisionedBy: "TASK_TARGET",
+          requestedTriggerSources: ["FEISHU"],
+        },
+        verificationRulesVersion: { increment: 1 },
+      },
+      where: {
+        id: "profile-secondary",
+        verificationRulesVersion: 2,
+      },
+    });
+  });
+
+  it("keeps a pending source while another active task still requests it", async () => {
+    const updateMany = vi.fn();
+    const findFirst = vi.fn().mockResolvedValue({ id: "binding-2" });
+    const profiles = service({
+      taskProfileBinding: { findFirst },
+      userBrowserProfile: { updateMany },
+    });
+
+    await expect(
+      profiles.releasePendingTaskRequest({
+        profileId: "profile-1",
+        triggerSource: "FEISHU",
+      }),
+    ).resolves.toBe(false);
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { requestedProfileId: "profile-1" },
+            {
+              externalIdentitySnapshot: {
+                array_contains: [{ profileId: "profile-1" }],
+                path: ["pendingProfiles"],
+              },
+            },
+          ]),
+        }),
+      }),
     );
   });
 
@@ -217,7 +668,7 @@ describe("UserBrowserProfilesService", () => {
       grants: [],
       id: "profile-1",
       runtimeSessions: [],
-      status: "READY",
+      status: "UNINITIALIZED",
       verificationUrl: "https://app.example.com/login",
       version: 7,
     } as never);
@@ -249,10 +700,43 @@ describe("UserBrowserProfilesService", () => {
         verificationError: expect.anything(),
         version: { increment: 1 },
       },
-      where: { id: "profile-1", status: "READY", version: 7 },
+      where: { id: "profile-1", status: "UNINITIALIZED", version: 7 },
     });
     expect(sessions.create).not.toHaveBeenCalled();
     expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a new preparation while the previous session is closing", async () => {
+    const profiles = service({});
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeSessions: [
+        {
+          id: "session-1",
+          purpose: "PROFILE_PREPARATION",
+          status: "CLOSING",
+        },
+      ],
+      status: "REAUTH_REQUIRED",
+      verificationUrl: "https://app.example.com/login",
+    } as never);
+
+    await expect(
+      profiles.prepare(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+        { ttlSeconds: 300 },
+      ),
+    ).rejects.toThrow("still closing");
   });
 
   it.each(["ACTIVE", "HUMAN_CONTROL"] as const)(
@@ -303,6 +787,7 @@ describe("UserBrowserProfilesService", () => {
           url: "https://app.example.com/login",
           waitUntil: "domcontentloaded",
         },
+        timeoutSeconds: 15,
       });
       if (status === "ACTIVE") {
         expect(takeover).toHaveBeenCalledOnce();
@@ -405,6 +890,7 @@ describe("UserBrowserProfilesService", () => {
       runtimeSessions: [
         { id: "execution-session", purpose: "EXECUTION", status: "ACTIVE" },
       ],
+      status: "PREPARING",
       verificationRules: {},
       verificationUrl: "https://app.example.com/",
     } as never);
@@ -638,6 +1124,61 @@ describe("UserBrowserProfilesService", () => {
       "browser_profile.deleted",
       "user_browser_profile",
       "profile-1",
+    );
+  });
+
+  it("does not purge a Profile when Runtime close was not confirmed", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const browser = { purgeProfile: vi.fn() };
+    const profiles = new UserBrowserProfilesService(
+      {
+        browserRuntimeSession: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              humanControllerUserId: null,
+              id: "session-1",
+              status: "ACTIVE",
+            },
+          ]),
+        },
+        executionRun: { count: vi.fn().mockResolvedValue(0) },
+        userBrowserProfile: { updateMany },
+      } as never,
+      {} as never,
+      { close: vi.fn().mockResolvedValue({ status: "LOST" }) } as never,
+      {} as never,
+      browser as never,
+      {} as never,
+    );
+    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+      id: "profile-1",
+      runtimeProfileKey: "opaque-profile-key",
+      status: "READY",
+      verificationError: null,
+      version: 4,
+    } as never);
+
+    await expect(
+      profiles.remove(
+        {
+          sessionId: "session-cookie",
+          team: { id: "team-1", name: "Team", slug: "team" },
+          user: {
+            avatarUrl: null,
+            email: "user@example.com",
+            id: "user-1",
+            name: "User",
+          },
+        },
+        "profile-1",
+      ),
+    ).rejects.toThrow("confirmed closed");
+    expect(browser.purgeProfile).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "READY" }),
+        where: { id: "profile-1", status: "DISABLED", version: 5 },
+      }),
     );
   });
 
