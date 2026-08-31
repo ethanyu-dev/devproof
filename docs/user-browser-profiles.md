@@ -93,4 +93,4 @@ The 30-day threshold is fixed. Runtime hosts must use reliable clock synchroniza
 
 ## Upgrade checks
 
-After an API and Browser Runtime upgrade, verify protocol v1.10 negotiation, Profile preparation, cross-origin SSO, global network policy, restart recovery, FIFO exclusion, manual deletion, and simulated inactivity cleanup. Older Runtimes may continue compatible ephemeral work but must not receive tasks requiring unsupported Profile capabilities.
+After an API and Browser Runtime upgrade, verify protocol v1.11 negotiation, Profile preparation, cross-origin SSO, global network policy, restart recovery, FIFO exclusion, manual deletion, and simulated inactivity cleanup. Older Runtimes may continue compatible ephemeral work but must not receive tasks requiring unsupported Profile capabilities.

@@ -63,11 +63,14 @@ function fixture() {
   return { handleHeartbeat, handleHello, hub, prisma, service, socket };
 }
 
-function hello(version?: string) {
+function hello(
+  version?: string,
+  protocolMinor: number = RUNTIME_PROTOCOL.minor,
+) {
   return runtimeClientMessageSchema.parse({
     activeSessions: [],
     instanceNonce: "instance-nonce-123456",
-    protocol: RUNTIME_PROTOCOL,
+    protocol: { ...RUNTIME_PROTOCOL, minor: protocolMinor },
     runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
     runtimeToken: "a".repeat(32),
     sentAt: new Date().toISOString(),
@@ -107,7 +110,26 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
     const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
     expect(accepted).toMatchObject({
       networkAllowlist: ["test-console.paigod.work"],
-      protocol: { minor: 10 },
+      protocol: { minor: 11 },
+      type: "runtime.hello.accepted",
+    });
+  });
+
+  it("negotiates protocol v1.10 with Browser Runtime 0.2.14", async () => {
+    const { handleHello, prisma, service, socket } = fixture();
+
+    await handleHello.call(service, socket, hello("0.2.14", 10));
+
+    expect(prisma.browserRuntime.update).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        protocolMinor: 10,
+        version: "0.2.14",
+      }),
+      where: { id: "6f090d88-8987-487f-8338-1a734beab6a6" },
+    });
+    const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
+    expect(accepted).toMatchObject({
+      protocol: { major: 1, minor: 10 },
       type: "runtime.hello.accepted",
     });
   });
@@ -142,7 +164,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
   it("excludes sessions with a close timestamp from reconnect reconciliation", async () => {
     const { handleHello, prisma, service, socket } = fixture();
 
-    await handleHello.call(service, socket, hello("0.2.14"));
+    await handleHello.call(service, socket, hello("0.2.15"));
 
     expect(prisma.browserRuntimeSession.findMany).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -58,6 +58,8 @@ Runtime capacity and the exact private-network host allowlist are managed per re
 
 Browser Runtime protocol v1.10 captures a screenshot after each successful navigation or interaction and composes the frames into a WebM action video when a Session closes. Screenshots and video are returned as Runtime Artifacts; API uploads them to the configured S3-compatible object store.
 
+Protocol v1.11 adds structured locator recovery diagnostics. When a selector matches multiple elements, Runtime automatically accepts a unique visible candidate; otherwise it returns bounded candidate details and instructs the Agent to resnapshot and retarget without guessing.
+
 Protocol v1.7 also supports open Shadow DOM capture and bounded, recursively redacted same-origin JSON response bodies when network evidence is narrowed by `urlIncludes`.
 
 See [`docs/runtime-protocol.md`](../../docs/runtime-protocol.md) for compatibility rules and [`packages/runtime-protocol/README.md`](../../packages/runtime-protocol/README.md) for the canonical protocol changelog.
