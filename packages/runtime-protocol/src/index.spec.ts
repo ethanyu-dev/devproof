@@ -64,6 +64,44 @@ describe("Runtime protocol", () => {
     expect(result.artifacts[0]?.kind).toBe("VIDEO");
   });
 
+  it("accepts structured locator recovery diagnostics", () => {
+    const result = runtimeClientMessageSchema.parse({
+      artifacts: [],
+      commandId: "4a73bdf6-a1ad-4f78-af39-78e686539314",
+      error: {
+        code: "LOCATOR_AMBIGUOUS",
+        details: {
+          candidates: [
+            {
+              href: "https://example.com/solution/ai",
+              index: 0,
+              name: "人工智能解决方案",
+              ref: "e42",
+              visible: true,
+            },
+          ],
+          count: 2,
+        },
+        message: "Locator matched 2 elements.",
+        recoveryAction: "RESNAPSHOT_AND_RETARGET",
+        retryable: false,
+      },
+      fencingToken: "7",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      ok: false,
+      sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+      type: "command.result",
+    });
+
+    expect(result).toMatchObject({
+      error: {
+        code: "LOCATOR_AMBIGUOUS",
+        recoveryAction: "RESNAPSHOT_AND_RETARGET",
+      },
+      ok: false,
+    });
+  });
+
   it("accepts a Runtime package version without requiring it from legacy clients", () => {
     const result = runtimeClientMessageSchema.parse({
       activeSessions: [],

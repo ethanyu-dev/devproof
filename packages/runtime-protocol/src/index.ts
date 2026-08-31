@@ -171,9 +171,12 @@ export const runtimeCommandResultSchema = z.object({
   error: z
     .object({
       code: z.string().min(1).max(80),
+      details: z.record(z.string(), z.unknown()).optional(),
       message: z.string().min(1).max(2000),
+      recoveryAction: z.enum(["RESNAPSHOT_AND_RETARGET"]).optional(),
       retryable: z.boolean().default(false),
     })
+    .strict()
     .optional(),
   fencingToken: z.string().regex(/^\d+$/u),
   leaseToken: z.string().uuid(),

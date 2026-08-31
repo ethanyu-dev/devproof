@@ -243,8 +243,40 @@ function runtimeLog(
 type RuntimeLocator =
   { ref: string } | { frameSelector?: string | undefined; selector: string };
 
-function codedError(code: string, message: string, retryable = false) {
-  return Object.assign(new Error(message), { code, retryable });
+type RuntimeRecoveryAction = "RESNAPSHOT_AND_RETARGET";
+
+interface LocatorCandidateDiagnostic {
+  enabled: boolean;
+  href: string | null;
+  id: string | null;
+  index: number;
+  landmark: string | null;
+  name: string;
+  parent: string | null;
+  ref: string | null;
+  role: string | null;
+  tag: string;
+  testId: string | null;
+  visible: boolean;
+}
+
+function codedError(
+  code: string,
+  message: string,
+  retryable = false,
+  diagnostics?: {
+    details?: Record<string, unknown>;
+    recoveryAction?: RuntimeRecoveryAction;
+  },
+) {
+  return Object.assign(new Error(message), {
+    code,
+    ...(diagnostics?.details ? { details: diagnostics.details } : {}),
+    ...(diagnostics?.recoveryAction
+      ? { recoveryAction: diagnostics.recoveryAction }
+      : {}),
+    retryable,
+  });
 }
 
 export async function purgePersistentProfileDirectory(
@@ -728,11 +760,18 @@ function classifyCommandError(
   commandType: RuntimeCommandType,
   cancelled: boolean,
 ) {
-  const typed = error as Error & { code?: string; retryable?: boolean };
+  const typed = error as Error & {
+    code?: string;
+    details?: Record<string, unknown>;
+    recoveryAction?: RuntimeRecoveryAction;
+    retryable?: boolean;
+  };
   if (typed.code) {
     return {
       code: typed.code,
+      ...(typed.details ? { details: typed.details } : {}),
       message: typed.message,
+      ...(typed.recoveryAction ? { recoveryAction: typed.recoveryAction } : {}),
       retryable: typed.retryable ?? false,
     };
   }
@@ -1211,7 +1250,7 @@ export class BrowserSessionManager {
         };
       }
       case "page.snapshot": {
-        const locator = parsed.payload.target
+        let locator = parsed.payload.target
           ? this.locator(session, parsed.payload.target)
           : session.page.locator("body").first();
         if (parsed.payload.target) {
@@ -1224,9 +1263,11 @@ export class BrowserSessionManager {
             );
           }
           if (count > 1) {
-            throw codedError(
-              "LOCATOR_AMBIGUOUS",
-              `Snapshot target matched ${count} elements; use a more precise selector.`,
+            locator = await this.uniqueVisibleLocatorOrThrow(
+              session,
+              locator,
+              count,
+              "Snapshot target",
             );
           }
         }
@@ -2283,7 +2324,7 @@ export class BrowserSessionManager {
     timeout: number,
     scope?: Page | FrameLocator,
   ): Promise<Locator> {
-    const locator = this.locator(session, target, scope);
+    let locator = this.locator(session, target, scope);
     try {
       await locator.first().waitFor({ state: "attached", timeout });
     } catch {
@@ -2291,9 +2332,11 @@ export class BrowserSessionManager {
     }
     const count = await locator.count();
     if (count > 1) {
-      throw codedError(
-        "LOCATOR_AMBIGUOUS",
-        `Locator matched ${count} elements; use an accessibility ref or a more precise selector.`,
+      locator = await this.uniqueVisibleLocatorOrThrow(
+        session,
+        locator,
+        count,
+        "Locator",
       );
     }
     try {
@@ -2302,6 +2345,139 @@ export class BrowserSessionManager {
       throw codedError("ELEMENT_NOT_VISIBLE", "Element is not visible.", true);
     }
     return locator;
+  }
+
+  private async uniqueVisibleLocatorOrThrow(
+    session: LiveSession,
+    locator: Locator,
+    count: number,
+    label: string,
+  ): Promise<Locator> {
+    const candidates = await this.locatorCandidateDiagnostics(
+      session,
+      locator,
+      count,
+    );
+    const visibleLocator = locator.filter({ visible: true });
+    const visibleCount = await visibleLocator.count();
+    if (visibleCount === 1) return visibleLocator;
+    throw codedError(
+      "LOCATOR_AMBIGUOUS",
+      `${label} matched ${count} elements; resnapshot and retarget with an accessibility ref or a more precise selector.`,
+      false,
+      {
+        details: {
+          candidates,
+          count,
+          returnedCandidates: candidates.length,
+          truncated: candidates.length < count,
+          visibleCount,
+        },
+        recoveryAction: "RESNAPSHOT_AND_RETARGET",
+      },
+    );
+  }
+
+  private async locatorCandidateDiagnostics(
+    session: LiveSession,
+    locator: Locator,
+    count: number,
+  ): Promise<LocatorCandidateDiagnostic[]> {
+    const candidates: LocatorCandidateDiagnostic[] = [];
+    for (let index = 0; index < Math.min(count, 5); index += 1) {
+      const candidate = locator.nth(index);
+      const [dom, enabled, visible] = await Promise.all([
+        candidate
+          .evaluate((element) => {
+            const describe = (value: Element | null) => {
+              if (!value) return null;
+              const id = value.getAttribute("id");
+              const role = value.getAttribute("role");
+              const testId =
+                value.getAttribute("data-testid") ??
+                value.getAttribute("data-test-id");
+              return [
+                value.tagName.toLowerCase(),
+                id ? `#${id}` : "",
+                role ? `[role=${role}]` : "",
+                testId ? `[data-testid=${testId}]` : "",
+              ].join("");
+            };
+            const tag = element.tagName.toLowerCase();
+            const role =
+              element.getAttribute("role") ??
+              (tag === "a" && element.hasAttribute("href")
+                ? "link"
+                : tag === "button"
+                  ? "button"
+                  : tag === "input"
+                    ? "textbox"
+                    : null);
+            const landmark = element.closest(
+              'main,nav,header,footer,aside,[role="main"],[role="navigation"],[role="banner"],[role="contentinfo"],[role="complementary"]',
+            );
+            return {
+              href: element.getAttribute("href"),
+              id: element.getAttribute("id"),
+              landmark: describe(landmark),
+              name:
+                element.getAttribute("aria-label") ?? element.textContent ?? "",
+              parent: describe(element.parentElement),
+              role,
+              tag,
+              testId:
+                element.getAttribute("data-testid") ??
+                element.getAttribute("data-test-id"),
+            };
+          })
+          .catch(() => ({
+            href: null,
+            id: null,
+            landmark: null,
+            name: "",
+            parent: null,
+            role: null,
+            tag: "unknown",
+            testId: null,
+          })),
+        candidate.isEnabled().catch(() => false),
+        candidate.isVisible().catch(() => false),
+      ]);
+      let href: string | null = null;
+      if (dom.href) {
+        try {
+          href = safeObservedUrl(
+            new URL(dom.href, session.page.url()).toString(),
+          );
+        } catch {
+          href = boundedUtf8Text(redactText(dom.href), 1_000);
+        }
+      }
+      candidates.push({
+        enabled,
+        href,
+        id: dom.id ? boundedUtf8Text(redactText(dom.id), 240) : null,
+        index,
+        landmark: dom.landmark
+          ? boundedUtf8Text(redactText(dom.landmark), 500)
+          : null,
+        name: boundedUtf8Text(redactText(dom.name.trim()), 500),
+        parent: dom.parent
+          ? boundedUtf8Text(redactText(dom.parent), 500)
+          : null,
+        // Accessibility refs are generation-scoped. Per-candidate snapshots
+        // would invalidate earlier refs, so only the single recovery snapshot
+        // returned by the Agent executor should supply actionable refs.
+        ref: null,
+        role: dom.role,
+        tag: dom.tag,
+        testId: dom.testId
+          ? boundedUtf8Text(redactText(dom.testId), 240)
+          : null,
+        visible,
+      });
+    }
+    return candidates;
   }
 
   private async captureStepArtifact(
