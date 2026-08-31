@@ -10,6 +10,7 @@ describe("UnifiedRunCleanupWorker deadline races", () => {
       agentRuntimeTask: { updateMany: vi.fn() },
       executionRun: { updateMany: executionRunUpdateMany },
       humanIntervention: { updateMany: interventionUpdateMany },
+      notificationOutbox: { create: vi.fn() },
       runAttempt: { updateMany: vi.fn() },
       runEvent: { create: vi.fn() },
     };
@@ -59,6 +60,7 @@ describe("UnifiedRunCleanupWorker deadline races", () => {
       agentRuntimeTask: { updateMany: vi.fn() },
       executionRun: { updateMany: executionRunUpdateMany },
       humanIntervention: { updateMany: vi.fn() },
+      notificationOutbox: { create: vi.fn() },
       runAttempt: { updateMany: vi.fn() },
       runEvent: { create: vi.fn() },
     };
@@ -91,5 +93,61 @@ describe("UnifiedRunCleanupWorker deadline races", () => {
       }),
     );
     expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("queues a Feishu card update when a human intervention expires", async () => {
+    const tx = {
+      agentRuntimeTask: { updateMany: vi.fn() },
+      executionRun: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      humanIntervention: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      notificationOutbox: { create: vi.fn() },
+      runAttempt: { updateMany: vi.fn() },
+      runEvent: { create: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn((callback) => callback(tx)),
+      browserExecution: { findMany: vi.fn().mockResolvedValue([]) },
+      executionRun: { findMany: vi.fn().mockResolvedValue([]) },
+      humanIntervention: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            attemptId: "attempt-1",
+            id: "intervention-1",
+            run: {
+              executionPolicy: {
+                hitl: {
+                  enabled: true,
+                  notificationChannels: ["FEISHU"],
+                  onTimeout: "INCONCLUSIVE",
+                  timeoutSeconds: 3_600,
+                },
+              },
+              startedAt: new Date(),
+            },
+            runId: "run-1",
+            taskId: "task-1",
+            teamId: "team-1",
+          },
+        ]),
+      },
+    };
+    const worker = new UnifiedRunCleanupWorker(
+      prisma as never,
+      { releaseForExecutionRun: vi.fn() } as never,
+    );
+
+    await worker.tick();
+
+    expect(tx.notificationOutbox.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        channel: "FEISHU",
+        eventType: "hitl.expired",
+        payload: expect.objectContaining({
+          notificationKind: "HITL_EXPIRED",
+        }),
+      }),
+    });
   });
 });

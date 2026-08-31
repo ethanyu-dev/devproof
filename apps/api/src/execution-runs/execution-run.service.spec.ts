@@ -221,6 +221,49 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
+  it("queues an update for the original Feishu card after human completion", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({
+        run: {
+          deadlineAt: new Date(snapshot.deadlineAt),
+          executionPolicy: {
+            ...snapshot.executionPolicy,
+            hitl: {
+              ...snapshot.executionPolicy.hitl,
+              notificationChannels: ["FEISHU"],
+            },
+          },
+          hardDeadlineAt: new Date(snapshot.deadlineAt),
+          lifecycle: "WAITING_HUMAN",
+        },
+      }),
+    );
+    const prisma = {
+      $transaction: vi.fn((callback) => callback(tx)),
+      executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { approved: true },
+    });
+
+    expect(tx.notificationOutbox.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        channel: "FEISHU",
+        dedupeKey: `run:${runId}:intervention:${interventionId}:resolved:feishu`,
+        eventType: "hitl.resolved",
+        executionRunId: runId,
+        interventionId,
+        payload: expect.objectContaining({
+          notificationKind: "HITL_RESOLVED",
+          resumeStatus: "QUEUED",
+        }),
+      }),
+    });
+  });
+
   it("refunds paused execution time without crossing the hard deadline", async () => {
     const tx = transactionClient();
     const beforeResolve = Date.now();
