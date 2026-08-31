@@ -767,6 +767,7 @@ export class AgentRuntimeTaskService {
                   expiresAt: expiresAt.toISOString(),
                   goal: task.run.goal,
                   interventionId: intervention.id,
+                  notificationKind: "HITL_REQUESTED",
                   prompt: intervention.prompt,
                   runId: task.runId,
                   runKind: "EXECUTION_RUN",

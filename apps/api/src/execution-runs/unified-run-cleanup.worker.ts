@@ -176,6 +176,26 @@ export class UnifiedRunCleanupWorker implements OnModuleInit, OnModuleDestroy {
             teamId: intervention.teamId,
           },
         });
+        if (policy.notificationChannels.includes("FEISHU")) {
+          await tx.notificationOutbox.create({
+            data: {
+              channel: "FEISHU",
+              dedupeKey: `run:${intervention.runId}:intervention:${intervention.id}:expired:feishu`,
+              eventType: "hitl.expired",
+              executionRunId: intervention.runId,
+              interventionId: intervention.id,
+              payload: json({
+                expiredAt: now.toISOString(),
+                interventionId: intervention.id,
+                notificationKind: "HITL_EXPIRED",
+                onTimeout: policy.onTimeout,
+                runId: intervention.runId,
+                runKind: "EXECUTION_RUN",
+              }),
+              teamId: intervention.teamId,
+            },
+          });
+        }
       });
     }
   }

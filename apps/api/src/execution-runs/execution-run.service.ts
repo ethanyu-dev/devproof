@@ -868,6 +868,26 @@ export class ExecutionRunService {
         });
       }
       const hitlPolicy = runHitlPolicySchema.parse(policyValue.hitl ?? {});
+      if (hitlPolicy.notificationChannels.includes("FEISHU")) {
+        await tx.notificationOutbox.create({
+          data: {
+            channel: "FEISHU",
+            dedupeKey: `run:${runId}:intervention:${interventionId}:resolved:feishu`,
+            eventType: "hitl.resolved",
+            executionRunId: runId,
+            interventionId,
+            payload: json({
+              interventionId,
+              notificationKind: "HITL_RESOLVED",
+              resolvedAt: now.toISOString(),
+              resumeStatus: "QUEUED",
+              runId,
+              runKind: "EXECUTION_RUN",
+            }),
+            teamId: current.team.id,
+          },
+        });
+      }
       if (hitlPolicy.notificationChannels.includes("AGENT_WEBHOOK")) {
         await tx.notificationOutbox.create({
           data: {
