@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 10,
+  minor: 11,
   name: "devproof-browser-runtime",
 } as const;
 export const USER_PROFILE_INACTIVITY_TTL_SECONDS = 30 * 24 * 60 * 60;

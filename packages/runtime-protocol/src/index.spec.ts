@@ -56,7 +56,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(10);
+    expect(RUNTIME_PROTOCOL.minor).toBe(11);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");
@@ -97,6 +97,31 @@ describe("Runtime protocol", () => {
       error: {
         code: "LOCATOR_AMBIGUOUS",
         recoveryAction: "RESNAPSHOT_AND_RETARGET",
+      },
+      ok: false,
+    });
+  });
+
+  it("accepts locator ambiguity errors from protocol v1.10 Runtimes", () => {
+    const result = runtimeClientMessageSchema.parse({
+      artifacts: [],
+      commandId: "4a73bdf6-a1ad-4f78-af39-78e686539314",
+      error: {
+        code: "LOCATOR_AMBIGUOUS",
+        message: "Locator matched 2 elements.",
+        retryable: false,
+      },
+      fencingToken: "7",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      ok: false,
+      sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+      type: "command.result",
+    });
+
+    expect(result).toMatchObject({
+      error: {
+        code: "LOCATOR_AMBIGUOUS",
+        retryable: false,
       },
       ok: false,
     });
