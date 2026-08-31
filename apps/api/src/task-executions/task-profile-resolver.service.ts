@@ -111,6 +111,11 @@ export class TaskProfileResolverService {
         "This task does not support profile selection.",
       );
     }
+    const previousRequestedProfileIds = requestedProfileIds(
+      task.profileBinding.requestedProfileId,
+      task.profileBinding.externalIdentitySnapshot,
+    );
+    const previousTriggerSource = task.profileBinding.triggerSource;
     const now = new Date();
     const refreshedDeadlineAt = refreshedTaskDeadline(task.inputSnapshot, now);
     await this.prisma.$transaction(async (tx) => {
@@ -138,6 +143,14 @@ export class TaskProfileResolverService {
         },
         where: { id: task.profileBinding!.id },
       });
+      if (previousTriggerSource) {
+        for (const profileId of previousRequestedProfileIds) {
+          await this.profiles.releasePendingTaskRequest(
+            { profileId, triggerSource: previousTriggerSource },
+            tx,
+          );
+        }
+      }
       await tx.taskExecution.update({
         data: {
           currentStage: "PROFILE_RESOLUTION",
@@ -179,6 +192,34 @@ export class TaskProfileResolverService {
       });
     });
     return this.resolve(task.id);
+  }
+
+  async releasePendingRequests(
+    taskExecutionId: string,
+    tx?: Prisma.TransactionClient,
+  ) {
+    const database = tx ?? this.prisma;
+    const binding = await database.taskProfileBinding.findUnique({
+      select: {
+        externalIdentitySnapshot: true,
+        requestedProfileId: true,
+        triggerSource: true,
+      },
+      where: { taskExecutionId },
+    });
+    if (!binding?.triggerSource) return 0;
+    let released = 0;
+    for (const profileId of requestedProfileIds(
+      binding.requestedProfileId,
+      binding.externalIdentitySnapshot,
+    )) {
+      const removed = await this.profiles.releasePendingTaskRequest(
+        { profileId, triggerSource: binding.triggerSource },
+        tx,
+      );
+      if (removed) released += 1;
+    }
+    return released;
   }
 
   async reconcile(limit = 25) {
@@ -470,7 +511,7 @@ export class TaskProfileResolverService {
       const allReady = pendingProfiles.every(
         (item) => item.profile?.status === "READY",
       );
-      return this.unavailable(
+      const resolution = await this.unavailable(
         task,
         policy,
         firstPending
@@ -504,6 +545,18 @@ export class TaskProfileResolverService {
             }
           : { ownerUserId: owner.userId },
       );
+      const pendingProfileIds = new Set(
+        pendingProfiles.flatMap((item) =>
+          item.profile ? [item.profile.id] : [],
+        ),
+      );
+      for (const profileId of pendingProfileIds) {
+        await this.profiles.ensurePendingTaskRequest({
+          profileId,
+          triggerSource,
+        });
+      }
+      return resolution;
     }
     const primaryProfileId =
       deploymentProfiles[0]?.profileId ?? policy.profileId ?? null;
@@ -942,6 +995,30 @@ function record(value: Prisma.JsonValue): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function requestedProfileIds(
+  requestedProfileId: string | null,
+  snapshotValue: Prisma.JsonValue,
+) {
+  const ids = new Set<string>();
+  if (requestedProfileId) ids.add(requestedProfileId);
+  const pendingProfiles = record(snapshotValue).pendingProfiles;
+  if (Array.isArray(pendingProfiles)) {
+    for (const pendingProfile of pendingProfiles) {
+      if (
+        pendingProfile &&
+        typeof pendingProfile === "object" &&
+        !Array.isArray(pendingProfile) &&
+        typeof (pendingProfile as Record<string, unknown>).profileId ===
+          "string"
+      ) {
+        const profileId = (pendingProfile as Record<string, unknown>).profileId;
+        ids.add(profileId as string);
+      }
+    }
+  }
+  return ids;
 }
 
 function taskEvent(

@@ -33,15 +33,20 @@ export async function requestWithTimeout(
 export async function consoleApi<T>(
   path: string,
   init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
-  const response = await requestWithTimeout("/console/api" + path, {
-    ...init,
-    credentials: "include",
-    headers: {
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...init?.headers,
+  const response = await requestWithTimeout(
+    "/console/api" + path,
+    {
+      ...init,
+      credentials: "include",
+      headers: {
+        ...(init?.body ? { "content-type": "application/json" } : {}),
+        ...init?.headers,
+      },
     },
-  });
+    timeoutMs,
+  );
 
   if (response.status === 401) {
     window.location.href = "/login";

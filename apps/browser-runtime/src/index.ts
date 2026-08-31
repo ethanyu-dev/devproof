@@ -1802,6 +1802,10 @@ export class BrowserSessionManager {
   }
 
   async cancel(sessionId: string, commandType?: RuntimeCommandType) {
+    if (commandType === "session.close") {
+      await this.close(sessionId);
+      return;
+    }
     const page = this.sessions.get(sessionId)?.page;
     if (!page) {
       return;

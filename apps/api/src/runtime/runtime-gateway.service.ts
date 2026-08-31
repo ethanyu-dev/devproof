@@ -39,6 +39,12 @@ const ACTIVE_STATUSES = [
   "CLOSING",
   "LOST",
 ] as const;
+const HEARTBEAT_RENEWABLE_STATUSES = [
+  "OPENING",
+  "ACTIVE",
+  "HUMAN_CONTROL",
+  "LOST",
+] as const;
 
 @Injectable()
 export class RuntimeGatewayService {
@@ -401,6 +407,37 @@ export class RuntimeGatewayService {
         });
         continue;
       }
+      if (server.status === "CLOSING") {
+        handledSessionIds.add(server.id);
+        await this.prisma.$transaction([
+          this.prisma.browserRuntimeSession.updateMany({
+            data: { leaseExpiresAt },
+            where: { id: server.id, status: "CLOSING" },
+          }),
+          this.prisma.browserRuntimeSlot.updateMany({
+            data: { expiresAt: leaseExpiresAt },
+            where: {
+              fencingToken: server.fencingToken,
+              leaseToken: server.leaseToken,
+              sessionId: server.id,
+            },
+          }),
+          this.prisma.browserRuntimeProfileLease.updateMany({
+            data: { expiresAt: leaseExpiresAt },
+            where: {
+              fencingToken: server.fencingToken,
+              leaseToken: server.leaseToken,
+              sessionId: server.id,
+            },
+          }),
+        ]);
+        actions.push({
+          action: "CLOSE_LOCAL",
+          reason: "The server is waiting for this session to close.",
+          sessionId: server.id,
+        });
+        continue;
+      }
       if (local.state === "INTERRUPTED") {
         handledSessionIds.add(server.id);
         if (server.profileMode === "EPHEMERAL") {
@@ -502,7 +539,34 @@ export class RuntimeGatewayService {
         );
         continue;
       }
-      if (session.profileMode === "EPHEMERAL" || session.status === "CLOSING") {
+      if (session.status === "CLOSING") {
+        if (
+          session.updatedAt.getTime() >
+          Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS
+        ) {
+          continue;
+        }
+        await this.prisma.$transaction([
+          this.prisma.browserRuntimeSession.update({
+            data: {
+              closedAt: new Date(),
+              humanControllerUserId: null,
+              humanControlExpiresAt: null,
+              lastError: Prisma.JsonNull,
+              status: "CLOSED",
+            },
+            where: { id: session.id },
+          }),
+          this.prisma.browserRuntimeSlot.deleteMany({
+            where: { sessionId: session.id },
+          }),
+          this.prisma.browserRuntimeProfileLease.deleteMany({
+            where: { sessionId: session.id },
+          }),
+        ]);
+        continue;
+      }
+      if (session.profileMode === "EPHEMERAL") {
         await this.prisma.$transaction([
           this.prisma.browserRuntimeSession.update({
             data: {
@@ -648,7 +712,7 @@ export class RuntimeGatewayService {
     const leaseExpiresAt = new Date(
       Date.now() + env().RUNTIME_LEASE_SECONDS * 1000,
     );
-    const closeSessions: string[] = [];
+    const closeSessions = new Set<string>();
     for (const local of heartbeat.activeSessions) {
       const renewed = await this.prisma.browserRuntimeSession.updateMany({
         data: {
@@ -661,12 +725,26 @@ export class RuntimeGatewayService {
           leaseToken: local.leaseToken,
           runtimeId,
           closedAt: null,
-          status: { in: [...ACTIVE_STATUSES] },
+          status: { in: [...HEARTBEAT_RENEWABLE_STATUSES] },
         },
       });
       if (renewed.count !== 1) {
-        closeSessions.push(local.sessionId);
-        continue;
+        const closing = await this.prisma.browserRuntimeSession.updateMany({
+          data: { leaseExpiresAt },
+          where: {
+            fencingToken: BigInt(local.fencingToken),
+            id: local.sessionId,
+            leaseToken: local.leaseToken,
+            runtimeId,
+            closedAt: null,
+            status: "CLOSING",
+          },
+        });
+        if (closing.count !== 1) {
+          closeSessions.add(local.sessionId);
+          continue;
+        }
+        closeSessions.add(local.sessionId);
       }
       await this.prisma.browserRuntimeSlot.updateMany({
         data: { expiresAt: leaseExpiresAt },
@@ -685,6 +763,50 @@ export class RuntimeGatewayService {
         },
       });
     }
+    const localSessionIds = heartbeat.activeSessions.map(
+      (session) => session.sessionId,
+    );
+    const missingClosingSessions =
+      await this.prisma.browserRuntimeSession.findMany({
+        orderBy: { updatedAt: "asc" },
+        select: { id: true, updatedAt: true },
+        where: {
+          closedAt: null,
+          runtimeId,
+          status: "CLOSING",
+          updatedAt: {
+            lte: new Date(Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS),
+          },
+          ...(localSessionIds.length ? { id: { notIn: localSessionIds } } : {}),
+        },
+      });
+    for (const session of missingClosingSessions) {
+      const closedAt = new Date();
+      await this.prisma.$transaction(async (tx) => {
+        const finalized = await tx.browserRuntimeSession.updateMany({
+          data: {
+            closedAt,
+            humanControllerUserId: null,
+            humanControlExpiresAt: null,
+            lastError: Prisma.JsonNull,
+            status: "CLOSED",
+          },
+          where: {
+            closedAt: null,
+            id: session.id,
+            status: "CLOSING",
+            updatedAt: session.updatedAt,
+          },
+        });
+        if (finalized.count !== 1) return;
+        await tx.browserRuntimeSlot.deleteMany({
+          where: { sessionId: session.id },
+        });
+        await tx.browserRuntimeProfileLease.deleteMany({
+          where: { sessionId: session.id },
+        });
+      });
+    }
     await this.prisma.browserRuntime.update({
       data: {
         lastSeenAt: new Date(),
@@ -695,7 +817,7 @@ export class RuntimeGatewayService {
     await this.redis.markRuntimeOnline(runtimeId);
     socket.send(
       JSON.stringify({
-        closeSessions,
+        closeSessions: [...closeSessions],
         leaseExpiresAt: leaseExpiresAt.toISOString(),
         serverTime: new Date().toISOString(),
         type: "runtime.heartbeat.ack",

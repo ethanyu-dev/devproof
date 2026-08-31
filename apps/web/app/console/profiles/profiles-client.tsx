@@ -23,6 +23,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Trash2,
+  X,
 } from "lucide-react";
 import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +47,9 @@ import { displayLabel } from "@/lib/display-text";
 type TriggerSource = "CONSOLE" | "FEISHU" | "ISSUE_ASSIGNEE";
 
 const PROFILE_FRAME_STALE_MS = 6_000;
+const PROFILE_OPERATION_TIMEOUT_MS = 120_000;
+type ProfileOperation =
+  "approve" | "close" | "delete" | "disable" | "prepare" | "reauth" | "verify";
 
 interface Profile {
   activeSession: {
@@ -80,13 +84,26 @@ export function ProfilesClient() {
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<ProfileOperation | null>(null);
+  const operationAbort = useRef<AbortController | null>(null);
+  const operationSequence = useRef(0);
   const [message, setMessage] = useState<{
     text: string;
     tone: "error" | "success";
   } | null>(null);
   const selected =
     profiles?.find((profile) => profile.id === selectedId) ?? null;
+  const sessionTransitioning = ["OPENING", "CLOSING"].includes(
+    selected?.activeSession?.status ?? "",
+  );
+  const busy =
+    operation !== null ||
+    selected?.status === "VERIFYING" ||
+    sessionTransitioning;
+  const loginBlocked = ["DISABLED", "MIGRATION_REQUIRED"].includes(
+    selected?.status ?? "",
+  );
+  const requiresReauth = ["READY", "LOST"].includes(selected?.status ?? "");
 
   const load = useCallback(
     async (keepId?: string | null) => {
@@ -117,39 +134,69 @@ export function ProfilesClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!selected || (selected.status !== "VERIFYING" && !sessionTransitioning))
+      return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await load(selected.id).catch(() => undefined);
+      if (!cancelled) timer = window.setTimeout(poll, 1_500);
+    };
+    timer = window.setTimeout(poll, 1_500);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [load, selected?.id, selected?.status, sessionTransitioning]);
+
   function select(profile: Profile) {
     setSelectedId(profile.id);
     setMessage(null);
   }
 
-  async function action(
-    name: "approve" | "prepare" | "verify" | "reauth" | "disable",
-  ) {
+  async function action(name: Exclude<ProfileOperation, "delete">) {
     if (!selected) return;
-    setBusy(true);
+    if (operation && name !== "close") return;
+    if (name === "close") operationAbort.current?.abort();
+    const controller = new AbortController();
+    const sequence = ++operationSequence.current;
+    operationAbort.current = controller;
+    setOperation(name);
     setMessage(null);
     try {
-      await consoleApi(`/browser-profiles/${selected.id}/${name}`, {
-        ...(name === "prepare" || name === "reauth"
-          ? { body: JSON.stringify({ ttlSeconds: 1800 }) }
-          : {}),
-        method: "POST",
-      });
+      await consoleApi(
+        `/browser-profiles/${selected.id}/${name}`,
+        {
+          ...(name === "prepare" || name === "reauth"
+            ? { body: JSON.stringify({ ttlSeconds: 1800 }) }
+            : {}),
+          method: "POST",
+          signal: controller.signal,
+        },
+        PROFILE_OPERATION_TIMEOUT_MS,
+      );
       await load(selected.id);
       setMessage({
         text:
           name === "verify"
             ? "登录状态验证成功，浏览器身份已可用于任务。"
-            : name === "approve"
-              ? "已授权本次任务入口使用该浏览器身份。"
-              : "操作已提交。",
+            : name === "close"
+              ? "已关闭本次登录窗口，未保存新的登录状态。"
+              : name === "approve"
+                ? "已授权本次任务入口使用该浏览器身份。"
+                : "操作已提交。",
         tone: "success",
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       await load(selected.id).catch(() => undefined);
       setMessage({ text: (error as Error).message, tone: "error" });
     } finally {
-      setBusy(false);
+      if (operationSequence.current === sequence) {
+        operationAbort.current = null;
+        setOperation(null);
+      }
     }
   }
 
@@ -159,7 +206,7 @@ export function ProfilesClient() {
       !window.confirm(`永久清理 ${selected.displayName} 的浏览器登录数据？`)
     )
       return;
-    setBusy(true);
+    setOperation("delete");
     try {
       await consoleApi(`/browser-profiles/${selected.id}`, {
         method: "DELETE",
@@ -172,7 +219,7 @@ export function ProfilesClient() {
     } catch (error) {
       setMessage({ text: (error as Error).message, tone: "error" });
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -298,16 +345,27 @@ export function ProfilesClient() {
                 <div className="dp-form-actions">
                   <div>
                     <Button
-                      disabled={busy || selected.status === "DISABLED"}
+                      className={`dp-profile-operation-button${
+                        operation === "prepare" || operation === "reauth"
+                          ? " is-loading"
+                          : ""
+                      }`}
+                      disabled={busy || loginBlocked}
                       onClick={() =>
-                        void action(
-                          selected.status === "READY" ? "reauth" : "prepare",
-                        )
+                        void action(requiresReauth ? "reauth" : "prepare")
                       }
                       variant="secondary"
                     >
-                      <KeyRound />
-                      {selected.status === "READY" ? "重新登录" : "准备登录"}
+                      {operation === "prepare" || operation === "reauth" ? (
+                        <LoaderCircle />
+                      ) : (
+                        <KeyRound />
+                      )}
+                      {operation === "prepare" || operation === "reauth"
+                        ? "正在打开登录页…"
+                        : requiresReauth
+                          ? "重新登录"
+                          : "准备登录"}
                     </Button>
                     <Button
                       disabled={busy || selected.status === "DISABLED"}
@@ -347,9 +405,10 @@ export function ProfilesClient() {
       {selected?.activeSession?.status === "HUMAN_CONTROL" ? (
         <ProfileBrowser
           profile={selected}
-          busy={busy}
+          onClose={() => void action("close")}
           onReload={() => void action("prepare")}
           onVerify={() => void action("verify")}
+          operation={operation}
           operationError={message?.tone === "error" ? message.text : null}
         />
       ) : selected ? (
@@ -363,6 +422,16 @@ export function ProfilesClient() {
               {formatDate(selected.inactivityExpiresAt)}
             </small>
           </span>
+          {["PREPARING", "VERIFYING"].includes(selected.status) ? (
+            <Button
+              disabled={operation === "close"}
+              onClick={() => void action("close")}
+              variant="secondary"
+            >
+              {operation === "close" ? <LoaderCircle /> : <X />}
+              {operation === "close" ? "正在关闭…" : "关闭登录"}
+            </Button>
+          ) : null}
         </Card>
       ) : null}
     </>
@@ -370,15 +439,17 @@ export function ProfilesClient() {
 }
 
 function ProfileBrowser({
-  busy,
+  onClose,
   onReload,
   onVerify,
+  operation,
   operationError,
   profile,
 }: {
-  busy: boolean;
+  onClose: () => void;
   onReload: () => void;
   onVerify: () => void;
+  operation: ProfileOperation | null;
   operationError: string | null;
   profile: Profile;
 }) {
@@ -526,6 +597,10 @@ function ProfileBrowser({
   const remaining = profile.activeSession?.humanControlExpiresAt
     ? formatRemaining(profile.activeSession.humanControlExpiresAt)
     : null;
+  const verifying =
+    operation !== "close" &&
+    (operation === "verify" || profile.status === "VERIFYING");
+  const busy = operation !== null || profile.status === "VERIFYING";
   const panel = (
     <section
       className={`dp-browser-handoff dp-profile-browser-handoff is-floating${fullscreen ? " is-fullscreen" : ""}`}
@@ -543,7 +618,11 @@ function ProfileBrowser({
               </>
             ) : null}
             <Badge tone={streamStatus === "live" ? "success" : "warning"}>
-              {streamStatus === "live" ? "由你控制" : "连接中"}
+              {verifying
+                ? "保存中"
+                : streamStatus === "live"
+                  ? "由你控制"
+                  : "连接中"}
             </Badge>
           </span>
           <Button
@@ -554,6 +633,15 @@ function ProfileBrowser({
           >
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
             {fullscreen ? "退出全屏" : "全屏操作"}
+          </Button>
+          <Button
+            aria-label="关闭浏览器身份验证"
+            disabled={operation !== null && operation !== "verify"}
+            onClick={onClose}
+            variant="secondary"
+          >
+            {operation === "close" ? <LoaderCircle /> : <X />}
+            {operation === "close" ? "正在关闭…" : "关闭"}
           </Button>
         </div>
       </header>
@@ -668,6 +756,16 @@ function ProfileBrowser({
                 <LoaderCircle /> 画面已过期，正在恢复画面与输入…
               </div>
             ) : null}
+            {verifying ? (
+              <div className="dp-browser-viewport-blocked">
+                <LoaderCircle /> 正在验证并保存登录状态，请勿重复操作…
+              </div>
+            ) : null}
+            {operation === "close" ? (
+              <div className="dp-browser-viewport-blocked">
+                <LoaderCircle /> 正在关闭登录窗口并释放执行节点…
+              </div>
+            ) : null}
           </div>
           {frame ? (
             <div className="dp-browser-viewport-meta">
@@ -683,15 +781,15 @@ function ProfileBrowser({
           </div>
           <div className="dp-browser-handoff-actions">
             <Button disabled={busy} onClick={onReload} variant="secondary">
-              <RefreshCw />
-              重新打开登录页
+              {operation === "prepare" ? <LoaderCircle /> : <RefreshCw />}
+              {operation === "prepare" ? "正在重新打开…" : "重新打开登录页"}
             </Button>
             <Button
               disabled={busy || !frame || streamStatus !== "live"}
               onClick={onVerify}
             >
-              <ShieldCheck />
-              验证并保存
+              {verifying ? <LoaderCircle /> : <ShieldCheck />}
+              {verifying ? "正在验证并保存…" : "验证并保存"}
             </Button>
           </div>
         </div>
@@ -861,7 +959,9 @@ function profileTone(
 ): "success" | "warning" | "danger" | "neutral" {
   return status === "READY"
     ? "success"
-    : ["PREPARING", "REAUTH_REQUIRED", "UNINITIALIZED"].includes(status)
+    : ["PREPARING", "VERIFYING", "REAUTH_REQUIRED", "UNINITIALIZED"].includes(
+          status,
+        )
       ? "warning"
       : ["LOST", "DISABLED"].includes(status)
         ? "danger"

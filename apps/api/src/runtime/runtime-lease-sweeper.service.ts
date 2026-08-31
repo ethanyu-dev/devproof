@@ -1,9 +1,12 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../database/prisma.service.js";
 import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.js";
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
+
+const STALE_PROFILE_VERIFICATION_MS = 2 * 60 * 1_000;
 
 @Injectable()
 export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
@@ -71,6 +74,48 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
         }),
       ]);
     }
+
+    const staleVerificationCutoff = new Date(
+      now.getTime() - STALE_PROFILE_VERIFICATION_MS,
+    );
+    const staleVerificationWhere = {
+      runtimeSessions: {
+        none: {
+          status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
+        },
+      },
+      status: "VERIFYING" as const,
+      updatedAt: { lte: staleVerificationCutoff },
+    } satisfies Prisma.UserBrowserProfileWhereInput;
+    await Promise.all([
+      this.prisma.userBrowserProfile.updateMany({
+        data: {
+          status: "UNINITIALIZED",
+          verificationError: {
+            code: "PROFILE_VERIFICATION_INTERRUPTED",
+            message:
+              "The verification process ended before the profile could be saved.",
+          },
+          version: { increment: 1 },
+        },
+        where: { ...staleVerificationWhere, lastVerifiedAt: null },
+      }),
+      this.prisma.userBrowserProfile.updateMany({
+        data: {
+          status: "REAUTH_REQUIRED",
+          verificationError: {
+            code: "PROFILE_VERIFICATION_INTERRUPTED",
+            message:
+              "The verification process ended before the profile could be saved.",
+          },
+          version: { increment: 1 },
+        },
+        where: {
+          ...staleVerificationWhere,
+          lastVerifiedAt: { not: null },
+        },
+      }),
+    ]);
 
     const expiredCommands = await this.prisma.browserRuntimeCommand.findMany({
       select: { id: true },

@@ -151,6 +151,9 @@ describe("Feishu integration security and parsing", () => {
       ),
     ).toBe("https://linear.app/acme/issue/ENG-123/refund");
     expect(profileStrategyFromText("ENG-123")).toBe("REQUESTER");
+    expect(profileStrategyFromText("ENG-123 --profile")).toBe("REQUESTER");
+    expect(profileStrategyFromText("ENG-123 需要登录")).toBe("REQUESTER");
+    expect(profileStrategyFromText("ENG-123 不需要登录")).toBe("EPHEMERAL");
     expect(profileStrategyFromText("ENG-123 --owner")).toBe("ISSUE_ASSIGNEE");
     expect(profileStrategyFromText("ENG-123 --owner --ephemeral")).toBe(
       "EPHEMERAL",

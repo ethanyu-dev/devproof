@@ -86,6 +86,7 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
       postRunAnalysisGeneration: 1,
       teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
     };
+    const releasePendingRequests = vi.fn().mockResolvedValue(1);
     const service = new TaskExecutionService(
       {
         $transaction: vi
@@ -98,7 +99,7 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
       } as never,
       {} as never,
       {} as never,
-      {} as never,
+      { releasePendingRequests } as never,
       { releaseTask: vi.fn().mockResolvedValue(undefined) } as never,
       {} as never,
     );
@@ -123,6 +124,10 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
         ],
         skipDuplicates: true,
       });
+      expect(releasePendingRequests).toHaveBeenCalledWith(
+        task.id,
+        transactionClient,
+      );
     } finally {
       if (previousEnabled === undefined) {
         delete process.env.POST_RUN_ANALYSIS_ENABLED;

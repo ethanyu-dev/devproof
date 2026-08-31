@@ -164,6 +164,10 @@
   padding: 10px 14px;
 }
 
+.dp-profile-operation-button.is-loading svg {
+  animation: dp-spin 800ms linear infinite;
+}
+
 @media (max-width: 760px) {
   .dp-profile-grants,
   .dp-profile-summary {

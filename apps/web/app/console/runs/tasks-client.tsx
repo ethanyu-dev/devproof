@@ -36,6 +36,7 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
+import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
 import { taskOutcomeDisplay, verificationVerdictLabel } from "./task-outcome";
 import type {
@@ -50,6 +51,8 @@ import type {
 
 const PAGE_SIZE = 10;
 const terminalLifecycles = new Set(["COMPLETED", "CANCELLED", "TIMED_OUT"]);
+type ProfileStrategy =
+  "EPHEMERAL" | "REQUESTER" | "ISSUE_ASSIGNEE" | "EXPLICIT_PROFILE";
 
 interface TaskPage {
   items: TaskSummary[];
@@ -774,13 +777,20 @@ function TaskStatusPanel({
   const [deploymentDrafts, setDeploymentDrafts] = useState([
     { id: 1, name: "Preview", targetUrl: "" },
   ]);
-  const [profileStrategy, setProfileStrategy] = useState<
-    "EPHEMERAL" | "REQUESTER" | "ISSUE_ASSIGNEE" | "EXPLICIT_PROFILE"
-  >("REQUESTER");
+  const [profileStrategy, setProfileStrategy] =
+    useState<ProfileStrategy>("EPHEMERAL");
   const [profileId, setProfileId] = useState("");
   const [profiles, setProfiles] = useState<
     Array<{ displayName: string; id: string; status: string }>
   >([]);
+  const boundProfile =
+    detail.profileBinding?.requestedProfile ??
+    detail.profileBinding?.resolvedProfile ??
+    null;
+  const explicitBoundProfile =
+    detail.profileBinding?.strategy === "EXPLICIT_PROFILE"
+      ? boundProfile
+      : null;
   const stages = (
     ["SPEC_ANALYSIS", "PROFILE_RESOLUTION", "SPEC_EXECUTION"] as const
   ).flatMap((type) => {
@@ -800,11 +810,60 @@ function TaskStatusPanel({
     stages.some((stage) => ["FAILED", "RUNNING"].includes(stage.status));
 
   useEffect(() => {
-    if (!detail.waitingReason?.startsWith("PROFILE_")) return;
+    if (
+      detail.waitingReason !== "DEPLOYMENT_TARGET_REQUIRED" &&
+      !detail.waitingReason?.startsWith("PROFILE_")
+    )
+      return;
     void consoleApi<Array<{ displayName: string; id: string; status: string }>>(
       "/browser-profiles",
     ).then(setProfiles);
   }, [detail.waitingReason]);
+
+  useEffect(() => {
+    const strategy = detail.profileBinding?.strategy;
+    if (
+      strategy &&
+      ["EPHEMERAL", "REQUESTER", "ISSUE_ASSIGNEE", "EXPLICIT_PROFILE"].includes(
+        strategy,
+      )
+    ) {
+      setProfileStrategy(strategy as ProfileStrategy);
+      setProfileId(
+        strategy === "EXPLICIT_PROFILE" ? (boundProfile?.id ?? "") : "",
+      );
+    }
+  }, [boundProfile?.id, detail.id, detail.profileBinding?.strategy]);
+
+  const currentProfilePolicy = retainedProfilePolicy(detail.input);
+  const profileSelection = (strategy: ProfileStrategy = profileStrategy) => ({
+    profilePolicy: {
+      onUnavailable: currentProfilePolicy.onUnavailable,
+      ...(strategy === "EXPLICIT_PROFILE" ? { profileId } : {}),
+      scope: currentProfilePolicy.scope,
+      strategy,
+    },
+  });
+
+  async function submitDeployments() {
+    const deployments = deploymentDrafts
+      .filter((deployment) => deployment.targetUrl.trim())
+      .map((deployment, index) => ({
+        environment: {},
+        key: `deployment-${index + 1}`,
+        name: deployment.name.trim() || `验证环境 ${index + 1}`,
+        targetUrl: deployment.targetUrl.trim(),
+      }));
+    if (
+      profileStrategy !== detail.profileBinding?.strategy ||
+      (profileStrategy === "EXPLICIT_PROFILE" &&
+        profileId !== (boundProfile?.id ?? ""))
+    ) {
+      const updated = await onMutate("/profile", profileSelection());
+      if (!updated) return;
+    }
+    await onMutate("/deployments", { deployments });
+  }
 
   async function exportAllLogs() {
     setExporting(true);
@@ -940,24 +999,61 @@ function TaskStatusPanel({
                   </Button>
                 </div>
               </Field>
+              <Field
+                description={profileStrategyDescriptions[profileStrategy]}
+                label="页面登录方式"
+              >
+                <Select
+                  onChange={(event) =>
+                    setProfileStrategy(event.target.value as ProfileStrategy)
+                  }
+                  value={profileStrategy}
+                >
+                  <option value="EPHEMERAL">不需要登录（临时会话）</option>
+                  <option value="REQUESTER">使用我的浏览器身份</option>
+                  <option value="ISSUE_ASSIGNEE">
+                    使用 Issue 负责人的浏览器身份
+                  </option>
+                  <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
+                </Select>
+              </Field>
+              {profileStrategy === "EXPLICIT_PROFILE" ? (
+                <Field label="可用浏览器身份">
+                  <Select
+                    value={profileId}
+                    onChange={(event) => setProfileId(event.target.value)}
+                  >
+                    <option value="">请选择</option>
+                    {explicitBoundProfile &&
+                    !profiles.some(
+                      (profile) =>
+                        profile.id === explicitBoundProfile.id &&
+                        profile.status === "READY",
+                    ) ? (
+                      <option value={explicitBoundProfile.id}>
+                        {explicitBoundProfile.displayName}（
+                        {displayLabel(explicitBoundProfile.status)}）
+                      </option>
+                    ) : null}
+                    {profiles
+                      .filter((profile) => profile.status === "READY")
+                      .map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.displayName}
+                        </option>
+                      ))}
+                  </Select>
+                </Field>
+              ) : null}
               <Button
                 disabled={
                   busy ||
                   !deploymentDrafts.some((deployment) =>
                     Boolean(deployment.targetUrl.trim()),
-                  )
+                  ) ||
+                  (profileStrategy === "EXPLICIT_PROFILE" && !profileId)
                 }
-                onClick={() => {
-                  const deployments = deploymentDrafts
-                    .filter((deployment) => deployment.targetUrl.trim())
-                    .map((deployment, index) => ({
-                      environment: {},
-                      key: `deployment-${index + 1}`,
-                      name: deployment.name.trim() || `验证环境 ${index + 1}`,
-                      targetUrl: deployment.targetUrl.trim(),
-                    }));
-                  void onMutate("/deployments", { deployments });
-                }}
+                onClick={() => void submitDeployments()}
               >
                 提交并执行全部 Spec × Deployment
               </Button>
@@ -983,13 +1079,28 @@ function TaskStatusPanel({
                 {detail.profileBinding.requestedProfile.owner.name}
                 只需完成登录并确认授权。
               </p>
-              <Button asChild>
-                <Link
-                  href={`/console/profiles?profile=${detail.profileBinding.requestedProfile.id}`}
+              <p>
+                如果这个 Issue
+                验证的是公开页面、不需要登录，可以直接改用临时会话。
+              </p>
+              <div className="dp-form-actions">
+                <Button asChild>
+                  <Link
+                    href={`/console/profiles?profile=${detail.profileBinding.requestedProfile.id}`}
+                  >
+                    前往登录
+                  </Link>
+                </Button>
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void onMutate("/profile", profileSelection("EPHEMERAL"))
+                  }
+                  variant="secondary"
                 >
-                  前往登录
-                </Link>
-              </Button>
+                  无需登录，继续执行
+                </Button>
+              </div>
             </div>
           </Card>
         ) : detail.waitingReason?.startsWith("PROFILE_") ? (
@@ -1008,9 +1119,7 @@ function TaskStatusPanel({
               >
                 <Select
                   onChange={(event) =>
-                    setProfileStrategy(
-                      event.target.value as typeof profileStrategy,
-                    )
+                    setProfileStrategy(event.target.value as ProfileStrategy)
                   }
                   value={profileStrategy}
                 >
@@ -1029,6 +1138,17 @@ function TaskStatusPanel({
                     onChange={(event) => setProfileId(event.target.value)}
                   >
                     <option value="">请选择</option>
+                    {explicitBoundProfile &&
+                    !profiles.some(
+                      (profile) =>
+                        profile.id === explicitBoundProfile.id &&
+                        profile.status === "READY",
+                    ) ? (
+                      <option value={explicitBoundProfile.id}>
+                        {explicitBoundProfile.displayName}（
+                        {displayLabel(explicitBoundProfile.status)}）
+                      </option>
+                    ) : null}
                     {profiles
                       .filter((profile) => profile.status === "READY")
                       .map((profile) => (
@@ -1043,18 +1163,7 @@ function TaskStatusPanel({
                 disabled={
                   busy || (profileStrategy === "EXPLICIT_PROFILE" && !profileId)
                 }
-                onClick={() =>
-                  void onMutate("/profile", {
-                    profilePolicy: {
-                      onUnavailable: "WAIT_FOR_PROFILE",
-                      ...(profileStrategy === "EXPLICIT_PROFILE"
-                        ? { profileId }
-                        : {}),
-                      scope: { authRole: "default", environmentKey: "default" },
-                      strategy: profileStrategy,
-                    },
-                  })
-                }
+                onClick={() => void onMutate("/profile", profileSelection())}
               >
                 提交身份选择
               </Button>

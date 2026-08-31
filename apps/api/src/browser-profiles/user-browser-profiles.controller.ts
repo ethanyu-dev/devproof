@@ -82,6 +82,11 @@ export class UserBrowserProfilesController {
     return this.profiles.verify(current, id);
   }
 
+  @Post(":id/close")
+  close(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
+    return this.profiles.closePreparation(current, id);
+  }
+
   @Post(":id/approve")
   approve(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.profiles.approve(current, id);
