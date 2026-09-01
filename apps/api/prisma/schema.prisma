@@ -1456,6 +1456,9 @@ model PostRunAnalysisJob {
   fencingToken              BigInt                 @default(0) @map("fencing_token")
   completionId              String?                @unique @map("completion_id") @db.Uuid
   deadlineAt                DateTime               @map("deadline_at") @db.Timestamptz
+  hardDeadlineAt            DateTime               @default(dbgenerated("(CURRENT_TIMESTAMP + INTERVAL '2 hours')")) @map("hard_deadline_at") @db.Timestamptz
+  readyAt                   DateTime?              @map("ready_at") @db.Timestamptz
+  nextAttemptAt             DateTime?              @map("next_attempt_at") @db.Timestamptz
   queuedAt                  DateTime               @default(now()) @map("queued_at") @db.Timestamptz
   startedAt                 DateTime?              @map("started_at") @db.Timestamptz
   finishedAt                DateTime?              @map("finished_at") @db.Timestamptz
@@ -1470,6 +1473,9 @@ model PostRunAnalysisJob {
   @@unique([taskExecutionId, analyzerVersion, generation], map: "post_run_analysis_jobs_task_analyzer_generation_key")
   @@index([teamId, status, createdAt])
   @@index([status, leaseExpiresAt, createdAt])
+  @@index([teamId, status, nextAttemptAt, attemptNumber], map: "post_run_analysis_jobs_schedulable_idx")
+  @@index([status, deadlineAt], map: "post_run_analysis_jobs_attempt_deadline_idx")
+  @@index([status, hardDeadlineAt], map: "post_run_analysis_jobs_hard_deadline_idx")
   @@map("post_run_analysis_jobs")
 }
 

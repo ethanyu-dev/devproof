@@ -16,8 +16,10 @@ import {
 vi.mock("../config/env.js", () => ({
   env: () => ({
     AGENT_RUNTIME_TASK_LEASE_SECONDS: 60,
+    POST_RUN_ANALYSIS_DEADLINE_SECONDS: 1_800,
     POST_RUN_ANALYSIS_ENABLED: true,
     POST_RUN_ANALYSIS_MIN_CONFIDENCE: 0.75,
+    POST_RUN_ANALYSIS_RETRY_BACKOFF_SECONDS: 30,
   }),
 }));
 
@@ -431,6 +433,105 @@ describe("PostRunAnalysisRuntimeService persistence redaction", () => {
 });
 
 describe("PostRunAnalysisRuntimeService claims", () => {
+  it("starts a full execution window when queued work is claimed", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-01T05:40:00.000Z");
+    vi.setSystemTime(now);
+    const readyAt = new Date(now.getTime() - 20 * 60_000);
+    const hardDeadlineAt = new Date(now.getTime() + 2 * 60 * 60_000);
+    let claimedData: Record<string, unknown> = {};
+    const findFirst = vi.fn().mockResolvedValue({
+      hardDeadlineAt,
+      id: analysisId,
+      readyAt,
+      startedAt: null,
+      status: "READY",
+    });
+    const create = vi.fn().mockResolvedValue({});
+    const transactionClient = {
+      postRunAnalysisEvent: { create },
+      postRunAnalysisJob: {
+        fields: { maxAttempts: { field: "maxAttempts" } },
+        findFirst,
+        findUniqueOrThrow: vi.fn().mockImplementation(() => ({
+          analyzerVersion: "post-run-analysis-v3",
+          attemptNumber: 1,
+          deadlineAt: claimedData.deadlineAt,
+          fencingToken: 1n,
+          hardDeadlineAt,
+          id: analysisId,
+          inputByteSize: 17_205_500,
+          inputCompleteness: {},
+          inputManifest: {},
+          inputSha256: "a".repeat(64),
+          inputStorageKey: "analysis/bundle.json",
+          leaseExpiresAt: claimedData.leaseExpiresAt,
+          leaseToken: claimedData.leaseToken,
+          taskExecution: {
+            sourceRef: "PROD-6754",
+            title: "offlineAt clear regression",
+            traceId: "1".repeat(32),
+          },
+          taskExecutionId,
+        })),
+        updateMany: vi.fn().mockImplementation(({ data }) => {
+          claimedData = data;
+          return { count: 1 };
+        }),
+      },
+    };
+    const service = new PostRunAnalysisRuntimeService(
+      {
+        $transaction: vi.fn(
+          (operation: (tx: typeof transactionClient) => unknown) =>
+            operation(transactionClient),
+        ),
+      } as never,
+      {
+        candidatesForTeam: vi.fn().mockResolvedValue([
+          {
+            apiKey: "secret",
+            baseUrl: "https://gateway.example.com/v1",
+            displayName: "test",
+            modelId: "gpt-test",
+          },
+        ]),
+      } as never,
+      {} as never,
+    );
+
+    try {
+      const result = await service.claim(teamId, {
+        protocol: { minor: 7 },
+        workerId: lease.workerId,
+      });
+
+      expect(result.task?.snapshot.deadlineAt).toBe("2026-09-01T06:10:00.000Z");
+      expect(findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [
+            { attemptNumber: "asc" },
+            { readyAt: "asc" },
+            { createdAt: "asc" },
+          ],
+          where: expect.objectContaining({
+            hardDeadlineAt: { gt: now },
+          }),
+        }),
+      );
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            kind: "analysis.started",
+            payload: expect.objectContaining({ queueWaitMs: 1_200_000 }),
+          }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("terminalizes a ready job without consuming an attempt when no model is configured", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const create = vi.fn().mockResolvedValue({});
@@ -578,6 +679,88 @@ describe("PostRunAnalysisRuntimeService lease hot paths", () => {
       },
       where: { id: analysisId, teamId },
     });
+  });
+});
+
+describe("PostRunAnalysisRuntimeService retries", () => {
+  it("backs off a retryable failure without consuming the hard deadline", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-01T05:31:03.000Z");
+    vi.setSystemTime(now);
+    const hardDeadlineAt = new Date("2026-09-01T07:18:19.000Z");
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const create = vi.fn().mockResolvedValue({});
+    const transactionClient = {
+      postRunAnalysisEvent: { create },
+      postRunAnalysisJob: { updateMany },
+    };
+    const service = new PostRunAnalysisRuntimeService(
+      {
+        $transaction: vi.fn(
+          (operation: (tx: typeof transactionClient) => unknown) =>
+            operation(transactionClient),
+        ),
+      } as never,
+      {} as never,
+      {} as never,
+    );
+
+    try {
+      const result = await (
+        service as unknown as {
+          fail(
+            currentTeamId: string,
+            job: Record<string, unknown>,
+            completionId: string,
+            outcome: Record<string, unknown>,
+          ): Promise<unknown>;
+        }
+      ).fail(
+        teamId,
+        {
+          attemptNumber: 2,
+          fencingToken: 3n,
+          hardDeadlineAt,
+          id: analysisId,
+          leaseExpiresAt: new Date(now.getTime() + 60_000),
+          leaseOwner: lease.workerId,
+          leaseToken: lease.leaseToken,
+          maxAttempts: 3,
+          readyAt: new Date(now.getTime() - 10 * 60_000),
+        },
+        "f3e8cc94-ac30-42ee-9260-514ea4e944f5",
+        {
+          error: {
+            code: "PROVIDER_TIMEOUT",
+            failureClass: "PROVIDER",
+            message: "Provider timed out.",
+            phase: "post_run_analysis.model_invocation",
+          },
+          kind: "RETRYABLE_FAILURE",
+        },
+      );
+
+      expect(result).toMatchObject({
+        jobStatus: "READY",
+        nextAttemptScheduled: true,
+      });
+      expect(updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: hardDeadlineAt,
+            nextAttemptAt: new Date("2026-09-01T05:32:03.000Z"),
+            status: "READY",
+          }),
+        }),
+      );
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ kind: "analysis.retry_queued" }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

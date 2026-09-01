@@ -10,14 +10,19 @@ import {
   POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD,
 } from "./task-log-bundle.service.js";
 
+const analysisId = "cc61de8d-cf29-4561-b2cd-c67c304668a5";
+const teamId = "6f090d88-8987-487f-8338-1a734beab6a6";
+
 vi.mock("../config/env.js", () => ({
   env: () => ({
     POST_RUN_ANALYSIS_ANALYZER_VERSION: "post-run-analysis-v2",
     POST_RUN_ANALYSIS_CAPTURE_GRACE_SECONDS: 0,
     POST_RUN_ANALYSIS_DEADLINE_SECONDS: 1_800,
     POST_RUN_ANALYSIS_ENABLED: true,
+    POST_RUN_ANALYSIS_HARD_DEADLINE_SECONDS: 7_200,
     POST_RUN_ANALYSIS_MAX_ATTEMPTS: 3,
     POST_RUN_ANALYSIS_RECOVERY_LOOKBACK_HOURS: 24,
+    POST_RUN_ANALYSIS_RETRY_BACKOFF_SECONDS: 30,
   }),
 }));
 
@@ -772,5 +777,74 @@ describe("PostRunAnalysisService", () => {
         }),
       }),
     );
+  });
+
+  it("requeues an execution timeout with exponential backoff before the hard deadline", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-01T05:48:19.000Z");
+    vi.setSystemTime(now);
+    const deadlineAt = new Date(now.getTime() - 1_000);
+    const hardDeadlineAt = new Date(now.getTime() + 60 * 60_000);
+    const updatedAt = new Date(now.getTime() - 60_000);
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const createEvent = vi.fn().mockResolvedValue({});
+    const transactionClient = {
+      postRunAnalysisEvent: { create: createEvent },
+      postRunAnalysisJob: { updateMany },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        (operation: (tx: typeof transactionClient) => unknown) =>
+          operation(transactionClient),
+      ),
+      postRunAnalysisJob: {
+        fields: { maxAttempts: { field: "maxAttempts" } },
+        findMany: vi.fn().mockResolvedValue([
+          {
+            attemptNumber: 2,
+            deadlineAt,
+            hardDeadlineAt,
+            id: analysisId,
+            maxAttempts: 3,
+            teamId,
+            updatedAt,
+          },
+        ]),
+      },
+    };
+    const service = new PostRunAnalysisService(
+      prisma as never,
+      {} as never,
+      {} as never,
+    );
+
+    try {
+      await expect(
+        (
+          service as unknown as {
+            requeueExpiredAttempts(limit: number): Promise<number>;
+          }
+        ).requeueExpiredAttempts(20),
+      ).resolves.toBe(1);
+
+      expect(updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            deadlineAt: hardDeadlineAt,
+            nextAttemptAt: new Date("2026-09-01T05:49:19.000Z"),
+            status: "READY",
+          }),
+        }),
+      );
+      expect(createEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            kind: "analysis.attempt_deadline_exceeded",
+          }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

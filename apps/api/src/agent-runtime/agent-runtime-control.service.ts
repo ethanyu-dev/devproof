@@ -4,6 +4,7 @@ import {
   runtimeCommandMinimumMinor,
 } from "@devproof/runtime-protocol";
 
+import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
@@ -70,7 +71,9 @@ export class AgentRuntimeControlService {
       );
     }
     return {
-      analysisConcurrency: pools.includes("POST_RUN_ANALYSIS") ? 1 : 0,
+      analysisConcurrency: pools.includes("POST_RUN_ANALYSIS")
+        ? env().POST_RUN_ANALYSIS_CONCURRENCY
+        : 0,
       browserConcurrency,
       pools: [...pools],
       refreshAfterMs: 5_000,

@@ -51,7 +51,9 @@ Every evidence reference cited by a finding must also have been fetched through 
 
 ## Recovery and isolation
 
-Jobs use lease tokens, monotonic fencing tokens, deadlines, bounded attempts, and idempotent completion IDs. Expired leases can be reclaimed only while the configured attempt budget remains; exhausted jobs are terminalized by reconciliation. Retryable failures return to `READY` while attempts and deadline remain; terminal failures can be retried from the Task detail page. Capturing a bundle resets the analysis deadline so slow browser cleanup does not consume the model's execution window. Model responses and tool calls each consume a bounded execution budget, including text-only responses from providers that ignore required tool selection.
+Jobs use lease tokens, monotonic fencing tokens, two separate deadlines, bounded attempts, and idempotent completion IDs. `hardDeadlineAt` bounds the complete capture, queue, and retry lifecycle. `deadlineAt` is the current attempt deadline and is assigned only when a Runtime claims the job, so time spent in `READY` never consumes that attempt's model-execution window. Capturing a bundle resets the hard deadline so slow browser cleanup does not consume the analysis lifecycle window.
+
+Expired leases can be reclaimed only while the configured attempt budget remains; exhausted jobs are terminalized by reconciliation. Retryable failures and timed-out attempts return to `READY` with exponential backoff while attempts and the hard deadline remain. Fresh jobs sort ahead of retries, then by ready time, preventing one repeatedly failing analysis from blocking the queue. Terminal failures can be retried from the Task detail page. Model responses and tool calls each consume a bounded execution budget, including text-only responses from providers that ignore required tool selection.
 
 The API enforces team scope on every console and Runtime query. Bundle serialization recursively removes credentials, cookies, tokens, profile/session identifiers, and sensitive URL parameters. The analysis pool cannot call Browser Execution or Spec Analysis tools. Terminal bundle and structured-evidence archive objects are detached and removed through the durable object-deletion queue after `RUNTIME_DATA_RETENTION_DAYS`; the full execution Manifest and its private archive index are cleared in the same transaction, while hashes, completeness, redacted reports, findings, and improvement work items remain available for audit.
 
@@ -72,10 +74,13 @@ Relevant API configuration:
 - `POST_RUN_ANALYSIS_ENABLED=false`
 - `POST_RUN_ANALYSIS_ANALYZER_VERSION=post-run-analysis-v3`
 - `POST_RUN_ANALYSIS_CAPTURE_GRACE_SECONDS=30`
-- `POST_RUN_ANALYSIS_DEADLINE_SECONDS=1800`
+- `POST_RUN_ANALYSIS_CONCURRENCY=3`
+- `POST_RUN_ANALYSIS_DEADLINE_SECONDS=1800` (per claimed attempt)
+- `POST_RUN_ANALYSIS_HARD_DEADLINE_SECONDS=7200` (capture, queue, and retries)
 - `POST_RUN_ANALYSIS_MAX_ATTEMPTS=3`
 - `POST_RUN_ANALYSIS_MIN_CONFIDENCE=0.7`
 - `POST_RUN_ANALYSIS_RECOVERY_LOOKBACK_HOURS=24`
+- `POST_RUN_ANALYSIS_RETRY_BACKOFF_SECONDS=30` (exponential, capped at one hour)
 - `DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT=64`
 
-After enabling it, create an Issue Task and verify that its terminal detail shows bundle capture, incrementally streamed analysis events, analysis status, evidence-backed findings, and the generated work item. Monitor `devproof_post_run_analysis_jobs{status=...}`, `devproof_improvement_work_items{status=...}`, and the `post-run-analysis` background worker health.
+After enabling it, create an Issue Task and verify that its terminal detail shows bundle capture, incrementally streamed analysis events, analysis status, evidence-backed findings, and the generated work item. Monitor `devproof_post_run_analysis_jobs{status=...}`, `devproof_post_run_analysis_oldest_ready_age_seconds`, `devproof_improvement_work_items{status=...}`, and the `post-run-analysis` background worker health. Sustained ready age above the normal attempt duration indicates that Runtime capacity should be increased.

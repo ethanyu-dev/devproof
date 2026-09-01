@@ -125,12 +125,24 @@ const envSchema = z
       .min(0)
       .max(3600)
       .default(30),
+    POST_RUN_ANALYSIS_CONCURRENCY: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(32)
+      .default(3),
     POST_RUN_ANALYSIS_DEADLINE_SECONDS: z.coerce
       .number()
       .int()
       .min(60)
       .max(86400)
       .default(1800),
+    POST_RUN_ANALYSIS_HARD_DEADLINE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(300)
+      .max(604800)
+      .default(7200),
     POST_RUN_ANALYSIS_MAX_ATTEMPTS: z.coerce
       .number()
       .int()
@@ -148,6 +160,12 @@ const envSchema = z
       .min(1)
       .max(720)
       .default(24),
+    POST_RUN_ANALYSIS_RETRY_BACKOFF_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(30),
     REDIS_URL: z
       .string()
       .url()
