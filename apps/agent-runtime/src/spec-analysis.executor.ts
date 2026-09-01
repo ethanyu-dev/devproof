@@ -9,9 +9,10 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 
-import type {
-  ActiveLease,
-  ControlPlaneClient,
+import {
+  ControlPlaneError,
+  type ActiveLease,
+  type ControlPlaneClient,
 } from "./control-plane.client.js";
 import type {
   ModelResponse,
@@ -30,6 +31,15 @@ const finishSpecSchema = z.object({
   analysisSummary: analysisSummarySchema,
   spec: runtimeGeneratedSpecSchema,
 });
+const MAX_CONSECUTIVE_SOURCE_FAILURES = 2;
+
+type SourceToolName =
+  | "linear_get_issue"
+  | "github_get_pull_request"
+  | "github_list_changed_files"
+  | "github_read_file"
+  | "github_search_code"
+  | "knowledge_search";
 
 export class SpecAnalysisExecutor {
   constructor(
@@ -65,6 +75,8 @@ export class SpecAnalysisExecutor {
     ];
     const sources = new Map<string, RuntimeSpecSourceRef>();
     const calledTools = new Set<string>();
+    const sourceFailureCounts = new Map<SourceToolName, number>();
+    const unavailableTools = new Set<SourceToolName>();
     let linkedPullRequestCount = 0;
     let segmentStatus: "FAILED" | "SUCCEEDED" = "FAILED";
     let segmentError: string | undefined;
@@ -113,7 +125,7 @@ export class SpecAnalysisExecutor {
                 model: candidate.modelId,
                 parallel_tool_calls: false,
                 tool_choice: "required",
-                tools: toolDefinitions(sources.keys()),
+                tools: toolDefinitions(sources.keys(), unavailableTools),
               },
               { signal },
             );
@@ -264,6 +276,7 @@ export class SpecAnalysisExecutor {
               linkedPullRequestCount,
               sources,
               spec: parsed.data.spec,
+              unavailableTools,
             });
             if (validationError) {
               await this.validationFailed(
@@ -331,7 +344,7 @@ export class SpecAnalysisExecutor {
             });
           }
 
-          if (!sourceToolNames.has(call.name)) {
+          if (!isSourceToolName(call.name)) {
             const error = `未知的 Spec 分析工具：${call.name}`;
             await this.appendTrace(
               lease,
@@ -340,6 +353,7 @@ export class SpecAnalysisExecutor {
             history.push(toolOutput(call, { accepted: false, error }));
             continue;
           }
+          const sourceToolName = call.name;
 
           try {
             const output = await this.controlPlane.executeSpecTool(
@@ -347,17 +361,12 @@ export class SpecAnalysisExecutor {
               {
                 arguments: parsedArguments,
                 callId: call.call_id,
-                name: call.name as
-                  | "linear_get_issue"
-                  | "github_get_pull_request"
-                  | "github_list_changed_files"
-                  | "github_read_file"
-                  | "github_search_code"
-                  | "knowledge_search",
+                name: sourceToolName,
               },
               signal,
             );
             calledTools.add(call.name);
+            sourceFailureCounts.delete(sourceToolName);
             output.sourceRefs.forEach((source) =>
               sources.set(source.externalId, source),
             );
@@ -386,21 +395,51 @@ export class SpecAnalysisExecutor {
             });
             history.push(toolOutput(call, output.result));
           } catch (error) {
+            const errorMessage = traceError(error);
+            const availabilityFailure = isSourceAvailabilityFailure(error);
+            const failureCount = availabilityFailure
+              ? (sourceFailureCounts.get(sourceToolName) ?? 0) + 1
+              : 0;
+            const sourceUnavailable =
+              availabilityFailure &&
+              failureCount >= MAX_CONSECUTIVE_SOURCE_FAILURES;
+            if (availabilityFailure) {
+              sourceFailureCounts.set(sourceToolName, failureCount);
+            } else {
+              sourceFailureCounts.delete(sourceToolName);
+            }
+            if (sourceUnavailable) unavailableTools.add(sourceToolName);
+            const traceMessage = sourceUnavailable
+              ? `${errorMessage}；${sourceToolName} 已连续失败 ${failureCount} 次，数据源已标记为不可用并停止调用。`
+              : errorMessage;
             await this.appendTrace(
               lease,
-              toolFailed(
-                task,
-                segmentId,
-                step,
-                call,
-                startedAt,
-                traceError(error),
-              ),
+              toolFailed(task, segmentId, step, call, startedAt, traceMessage),
             );
+            if (sourceUnavailable) {
+              history.push(
+                toolOutput(call, {
+                  accepted: false,
+                  code: "SOURCE_UNAVAILABLE",
+                  consecutiveFailures: failureCount,
+                  error: errorMessage,
+                  skipped: true,
+                  sourceTool: sourceToolName,
+                }),
+              );
+              if (requiredSourceToolNames.has(sourceToolName)) {
+                return sourceUnavailableOutcome(
+                  sourceToolName,
+                  failureCount,
+                  error,
+                );
+              }
+              continue;
+            }
             history.push(
               toolOutput(call, {
                 accepted: false,
-                error: traceError(error),
+                error: errorMessage,
               }),
             );
           }
@@ -491,7 +530,7 @@ export class SpecAnalysisExecutor {
   }
 }
 
-const sourceToolNames = new Set([
+const sourceToolNames = new Set<SourceToolName>([
   "linear_get_issue",
   "github_get_pull_request",
   "github_list_changed_files",
@@ -499,8 +538,16 @@ const sourceToolNames = new Set([
   "github_search_code",
   "knowledge_search",
 ]);
+const requiredSourceToolNames = new Set<SourceToolName>(["linear_get_issue"]);
 
-function toolDefinitions(sourceIds: Iterable<string> = []) {
+function isSourceToolName(name: string): name is SourceToolName {
+  return sourceToolNames.has(name as SourceToolName);
+}
+
+function toolDefinitions(
+  sourceIds: Iterable<string> = [],
+  unavailableTools: ReadonlySet<string> = new Set(),
+) {
   const observedSourceIds = [...sourceIds];
   const analysisSummary = {
     description:
@@ -601,7 +648,7 @@ function toolDefinitions(sourceIds: Iterable<string> = []) {
       ) as Record<string, unknown>,
       strict: false,
     },
-  ];
+  ].filter((tool) => !unavailableTools.has(tool.name));
 }
 
 function constrainSourceRefs(
@@ -660,6 +707,7 @@ function systemPrompt() {
   return `你是 DevProof 的 Spec 分析 Agent。
 请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码、相关代码和知识库内容，生成一份完整、可执行的验证 Spec。
 必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述；还要使用由 Issue 和代码分析提炼出的查询检索知识库。
+同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Linear Issue 是后续来源的必要入口，如果它不可用，执行器会立即以明确的数据源错误终止。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。
@@ -672,23 +720,35 @@ function validateFinalSpec(input: {
   linkedPullRequestCount: number;
   sources: ReadonlyMap<string, RuntimeSpecSourceRef>;
   spec: z.infer<typeof runtimeGeneratedSpecSchema>;
+  unavailableTools: ReadonlySet<string>;
 }) {
   const chineseError = validateChineseSpec(input.spec);
   if (chineseError) return chineseError;
   if (!input.calledTools.has("linear_get_issue")) {
     return "完成 Spec 前必须读取 Linear Issue。";
   }
-  if (!input.calledTools.has("knowledge_search")) {
+  if (
+    !input.calledTools.has("knowledge_search") &&
+    !input.unavailableTools.has("knowledge_search")
+  ) {
     return "完成 Spec 前必须检索知识库。";
   }
   const sourceKinds = new Set(
     [...input.sources.values()].map((source) => source.kind),
   );
   if (input.linkedPullRequestCount > 0) {
-    if (!sourceKinds.has("GITHUB_PULL_REQUEST")) {
+    if (
+      !sourceKinds.has("GITHUB_PULL_REQUEST") &&
+      !input.unavailableTools.has("github_get_pull_request")
+    ) {
       return "完成 Spec 前必须读取每个相关联的 Pull Request。";
     }
-    if (!sourceKinds.has("GITHUB_DIFF") || !sourceKinds.has("GITHUB_FILE")) {
+    if (
+      (!sourceKinds.has("GITHUB_DIFF") &&
+        !input.unavailableTools.has("github_list_changed_files")) ||
+      (!sourceKinds.has("GITHUB_FILE") &&
+        !input.unavailableTools.has("github_read_file"))
+    ) {
       return "完成 Spec 前必须同时检查变更 diff 片段和相关代码内容。";
     }
   }
@@ -709,6 +769,37 @@ function validateFinalSpec(input: {
     ].join("\n");
   }
   return null;
+}
+
+function isSourceAvailabilityFailure(error: unknown) {
+  return (
+    error instanceof ControlPlaneError &&
+    (error.status === 429 || error.status >= 500)
+  );
+}
+
+function sourceUnavailableOutcome(
+  sourceTool: SourceToolName,
+  consecutiveFailures: number,
+  error: unknown,
+): RuntimeSpecAnalysisOutcome {
+  const status = error instanceof ControlPlaneError ? error.status : null;
+  return runtimeSpecAnalysisOutcomeSchema.parse({
+    error: {
+      code: "SPEC_ANALYSIS_SOURCE_UNAVAILABLE",
+      details: {
+        consecutiveFailures,
+        sourceTool,
+        ...(status === null ? {} : { status }),
+      },
+      failureClass: "TOOL_EXECUTION",
+      message: `必需数据源 ${sourceTool} 连续 ${consecutiveFailures} 次调用失败，已停止重试。最后一次错误：${traceError(error)}`,
+      phase: "spec_analysis",
+    },
+    executionDisposition: "NOT_RUN",
+    kind: "FATAL_FAILURE",
+    summary: `必需数据源 ${sourceTool} 不可用，Spec 分析已停止以避免重复调用。`,
+  });
 }
 
 const CHINESE_TEXT = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;

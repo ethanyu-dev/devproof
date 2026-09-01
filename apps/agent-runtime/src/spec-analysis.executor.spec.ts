@@ -6,6 +6,7 @@ import type {
 } from "@devproof/agent-runtime-protocol";
 
 import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
+import { ControlPlaneError } from "./control-plane.client.js";
 
 const source: RuntimeSpecSourceRef = {
   contentHash: "a".repeat(64),
@@ -266,6 +267,182 @@ describe("SpecAnalysisExecutor", () => {
     expect(correction.error).toContain("spec.cases[0].sourceRefs[0]");
     expect(correction.error).toContain(
       "spec.cases[0].criteria[0].sourceRefs[0]",
+    );
+  });
+
+  it("stops after two consecutive failures from the required Linear source", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-1",
+        output: [
+          call(
+            "linear_get_issue",
+            { analysisSummary: "读取权威 Issue。" },
+            "call-1",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-2",
+        output: [
+          call(
+            "linear_get_issue",
+            { analysisSummary: "Linear 暂时失败，再重试一次。" },
+            "call-2",
+          ),
+        ],
+      });
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executeSpecTool = vi.fn().mockRejectedValue(
+      new ControlPlaneError(500, {
+        message: "Internal server error",
+        statusCode: 500,
+      }),
+    );
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent, executeSpecTool } as never,
+      60,
+    );
+
+    const outcome = await executor.execute(
+      task,
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(outcome).toMatchObject({
+      error: {
+        code: "SPEC_ANALYSIS_SOURCE_UNAVAILABLE",
+        details: {
+          consecutiveFailures: 2,
+          sourceTool: "linear_get_issue",
+          status: 500,
+        },
+      },
+      executionDisposition: "NOT_RUN",
+      kind: "FATAL_FAILURE",
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(executeSpecTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes an unavailable optional source and completes with remaining evidence", async () => {
+    const spec = {
+      cases: [
+        {
+          criteria: [
+            {
+              description: "订单显示为已退款状态。",
+              id: "refunded-state",
+              requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
+              sourceRefs: [source.externalId],
+            },
+          ],
+          name: "退款状态",
+          preconditions: ["已存在一笔已支付订单。"],
+          rationale: "覆盖 Issue 中的退款要求。",
+          sourceRefs: [source.externalId],
+          steps: [
+            {
+              action: "发起退款。",
+              expectedObservation: "订单状态变为已退款。",
+              order: 1,
+            },
+          ],
+        },
+      ],
+      risks: ["知识库数据源不可用，规格仅基于 Linear Issue。"],
+      scope: { inScope: ["退款状态"] },
+      summary: "验证退款行为。",
+    };
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-1",
+        output: [
+          call(
+            "linear_get_issue",
+            { analysisSummary: "读取权威 Issue。" },
+            "call-1",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-2",
+        output: [
+          call(
+            "knowledge_search",
+            {
+              analysisSummary: "检索退款业务知识。",
+              query: "refund order state",
+            },
+            "call-2",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-3",
+        output: [
+          call(
+            "knowledge_search",
+            {
+              analysisSummary: "知识库暂时失败，再重试一次。",
+              query: "refund order state",
+            },
+            "call-3",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-4",
+        output: [
+          call(
+            "finish_spec",
+            {
+              analysisSummary: "知识库不可用，使用剩余来源完成规格。",
+              spec,
+            },
+            "call-4",
+          ),
+        ],
+      });
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executeSpecTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        result: {
+          issue: { identifier: "ENG-123", title: "Refund flow" },
+          pullRequestUrls: [],
+        },
+        sourceRefs: [source],
+      })
+      .mockRejectedValueOnce(
+        new ControlPlaneError(500, { message: "Internal server error" }),
+      )
+      .mockRejectedValueOnce(
+        new ControlPlaneError(500, { message: "Internal server error" }),
+      );
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent, executeSpecTool } as never,
+      10,
+    );
+
+    const outcome = await executor.execute(
+      task,
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(outcome.kind).toBe("SPEC_GENERATED");
+    expect(executeSpecTool).toHaveBeenCalledTimes(3);
+    const fourthRequest = create.mock.calls[3]?.[0] as {
+      tools: Array<{ name: string }>;
+    };
+    expect(fourthRequest.tools.map((tool) => tool.name)).not.toContain(
+      "knowledge_search",
     );
   });
 });
