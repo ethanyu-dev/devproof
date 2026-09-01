@@ -47,19 +47,7 @@ Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户�
 
 ### 本地 Console 角色
 
-Console 默认使用普通成员视图，只展示团队全部任务及任务需要的浏览器登录流程。开发或演示完整管理控制台时，在浏览器 Console 执行：
-
-```js
-localStorage.setItem("devproof.admin", "true");
-location.reload();
-```
-
-恢复普通成员视图：
-
-```js
-localStorage.removeItem("devproof.admin");
-location.reload();
-```
+Console 默认使用普通成员视图，只展示团队全部任务及任务需要的浏览器登录流程。开发或演示完整管理控制台时，可直接通过顶部导航中的“普通用户 / 管理员”切换器更改视图，无需刷新页面。
 
 该开关只控制当前浏览器中的前端展示，不是权限边界；生产环境的管理员授权仍需由后端实现。
 

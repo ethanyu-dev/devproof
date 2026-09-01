@@ -16,7 +16,6 @@ import {
   X,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { requestWithTimeout } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -159,6 +158,19 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     window.location.href = "/login";
   }
 
+  function changeConsoleRole(nextIsAdmin: boolean) {
+    if (nextIsAdmin === isAdmin) return;
+
+    if (nextIsAdmin) {
+      window.localStorage.setItem(DEVPROOF_ADMIN_STORAGE_KEY, "true");
+    } else {
+      window.localStorage.removeItem(DEVPROOF_ADMIN_STORAGE_KEY);
+    }
+
+    setIsAdmin(nextIsAdmin);
+    setMobileNavOpen(false);
+  }
+
   if (!session || isAdmin === null) {
     if (sessionError) {
       return (
@@ -224,6 +236,10 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               </span>
             </Link>
             <div className="flex items-center gap-2">
+              <ConsoleRoleSwitcher
+                isAdmin={isAdmin}
+                onChange={changeConsoleRole}
+              />
               <div className="hidden text-right md:block">
                 <strong className="block max-w-40 truncate text-xs font-medium">
                   {name}
@@ -351,9 +367,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               </p>
             </div>
           </div>
-          <Badge variant="outline" className="gap-1.5">
-            <ShieldCheck className="size-3" /> 管理员
-          </Badge>
+          <ConsoleRoleSwitcher isAdmin={isAdmin} onChange={changeConsoleRole} />
         </header>
 
         {mobileNavOpen ? (
@@ -383,6 +397,48 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         </main>
         <div id="dp-console-workspace-overlay" />
       </div>
+    </div>
+  );
+}
+
+function ConsoleRoleSwitcher({
+  isAdmin,
+  onChange,
+}: {
+  isAdmin: boolean;
+  onChange: (isAdmin: boolean) => void;
+}) {
+  const options = [
+    { icon: UserRoundCheck, isAdmin: false, label: "普通用户" },
+    { icon: ShieldCheck, isAdmin: true, label: "管理员" },
+  ] as const;
+
+  return (
+    <div
+      aria-label="控制台视图"
+      className="inline-flex shrink-0 items-center rounded-md border border-border bg-muted/50 p-0.5"
+      role="group"
+    >
+      {options.map((option) => {
+        const selected = option.isAdmin === isAdmin;
+        const Icon = option.icon;
+
+        return (
+          <button
+            aria-pressed={selected}
+            className={cn(
+              "inline-flex h-6 cursor-pointer items-center gap-1 rounded-sm px-2 text-[10px] font-medium text-muted-foreground outline-none transition-[color,background-color,box-shadow] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30",
+              selected && "bg-background text-foreground shadow-xs",
+            )}
+            key={option.label}
+            onClick={() => onChange(option.isAdmin)}
+            type="button"
+          >
+            <Icon className="size-3" />
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
