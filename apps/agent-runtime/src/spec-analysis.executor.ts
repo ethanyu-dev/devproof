@@ -113,7 +113,7 @@ export class SpecAnalysisExecutor {
                 model: candidate.modelId,
                 parallel_tool_calls: false,
                 tool_choice: "required",
-                tools: toolDefinitions(),
+                tools: toolDefinitions(sources.keys()),
               },
               { signal },
             );
@@ -252,10 +252,10 @@ export class SpecAnalysisExecutor {
                 parsed.error.message,
               );
               history.push(
-                toolOutput(call, {
-                  accepted: false,
-                  error: parsed.error.message,
-                }),
+                toolOutput(
+                  call,
+                  specCorrection(parsed.error.message, sources.keys()),
+                ),
               );
               continue;
             }
@@ -284,10 +284,10 @@ export class SpecAnalysisExecutor {
                 validationError,
               );
               history.push(
-                toolOutput(call, {
-                  accepted: false,
-                  error: validationError,
-                }),
+                toolOutput(
+                  call,
+                  specCorrection(validationError, sources.keys()),
+                ),
               );
               continue;
             }
@@ -500,7 +500,8 @@ const sourceToolNames = new Set([
   "knowledge_search",
 ]);
 
-function toolDefinitions() {
+function toolDefinitions(sourceIds: Iterable<string> = []) {
+  const observedSourceIds = [...sourceIds];
   const analysisSummary = {
     description:
       "使用简体中文简要说明已获得的信息以及为什么需要执行本次操作；该内容会展示给用户，不要包含隐藏思维链。",
@@ -594,13 +595,51 @@ function toolDefinitions() {
       name: "finish_spec",
       description:
         "完成来源分析后提交完整、可执行的中文 Spec；每个 Case 和验收标准都必须引用实际观察到的 analysis-source。",
-      parameters: stripFormats(z.toJSONSchema(finishSpecSchema)) as Record<
-        string,
-        unknown
-      >,
+      parameters: constrainSourceRefs(
+        stripFormats(z.toJSONSchema(finishSpecSchema)),
+        observedSourceIds,
+      ) as Record<string, unknown>,
       strict: false,
     },
   ];
+}
+
+function constrainSourceRefs(
+  value: unknown,
+  sourceIds: readonly string[],
+): unknown {
+  if (!sourceIds.length) return value;
+  if (Array.isArray(value)) {
+    return value.map((child) => constrainSourceRefs(child, sourceIds));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, child]) => {
+      const constrainedChild = constrainSourceRefs(child, sourceIds);
+      if (
+        key !== "sourceRefs" ||
+        !constrainedChild ||
+        typeof constrainedChild !== "object" ||
+        Array.isArray(constrainedChild)
+      ) {
+        return [key, constrainedChild];
+      }
+      const sourceRefSchema = constrainedChild as Record<string, unknown>;
+      const itemSchema = record(sourceRefSchema.items);
+      return [
+        key,
+        {
+          ...sourceRefSchema,
+          items: {
+            ...itemSchema,
+            description:
+              "必须逐字选择一个已经由来源工具返回的 analysis-source。",
+            enum: sourceIds,
+          },
+        },
+      ];
+    }),
+  );
 }
 
 function objectSchema(properties: Record<string, unknown>, required: string[]) {
@@ -653,8 +692,21 @@ function validateFinalSpec(input: {
       return "完成 Spec 前必须同时检查变更 diff 片段和相关代码内容。";
     }
   }
-  for (const id of specSourceIds(input.spec)) {
-    if (!input.sources.has(id)) return `Spec 引用了尚未观察到的来源：${id}`;
+  const invalidSourceRefs = specSourceRefEntries(input.spec).filter(
+    ({ sourceRef }) => !input.sources.has(sourceRef),
+  );
+  if (invalidSourceRefs.length) {
+    const details = invalidSourceRefs
+      .slice(0, 20)
+      .map(({ path, sourceRef }) => `- ${path}: ${sourceRef}`);
+    if (invalidSourceRefs.length > details.length) {
+      details.push(`- 另有 ${invalidSourceRefs.length - details.length} 处`);
+    }
+    return [
+      `Spec 引用了 ${new Set(invalidSourceRefs.map(({ sourceRef }) => sourceRef)).size} 个尚未观察到的来源（共 ${invalidSourceRefs.length} 处）：`,
+      ...details,
+      "请只从 allowedSourceRefs 中逐字复制来源引用。",
+    ].join("\n");
   }
   return null;
 }
@@ -724,13 +776,33 @@ function validateChineseSpec(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
 
 function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
   return Array.from(
-    new Set(
-      spec.cases.flatMap((testCase) => [
-        ...testCase.sourceRefs,
-        ...testCase.criteria.flatMap((criterion) => criterion.sourceRefs),
-      ]),
-    ),
+    new Set(specSourceRefEntries(spec).map(({ sourceRef }) => sourceRef)),
   );
+}
+
+function specSourceRefEntries(
+  spec: z.infer<typeof runtimeGeneratedSpecSchema>,
+) {
+  return spec.cases.flatMap((testCase, caseIndex) => [
+    ...testCase.sourceRefs.map((sourceRef, sourceIndex) => ({
+      path: `spec.cases[${caseIndex}].sourceRefs[${sourceIndex}]`,
+      sourceRef,
+    })),
+    ...testCase.criteria.flatMap((criterion, criterionIndex) =>
+      criterion.sourceRefs.map((sourceRef, sourceIndex) => ({
+        path: `spec.cases[${caseIndex}].criteria[${criterionIndex}].sourceRefs[${sourceIndex}]`,
+        sourceRef,
+      })),
+    ),
+  ]);
+}
+
+function specCorrection(error: string, sourceIds: Iterable<string>) {
+  return {
+    accepted: false,
+    allowedSourceRefs: [...sourceIds],
+    error,
+  };
 }
 
 function parseArguments(value: string): Record<string, unknown> {

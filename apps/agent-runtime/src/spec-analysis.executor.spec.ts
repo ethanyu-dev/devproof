@@ -87,6 +87,19 @@ describe("SpecAnalysisExecutor", () => {
       scope: { inScope: ["退款状态"] },
       summary: "验证退款行为。",
     };
+    const invalidCaseSourceRef = `${source.externalId}-case-typo`;
+    const invalidCriterionSourceRef = `${source.externalId}-criterion-typo`;
+    const specWithInvalidSourceRefs = {
+      ...spec,
+      cases: spec.cases.map((testCase) => ({
+        ...testCase,
+        criteria: testCase.criteria.map((criterion) => ({
+          ...criterion,
+          sourceRefs: [invalidCriterionSourceRef],
+        })),
+        sourceRefs: [invalidCaseSourceRef],
+      })),
+    };
     const create = vi
       .fn()
       .mockResolvedValueOnce({
@@ -133,10 +146,23 @@ describe("SpecAnalysisExecutor", () => {
           call(
             "finish_spec",
             {
-              analysisSummary: "引用来源足以支持一份可执行的 Spec。",
-              spec,
+              analysisSummary: "修正字段后提交完整 Spec。",
+              spec: specWithInvalidSourceRefs,
             },
             "call-4",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-5",
+        output: [
+          call(
+            "finish_spec",
+            {
+              analysisSummary: "逐字采用合法来源并提交可执行的 Spec。",
+              spec,
+            },
+            "call-5",
           ),
         ],
       });
@@ -171,16 +197,16 @@ describe("SpecAnalysisExecutor", () => {
     const kinds = appendSpecEvent.mock.calls.map((arguments_) => arguments_[1]);
     expect(
       kinds.filter((kind) => kind === "agent.model.completed"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(
       kinds.filter((kind) => kind === "agent.analysis.completed"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(kinds.filter((kind) => kind === "agent.tool.started")).toHaveLength(
-      4,
+      5,
     );
     expect(
       kinds.filter((kind) => kind === "agent.tool.completed"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(
       appendSpecEvent.mock.calls.find(
         (arguments_) =>
@@ -189,7 +215,9 @@ describe("SpecAnalysisExecutor", () => {
       )?.[2],
     ).toMatchObject({ sourceRefs: [source.externalId] });
     expect(kinds).toContain("agent.spec.generated");
-    expect(kinds).toContain("agent.spec.validation_failed");
+    expect(
+      kinds.filter((kind) => kind === "agent.spec.validation_failed"),
+    ).toHaveLength(2);
     expect(JSON.stringify(appendSpecEvent.mock.calls)).not.toContain(
       "private hidden reasoning",
     );
@@ -205,5 +233,39 @@ describe("SpecAnalysisExecutor", () => {
         /[\u3400-\u9fff]/u.test(tool.description),
       ),
     ).toBe(true);
+    expect(JSON.stringify(firstRequest.tools)).not.toContain(source.externalId);
+
+    const secondRequest = create.mock.calls[1]?.[0] as {
+      tools: Array<{ name: string; parameters: unknown }>;
+    };
+    const finishSpecTool = secondRequest.tools.find(
+      (tool) => tool.name === "finish_spec",
+    );
+    const finishSpecParameters = JSON.stringify(finishSpecTool?.parameters);
+    expect(finishSpecParameters).toContain(
+      "必须逐字选择一个已经由来源工具返回的 analysis-source。",
+    );
+    expect(finishSpecParameters).toContain(
+      JSON.stringify({ enum: [source.externalId] }).slice(1, -1),
+    );
+
+    const finalRequest = create.mock.calls[4]?.[0] as {
+      input: Array<{ call_id?: string; output?: string; type?: string }>;
+    };
+    const correctionOutput = finalRequest.input.find(
+      (item) =>
+        item.type === "function_call_output" && item.call_id === "call-4",
+    );
+    expect(correctionOutput).toBeDefined();
+    const correction = JSON.parse(correctionOutput?.output ?? "{}") as {
+      allowedSourceRefs?: string[];
+      error?: string;
+    };
+    expect(correction.allowedSourceRefs).toEqual([source.externalId]);
+    expect(correction.error).toContain("2 个尚未观察到的来源（共 2 处）");
+    expect(correction.error).toContain("spec.cases[0].sourceRefs[0]");
+    expect(correction.error).toContain(
+      "spec.cases[0].criteria[0].sourceRefs[0]",
+    );
   });
 });
