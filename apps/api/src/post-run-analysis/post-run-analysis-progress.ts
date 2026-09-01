@@ -111,6 +111,12 @@ export function buildPostRunAnalysisProgress(
       .map((event) => text(record(event.payload).callId))
       .filter((value): value is string => Boolean(value)),
   );
+  const legacyModelStarts = modelStarted.filter(
+    (event) => !text(record(event.payload).callId),
+  ).length;
+  const legacyModelFinishes = modelFinished.filter(
+    (event) => !text(record(event.payload).callId),
+  ).length;
   const evidenceReads = ordered.filter(
     (event) => event.kind === "analysis.evidence.read",
   );
@@ -128,27 +134,27 @@ export function buildPostRunAnalysisProgress(
   const reportValidationFailures = ordered.filter(
     (event) => event.kind === "analysis.report.validation_failed",
   );
-  const reportGenerated = ordered.findLast(
-    (event) => event.kind === "analysis.report.generated",
-  );
-  const latestReportEvent = ordered.findLast((event) =>
+  const currentAttemptEvents = eventsForCurrentAttempt(ordered);
+  const latestReportEvent = currentAttemptEvents.findLast((event) =>
     ["analysis.report.generated", "analysis.report.validation_failed"].includes(
       event.kind,
     ),
   );
   const latestEvent = ordered.at(-1) ?? null;
-  const phase = currentPhase(job, ordered);
+  const phase = currentPhase(job, currentAttemptEvents);
   const terminal = ["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status);
   const deadline =
     job.status === "RUNNING" ? job.deadlineAt : job.hardDeadlineAt;
-  const startedEvent = ordered.find(
+  const startedEvent = currentAttemptEvents.findLast(
     (event) => event.kind === "analysis.started",
   );
   const queueWaitMs =
-    number(record(startedEvent?.payload).queueWaitMs) ??
-    (job.startedAt && job.readyAt
-      ? Math.max(0, job.startedAt.getTime() - job.readyAt.getTime())
-      : null);
+    job.status === "READY" && job.readyAt
+      ? Math.max(0, now.getTime() - job.readyAt.getTime())
+      : (number(record(startedEvent?.payload).queueWaitMs) ??
+        (job.startedAt && job.readyAt
+          ? Math.max(0, job.startedAt.getTime() - job.readyAt.getTime())
+          : null));
   const usage = completedModelCalls.reduce(
     (total, event) => {
       const value = record(record(event.payload).usage);
@@ -192,9 +198,8 @@ export function buildPostRunAnalysisProgress(
       failedModelCalls: failedModelCalls.length,
       inputTokens: usage.inputTokens,
       manifestReads: manifestReads.length,
-      modelCalls: modelCallIds.size
-        ? modelCallIds.size
-        : Math.max(modelStarted.length, modelFinished.length),
+      modelCalls:
+        modelCallIds.size + Math.max(legacyModelStarts, legacyModelFinishes),
       modelDurationMs: [...completedModelCalls, ...failedModelCalls].reduce(
         (total, event) =>
           total + (number(record(event.payload).durationMs) ?? 0),
@@ -210,8 +215,15 @@ export function buildPostRunAnalysisProgress(
     phase,
     phaseLabel: phaseLabel(phase),
     queueWaitMs,
-    steps: progressSteps(job, phase, ordered),
+    steps: progressSteps(job, phase, currentAttemptEvents),
   };
+}
+
+function eventsForCurrentAttempt(events: PostRunAnalysisProgressEvent[]) {
+  const startedIndex = events.findLastIndex(
+    (event) => event.kind === "analysis.started",
+  );
+  return startedIndex === -1 ? events : events.slice(startedIndex);
 }
 
 function currentPhase(
@@ -232,6 +244,8 @@ function currentPhase(
       "analysis.evidence.served",
       "analysis.manifest.read",
       "analysis.model.completed",
+      "analysis.model.failed",
+      "analysis.model.started",
       "analysis.report.validation_failed",
     ].includes(event.kind),
   );
@@ -239,6 +253,7 @@ function currentPhase(
     latestOperationalEvent?.kind === "analysis.model.completed"
       ? text(record(latestOperationalEvent.payload).action)
       : null;
+  const reportedPhase = text(record(latestOperationalEvent?.payload).phase);
   if (
     latestModelAction === "GENERATE_REPORT" ||
     latestOperationalEvent?.kind === "analysis.report.validation_failed"
@@ -254,6 +269,16 @@ function currentPhase(
     ["READ_BUNDLE", "READ_EVIDENCE"].includes(latestModelAction ?? "")
   ) {
     return "EVIDENCE";
+  }
+  if (
+    ["EVIDENCE_ANALYSIS", "EVIDENCE_DISCOVERY"].includes(reportedPhase ?? "")
+  ) {
+    return "EVIDENCE";
+  }
+  if (
+    ["REPORT_GENERATION", "REPORT_VALIDATION"].includes(reportedPhase ?? "")
+  ) {
+    return "REPORTING";
   }
   return "INDEXING";
 }

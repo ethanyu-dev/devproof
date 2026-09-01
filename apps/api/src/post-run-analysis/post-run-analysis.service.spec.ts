@@ -198,10 +198,11 @@ describe("PostRunAnalysisService", () => {
       updatedAt: occurredAt,
       workItem: null,
     });
+    const findProgressEvents = vi.fn().mockResolvedValue(events);
     const service = new PostRunAnalysisService(
       {
         postRunAnalysisEvent: {
-          findMany: vi.fn().mockResolvedValue(events),
+          findMany: findProgressEvents,
         },
         postRunAnalysisJob: { findFirst },
       } as never,
@@ -236,6 +237,19 @@ describe("PostRunAnalysisService", () => {
       eventsTruncated: false,
     });
     expect(detail?.events).toHaveLength(200);
+    expect(findProgressEvents).toHaveBeenCalledWith({
+      orderBy: { sequence: "asc" },
+      select: {
+        kind: true,
+        occurredAt: true,
+        payload: true,
+        sequence: true,
+      },
+      where: {
+        analysisId,
+        teamId,
+      },
+    });
     expect(detail?.progress).toMatchObject({
       metrics: { modelCalls: 201 },
       phase: "INDEXING",
@@ -289,6 +303,7 @@ describe("PostRunAnalysisService", () => {
       }),
     );
     expect(page).toMatchObject({
+      analysisId,
       category: "ERROR",
       hasMore: true,
       nextBeforeSequence: "11",

@@ -246,7 +246,6 @@ export interface PostRunAnalysisDetail {
       totalTokens: number;
       uniqueEvidence: number;
     };
-    metricsTruncated: boolean;
     nextAttemptAt: string | null;
     phase: string;
     phaseLabel: string;
@@ -276,6 +275,7 @@ export interface PostRunAnalysisDetail {
 export type PostRunAnalysisEvent = PostRunAnalysisDetail["events"][number];
 
 export interface PostRunAnalysisEventPage {
+  analysisId: string;
   category: PostRunAnalysisEventCategory;
   events: PostRunAnalysisEvent[];
   hasMore: boolean;

@@ -51,7 +51,7 @@ Every evidence reference cited by a finding must also have been fetched through 
 
 ## Console progress and diagnostics
 
-The Task detail API derives a complete progress summary from the analysis event stream instead of asking the browser to infer state from the most recent display page. It exposes the active phase, six lifecycle steps, queue and execution timing, deadline remaining, model calls and duration, normalized token usage, evidence reads, validation failures, and finding count. The Console presents this summary first and keeps raw event payloads behind a collapsed technical section.
+The Task detail API derives a complete progress summary from the full analysis event stream instead of asking the browser to infer state from the most recent display page. Cumulative metrics cover every attempt, while the active phase and queue timing are scoped to the latest attempt. It exposes six lifecycle steps, queue and execution timing, deadline remaining, model calls and duration, normalized token usage, evidence reads, validation failures, and finding count. The Console presents this summary first and keeps raw event payloads behind a collapsed technical section.
 
 Runtime model events include a control-plane-safe `callId`, turn, phase, deterministic action and purpose, duration, tool names, cited evidence references, and normalized usage metadata. These fields describe what the executor did without persisting prompts, raw model output, rolling analysis memory, or hidden chain-of-thought. Model start and terminal events are rendered as one turn; adjacent evidence reads are grouped.
 

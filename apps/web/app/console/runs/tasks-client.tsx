@@ -40,6 +40,8 @@ import {
   aggregateAnalysisEvents,
   analysisEventFilters,
   analysisEventMatches,
+  mergePostRunAnalysisEventPage,
+  mergePostRunAnalysisEvents,
 } from "./post-run-analysis-view";
 import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
@@ -1266,6 +1268,10 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const olderEventRequestRef = useRef(0);
+  const eventScopeKey = `${analysis?.id ?? "none"}:${eventCategory}:${pollGeneration}`;
+  const eventScopeRef = useRef(eventScopeKey);
+  eventScopeRef.current = eventScopeKey;
 
   useEffect(() => {
     let active = true;
@@ -1293,7 +1299,7 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
           current && eventCursor && current.id === next.id
             ? {
                 ...next,
-                events: mergeAnalysisEvents(current.events, next.events),
+                events: mergePostRunAnalysisEvents(current.events, next.events),
                 eventsTruncated:
                   current.eventsTruncated || next.eventsTruncated,
               }
@@ -1333,14 +1339,24 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
         active = false;
       };
     }
+    const analysisId = analysis.id;
+    const requestId = ++olderEventRequestRef.current;
     setLoadingEvents(true);
+    setLoadingOlderEvents(false);
     setEventError(null);
     setEventPage(null);
     void consoleApi<PostRunAnalysisEventPage>(
       `/tasks/${taskId}/post-run-analysis/events?category=${eventCategory}`,
     )
       .then((page) => {
-        if (active) setEventPage(page);
+        if (active && requestId === olderEventRequestRef.current) {
+          setEventPage(
+            mergePostRunAnalysisEventPage(null, page, {
+              analysisId,
+              category: eventCategory,
+            }),
+          );
+        }
       })
       .catch((loadError: unknown) => {
         if (active) setEventError((loadError as Error).message);
@@ -1354,33 +1370,58 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
   }, [analysis?.id, eventCategory, pollGeneration, taskId]);
 
   const visibleEvents = useMemo(() => {
+    const pageEvents =
+      eventPage &&
+      eventPage.analysisId === analysis?.id &&
+      eventPage.category === eventCategory
+        ? eventPage.events
+        : [];
     const liveEvents = (analysis?.events ?? []).filter((event) =>
       analysisEventMatches(event, eventCategory),
     );
-    return mergeAnalysisEvents(eventPage?.events ?? [], liveEvents);
-  }, [analysis?.events, eventCategory, eventPage?.events]);
+    return mergePostRunAnalysisEvents(pageEvents, liveEvents);
+  }, [analysis?.events, analysis?.id, eventCategory, eventPage]);
   const groupedEvents = useMemo(
     () => aggregateAnalysisEvents(visibleEvents),
     [visibleEvents],
   );
 
   async function loadOlderEvents() {
+    const analysisId = analysis?.id;
     const beforeSequence = visibleEvents.at(0)?.sequence;
-    if (!beforeSequence) return;
+    if (!analysisId || !beforeSequence) return;
+    const category = eventCategory;
+    const scopeKey = eventScopeRef.current;
+    const requestId = ++olderEventRequestRef.current;
     setLoadingOlderEvents(true);
     setEventError(null);
     try {
       const page = await consoleApi<PostRunAnalysisEventPage>(
-        `/tasks/${taskId}/post-run-analysis/events?category=${eventCategory}&beforeSequence=${encodeURIComponent(beforeSequence)}`,
+        `/tasks/${taskId}/post-run-analysis/events?category=${category}&beforeSequence=${encodeURIComponent(beforeSequence)}`,
       );
-      setEventPage((current) => ({
-        ...page,
-        events: mergeAnalysisEvents(current?.events ?? [], page.events),
-      }));
+      if (
+        requestId !== olderEventRequestRef.current ||
+        scopeKey !== eventScopeRef.current
+      ) {
+        return;
+      }
+      setEventPage((current) =>
+        mergePostRunAnalysisEventPage(current, page, {
+          analysisId,
+          category,
+        }),
+      );
     } catch (loadError) {
-      setEventError((loadError as Error).message);
+      if (
+        requestId === olderEventRequestRef.current &&
+        scopeKey === eventScopeRef.current
+      ) {
+        setEventError((loadError as Error).message);
+      }
     } finally {
-      setLoadingOlderEvents(false);
+      if (requestId === olderEventRequestRef.current) {
+        setLoadingOlderEvents(false);
+      }
     }
   }
 
@@ -1523,9 +1564,6 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
               <small className="dp-post-run-analysis-deadline">
                 当前期限剩余{" "}
                 {formatAnalysisDuration(analysis.progress.deadlineRemainingMs)}
-                {analysis.progress.metricsTruncated
-                  ? " · 指标仅统计最近事件"
-                  : ""}
               </small>
             ) : null}
           </section>
@@ -1748,19 +1786,6 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
         </div>
       )}
     </Card>
-  );
-}
-
-function mergeAnalysisEvents(
-  current: PostRunAnalysisDetail["events"],
-  incoming: PostRunAnalysisDetail["events"],
-) {
-  return [
-    ...new Map(
-      [...current, ...incoming].map((event) => [event.sequence, event]),
-    ).values(),
-  ].sort((left, right) =>
-    left.sequence.localeCompare(right.sequence, undefined, { numeric: true }),
   );
 }
 

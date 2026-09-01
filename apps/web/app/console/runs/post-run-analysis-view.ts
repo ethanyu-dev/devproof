@@ -1,6 +1,7 @@
 import type {
   PostRunAnalysisEvent,
   PostRunAnalysisEventCategory,
+  PostRunAnalysisEventPage,
 } from "./task-types";
 
 export const analysisEventFilters: Array<{
@@ -113,6 +114,42 @@ export function aggregateAnalysisEvents(events: PostRunAnalysisEvent[]) {
   );
 }
 
+export function mergePostRunAnalysisEvents(
+  current: PostRunAnalysisEvent[],
+  incoming: PostRunAnalysisEvent[],
+) {
+  return [
+    ...new Map(
+      [...current, ...incoming].map((event) => [event.sequence, event]),
+    ).values(),
+  ].sort(compareEvents);
+}
+
+export function mergePostRunAnalysisEventPage(
+  current: PostRunAnalysisEventPage | null,
+  incoming: PostRunAnalysisEventPage,
+  expected: {
+    analysisId: string;
+    category: PostRunAnalysisEventCategory;
+  },
+) {
+  if (
+    incoming.analysisId !== expected.analysisId ||
+    incoming.category !== expected.category
+  ) {
+    return current;
+  }
+  const currentEvents =
+    current?.analysisId === expected.analysisId &&
+    current.category === expected.category
+      ? current.events
+      : [];
+  return {
+    ...incoming,
+    events: mergePostRunAnalysisEvents(currentEvents, incoming.events),
+  };
+}
+
 function modelGroup(
   started: PostRunAnalysisEvent | null,
   terminal: PostRunAnalysisEvent | null,
@@ -176,21 +213,41 @@ function singleEventGroup(event: PostRunAnalysisEvent): AnalysisEventGroup {
 
 function groupEvidenceReads(groups: AnalysisEventGroup[]) {
   const result: AnalysisEventGroup[] = [];
-  for (const group of groups) {
+  for (const originalGroup of groups) {
+    let group = originalGroup;
+    const served = result.at(-1);
+    if (
+      group.kind === "analysis.evidence.read" &&
+      served?.kind === "analysis.evidence.served" &&
+      evidenceRef(group) === evidenceRef(served) &&
+      withinEvidenceGroupWindow(served, group)
+    ) {
+      result.pop();
+      group = {
+        ...group,
+        events: [...served.events, ...group.events],
+        id: `evidence:${served.sequence}:${group.sequence}`,
+        payload: [served.payload, group.payload],
+        sequence: served.sequence,
+      };
+    }
     const previous = result.at(-1);
     if (
       group.kind === "analysis.evidence.read" &&
       previous?.kind === "analysis.evidence.read" &&
-      Date.parse(group.occurredAt) - Date.parse(previous.occurredAt) <= 10_000
+      withinEvidenceGroupWindow(previous, group)
     ) {
       const events = [...previous.events, ...group.events];
-      const refs = events
+      const readEvents = events.filter(
+        (event) => event.kind === "analysis.evidence.read",
+      );
+      const refs = readEvents
         .map((event) => text(record(event.payload).evidenceRef))
         .filter((value): value is string => Boolean(value));
       result[result.length - 1] = {
         ...previous,
         events,
-        meta: `${events.length} 次读取 · ${new Set(refs).size} 条证据`,
+        meta: `${readEvents.length} 次读取 · ${new Set(refs).size} 条证据`,
         occurredAt: group.occurredAt,
         payload: events.map((event) => event.payload),
         summary: refs.slice(-3).map(shortRef).join("、"),
@@ -201,6 +258,18 @@ function groupEvidenceReads(groups: AnalysisEventGroup[]) {
     result.push(group);
   }
   return result;
+}
+
+function evidenceRef(group: AnalysisEventGroup) {
+  return text(record(group.payload).evidenceRef);
+}
+
+function withinEvidenceGroupWindow(
+  earlier: AnalysisEventGroup,
+  later: AnalysisEventGroup,
+) {
+  const elapsed = Date.parse(later.occurredAt) - Date.parse(earlier.occurredAt);
+  return elapsed >= 0 && elapsed <= 10_000;
 }
 
 function eventSummary(event: PostRunAnalysisEvent) {

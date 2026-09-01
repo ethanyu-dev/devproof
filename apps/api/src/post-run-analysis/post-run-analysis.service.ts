@@ -40,7 +40,6 @@ const TERMINAL_BROWSER_STATUSES = [
   "TIMED_OUT",
 ] as const;
 const EVENT_PAGE_SIZE = 200;
-const PROGRESS_EVENT_LIMIT = 2_000;
 const CAPTURE_CLAIM_STALE_MS = 15 * 60 * 1_000;
 const POST_RUN_ANALYSIS_DETAIL_SELECT = {
   analyzerVersion: true,
@@ -265,21 +264,16 @@ export class PostRunAnalysisService {
     });
     if (!row) return null;
     const progressRows = await this.prisma.postRunAnalysisEvent.findMany({
-      orderBy: { sequence: "desc" },
+      orderBy: { sequence: "asc" },
       select: {
         kind: true,
         occurredAt: true,
         payload: true,
         sequence: true,
       },
-      take: PROGRESS_EVENT_LIMIT + 1,
       where: { analysisId: row.id, teamId: current.team.id },
     });
-    const progressTruncated = progressRows.length > PROGRESS_EVENT_LIMIT;
-    const progressEvents = progressRows
-      .slice(0, PROGRESS_EVENT_LIMIT)
-      .reverse();
-    return toDetail(row, afterSequence, progressEvents, progressTruncated);
+    return toDetail(row, afterSequence, progressRows);
   }
 
   async events(
@@ -316,6 +310,7 @@ export class PostRunAnalysisService {
     const hasMore = rows.length > EVENT_PAGE_SIZE;
     const events = rows.slice(0, EVENT_PAGE_SIZE).reverse();
     return {
+      analysisId: job.id,
       category,
       events: events.map(toEvent),
       hasMore,
@@ -952,7 +947,6 @@ function toDetail(
   row: PostRunAnalysisDetailRow,
   afterSequence: bigint | null,
   progressEvents: Parameters<typeof buildPostRunAnalysisProgress>[1],
-  progressTruncated: boolean,
 ) {
   const eventsHasMore = row.events.length > EVENT_PAGE_SIZE;
   const events = row.events.slice(0, EVENT_PAGE_SIZE);
@@ -991,10 +985,7 @@ function toDetail(
         }
       : null,
     maxAttempts: row.maxAttempts,
-    progress: {
-      ...buildPostRunAnalysisProgress(row, progressEvents),
-      metricsTruncated: progressTruncated,
-    },
+    progress: buildPostRunAnalysisProgress(row, progressEvents),
     startedAt: row.startedAt?.toISOString() ?? null,
     status: row.status,
     updatedAt: row.updatedAt.toISOString(),

@@ -108,6 +108,55 @@ describe("buildPostRunAnalysisProgress", () => {
       "正在核验证据 browser-command://failed-command（CLICK · Run 9be3dc23 · Attempt #2）。",
     );
   });
+
+  it("scopes the active phase and queue timing to the latest attempt", () => {
+    const occurredAt = new Date("2026-09-01T05:40:00.000Z");
+    const progress = buildPostRunAnalysisProgress(
+      {
+        createdAt: occurredAt,
+        deadlineAt: new Date("2026-09-01T06:10:00.000Z"),
+        error: null,
+        findings: [],
+        finishedAt: null,
+        hardDeadlineAt: new Date("2026-09-01T07:18:00.000Z"),
+        inputSha256: "a".repeat(64),
+        nextAttemptAt: null,
+        readyAt: occurredAt,
+        startedAt: occurredAt,
+        status: "RUNNING",
+        updatedAt: occurredAt,
+      },
+      [
+        event(1, "analysis.started", {
+          attemptNumber: 1,
+          queueWaitMs: 20_000,
+        }),
+        event(2, "analysis.report.generated", { findingCount: 1 }),
+        event(3, "analysis.retry_queued", { attemptNumber: 1 }),
+        event(4, "analysis.started", {
+          attemptNumber: 2,
+          queueWaitMs: 5_000,
+        }),
+        event(5, "analysis.model.started", {
+          callId: "attempt-2-call-1",
+          model: "xai/grok-4.6",
+          phase: "EVIDENCE_DISCOVERY",
+          turn: 1,
+        }),
+      ],
+      new Date("2026-09-01T05:45:00.000Z"),
+    );
+
+    expect(progress).toMatchObject({
+      currentMessage: "正在进行第 1 轮模型分析（xai/grok-4.6）。",
+      phase: "EVIDENCE",
+      queueWaitMs: 5_000,
+      steps: expect.arrayContaining([
+        { key: "EVIDENCE", label: "核验证据", status: "ACTIVE" },
+        { key: "PERSISTING", label: "保存结果", status: "PENDING" },
+      ]),
+    });
+  });
 });
 
 function event(sequence: number, kind: string, payload: unknown) {
