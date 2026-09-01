@@ -67,7 +67,7 @@ describe("Agent Runtime pool registration", () => {
       analysisConcurrency: 0,
       browserConcurrency: 0,
       pools: ["SPEC_ANALYSIS"],
-      specConcurrency: 1,
+      specConcurrency: 5,
     });
     expect(findMany).not.toHaveBeenCalled();
   });

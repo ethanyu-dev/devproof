@@ -10,6 +10,7 @@ import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 
 const MAX_ASSIGNED_BROWSER_CONCURRENCY = 1_024;
 const AGENT_RUNTIME_REGISTRATION_MIN_MINOR = 4;
+const SPEC_ANALYSIS_CONCURRENCY = 5;
 
 @Injectable()
 export class AgentRuntimeControlService {
@@ -73,7 +74,9 @@ export class AgentRuntimeControlService {
       browserConcurrency,
       pools: [...pools],
       refreshAfterMs: 5_000,
-      specConcurrency: pools.includes("SPEC_ANALYSIS") ? 1 : 0,
+      specConcurrency: pools.includes("SPEC_ANALYSIS")
+        ? SPEC_ANALYSIS_CONCURRENCY
+        : 0,
     };
   }
 }
