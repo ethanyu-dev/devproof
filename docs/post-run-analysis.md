@@ -49,6 +49,14 @@ The Runtime validates report references and Run/Attempt/Runtime combinations aga
 
 Every evidence reference cited by a finding must also have been fetched through `read_analysis_evidence` during the active lease; appearing in the Manifest allowlist alone is not sufficient. After a successful evidence response, the control plane records the evidenceRef with the current fencing token and checks those server-authored records again in the report-completion transaction. Runtime events, provider errors, and model reports are recursively redacted again at the API persistence boundary before they can reach PostgreSQL or the Console.
 
+## Console progress and diagnostics
+
+The Task detail API derives a complete progress summary from the analysis event stream instead of asking the browser to infer state from the most recent display page. It exposes the active phase, six lifecycle steps, queue and execution timing, deadline remaining, model calls and duration, normalized token usage, evidence reads, validation failures, and finding count. The Console presents this summary first and keeps raw event payloads behind a collapsed technical section.
+
+Runtime model events include a control-plane-safe `callId`, turn, phase, deterministic action and purpose, duration, tool names, cited evidence references, and normalized usage metadata. These fields describe what the executor did without persisting prompts, raw model output, rolling analysis memory, or hidden chain-of-thought. Model start and terminal events are rendered as one turn; adjacent evidence reads are grouped.
+
+Operators can filter technical events by `KEY`, `ERROR`, `MODEL`, `EVIDENCE`, or `ALL`. `GET /console/api/tasks/:id/post-run-analysis/events` accepts `category` and an optional exclusive `beforeSequence` cursor, returning older pages without losing the live forward cursor used by the main detail poll. Failures remain pinned above technical details with their actionable code and message.
+
 ## Recovery and isolation
 
 Jobs use lease tokens, monotonic fencing tokens, two separate deadlines, bounded attempts, and idempotent completion IDs. `hardDeadlineAt` bounds the complete capture, queue, and retry lifecycle. `deadlineAt` is the current attempt deadline and is assigned only when a Runtime claims the job, so time spent in `READY` never consumes that attempt's model-execution window. Capturing a bundle resets the hard deadline so slow browser cleanup does not consume the analysis lifecycle window.

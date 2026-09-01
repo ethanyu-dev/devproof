@@ -224,6 +224,39 @@ export interface PostRunAnalysisDetail {
     sha256: string;
   } | null;
   maxAttempts: number;
+  progress: {
+    currentMessage: string;
+    deadlineAt: string;
+    deadlineRemainingMs: number;
+    elapsedMs: number;
+    findingCount: number;
+    lastActivityAt: string;
+    lastEventKind: string | null;
+    metrics: {
+      bundleReads: number;
+      evidenceReads: number;
+      failedModelCalls: number;
+      inputTokens: number;
+      manifestReads: number;
+      modelCalls: number;
+      modelDurationMs: number;
+      models: string[];
+      outputTokens: number;
+      reportValidationFailures: number;
+      totalTokens: number;
+      uniqueEvidence: number;
+    };
+    metricsTruncated: boolean;
+    nextAttemptAt: string | null;
+    phase: string;
+    phaseLabel: string;
+    queueWaitMs: number | null;
+    steps: Array<{
+      key: string;
+      label: string;
+      status: "ACTIVE" | "COMPLETED" | "FAILED" | "PENDING";
+    }>;
+  };
   startedAt: string | null;
   status: string;
   updatedAt: string;
@@ -239,3 +272,15 @@ export interface PostRunAnalysisDetail {
     updatedAt: string;
   } | null;
 }
+
+export type PostRunAnalysisEvent = PostRunAnalysisDetail["events"][number];
+
+export interface PostRunAnalysisEventPage {
+  category: PostRunAnalysisEventCategory;
+  events: PostRunAnalysisEvent[];
+  hasMore: boolean;
+  nextBeforeSequence: string | null;
+}
+
+export type PostRunAnalysisEventCategory =
+  "ALL" | "KEY" | "ERROR" | "MODEL" | "EVIDENCE";

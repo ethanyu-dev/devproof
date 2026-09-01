@@ -21,6 +21,12 @@ import {
   postRunAnalysisHardDeadline,
   postRunAnalysisRetryAt,
 } from "./post-run-analysis-scheduling.js";
+import {
+  buildPostRunAnalysisProgress,
+  POST_RUN_ANALYSIS_EVENT_CATEGORIES,
+  postRunAnalysisEventKinds,
+  type PostRunAnalysisEventCategory,
+} from "./post-run-analysis-progress.js";
 
 const TERMINAL_TASK_LIFECYCLES = [
   "COMPLETED",
@@ -34,12 +40,14 @@ const TERMINAL_BROWSER_STATUSES = [
   "TIMED_OUT",
 ] as const;
 const EVENT_PAGE_SIZE = 200;
+const PROGRESS_EVENT_LIMIT = 2_000;
 const CAPTURE_CLAIM_STALE_MS = 15 * 60 * 1_000;
 const POST_RUN_ANALYSIS_DETAIL_SELECT = {
   analyzerVersion: true,
   attemptNumber: true,
   createdAt: true,
   error: true,
+  deadlineAt: true,
   events: true,
   findings: {
     include: { workItem: true },
@@ -48,10 +56,13 @@ const POST_RUN_ANALYSIS_DETAIL_SELECT = {
   finishedAt: true,
   generation: true,
   id: true,
+  hardDeadlineAt: true,
   inputByteSize: true,
   inputCompleteness: true,
   inputSha256: true,
   maxAttempts: true,
+  nextAttemptAt: true,
+  readyAt: true,
   startedAt: true,
   status: true,
   updatedAt: true,
@@ -230,7 +241,10 @@ export class PostRunAnalysisService {
     taskExecutionId: string,
     options: { afterSequence?: string } = {},
   ) {
-    const afterSequence = parseEventSequence(options.afterSequence);
+    const afterSequence = parseEventSequence(
+      options.afterSequence,
+      "afterSequence",
+    );
     const row = await this.prisma.postRunAnalysisJob.findFirst({
       select: {
         ...POST_RUN_ANALYSIS_DETAIL_SELECT,
@@ -249,7 +263,64 @@ export class PostRunAnalysisService {
       orderBy: [{ generation: "desc" }, { createdAt: "desc" }],
       where: { taskExecutionId, teamId: current.team.id },
     });
-    return row ? toDetail(row, afterSequence) : null;
+    if (!row) return null;
+    const progressRows = await this.prisma.postRunAnalysisEvent.findMany({
+      orderBy: { sequence: "desc" },
+      select: {
+        kind: true,
+        occurredAt: true,
+        payload: true,
+        sequence: true,
+      },
+      take: PROGRESS_EVENT_LIMIT + 1,
+      where: { analysisId: row.id, teamId: current.team.id },
+    });
+    const progressTruncated = progressRows.length > PROGRESS_EVENT_LIMIT;
+    const progressEvents = progressRows
+      .slice(0, PROGRESS_EVENT_LIMIT)
+      .reverse();
+    return toDetail(row, afterSequence, progressEvents, progressTruncated);
+  }
+
+  async events(
+    current: ToolAuthContext,
+    taskExecutionId: string,
+    options: { beforeSequence?: string; category?: string } = {},
+  ) {
+    const beforeSequence = parseEventSequence(
+      options.beforeSequence,
+      "beforeSequence",
+    );
+    const category = parseEventCategory(options.category);
+    const job = await this.prisma.postRunAnalysisJob.findFirst({
+      orderBy: [{ generation: "desc" }, { createdAt: "desc" }],
+      select: { id: true },
+      where: { taskExecutionId, teamId: current.team.id },
+    });
+    if (!job) {
+      throw new NotFoundException("Post-run analysis job was not found.");
+    }
+    const kinds = postRunAnalysisEventKinds(category);
+    const rows = await this.prisma.postRunAnalysisEvent.findMany({
+      orderBy: { sequence: "desc" },
+      take: EVENT_PAGE_SIZE + 1,
+      where: {
+        analysisId: job.id,
+        teamId: current.team.id,
+        ...(beforeSequence === null
+          ? {}
+          : { sequence: { lt: beforeSequence } }),
+        ...(kinds ? { kind: { in: kinds } } : {}),
+      },
+    });
+    const hasMore = rows.length > EVENT_PAGE_SIZE;
+    const events = rows.slice(0, EVENT_PAGE_SIZE).reverse();
+    return {
+      category,
+      events: events.map(toEvent),
+      hasMore,
+      nextBeforeSequence: events.at(0)?.sequence.toString() ?? null,
+    };
   }
 
   async retry(current: ToolAuthContext, taskExecutionId: string) {
@@ -877,7 +948,12 @@ export function findingFingerprint(finding: {
     .digest("hex");
 }
 
-function toDetail(row: PostRunAnalysisDetailRow, afterSequence: bigint | null) {
+function toDetail(
+  row: PostRunAnalysisDetailRow,
+  afterSequence: bigint | null,
+  progressEvents: Parameters<typeof buildPostRunAnalysisProgress>[1],
+  progressTruncated: boolean,
+) {
   const eventsHasMore = row.events.length > EVENT_PAGE_SIZE;
   const events = row.events.slice(0, EVENT_PAGE_SIZE);
   if (afterSequence === null) events.reverse();
@@ -890,13 +966,7 @@ function toDetail(row: PostRunAnalysisDetailRow, afterSequence: bigint | null) {
     error: row.error,
     eventCursor:
       events.at(-1)?.sequence.toString() ?? afterSequence?.toString() ?? null,
-    events: events.map((event) => ({
-      actor: event.actor,
-      kind: event.kind,
-      occurredAt: event.occurredAt.toISOString(),
-      payload: event.payload,
-      sequence: event.sequence.toString(),
-    })),
+    events: events.map(toEvent),
     eventsHasMore: afterSequence !== null && eventsHasMore,
     eventsTruncated: afterSequence === null && eventsHasMore,
     findings: [...row.findings]
@@ -921,6 +991,10 @@ function toDetail(row: PostRunAnalysisDetailRow, afterSequence: bigint | null) {
         }
       : null,
     maxAttempts: row.maxAttempts,
+    progress: {
+      ...buildPostRunAnalysisProgress(row, progressEvents),
+      metricsTruncated: progressTruncated,
+    },
     startedAt: row.startedAt?.toISOString() ?? null,
     status: row.status,
     updatedAt: row.updatedAt.toISOString(),
@@ -940,14 +1014,44 @@ function toDetail(row: PostRunAnalysisDetailRow, afterSequence: bigint | null) {
   };
 }
 
-function parseEventSequence(value: string | undefined) {
+function toEvent(event: {
+  actor: string;
+  kind: string;
+  occurredAt: Date;
+  payload: unknown;
+  sequence: bigint;
+}) {
+  return {
+    actor: event.actor,
+    kind: event.kind,
+    occurredAt: event.occurredAt.toISOString(),
+    payload: event.payload,
+    sequence: event.sequence.toString(),
+  };
+}
+
+function parseEventSequence(value: string | undefined, field: string) {
   if (value === undefined) return null;
   if (!/^\d+$/u.test(value)) {
-    throw new BadRequestException(
-      "afterSequence must be a non-negative integer.",
-    );
+    throw new BadRequestException(`${field} must be a non-negative integer.`);
   }
   return BigInt(value);
+}
+
+function parseEventCategory(
+  value: string | undefined,
+): PostRunAnalysisEventCategory {
+  const category = value?.toUpperCase() ?? "ALL";
+  if (
+    !POST_RUN_ANALYSIS_EVENT_CATEGORIES.includes(
+      category as PostRunAnalysisEventCategory,
+    )
+  ) {
+    throw new BadRequestException(
+      `category must be one of ${POST_RUN_ANALYSIS_EVENT_CATEGORIES.join(", ")}.`,
+    );
+  }
+  return category as PostRunAnalysisEventCategory;
 }
 
 function severityRank(severity: string) {

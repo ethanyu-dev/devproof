@@ -22,6 +22,19 @@ export class PostRunAnalysisConsoleController {
     });
   }
 
+  @Get(":id/post-run-analysis/events")
+  events(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Query("beforeSequence") beforeSequence?: string,
+    @Query("category") category?: string,
+  ) {
+    return this.analyses.events(context(current), id, {
+      ...(beforeSequence === undefined ? {} : { beforeSequence }),
+      ...(category === undefined ? {} : { category }),
+    });
+  }
+
   @Post(":id/post-run-analysis/retry")
   retry(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.analyses.retry(context(current), id);
