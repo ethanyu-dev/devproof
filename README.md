@@ -47,19 +47,7 @@ Browser Runtime is the first Execution Runner, not the platform boundary. The us
 
 ### Local Console role
 
-The Console uses the member view by default. It shows every team Task and only the Browser login flow needed by those Tasks. For development or demos, enable the complete admin Console from the browser console:
-
-```js
-localStorage.setItem("devproof.admin", "true");
-location.reload();
-```
-
-Return to the member view with:
-
-```js
-localStorage.removeItem("devproof.admin");
-location.reload();
-```
+The Console uses the member view by default. It shows every team Task and only the Browser login flow needed by those Tasks. For development or demos, use the “Member / Admin” switcher in the top navigation to change views without reloading the page.
 
 This flag controls presentation in the current browser only; it is not an authorization boundary. Production admin authorization must still be enforced by the backend.
 
