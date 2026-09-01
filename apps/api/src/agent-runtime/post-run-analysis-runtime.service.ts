@@ -22,6 +22,10 @@ import { ObjectStorageService } from "../infrastructure/object-storage.service.j
 import { redactText } from "../observability/observability.service.js";
 import { findingFingerprint } from "../post-run-analysis/post-run-analysis.service.js";
 import {
+  postRunAnalysisAttemptDeadline,
+  postRunAnalysisRetryAt,
+} from "../post-run-analysis/post-run-analysis-scheduling.js";
+import {
   POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD,
   POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD,
   sanitizeLogBundleValue,
@@ -89,30 +93,54 @@ export class PostRunAnalysisRuntimeService {
       const claimed = await this.prisma.$transaction(async (tx) => {
         const now = new Date();
         const candidate = await tx.postRunAnalysisJob.findFirst({
-          orderBy: { createdAt: "asc" },
-          select: { id: true, startedAt: true },
+          orderBy: [
+            { attemptNumber: "asc" },
+            { readyAt: "asc" },
+            { createdAt: "asc" },
+          ],
+          select: {
+            hardDeadlineAt: true,
+            id: true,
+            readyAt: true,
+            startedAt: true,
+            status: true,
+          },
           where: {
             attemptNumber: {
               lt: tx.postRunAnalysisJob.fields.maxAttempts,
             },
-            deadlineAt: { gt: now },
+            hardDeadlineAt: { gt: now },
             teamId,
             OR: [
-              { status: "READY" },
-              { leaseExpiresAt: { lt: now }, status: "RUNNING" },
+              {
+                status: "READY",
+                OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+              },
+              {
+                deadlineAt: { gt: now },
+                leaseExpiresAt: { lt: now },
+                status: "RUNNING",
+              },
             ],
           },
         });
         if (!candidate) return null;
         const leaseToken = randomUUID();
         const leaseExpiresAt = leaseExpiry(now);
+        const deadlineAt = postRunAnalysisAttemptDeadline(
+          candidate.hardDeadlineAt,
+          now,
+        );
         const acquired = await tx.postRunAnalysisJob.updateMany({
           data: {
             attemptNumber: { increment: 1 },
+            deadlineAt,
+            error: Prisma.JsonNull,
             fencingToken: { increment: 1 },
             leaseExpiresAt,
             leaseOwner: input.workerId,
             leaseToken,
+            nextAttemptAt: null,
             startedAt: candidate.startedAt ?? now,
             status: "RUNNING",
           },
@@ -120,10 +148,18 @@ export class PostRunAnalysisRuntimeService {
             attemptNumber: {
               lt: tx.postRunAnalysisJob.fields.maxAttempts,
             },
+            hardDeadlineAt: { gt: now },
             id: candidate.id,
             OR: [
-              { status: "READY" },
-              { leaseExpiresAt: { lt: now }, status: "RUNNING" },
+              {
+                status: "READY",
+                OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+              },
+              {
+                deadlineAt: { gt: now },
+                leaseExpiresAt: { lt: now },
+                status: "RUNNING",
+              },
             ],
           },
         });
@@ -137,7 +173,15 @@ export class PostRunAnalysisRuntimeService {
             actor: "AGENT_RUNTIME",
             analysisId: job.id,
             kind: "analysis.started",
-            payload: json({ attemptNumber: job.attemptNumber }),
+            payload: json({
+              attemptNumber: job.attemptNumber,
+              deadlineAt: job.deadlineAt.toISOString(),
+              hardDeadlineAt: job.hardDeadlineAt.toISOString(),
+              queueWaitMs:
+                candidate.status === "READY" && candidate.readyAt
+                  ? Math.max(0, now.getTime() - candidate.readyAt.getTime())
+                  : null,
+            }),
             teamId,
           },
         });
@@ -770,10 +814,11 @@ export class PostRunAnalysisRuntimeService {
   ) {
     const now = new Date();
     const safeError = sanitizeLogBundleValue(outcome.error);
+    const nextAttemptAt = postRunAnalysisRetryAt(job.attemptNumber, now);
     const retry =
       outcome.kind === "RETRYABLE_FAILURE" &&
       job.attemptNumber < job.maxAttempts &&
-      job.deadlineAt > now;
+      nextAttemptAt < job.hardDeadlineAt;
     await this.prisma.$transaction(async (tx) => {
       const finalized = await tx.postRunAnalysisJob.updateMany({
         data: {
@@ -783,7 +828,10 @@ export class PostRunAnalysisRuntimeService {
           leaseExpiresAt: null,
           leaseOwner: null,
           leaseToken: null,
+          nextAttemptAt: retry ? nextAttemptAt : null,
+          readyAt: retry ? now : job.readyAt,
           status: retry ? "READY" : "FAILED",
+          ...(retry ? { deadlineAt: job.hardDeadlineAt } : {}),
         },
         where: {
           fencingToken: job.fencingToken,
@@ -806,6 +854,7 @@ export class PostRunAnalysisRuntimeService {
           payload: json({
             attemptNumber: job.attemptNumber,
             error: safeError,
+            nextAttemptAt: retry ? nextAttemptAt.toISOString() : null,
           }),
           teamId,
         },

@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AgentRuntimeControlService } from "./agent-runtime-control.service.js";
 
+vi.mock("../config/env.js", () => ({
+  env: () => ({ POST_RUN_ANALYSIS_CONCURRENCY: 3 }),
+}));
+
 const teamId = "4a9f2473-0b1f-4de8-87d7-2ac49b425d75";
 
 describe("Agent Runtime pool registration", () => {
@@ -70,6 +74,25 @@ describe("Agent Runtime pool registration", () => {
       specConcurrency: 5,
     });
     expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("advertises the configured post-run analysis lane capacity", async () => {
+    const service = new AgentRuntimeControlService({} as never, {} as never);
+
+    await expect(
+      service.register(
+        {
+          credential: { pool: "POST_RUN_ANALYSIS" },
+          team: { id: teamId },
+        } as never,
+        { protocol: { minor: 7 }, workerId: "analysis-worker" },
+      ),
+    ).resolves.toMatchObject({
+      analysisConcurrency: 3,
+      browserConcurrency: 0,
+      pools: ["POST_RUN_ANALYSIS"],
+      specConcurrency: 0,
+    });
   });
 
   it("rejects legacy mixed credentials", async () => {
