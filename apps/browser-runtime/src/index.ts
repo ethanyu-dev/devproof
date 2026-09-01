@@ -130,6 +130,14 @@ interface StepFrame {
   width: number;
 }
 
+interface StepVideoEncodingProfile {
+  maxHeight?: number;
+  maxWidth?: number;
+  mimeTypes: string[];
+  name: "native" | "compatibility";
+  videoBitsPerSecond?: number;
+}
+
 interface RuntimeCommand {
   commandId: string;
   commandType: RuntimeCommandType;
@@ -161,7 +169,9 @@ const DIRECT_CONTENT_MAX_BYTES = 256 * 1_024;
 const INLINE_SCREENSHOT_MAX_BYTES = 1_250 * 1_024;
 const RUNTIME_ARTIFACT_SAFE_MAX_BYTES = 9 * 1_024 * 1_024;
 const MAX_RECORDED_STEP_FRAMES = 120;
-const MAX_STEP_VIDEO_DURATION_MS = 45_000;
+// `session.close` has a 60-second command budget. Keep each encoding attempt
+// short enough that the compatibility retry and browser cleanup can both run.
+const MAX_STEP_VIDEO_ATTEMPT_DURATION_MS = 24_000;
 const MAX_STEP_VIDEO_FRAME_DURATION_MS = 750;
 const STEP_SCREENSHOT_COMMANDS = new Set<RuntimeCommandType>([
   "page.open",
@@ -1190,8 +1200,10 @@ export class BrowserSessionManager {
           );
           return null;
         });
+        let videoError: ReturnType<typeof classifyCommandError> | null = null;
         const video = await this.composeStepVideo(session).catch(
           (error: unknown) => {
+            videoError = classifyCommandError(error, "session.close", false);
             runtimeLog(
               "warn",
               "runtime.step_video.compose_failed",
@@ -1211,6 +1223,7 @@ export class BrowserSessionManager {
             closed: true,
             stepFrameCount: frameCount,
             videoCreated: video !== null,
+            ...(videoError ? { videoError } : {}),
           },
         };
       }
@@ -2540,145 +2553,206 @@ export class BrowserSessionManager {
       180,
       Math.min(
         MAX_STEP_VIDEO_FRAME_DURATION_MS,
-        Math.floor(MAX_STEP_VIDEO_DURATION_MS / session.stepFrames.length),
+        Math.floor(
+          MAX_STEP_VIDEO_ATTEMPT_DURATION_MS / session.stepFrames.length,
+        ),
       ),
     );
-    const composer = await session.context.newPage();
-    try {
-      const encoded = await composer.evaluate(
-        async ({ durationMs, frameDurationMs, frames }) => {
-          if (typeof MediaRecorder === "undefined") {
-            throw new Error("Chromium MediaRecorder is unavailable.");
-          }
-          const mimeType = [
-            "video/webm;codecs=vp9",
-            "video/webm;codecs=vp8",
-            "video/webm",
-          ].find((candidate) => MediaRecorder.isTypeSupported(candidate));
-          if (!mimeType) throw new Error("No WebM encoder is available.");
+    const durationMs = Math.max(
+      700,
+      session.stepFrames.length * frameDurationMs,
+    );
+    const profiles: StepVideoEncodingProfile[] = [
+      {
+        mimeTypes: [
+          "video/webm;codecs=vp9",
+          "video/webm;codecs=vp8",
+          "video/webm",
+        ],
+        name: "native",
+      },
+      {
+        maxHeight: 540,
+        maxWidth: 960,
+        mimeTypes: [
+          "video/webm;codecs=vp8",
+          "video/webm",
+          "video/webm;codecs=vp9",
+        ],
+        name: "compatibility",
+        videoBitsPerSecond: 600_000,
+      },
+    ];
+    const failures: Array<{ code: string; message: string; profile: string }> =
+      [];
 
-          const loadImage = async (dataBase64: string) => {
-            const image = new Image();
-            image.src = `data:image/jpeg;base64,${dataBase64}`;
-            await image.decode();
-            return image;
-          };
-          const firstImage = await loadImage(frames[0]!.dataBase64);
-          const width = firstImage.naturalWidth;
-          const height = firstImage.naturalHeight;
-          if (width <= 0 || height <= 0) {
-            throw new Error("Step video frame dimensions are invalid.");
-          }
-          const canvas = document.createElement("canvas");
-          canvas.width = width;
-          canvas.height = height;
-          const context = canvas.getContext("2d");
-          if (!context) throw new Error("Canvas 2D context is unavailable.");
-          const stream = canvas.captureStream(10);
-          const maximumEncodedBytes = 8 * 1024 * 1024;
-          const videoBitsPerSecond = Math.min(
-            6_000_000,
-            Math.max(
-              800_000,
-              Math.floor(
-                (maximumEncodedBytes * 8 * 0.9) /
-                  Math.max(0.7, durationMs / 1_000),
-              ),
-            ),
-          );
-          const recorder = new MediaRecorder(stream, {
-            mimeType,
-            videoBitsPerSecond,
-          });
-          const chunks: Blob[] = [];
-          recorder.ondataavailable = (event) => {
-            if (event.data.size > 0) chunks.push(event.data);
-          };
-          const stopped = new Promise<void>((resolve, reject) => {
-            recorder.onerror = () =>
-              reject(new Error("Video encoding failed."));
-            recorder.onstop = () => resolve();
-          });
-          const sleep = (milliseconds: number) =>
-            new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-          recorder.start(250);
+    for (const profile of profiles) {
+      const composer = await session.context.newPage();
+      try {
+        const encoded = await composer.evaluate(
+          async ({ durationMs, encoding, frameDurationMs, frames }) => {
+            if (typeof MediaRecorder === "undefined") {
+              throw new Error("Chromium MediaRecorder is unavailable.");
+            }
+            const mimeType = encoding.mimeTypes.find((candidate) =>
+              MediaRecorder.isTypeSupported(candidate),
+            );
+            if (!mimeType) throw new Error("No WebM encoder is available.");
 
-          for (const [index, frame] of frames.entries()) {
-            const image =
-              index === 0 ? firstImage : await loadImage(frame.dataBase64);
-            context.fillStyle = "#070b12";
-            context.fillRect(0, 0, width, height);
-            const scale = Math.min(
-              width / image.naturalWidth,
-              height / image.naturalHeight,
+            const loadImage = async (dataBase64: string) => {
+              const image = new Image();
+              image.src = `data:image/jpeg;base64,${dataBase64}`;
+              await image.decode();
+              return image;
+            };
+            const firstImage = await loadImage(frames[0]!.dataBase64);
+            const sourceWidth = firstImage.naturalWidth;
+            const sourceHeight = firstImage.naturalHeight;
+            if (sourceWidth <= 0 || sourceHeight <= 0) {
+              throw new Error("Step video frame dimensions are invalid.");
+            }
+            const outputScale = Math.min(
+              1,
+              encoding.maxWidth ? encoding.maxWidth / sourceWidth : 1,
+              encoding.maxHeight ? encoding.maxHeight / sourceHeight : 1,
             );
-            const renderedWidth = image.naturalWidth * scale;
-            const renderedHeight = image.naturalHeight * scale;
-            context.drawImage(
-              image,
-              (width - renderedWidth) / 2,
-              (height - renderedHeight) / 2,
-              renderedWidth,
-              renderedHeight,
-            );
-            await sleep(
-              frames.length === 1
-                ? Math.max(700, frameDurationMs)
-                : frameDurationMs,
-            );
-          }
+            const evenDimension = (value: number) =>
+              Math.max(2, Math.floor(value / 2) * 2);
+            const width = evenDimension(sourceWidth * outputScale);
+            const height = evenDimension(sourceHeight * outputScale);
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d");
+            if (!context) throw new Error("Canvas 2D context is unavailable.");
+            const stream = canvas.captureStream(10);
+            const maximumEncodedBytes = 8 * 1024 * 1024;
+            const videoBitsPerSecond =
+              encoding.videoBitsPerSecond ??
+              Math.min(
+                6_000_000,
+                Math.max(
+                  800_000,
+                  Math.floor(
+                    (maximumEncodedBytes * 8 * 0.9) /
+                      Math.max(0.7, durationMs / 1_000),
+                  ),
+                ),
+              );
+            const recorder = new MediaRecorder(stream, {
+              mimeType,
+              videoBitsPerSecond,
+            });
+            const chunks: Blob[] = [];
+            recorder.ondataavailable = (event) => {
+              if (event.data.size > 0) chunks.push(event.data);
+            };
+            const stopped = new Promise<void>((resolve, reject) => {
+              recorder.onerror = () =>
+                reject(new Error("Video encoding failed."));
+              recorder.onstop = () => resolve();
+            });
+            const sleep = (milliseconds: number) =>
+              new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+            recorder.start(250);
 
-          await sleep(120);
-          recorder.stop();
-          await stopped;
-          stream.getTracks().forEach((track) => track.stop());
-          const blob = new Blob(chunks, { type: mimeType });
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          let binary = "";
-          const chunkSize = 0x8000;
-          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-            binary += String.fromCharCode(
-              ...bytes.subarray(offset, offset + chunkSize),
-            );
-          }
-          return {
-            dataBase64: btoa(binary),
-            height,
-            mimeType: blob.type || "video/webm",
-            width,
-          };
-        },
-        {
-          durationMs: Math.max(
-            700,
-            session.stepFrames.length * frameDurationMs,
-          ),
-          frameDurationMs,
-          frames: session.stepFrames.map((frame) => ({
-            dataBase64: frame.data.toString("base64"),
-          })),
-        },
-      );
-      const data = Buffer.from(encoded.dataBase64, "base64");
-      if (data.byteLength === 0) {
-        throw new Error("Chromium produced an empty step video.");
-      }
-      if (data.byteLength > RUNTIME_ARTIFACT_SAFE_MAX_BYTES) {
-        throw codedError(
-          "ARTIFACT_TOO_LARGE",
-          "Step video exceeds the Runtime artifact limit.",
+            for (const [index, frame] of frames.entries()) {
+              const image =
+                index === 0 ? firstImage : await loadImage(frame.dataBase64);
+              context.fillStyle = "#070b12";
+              context.fillRect(0, 0, width, height);
+              const scale = Math.min(
+                width / image.naturalWidth,
+                height / image.naturalHeight,
+              );
+              const renderedWidth = image.naturalWidth * scale;
+              const renderedHeight = image.naturalHeight * scale;
+              context.drawImage(
+                image,
+                (width - renderedWidth) / 2,
+                (height - renderedHeight) / 2,
+                renderedWidth,
+                renderedHeight,
+              );
+              await sleep(
+                frames.length === 1
+                  ? Math.max(700, frameDurationMs)
+                  : frameDurationMs,
+              );
+            }
+
+            await sleep(120);
+            recorder.stop();
+            await stopped;
+            stream.getTracks().forEach((track) => track.stop());
+            const blob = new Blob(chunks, { type: mimeType });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let binary = "";
+            const chunkSize = 0x8000;
+            for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+              binary += String.fromCharCode(
+                ...bytes.subarray(offset, offset + chunkSize),
+              );
+            }
+            return {
+              dataBase64: btoa(binary),
+              height,
+              mimeType: blob.type || "video/webm",
+              width,
+            };
+          },
+          {
+            durationMs,
+            encoding: profile,
+            frameDurationMs,
+            frames: session.stepFrames.map((frame) => ({
+              dataBase64: frame.data.toString("base64"),
+            })),
+          },
         );
+        const data = Buffer.from(encoded.dataBase64, "base64");
+        if (data.byteLength === 0) {
+          throw new Error("Chromium produced an empty step video.");
+        }
+        if (data.byteLength > RUNTIME_ARTIFACT_SAFE_MAX_BYTES) {
+          throw codedError(
+            "ARTIFACT_TOO_LARGE",
+            "Step video exceeds the Runtime artifact limit.",
+          );
+        }
+        return this.artifact("VIDEO", "video/webm", data, {
+          durationMs,
+          encodingProfile: profile.name,
+          fallbackUsed: profile.name === "compatibility",
+          format: "STEP_SCREENSHOT_SLIDESHOW",
+          frameCount: session.stepFrames.length,
+          height: encoded.height,
+          width: encoded.width,
+        });
+      } catch (error) {
+        const classified = classifyCommandError(error, "session.close", false);
+        failures.push({
+          code: classified.code,
+          message: boundedUtf8Text(redactText(classified.message), 500),
+          profile: profile.name,
+        });
+        runtimeLog(
+          "warn",
+          "runtime.step_video.attempt_failed",
+          { errorCode: classified.code, profile: profile.name },
+          error,
+        );
+      } finally {
+        await composer.close().catch(() => undefined);
       }
-      return this.artifact("VIDEO", "video/webm", data, {
-        durationMs: Math.max(700, session.stepFrames.length * frameDurationMs),
-        format: "STEP_SCREENSHOT_SLIDESHOW",
-        frameCount: session.stepFrames.length,
-        height: encoded.height,
-        width: encoded.width,
-      });
-    } finally {
-      await composer.close().catch(() => undefined);
     }
+
+    throw codedError(
+      "VIDEO_COMPOSITION_FAILED",
+      "Step video composition failed for every encoding profile.",
+      false,
+      { details: { attempts: failures } },
+    );
   }
 
   private async loadStepFrames(sessionId: string): Promise<StepFrame[]> {
