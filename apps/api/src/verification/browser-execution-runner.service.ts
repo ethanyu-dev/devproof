@@ -35,6 +35,45 @@ function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+export interface BrowserVideoFinalizationFailure {
+  code: string;
+  message: string;
+  stepFrameCount: number;
+  type: "VIDEO_FINALIZATION";
+}
+
+export function browserVideoFinalizationFailure(
+  command: {
+    result: unknown;
+    status: string;
+  } | null,
+): BrowserVideoFinalizationFailure | null {
+  if (!command || command.status !== "SUCCEEDED") return null;
+  const result = record(command.result);
+  const stepFrameCount =
+    typeof result.stepFrameCount === "number" ? result.stepFrameCount : 0;
+  if (result.videoCreated !== false || stepFrameCount === 0) return null;
+  const videoError = record(result.videoError);
+  return {
+    code:
+      typeof videoError.code === "string"
+        ? videoError.code
+        : "VIDEO_COMPOSITION_FAILED",
+    message:
+      typeof videoError.message === "string"
+        ? videoError.message
+        : "Browser Runtime closed without creating the step video.",
+    stepFrameCount,
+    type: "VIDEO_FINALIZATION",
+  };
+}
+
 class RuntimeCapacityExhaustedError extends Error {}
 
 export function supportsBrowserAgentProtocol(runtime: {
@@ -606,12 +645,15 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     }
     const now = new Date();
     const released = closed?.status === "SUCCEEDED";
+    const videoFailure = browserVideoFinalizationFailure(closed);
     await this.prisma.$transaction([
       this.prisma.browserRuntimeSession.update({
         data: {
           closedAt: now,
           lastError: released
-            ? Prisma.JsonNull
+            ? videoFailure
+              ? json(videoFailure)
+              : Prisma.JsonNull
             : closed?.error
               ? json(closed.error)
               : json({ code: "CLOSE_FAILED" }),
@@ -643,6 +685,9 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           payload: json({
             sessionId: session.id,
             status: closed?.status ?? "LOST",
+            ...(videoFailure
+              ? { videoCreated: false, videoError: videoFailure }
+              : {}),
           }),
           runId: execution.runId,
           teamId,
@@ -871,17 +916,20 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         skipDuplicates: true,
       });
     }
+    const released = closed?.status === "SUCCEEDED";
+    const videoFailure = browserVideoFinalizationFailure(closed);
     await this.prisma.$transaction([
       this.prisma.browserRuntimeSession.update({
         data: {
           closedAt: new Date(),
-          lastError:
-            closed?.status === "SUCCEEDED"
-              ? Prisma.JsonNull
-              : closed?.error
-                ? json(closed.error)
-                : json({ code: "CLOSE_FAILED" }),
-          status: closed?.status === "SUCCEEDED" ? "CLOSED" : "LOST",
+          lastError: released
+            ? videoFailure
+              ? json(videoFailure)
+              : Prisma.JsonNull
+            : closed?.error
+              ? json(closed.error)
+              : json({ code: "CLOSE_FAILED" }),
+          status: released ? "CLOSED" : "LOST",
         },
         where: { id: session.id },
       }),
@@ -895,7 +943,13 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     await this.lifecycle.appendEvent({
       actor: "RUNNER",
       kind: "execution.released",
-      payload: { sessionId: session.id, status: closed?.status ?? "LOST" },
+      payload: {
+        sessionId: session.id,
+        status: closed?.status ?? "LOST",
+        ...(videoFailure
+          ? { videoCreated: false, videoError: videoFailure }
+          : {}),
+      },
       runId,
       teamId,
     });

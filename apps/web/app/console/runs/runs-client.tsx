@@ -73,6 +73,7 @@ interface RunDetail extends RunSummary {
         occurredAt: string;
       }>;
       id: string;
+      lastError: unknown;
       profileMode: string;
       runtime: { id: string; name: string; status: string };
       status: string;
@@ -183,6 +184,18 @@ function businessReferenceUrl(evidence: RunDetail["evidences"][number]) {
 
 function evidenceMetadata(evidence: RunDetail["evidences"][number]) {
   return isRecord(evidence.metadata) ? evidence.metadata : {};
+}
+
+function videoFinalizationFailure(value: unknown) {
+  if (!isRecord(value) || value.type !== "VIDEO_FINALIZATION") return null;
+  return {
+    code:
+      typeof value.code === "string" ? value.code : "VIDEO_COMPOSITION_FAILED",
+    message:
+      typeof value.message === "string"
+        ? value.message
+        : "浏览器节点未能生成操作视频。",
+  };
 }
 
 function isVideoEvidence(evidence: RunDetail["evidences"][number]) {
@@ -624,6 +637,12 @@ function RunDetailClient({ id }: { id: string }) {
   const stepScreenshots = (detail?.evidences.filter(isStepScreenshot) ?? [])
     .filter((evidence) => evidence.downloadUrl)
     .sort((left, right) => stepIndex(left) - stepIndex(right));
+  const videoFailure =
+    detail?.browserExecutions
+      .map((execution) =>
+        videoFinalizationFailure(execution.runtimeSession?.lastError),
+      )
+      .find((failure) => failure !== null) ?? null;
   const passedCriteria = criteria.filter(
     (criterion) => criterion.status === "PASSED",
   ).length;
@@ -760,7 +779,11 @@ function RunDetailClient({ id }: { id: string }) {
                     <small>
                       {videos.length > 0
                         ? "真实浏览器操作回放"
-                        : "视频生成中，步骤截图已可查看"}
+                        : terminal
+                          ? videoFailure
+                            ? `视频生成失败（${videoFailure.code}），步骤截图已保留`
+                            : "本次执行未生成操作视频，步骤截图已保留"
+                          : "视频生成中，步骤截图已可查看"}
                     </small>
                   </div>
                   {videos.map((video) => (
@@ -836,7 +859,9 @@ function RunDetailClient({ id }: { id: string }) {
                     </b>
                     <small>
                       {terminal
-                        ? "需要浏览器执行节点协议 v1.10 或更新版本。"
+                        ? videoFailure
+                          ? `${videoFailure.code}：${videoFailure.message}`
+                          : "浏览器执行结束时未返回视频制品。"
                         : "执行过程中会逐步生成截图与操作回放。"}
                     </small>
                   </span>
@@ -1087,6 +1112,19 @@ function RunDetailClient({ id }: { id: string }) {
                                 {displayLabel(execution.status)}
                               </Badge>
                             </header>
+                            {videoFinalizationFailure(
+                              execution.runtimeSession?.lastError,
+                            ) ? (
+                              <p className="dp-run-card-copy">
+                                操作视频生成失败：
+                                {
+                                  videoFinalizationFailure(
+                                    execution.runtimeSession?.lastError,
+                                  )?.code
+                                }
+                                。步骤截图仍可用于回放和排查。
+                              </p>
+                            ) : null}
                             {execution.runtimeSession?.commands.length ? (
                               <div className="dp-run-runtime-list">
                                 {execution.runtimeSession.commands.map(

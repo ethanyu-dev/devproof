@@ -2,6 +2,7 @@ import { verificationRequestSchema } from "@devproof/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  browserVideoFinalizationFailure,
   BrowserExecutionRunner,
   supportsBrowserAgentProtocol,
 } from "./browser-execution-runner.service.js";
@@ -20,6 +21,38 @@ describe("Browser Runtime protocol selection", () => {
     expect(
       supportsBrowserAgentProtocol({ protocolMajor: 2, protocolMinor: 2 }),
     ).toBe(false);
+  });
+});
+
+describe("Browser Runtime video finalization", () => {
+  it("normalizes a soft video failure for durable session reporting", () => {
+    expect(
+      browserVideoFinalizationFailure({
+        result: {
+          stepFrameCount: 16,
+          videoCreated: false,
+          videoError: {
+            code: "VIDEO_COMPOSITION_FAILED",
+            message: "Every encoding profile failed.",
+          },
+        },
+        status: "SUCCEEDED",
+      }),
+    ).toEqual({
+      code: "VIDEO_COMPOSITION_FAILED",
+      message: "Every encoding profile failed.",
+      stepFrameCount: 16,
+      type: "VIDEO_FINALIZATION",
+    });
+  });
+
+  it("does not report a failure when no frames were recorded", () => {
+    expect(
+      browserVideoFinalizationFailure({
+        result: { stepFrameCount: 0, videoCreated: false },
+        status: "SUCCEEDED",
+      }),
+    ).toBeNull();
   });
 });
 
