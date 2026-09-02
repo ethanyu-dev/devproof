@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunTrajectoryRecord } from "@devproof/contracts";
 import {
   Activity,
@@ -36,6 +36,13 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
+import {
+  aggregateAnalysisEvents,
+  analysisEventFilters,
+  analysisEventMatches,
+  mergePostRunAnalysisEventPage,
+  mergePostRunAnalysisEvents,
+} from "./post-run-analysis-view";
 import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
 import { taskOutcomeDisplay, verificationVerdictLabel } from "./task-outcome";
@@ -45,6 +52,8 @@ import type {
   TaskDetail,
   TaskEvent,
   PostRunAnalysisDetail,
+  PostRunAnalysisEventCategory,
+  PostRunAnalysisEventPage,
   TaskStage,
   TaskSummary,
 } from "./task-types";
@@ -1248,9 +1257,21 @@ function TaskStatusPanel({
 
 function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
   const [analysis, setAnalysis] = useState<PostRunAnalysisDetail | null>(null);
+  const [eventCategory, setEventCategory] =
+    useState<PostRunAnalysisEventCategory>("KEY");
+  const [eventError, setEventError] = useState<string | null>(null);
+  const [eventPage, setEventPage] = useState<PostRunAnalysisEventPage | null>(
+    null,
+  );
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const olderEventRequestRef = useRef(0);
+  const eventScopeKey = `${analysis?.id ?? "none"}:${eventCategory}:${pollGeneration}`;
+  const eventScopeRef = useRef(eventScopeKey);
+  eventScopeRef.current = eventScopeKey;
 
   useEffect(() => {
     let active = true;
@@ -1278,7 +1299,7 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
           current && eventCursor && current.id === next.id
             ? {
                 ...next,
-                events: mergeAnalysisEvents(current.events, next.events),
+                events: mergePostRunAnalysisEvents(current.events, next.events),
                 eventsTruncated:
                   current.eventsTruncated || next.eventsTruncated,
               }
@@ -1307,6 +1328,102 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
       if (timer) window.clearTimeout(timer);
     };
   }, [pollGeneration, taskId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!analysis) {
+      setEventPage(null);
+      setEventError(null);
+      setLoadingEvents(false);
+      return () => {
+        active = false;
+      };
+    }
+    const analysisId = analysis.id;
+    const requestId = ++olderEventRequestRef.current;
+    setLoadingEvents(true);
+    setLoadingOlderEvents(false);
+    setEventError(null);
+    setEventPage(null);
+    void consoleApi<PostRunAnalysisEventPage>(
+      `/tasks/${taskId}/post-run-analysis/events?category=${eventCategory}`,
+    )
+      .then((page) => {
+        if (active && requestId === olderEventRequestRef.current) {
+          setEventPage(
+            mergePostRunAnalysisEventPage(null, page, {
+              analysisId,
+              category: eventCategory,
+            }),
+          );
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (active) setEventError((loadError as Error).message);
+      })
+      .finally(() => {
+        if (active) setLoadingEvents(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [analysis?.id, eventCategory, pollGeneration, taskId]);
+
+  const visibleEvents = useMemo(() => {
+    const pageEvents =
+      eventPage &&
+      eventPage.analysisId === analysis?.id &&
+      eventPage.category === eventCategory
+        ? eventPage.events
+        : [];
+    const liveEvents = (analysis?.events ?? []).filter((event) =>
+      analysisEventMatches(event, eventCategory),
+    );
+    return mergePostRunAnalysisEvents(pageEvents, liveEvents);
+  }, [analysis?.events, analysis?.id, eventCategory, eventPage]);
+  const groupedEvents = useMemo(
+    () => aggregateAnalysisEvents(visibleEvents),
+    [visibleEvents],
+  );
+
+  async function loadOlderEvents() {
+    const analysisId = analysis?.id;
+    const beforeSequence = visibleEvents.at(0)?.sequence;
+    if (!analysisId || !beforeSequence) return;
+    const category = eventCategory;
+    const scopeKey = eventScopeRef.current;
+    const requestId = ++olderEventRequestRef.current;
+    setLoadingOlderEvents(true);
+    setEventError(null);
+    try {
+      const page = await consoleApi<PostRunAnalysisEventPage>(
+        `/tasks/${taskId}/post-run-analysis/events?category=${category}&beforeSequence=${encodeURIComponent(beforeSequence)}`,
+      );
+      if (
+        requestId !== olderEventRequestRef.current ||
+        scopeKey !== eventScopeRef.current
+      ) {
+        return;
+      }
+      setEventPage((current) =>
+        mergePostRunAnalysisEventPage(current, page, {
+          analysisId,
+          category,
+        }),
+      );
+    } catch (loadError) {
+      if (
+        requestId === olderEventRequestRef.current &&
+        scopeKey === eventScopeRef.current
+      ) {
+        setEventError((loadError as Error).message);
+      }
+    } finally {
+      if (requestId === olderEventRequestRef.current) {
+        setLoadingOlderEvents(false);
+      }
+    }
+  }
 
   async function retry() {
     setRetrying(true);
@@ -1366,6 +1483,99 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
               <span>正在等待日志与制品收口</span>
             )}
           </div>
+          <section className="dp-post-run-analysis-overview">
+            <div className="dp-post-run-analysis-overview-head">
+              <span>
+                <Activity />
+                <b>{analysis.progress.phaseLabel}</b>
+              </span>
+              <small>
+                最近活动{" "}
+                {new Date(analysis.progress.lastActivityAt).toLocaleTimeString(
+                  "zh-CN",
+                  { hour12: false },
+                )}
+              </small>
+            </div>
+            <p>{analysis.progress.currentMessage}</p>
+            <div className="dp-post-run-analysis-steps">
+              {analysis.progress.steps.map((step) => (
+                <div
+                  className={`is-${step.status.toLowerCase()}`}
+                  key={step.key}
+                >
+                  <i aria-hidden="true" />
+                  <span>{step.label}</span>
+                </div>
+              ))}
+            </div>
+            <div className="dp-post-run-analysis-kpis">
+              <div>
+                <small>总耗时</small>
+                <b>{formatAnalysisDuration(analysis.progress.elapsedMs)}</b>
+              </div>
+              <div>
+                <small>排队等待</small>
+                <b>
+                  {analysis.progress.queueWaitMs === null
+                    ? "—"
+                    : formatAnalysisDuration(analysis.progress.queueWaitMs)}
+                </b>
+              </div>
+              <div>
+                <small>模型调用</small>
+                <b>
+                  {formatAnalysisNumber(analysis.progress.metrics.modelCalls)}{" "}
+                  次
+                  {analysis.progress.metrics.modelDurationMs
+                    ? ` · ${formatAnalysisDuration(
+                        analysis.progress.metrics.modelDurationMs,
+                      )}`
+                    : ""}
+                  {analysis.progress.metrics.failedModelCalls
+                    ? ` · ${formatAnalysisNumber(
+                        analysis.progress.metrics.failedModelCalls,
+                      )} 失败`
+                    : ""}
+                </b>
+              </div>
+              <div>
+                <small>已核验证据</small>
+                <b>
+                  {formatAnalysisNumber(
+                    analysis.progress.metrics.uniqueEvidence,
+                  )}
+                </b>
+              </div>
+              <div>
+                <small>Token 输入 / 输出</small>
+                <b>
+                  {formatAnalysisNumber(analysis.progress.metrics.inputTokens)}{" "}
+                  /{" "}
+                  {formatAnalysisNumber(analysis.progress.metrics.outputTokens)}
+                </b>
+              </div>
+              <div>
+                <small>分析发现</small>
+                <b>{formatAnalysisNumber(analysis.progress.findingCount)}</b>
+              </div>
+            </div>
+            {!["SUCCEEDED", "FAILED", "CANCELLED"].includes(analysis.status) ? (
+              <small className="dp-post-run-analysis-deadline">
+                当前期限剩余{" "}
+                {formatAnalysisDuration(analysis.progress.deadlineRemainingMs)}
+              </small>
+            ) : null}
+          </section>
+          {analysis.error ? (
+            <div className="dp-post-run-analysis-alert">
+              <XCircle />
+              <div>
+                <b>{analysisErrorTitle(analysis.error)}</b>
+                <p>{analysisErrorMessage(analysis.error)}</p>
+              </div>
+            </div>
+          ) : null}
           <div className="dp-run-technical-body dp-post-run-analysis-body">
             {analysis.input ? (
               <details className="dp-run-technical-details dp-post-run-analysis-details">
@@ -1379,49 +1589,88 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
                 <pre>{prettyValue(analysis.input.completeness)}</pre>
               </details>
             ) : null}
-            {analysis.events.length ? (
-              <details
-                className="dp-run-technical-details dp-post-run-analysis-details"
-                open={
-                  !["SUCCEEDED", "FAILED", "CANCELLED"].includes(
-                    analysis.status,
-                  )
-                }
-              >
+            {analysis.events.length || eventPage?.events.length ? (
+              <details className="dp-run-technical-details dp-post-run-analysis-details">
                 <summary>
                   <span>
                     <Activity />
-                    <b>分析执行日志</b>
+                    <b>技术事件</b>
                     <small>
-                      {analysis.events.length} 条
-                      {analysis.eventsTruncated ? " · 仅展示最近记录" : ""}
+                      {groupedEvents.length} 组 · {visibleEvents.length} 条事件
+                      {eventPage?.hasMore ? " · 可加载更早记录" : ""}
                     </small>
                   </span>
                   <ChevronDown />
                 </summary>
+                <div className="dp-post-run-analysis-event-tools">
+                  <div role="tablist" aria-label="分析事件筛选">
+                    {analysisEventFilters.map((filter) => (
+                      <button
+                        aria-selected={eventCategory === filter.key}
+                        className={
+                          eventCategory === filter.key ? "is-active" : ""
+                        }
+                        key={filter.key}
+                        onClick={() => setEventCategory(filter.key)}
+                        role="tab"
+                        type="button"
+                      >
+                        {filter.label}
+                      </button>
+                    ))}
+                  </div>
+                  {loadingEvents ? <small>正在加载事件…</small> : null}
+                </div>
+                {eventError ? (
+                  <FormMessage message={eventError} tone="error" />
+                ) : null}
                 <div className="dp-post-run-analysis-events">
-                  {analysis.events.map((event) => (
-                    <article key={event.sequence}>
+                  {groupedEvents.map((group) => (
+                    <article key={group.id}>
                       <header>
                         <span>
-                          <strong>{displayLabel(event.kind)}</strong>
+                          <strong>
+                            {group.title ?? displayLabel(group.kind)}
+                          </strong>
                           <small>
-                            {event.actor} · #{event.sequence}
+                            {group.meta ? `${group.meta} · ` : ""}
+                            {group.actor} · #{group.sequence}
                           </small>
                         </span>
-                        <time dateTime={event.occurredAt}>
-                          {new Date(event.occurredAt).toLocaleTimeString(
+                        <time dateTime={group.occurredAt}>
+                          {new Date(group.occurredAt).toLocaleTimeString(
                             "zh-CN",
                             { hour12: false },
                           )}
                         </time>
                       </header>
-                      {hasDisplayPayload(event.payload) ? (
-                        <pre>{prettyValue(event.payload)}</pre>
+                      {group.summary ? <p>{group.summary}</p> : null}
+                      {hasDisplayPayload(group.payload) ? (
+                        <details className="dp-post-run-analysis-event-raw">
+                          <summary>查看原始数据</summary>
+                          <pre>{prettyValue(group.payload)}</pre>
+                        </details>
                       ) : null}
                     </article>
                   ))}
+                  {!loadingEvents && !groupedEvents.length ? (
+                    <p className="dp-post-run-analysis-event-empty">
+                      当前筛选条件下没有事件。
+                    </p>
+                  ) : null}
                 </div>
+                {eventPage?.hasMore ? (
+                  <div className="dp-post-run-analysis-event-more">
+                    <Button
+                      disabled={loadingOlderEvents}
+                      onClick={() => void loadOlderEvents()}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      {loadingOlderEvents ? "正在加载…" : "加载更早事件"}
+                    </Button>
+                  </div>
+                ) : null}
               </details>
             ) : null}
             {analysis.error ? (
@@ -1540,24 +1789,38 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
   );
 }
 
-function mergeAnalysisEvents(
-  current: PostRunAnalysisDetail["events"],
-  incoming: PostRunAnalysisDetail["events"],
-) {
-  return [
-    ...new Map(
-      [...current, ...incoming].map((event) => [event.sequence, event]),
-    ).values(),
-  ].sort((left, right) =>
-    left.sequence.localeCompare(right.sequence, undefined, { numeric: true }),
-  );
-}
-
 function hasDisplayPayload(value: unknown) {
   if (value === null || value === undefined) return false;
   if (Array.isArray(value)) return value.length > 0;
   if (isRecord(value)) return Object.keys(value).length > 0;
   return true;
+}
+
+function formatAnalysisDuration(milliseconds: number) {
+  if (milliseconds < 1_000)
+    return `${Math.max(0, Math.round(milliseconds))} ms`;
+  if (milliseconds < 60_000) return `${Math.round(milliseconds / 1_000)} 秒`;
+  const minutes = Math.floor(milliseconds / 60_000);
+  const seconds = Math.round((milliseconds % 60_000) / 1_000);
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+}
+
+function formatAnalysisNumber(value: number) {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function analysisErrorTitle(value: unknown) {
+  if (!isRecord(value)) return "自动优化分析未完成";
+  return typeof value.code === "string"
+    ? displayLabel(value.code)
+    : "自动优化分析未完成";
+}
+
+function analysisErrorMessage(value: unknown) {
+  if (!isRecord(value)) return "请展开技术详情查看失败信息。";
+  return typeof value.message === "string"
+    ? value.message
+    : "请展开技术详情查看失败信息。";
 }
 
 function summarizeCaseExecution(testCase: TaskCase) {

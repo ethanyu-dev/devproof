@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   runtimePostRunAnalysisOutcomeSchema,
   runtimePostRunAnalysisReportSchema,
@@ -86,6 +88,11 @@ export class PostRunAnalysisExecutor {
         analyzerVersion: task.snapshot.analyzerVersion,
         attemptNumber: task.snapshot.attemptNumber,
         bundleSha256: task.snapshot.input.sha256,
+        deadlineRemainingMs: Math.max(
+          0,
+          Date.parse(task.snapshot.deadlineAt) - Date.now(),
+        ),
+        phase: manifestComplete ? "EVIDENCE_DISCOVERY" : "INDEXING",
       },
     );
 
@@ -96,11 +103,25 @@ export class PostRunAnalysisExecutor {
       for (const candidate of candidates) {
         if (modelTurnCount >= this.toolLimit) break;
         modelTurnCount += 1;
+        const callId = randomUUID();
+        const phase = currentAnalysisPhase(
+          manifestComplete,
+          readEvidenceRefs.size,
+        );
         const startedAt = Date.now();
         await this.controlPlane.appendPostRunAnalysisEvent(
           lease,
           "analysis.model.started",
-          { model: candidate.modelId },
+          {
+            deadlineRemainingMs: Math.max(
+              0,
+              Date.parse(task.snapshot.deadlineAt) - startedAt,
+            ),
+            callId,
+            model: candidate.modelId,
+            phase,
+            turn: modelTurnCount,
+          },
         );
         try {
           response = await this.modelClient(candidate).responses.create(
@@ -113,13 +134,22 @@ export class PostRunAnalysisExecutor {
             },
             { signal },
           );
+          const actions = modelActions(response.output);
           await this.controlPlane.appendPostRunAnalysisEvent(
             lease,
             "analysis.model.completed",
             {
+              action: actions.action,
               durationMs: Date.now() - startedAt,
+              evidenceCount: actions.evidenceRefs.length,
+              evidenceRefs: actions.evidenceRefs,
+              callId,
               model: candidate.modelId,
+              phase: actions.phase ?? phase,
+              purpose: actionPurpose(actions.action),
               responseId: response.id,
+              toolNames: actions.toolNames,
+              turn: modelTurnCount,
               ...(response.usage ? { usage: response.usage } : {}),
             },
           );
@@ -132,7 +162,10 @@ export class PostRunAnalysisExecutor {
             {
               durationMs: Date.now() - startedAt,
               errorMessage: errorMessage(error),
+              callId,
               model: candidate.modelId,
+              phase,
+              turn: modelTurnCount,
             },
           );
           if (signal.aborted) throw error;
@@ -205,9 +238,15 @@ export class PostRunAnalysisExecutor {
             lease,
             "analysis.manifest.read",
             {
+              bytesRead:
+                (output.nextCursor ?? output.totalBytes) - parsed.data.cursor,
+              complete: output.nextCursor === null,
               cursor: parsed.data.cursor,
               nextCursor: output.nextCursor,
+              phase: "INDEXING",
+              toolCallId: call.call_id,
               totalBytes: output.totalBytes,
+              turn: modelTurnCount,
             },
           );
           history = compactToolExchange(
@@ -255,9 +294,15 @@ export class PostRunAnalysisExecutor {
             lease,
             "analysis.bundle.read",
             {
+              bytesRead:
+                (output.nextCursor ?? output.totalBytes) - parsed.data.cursor,
+              complete: output.nextCursor === null,
               cursor: parsed.data.cursor,
               nextCursor: output.nextCursor,
+              phase: "EVIDENCE_ANALYSIS",
+              toolCallId: call.call_id,
               totalBytes: output.totalBytes,
+              turn: modelTurnCount,
             },
           );
           history = compactToolExchange(
@@ -315,10 +360,20 @@ export class PostRunAnalysisExecutor {
               lease,
               "analysis.evidence.read",
               {
+                bytesRead:
+                  (output.nextCursor ?? output.totalBytes) - parsed.data.cursor,
+                complete: output.nextCursor === null,
                 cursor: parsed.data.cursor,
                 evidenceRef: parsed.data.evidenceRef,
+                ...analysisEvidenceContext(
+                  authoritativeManifest,
+                  parsed.data.evidenceRef,
+                ),
                 nextCursor: output.nextCursor,
+                phase: "EVIDENCE_ANALYSIS",
+                toolCallId: call.call_id,
                 totalBytes: output.totalBytes,
+                turn: modelTurnCount,
               },
             );
             history = compactToolExchange(
@@ -359,7 +414,13 @@ export class PostRunAnalysisExecutor {
             await this.controlPlane.appendPostRunAnalysisEvent(
               lease,
               "analysis.report.validation_failed",
-              { unavailableEvidenceRefs: unavailable },
+              {
+                findingCount: parsed.data.report.findings.length,
+                phase: "REPORT_VALIDATION",
+                toolCallId: call.call_id,
+                turn: modelTurnCount,
+                unavailableEvidenceRefs: unavailable,
+              },
             );
             history = compactToolExchange(baseHistory, analysisSummary, call, {
               error:
@@ -377,7 +438,13 @@ export class PostRunAnalysisExecutor {
             await this.controlPlane.appendPostRunAnalysisEvent(
               lease,
               "analysis.report.validation_failed",
-              { unreadEvidenceRefs: unread },
+              {
+                findingCount: parsed.data.report.findings.length,
+                phase: "REPORT_VALIDATION",
+                toolCallId: call.call_id,
+                turn: modelTurnCount,
+                unreadEvidenceRefs: unread,
+              },
             );
             history = compactToolExchange(baseHistory, analysisSummary, call, {
               error:
@@ -394,7 +461,13 @@ export class PostRunAnalysisExecutor {
             await this.controlPlane.appendPostRunAnalysisEvent(
               lease,
               "analysis.report.validation_failed",
-              { runtimeLocationIssues: locationIssues },
+              {
+                findingCount: parsed.data.report.findings.length,
+                phase: "REPORT_VALIDATION",
+                runtimeLocationIssues: locationIssues,
+                toolCallId: call.call_id,
+                turn: modelTurnCount,
+              },
             );
             history = compactToolExchange(baseHistory, analysisSummary, call, {
               error:
@@ -410,6 +483,9 @@ export class PostRunAnalysisExecutor {
               bundleComplete,
               evidenceReadCount: readEvidenceRefs.size,
               findingCount: parsed.data.report.findings.length,
+              phase: "REPORT_GENERATION",
+              toolCallId: call.call_id,
+              turn: modelTurnCount,
             },
           );
           return runtimePostRunAnalysisOutcomeSchema.parse({
@@ -442,6 +518,92 @@ export class PostRunAnalysisExecutor {
         : "Agent 未能在工具调用预算内完成运行后分析。",
     });
   }
+}
+
+type AnalysisAction =
+  | "CONTINUE"
+  | "GENERATE_REPORT"
+  | "READ_BUNDLE"
+  | "READ_EVIDENCE"
+  | "READ_MANIFEST";
+
+function currentAnalysisPhase(
+  manifestComplete: boolean,
+  evidenceReadCount: number,
+) {
+  if (!manifestComplete) return "INDEXING";
+  return evidenceReadCount > 0 ? "EVIDENCE_ANALYSIS" : "EVIDENCE_DISCOVERY";
+}
+
+function modelActions(output: unknown[]) {
+  const calls = output.filter(isFunctionCall);
+  const toolNames = [...new Set(calls.map((call) => call.name))];
+  const evidenceRefs = uniqueEvidenceRefs(
+    calls.flatMap((call) => {
+      if (call.name !== "read_analysis_evidence") return [];
+      const evidenceRef = parseArguments(call.arguments).evidenceRef;
+      return typeof evidenceRef === "string" ? [evidenceRef] : [];
+    }),
+  ).slice(0, 20);
+  const action: AnalysisAction = toolNames.includes("finish_analysis")
+    ? "GENERATE_REPORT"
+    : toolNames.includes("read_analysis_manifest")
+      ? "READ_MANIFEST"
+      : toolNames.includes("read_analysis_evidence")
+        ? "READ_EVIDENCE"
+        : toolNames.includes("read_analysis_bundle")
+          ? "READ_BUNDLE"
+          : "CONTINUE";
+  return {
+    action,
+    evidenceRefs,
+    phase:
+      action === "GENERATE_REPORT"
+        ? "REPORT_GENERATION"
+        : action === "READ_MANIFEST"
+          ? "INDEXING"
+          : ["READ_BUNDLE", "READ_EVIDENCE"].includes(action)
+            ? "EVIDENCE_ANALYSIS"
+            : null,
+    toolNames,
+  };
+}
+
+function actionPurpose(action: AnalysisAction) {
+  return {
+    CONTINUE: "继续分析并选择下一步操作",
+    GENERATE_REPORT: "生成并提交分析报告",
+    READ_BUNDLE: "补充读取任务日志包",
+    READ_EVIDENCE: "核验异常相关证据",
+    READ_MANIFEST: "读取完整执行索引",
+  }[action];
+}
+
+function analysisEvidenceContext(manifestValue: unknown, evidenceRef: string) {
+  const manifest = record(manifestValue);
+  const location = array(manifest.evidenceLocations)
+    .map(record)
+    .find((value) => text(value.evidenceRef) === evidenceRef);
+  let commandType: string | null = null;
+  for (const runValue of array(manifest.runs)) {
+    for (const executionValue of array(record(runValue).browserExecutions)) {
+      for (const commandValue of array(
+        record(record(executionValue).runtimeSession).failedCommands,
+      )) {
+        const command = record(commandValue);
+        if (text(command.evidenceRef) === evidenceRef) {
+          commandType = text(command.commandType);
+        }
+      }
+    }
+  }
+  return {
+    attemptNumber: positiveInteger(location?.attemptNumber),
+    commandType,
+    evidenceType: evidenceRef.split("://", 1)[0] ?? "unknown",
+    runId: text(location?.runId),
+    runtimeId: text(location?.runtimeId),
+  };
 }
 
 function toolDefinitions() {

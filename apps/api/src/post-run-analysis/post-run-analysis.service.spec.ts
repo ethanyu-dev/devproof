@@ -12,6 +12,7 @@ import {
 
 const analysisId = "cc61de8d-cf29-4561-b2cd-c67c304668a5";
 const teamId = "6f090d88-8987-487f-8338-1a734beab6a6";
+const taskExecutionId = "9be3dc23-9a52-4a97-b6ca-6df0af16d815";
 
 vi.mock("../config/env.js", () => ({
   env: () => ({
@@ -178,23 +179,33 @@ describe("PostRunAnalysisService", () => {
       analyzerVersion: "post-run-analysis-v2",
       attemptNumber: 1,
       createdAt: occurredAt,
+      deadlineAt: new Date("2026-08-27T12:30:00.000Z"),
       error: null,
       events,
       findings: [],
       finishedAt: null,
       generation: 1,
+      hardDeadlineAt: new Date("2026-08-27T14:00:00.000Z"),
       id: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
       inputByteSize: 1_024,
       inputCompleteness: {},
       inputSha256: "a".repeat(64),
       maxAttempts: 3,
+      nextAttemptAt: null,
+      readyAt: occurredAt,
       startedAt: occurredAt,
       status: "RUNNING",
       updatedAt: occurredAt,
       workItem: null,
     });
+    const findProgressEvents = vi.fn().mockResolvedValue(events);
     const service = new PostRunAnalysisService(
-      { postRunAnalysisJob: { findFirst } } as never,
+      {
+        postRunAnalysisEvent: {
+          findMany: findProgressEvents,
+        },
+        postRunAnalysisJob: { findFirst },
+      } as never,
       {} as never,
       {} as never,
     );
@@ -226,6 +237,92 @@ describe("PostRunAnalysisService", () => {
       eventsTruncated: false,
     });
     expect(detail?.events).toHaveLength(200);
+    expect(findProgressEvents).toHaveBeenCalledWith({
+      orderBy: { sequence: "asc" },
+      select: {
+        kind: true,
+        occurredAt: true,
+        payload: true,
+        sequence: true,
+      },
+      where: {
+        analysisId,
+        teamId,
+      },
+    });
+    expect(detail?.progress).toMatchObject({
+      metrics: { modelCalls: 201 },
+      phase: "INDEXING",
+      phaseLabel: "索引读取中",
+    });
+  });
+
+  it("pages older analysis events within a server-side category", async () => {
+    const rows = Array.from({ length: 201 }, (_, index) => ({
+      actor: "AGENT_RUNTIME",
+      analysisId,
+      id: `event-${index}`,
+      kind: "analysis.model.failed",
+      occurredAt: new Date("2026-08-27T12:00:00.000Z"),
+      payload: {},
+      sequence: BigInt(210 - index),
+      teamId,
+    }));
+    const findMany = vi.fn().mockResolvedValue(rows);
+    const service = new PostRunAnalysisService(
+      {
+        postRunAnalysisEvent: { findMany },
+        postRunAnalysisJob: {
+          findFirst: vi.fn().mockResolvedValue({ id: analysisId }),
+        },
+      } as never,
+      {} as never,
+      {} as never,
+    );
+
+    const page = await service.events(
+      { team: { id: teamId } } as never,
+      taskExecutionId,
+      { beforeSequence: "211", category: "error" },
+    );
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: 201,
+        where: expect.objectContaining({
+          analysisId,
+          kind: {
+            in: expect.arrayContaining([
+              "analysis.model.failed",
+              "analysis.report.validation_failed",
+            ]),
+          },
+          sequence: { lt: 211n },
+          teamId,
+        }),
+      }),
+    );
+    expect(page).toMatchObject({
+      analysisId,
+      category: "ERROR",
+      hasMore: true,
+      nextBeforeSequence: "11",
+    });
+    expect(page.events).toHaveLength(200);
+  });
+
+  it("rejects an unknown analysis event category before querying data", async () => {
+    const service = new PostRunAnalysisService(
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      service.events({ team: { id: teamId } } as never, taskExecutionId, {
+        category: "telemetry",
+      }),
+    ).rejects.toThrow(/category must be one of/u);
   });
 
   it("retries only the terminal snapshot read inside the transaction", async () => {

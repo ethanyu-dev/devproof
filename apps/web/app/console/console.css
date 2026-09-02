@@ -6996,6 +6996,171 @@
   font-weight: 600;
 }
 
+.dp-post-run-analysis-overview {
+  display: grid;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklch, var(--card) 88%, var(--muted));
+  padding: 12px;
+}
+
+.dp-post-run-analysis-overview-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dp-post-run-analysis-overview-head > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.dp-post-run-analysis-overview-head svg {
+  width: 15px;
+  height: 15px;
+  color: var(--primary);
+}
+
+.dp-post-run-analysis-overview-head b {
+  font-size: 13px;
+}
+
+.dp-post-run-analysis-overview-head small,
+.dp-post-run-analysis-deadline {
+  color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.dp-post-run-analysis-overview > p {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.dp-post-run-analysis-steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dp-post-run-analysis-steps > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  padding: 5px 8px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.dp-post-run-analysis-steps i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.dp-post-run-analysis-steps .is-completed {
+  color: var(--foreground);
+}
+
+.dp-post-run-analysis-steps .is-completed i {
+  background: #22c55e;
+}
+
+.dp-post-run-analysis-steps .is-active {
+  border-color: color-mix(in oklch, var(--primary) 52%, var(--border));
+  background: color-mix(in oklch, var(--primary) 8%, var(--card));
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.dp-post-run-analysis-steps .is-active i {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+}
+
+.dp-post-run-analysis-steps .is-failed {
+  border-color: color-mix(in oklch, var(--destructive) 50%, var(--border));
+  color: var(--destructive);
+}
+
+.dp-post-run-analysis-steps .is-failed i {
+  background: var(--destructive);
+}
+
+.dp-post-run-analysis-kpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dp-post-run-analysis-kpis > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 3px);
+  background: var(--card);
+  padding: 7px 8px;
+}
+
+.dp-post-run-analysis-kpis small {
+  color: var(--muted-foreground);
+  font-size: 9px;
+}
+
+.dp-post-run-analysis-kpis b {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.dp-post-run-analysis-alert {
+  display: flex;
+  gap: 9px;
+  border-bottom: 1px solid
+    color-mix(in oklch, var(--destructive) 40%, var(--border));
+  background: color-mix(in oklch, var(--destructive) 8%, var(--card));
+  padding: 10px 12px;
+  color: var(--destructive);
+}
+
+.dp-post-run-analysis-alert > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.dp-post-run-analysis-alert > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.dp-post-run-analysis-alert b {
+  font-size: 11px;
+}
+
+.dp-post-run-analysis-alert p {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .dp-post-run-analysis-body {
   min-width: 0;
 }
@@ -7067,6 +7232,52 @@
   background: var(--muted);
 }
 
+.dp-post-run-analysis-event-tools {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding: 7px 10px;
+}
+
+.dp-post-run-analysis-event-tools > div {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dp-post-run-analysis-event-tools button {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  padding: 3px 8px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+
+.dp-post-run-analysis-event-tools button:hover,
+.dp-post-run-analysis-event-tools button.is-active {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.dp-post-run-analysis-event-tools button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.dp-post-run-analysis-event-tools > small {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
 .dp-post-run-analysis-events > article {
   min-width: 0;
   background: var(--card);
@@ -7109,6 +7320,27 @@
   flex: 0 0 auto;
 }
 
+.dp-post-run-analysis-events article > p {
+  margin: 0;
+  padding: 0 10px 9px;
+  color: var(--foreground);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dp-post-run-analysis-event-raw {
+  border-top: 1px solid var(--border);
+}
+
+.dp-post-run-analysis-event-raw > summary {
+  padding: 6px 10px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
 .dp-post-run-analysis-events pre {
   overflow: auto;
   max-height: 180px;
@@ -7122,6 +7354,41 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.dp-post-run-analysis-event-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  text-align: center;
+}
+
+.dp-post-run-analysis-event-more {
+  display: flex;
+  justify-content: center;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+
+@media (max-width: 960px) {
+  .dp-post-run-analysis-steps,
+  .dp-post-run-analysis-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .dp-post-run-analysis-overview-head,
+  .dp-post-run-analysis-event-tools {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dp-post-run-analysis-steps,
+  .dp-post-run-analysis-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .dp-post-run-analysis-findings {

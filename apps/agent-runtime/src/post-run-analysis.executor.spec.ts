@@ -175,6 +175,43 @@ describe("PostRunAnalysisExecutor", () => {
         "analysis.report.generated",
       ]),
     );
+    const modelStarted = appendPostRunAnalysisEvent.mock.calls.find(
+      (entry) => entry[1] === "analysis.model.started",
+    )?.[2];
+    const modelCompleted = appendPostRunAnalysisEvent.mock.calls.find(
+      (entry) => entry[1] === "analysis.model.completed",
+    )?.[2];
+    expect(modelStarted).toMatchObject({
+      callId: expect.any(String),
+      model: "gpt-test",
+      phase: "EVIDENCE_DISCOVERY",
+      turn: 1,
+    });
+    expect(modelCompleted).toMatchObject({
+      action: "READ_EVIDENCE",
+      callId: modelStarted.callId,
+      evidenceCount: 1,
+      evidenceRefs: ["artifact://network-log"],
+      phase: "EVIDENCE_ANALYSIS",
+      purpose: "核验异常相关证据",
+      toolNames: ["read_analysis_evidence"],
+      turn: 1,
+    });
+    const evidenceRead = appendPostRunAnalysisEvent.mock.calls.find(
+      (entry) => entry[1] === "analysis.evidence.read",
+    )?.[2];
+    expect(evidenceRead).toMatchObject({
+      attemptNumber: 1,
+      evidenceType: "artifact",
+      runId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
+      runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
+      turn: 1,
+    });
+    expect(
+      appendPostRunAnalysisEvent.mock.calls.every(
+        (entry) => !("analysisSummary" in entry[2]),
+      ),
+    ).toBe(true);
     const firstRequest = create.mock.calls[0]?.[0] as {
       input: Array<{ content?: string }>;
       tools: Array<{ name: string }>;
