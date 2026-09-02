@@ -160,6 +160,80 @@ describe("Agent Runtime post-run outcome submission", () => {
 });
 
 describe("Agent Runtime pool isolation", () => {
+  it("binds an undeclared Runtime to its credential pool", () => {
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_WORKER_ID: "credential-bound-worker",
+      } as never,
+      {} as never,
+      vi.fn() as never,
+    );
+    const reconcileLanes = vi.fn();
+    (
+      worker as unknown as {
+        reconcileLanes: typeof reconcileLanes;
+      }
+    ).reconcileLanes = reconcileLanes;
+
+    (
+      worker as unknown as {
+        reconcileAllocation(
+          allocation: Record<string, unknown>,
+          signal: AbortSignal,
+        ): void;
+      }
+    ).reconcileAllocation(
+      {
+        analysisConcurrency: 0,
+        browserConcurrency: 0,
+        pools: ["SPEC_ANALYSIS"],
+        specConcurrency: 3,
+      },
+      new AbortController().signal,
+    );
+
+    expect(reconcileLanes).toHaveBeenCalledWith(
+      "spec",
+      3,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("rejects a pool change after credential binding", () => {
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_WORKER_ID: "credential-bound-worker",
+      } as never,
+      {} as never,
+      vi.fn() as never,
+    );
+    const reconcileAllocation = (allocation: Record<string, unknown>): void =>
+      (
+        worker as unknown as {
+          reconcileAllocation(
+            value: Record<string, unknown>,
+            signal: AbortSignal,
+          ): void;
+        }
+      ).reconcileAllocation(allocation, new AbortController().signal);
+
+    reconcileAllocation({
+      analysisConcurrency: 0,
+      browserConcurrency: 0,
+      pools: ["SPEC_ANALYSIS"],
+      specConcurrency: 0,
+    });
+
+    expect(() =>
+      reconcileAllocation({
+        analysisConcurrency: 0,
+        browserConcurrency: 0,
+        pools: ["BROWSER_EXECUTION"],
+        specConcurrency: 0,
+      }),
+    ).toThrow(/isolated to SPEC_ANALYSIS/u);
+  });
+
   it("creates lanes only for its declared pool", () => {
     const worker = new AgentRuntimeWorker(
       {

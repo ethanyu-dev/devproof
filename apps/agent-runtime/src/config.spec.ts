@@ -84,8 +84,15 @@ describe("Agent Runtime configuration", () => {
     expect(runtimeConfig().DEVPROOF_API_URL).toBe("https://api.example.com");
   });
 
-  it("requires an explicit isolated Runtime pool", () => {
+  it("allows the control plane credential to bind the isolated Runtime pool", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+
+    expect(runtimeConfig().DEVPROOF_AGENT_RUNTIME_POOL).toBeUndefined();
+  });
+
+  it("rejects an invalid explicit Runtime pool", () => {
+    process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+    process.env.DEVPROOF_AGENT_RUNTIME_POOL = "MIXED";
 
     expect(() => runtimeConfig()).toThrow(/DEVPROOF_AGENT_RUNTIME_POOL/u);
   });

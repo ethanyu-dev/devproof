@@ -75,7 +75,7 @@ pnpm --filter @devproof/api runtime:provision -- \
   --pool POST_RUN_ANALYSIS
 ```
 
-For local development, put the one-time token in `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`. For a standalone Runtime deployment, set `DEVPROOF_AGENT_RUNTIME_POOL=POST_RUN_ANALYSIS` together with `DEVPROOF_AGENT_RUNTIME_TOKEN`. Configure its independent model list under the Post-run Analysis pool in Console.
+For local development, put the one-time token in `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`. For a standalone Runtime deployment, set `DEVPROOF_AGENT_RUNTIME_TOKEN` and preferably assert `DEVPROOF_AGENT_RUNTIME_POOL=POST_RUN_ANALYSIS`; without the assertion, the Runtime binds to the token's pool on first registration. Configure its independent model list under the Post-run Analysis pool in Console.
 
 Relevant API configuration:
 
