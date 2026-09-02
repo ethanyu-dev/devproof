@@ -42,10 +42,80 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 export interface BrowserVideoFinalizationFailure {
+  attempts: BrowserVideoFinalizationAttempt[];
   code: string;
+  durationMs: number | null;
   message: string;
+  runtimeVersion: string | null;
   stepFrameCount: number;
   type: "VIDEO_FINALIZATION";
+}
+
+export interface BrowserVideoFinalizationAttempt {
+  code: string;
+  durationMs: number;
+  maxHeight?: number;
+  maxWidth?: number;
+  message: string;
+  profile: "native" | "compatibility";
+  videoBitsPerSecond?: number;
+}
+
+function nonNegativeInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | null {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= maximum &&
+    Number.isSafeInteger(value)
+    ? value
+    : null;
+}
+
+function positiveInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  const parsed = nonNegativeInteger(value, maximum);
+  return parsed !== null && parsed > 0 ? parsed : undefined;
+}
+
+function videoFinalizationAttempts(
+  videoError: Record<string, unknown>,
+): BrowserVideoFinalizationAttempt[] {
+  const details = record(videoError.details);
+  if (!Array.isArray(details.attempts)) return [];
+  return details.attempts.slice(0, 4).flatMap((value) => {
+    const attempt = record(value);
+    if (
+      typeof attempt.code !== "string" ||
+      typeof attempt.message !== "string" ||
+      !["native", "compatibility"].includes(String(attempt.profile))
+    ) {
+      return [];
+    }
+    const durationMs = nonNegativeInteger(attempt.durationMs, 300_000);
+    if (durationMs === null) return [];
+    const maxHeight = positiveInteger(attempt.maxHeight, 16_384);
+    const maxWidth = positiveInteger(attempt.maxWidth, 16_384);
+    const videoBitsPerSecond = positiveInteger(
+      attempt.videoBitsPerSecond,
+      100_000_000,
+    );
+    return [
+      {
+        code: attempt.code.slice(0, 80),
+        durationMs,
+        ...(maxHeight ? { maxHeight } : {}),
+        ...(maxWidth ? { maxWidth } : {}),
+        message: attempt.message.slice(0, 500),
+        profile: attempt.profile as "native" | "compatibility",
+        ...(videoBitsPerSecond ? { videoBitsPerSecond } : {}),
+      },
+    ];
+  });
 }
 
 export function browserVideoFinalizationFailure(
@@ -56,19 +126,24 @@ export function browserVideoFinalizationFailure(
 ): BrowserVideoFinalizationFailure | null {
   if (!command || command.status !== "SUCCEEDED") return null;
   const result = record(command.result);
-  const stepFrameCount =
-    typeof result.stepFrameCount === "number" ? result.stepFrameCount : 0;
+  const stepFrameCount = positiveInteger(result.stepFrameCount, 120) ?? 0;
   if (result.videoCreated !== false || stepFrameCount === 0) return null;
   const videoError = record(result.videoError);
   return {
+    attempts: videoFinalizationAttempts(videoError),
     code:
       typeof videoError.code === "string"
-        ? videoError.code
+        ? videoError.code.slice(0, 80)
         : "VIDEO_COMPOSITION_FAILED",
+    durationMs: nonNegativeInteger(result.videoFinalizationDurationMs, 300_000),
     message:
       typeof videoError.message === "string"
-        ? videoError.message
+        ? videoError.message.slice(0, 500)
         : "Browser Runtime closed without creating the step video.",
+    runtimeVersion:
+      typeof result.videoRuntimeVersion === "string"
+        ? result.videoRuntimeVersion.slice(0, 64)
+        : null,
     stepFrameCount,
     type: "VIDEO_FINALIZATION",
   };

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 11,
+  minor: 12,
   name: "devproof-browser-runtime",
 } as const;
 export const USER_PROFILE_INACTIVITY_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -186,23 +186,59 @@ export const runtimeCommandResultSchema = z.object({
   type: z.literal("command.result"),
 });
 
-export const runtimeEventSchema = z.object({
-  eventId: z.string().uuid(),
-  fencingToken: z.string().regex(/^\d+$/u),
-  kind: z.enum([
-    "PAGE_CHANGED",
-    "CONSOLE_ERROR",
-    "NETWORK_ERROR",
-    "NETWORK_FAULT_HIT",
-    "HUMAN_INPUT",
-    "SESSION_INTERRUPTED",
-  ]),
-  leaseToken: z.string().uuid(),
-  payload: z.record(z.string(), z.unknown()).default({}),
-  sessionId: z.string().uuid(),
-  timestamp: z.string().datetime(),
-  type: z.literal("runtime.event"),
-});
+const runtimeVideoFinalizationAttemptSchema = z
+  .object({
+    code: z.string().min(1).max(80),
+    durationMs: z.number().int().nonnegative().max(300_000),
+    maxHeight: z.number().int().positive().max(16_384).optional(),
+    maxWidth: z.number().int().positive().max(16_384).optional(),
+    message: z.string().min(1).max(500),
+    profile: z.enum(["native", "compatibility"]),
+    videoBitsPerSecond: z.number().int().positive().max(100_000_000).optional(),
+  })
+  .strict();
+
+export const runtimeVideoFinalizationFailurePayloadSchema = z
+  .object({
+    attempts: z.array(runtimeVideoFinalizationAttemptSchema).max(4),
+    code: z.string().min(1).max(80),
+    commandId: z.string().uuid(),
+    durationMs: z.number().int().nonnegative().max(300_000),
+    frameCount: z.number().int().positive().max(120),
+    message: z.string().min(1).max(500),
+    runtimeVersion: z.string().trim().min(1).max(64),
+  })
+  .strict();
+
+export const runtimeEventSchema = z
+  .object({
+    eventId: z.string().uuid(),
+    fencingToken: z.string().regex(/^\d+$/u),
+    kind: z.enum([
+      "PAGE_CHANGED",
+      "CONSOLE_ERROR",
+      "NETWORK_ERROR",
+      "NETWORK_FAULT_HIT",
+      "HUMAN_INPUT",
+      "SESSION_INTERRUPTED",
+      "VIDEO_FINALIZATION_FAILED",
+    ]),
+    leaseToken: z.string().uuid(),
+    payload: z.record(z.string(), z.unknown()).default({}),
+    sessionId: z.string().uuid(),
+    timestamp: z.string().datetime(),
+    type: z.literal("runtime.event"),
+  })
+  .superRefine((value, context) => {
+    if (value.kind !== "VIDEO_FINALIZATION_FAILED") return;
+    const parsed = runtimeVideoFinalizationFailurePayloadSchema.safeParse(
+      value.payload,
+    );
+    if (parsed.success) return;
+    for (const issue of parsed.error.issues) {
+      context.addIssue({ ...issue, path: ["payload", ...issue.path] });
+    }
+  });
 
 export const runtimeProfileLifecycleSchema = z.object({
   eventId: z.string().uuid(),

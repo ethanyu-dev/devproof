@@ -25,6 +25,7 @@ The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. B
 | v1.9     | Runtime-wide network policy replaces Profile-level hostname enforcement                               |
 | v1.10    | Per-action screenshots and a composed WebM action video                                               |
 | v1.11    | Unique-visible locator selection and structured ambiguity recovery diagnostics                        |
+| v1.12    | Acknowledged, bounded video-finalization failure diagnostics                                          |
 
 The source of truth for the currently implemented version is `RUNTIME_PROTOCOL` in [`packages/runtime-protocol/src/index.ts`](../packages/runtime-protocol/src/index.ts).
 

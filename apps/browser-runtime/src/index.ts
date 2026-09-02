@@ -21,11 +21,13 @@ import {
   RUNTIME_PROTOCOL,
   USER_PROFILE_INACTIVITY_TTL_SECONDS,
   runtimeCommandPayloadSchema,
+  runtimeEventSchema,
   runtimeServerMessageSchema,
   type ReconcileAction,
   type BrowserHumanInputEvent,
   type RuntimeArtifactPayload,
   type RuntimeCommandType,
+  type RuntimeClientMessage,
   type RuntimeHumanPreviewFrame,
   type RuntimeServerMessage,
 } from "@devproof/runtime-protocol";
@@ -74,6 +76,11 @@ interface PendingProfileLifecycleEvent {
   purgedAt: string;
   type: "profile.lifecycle";
 }
+
+type PendingRuntimeDiagnosticEvent = Extract<
+  RuntimeClientMessage,
+  { type: "runtime.event" }
+> & { kind: "VIDEO_FINALIZATION_FAILED" };
 
 interface RuntimeState {
   apiUrl: string;
@@ -138,6 +145,16 @@ interface StepVideoEncodingProfile {
   videoBitsPerSecond?: number;
 }
 
+interface StepVideoEncodingFailure {
+  code: string;
+  durationMs: number;
+  maxHeight?: number;
+  maxWidth?: number;
+  message: string;
+  profile: StepVideoEncodingProfile["name"];
+  videoBitsPerSecond?: number;
+}
+
 interface RuntimeCommand {
   commandId: string;
   commandType: RuntimeCommandType;
@@ -155,6 +172,8 @@ type BufferedRuntimeMessageType =
   | "runtime.event"
   | "profile.lifecycle";
 
+type BufferedRuntimeMessagePriority = 1 | 2 | 3;
+
 export const runtimeVersion = packageVersion();
 const stateDirectory =
   process.env.DEVPROOF_RUNTIME_HOME ??
@@ -162,13 +181,18 @@ const stateDirectory =
 const statePath = join(stateDirectory, "runtime.json");
 const profileRoot = join(stateDirectory, "profiles");
 const recordingRoot = join(stateDirectory, "recordings");
+const diagnosticRoot = join(stateDirectory, "diagnostics");
 const USER_PROFILE_METADATA_FILE = ".devproof-user-profile.json";
 const PROFILE_LIFECYCLE_FILE_PREFIX = ".devproof-profile-lifecycle-";
+const RUNTIME_DIAGNOSTIC_FILE_PREFIX = ".runtime-diagnostic-";
+const RUNTIME_DIAGNOSTIC_MAX_FILES = 64;
+const RUNTIME_DIAGNOSTIC_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const PROFILE_CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
 const DIRECT_CONTENT_MAX_BYTES = 256 * 1_024;
 const INLINE_SCREENSHOT_MAX_BYTES = 1_250 * 1_024;
 const RUNTIME_ARTIFACT_SAFE_MAX_BYTES = 9 * 1_024 * 1_024;
 const MAX_RECORDED_STEP_FRAMES = 120;
+const VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR = 12;
 // `session.close` has a 60-second command budget. Keep each encoding attempt
 // short enough that the compatibility retry and browser cleanup can both run.
 const MAX_STEP_VIDEO_ATTEMPT_DURATION_MS = 24_000;
@@ -535,6 +559,90 @@ function profileLifecyclePath(root: string, eventId: string) {
     throw new Error("Profile lifecycle event id is invalid.");
   }
   return join(root, `${PROFILE_LIFECYCLE_FILE_PREFIX}${eventId}.json`);
+}
+
+export async function readPendingRuntimeDiagnosticEvents(
+  root: string,
+  now = new Date(),
+) {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const events: PendingRuntimeDiagnosticEvent[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (
+      !entry.isFile() ||
+      !entry.name.startsWith(RUNTIME_DIAGNOSTIC_FILE_PREFIX) ||
+      !entry.name.endsWith(".json")
+    ) {
+      continue;
+    }
+    const path = join(root, entry.name);
+    try {
+      const parsed = runtimeEventSchema.parse(
+        JSON.parse(await readFile(path, "utf8")),
+      );
+      if (parsed.kind !== "VIDEO_FINALIZATION_FAILED") {
+        throw new Error("Runtime diagnostic kind is invalid.");
+      }
+      if (
+        Date.parse(parsed.timestamp) <
+        now.getTime() - RUNTIME_DIAGNOSTIC_RETENTION_MS
+      ) {
+        await rm(path, { force: true });
+        continue;
+      }
+      events.push(parsed as PendingRuntimeDiagnosticEvent);
+    } catch (error) {
+      runtimeLog(
+        "warn",
+        "runtime.diagnostic.file_invalid",
+        { fileName: entry.name },
+        error,
+      );
+      await rm(path, { force: true }).catch(() => undefined);
+    }
+  }
+  events.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  const excess = events.slice(
+    0,
+    Math.max(0, events.length - RUNTIME_DIAGNOSTIC_MAX_FILES),
+  );
+  for (const event of excess) {
+    await removePendingRuntimeDiagnosticEvent(root, event.eventId);
+  }
+  return events.slice(-RUNTIME_DIAGNOSTIC_MAX_FILES);
+}
+
+export async function persistRuntimeDiagnosticEvent(
+  root: string,
+  event: PendingRuntimeDiagnosticEvent,
+) {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const target = runtimeDiagnosticPath(root, event.eventId);
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(event), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  await readPendingRuntimeDiagnosticEvents(root);
+}
+
+export function removePendingRuntimeDiagnosticEvent(
+  root: string,
+  eventId: string,
+) {
+  return rm(runtimeDiagnosticPath(root, eventId), { force: true });
+}
+
+function runtimeDiagnosticPath(root: string, eventId: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(eventId)) {
+    throw new Error("Runtime diagnostic event id is invalid.");
+  }
+  return join(root, `${RUNTIME_DIAGNOSTIC_FILE_PREFIX}${eventId}.json`);
 }
 
 function redactUrl(value: string): string {
@@ -968,6 +1076,10 @@ export class BrowserSessionManager {
       timer: NodeJS.Timeout;
     }
   >();
+  private readonly emitDiagnostic: (
+    session: LiveSession,
+    payload: Record<string, unknown>,
+  ) => Promise<void>;
 
   constructor(
     private readonly store: StateStore,
@@ -980,14 +1092,25 @@ export class BrowserSessionManager {
         | "NETWORK_ERROR"
         | "NETWORK_FAULT_HIT"
         | "HUMAN_INPUT"
-        | "SESSION_INTERRUPTED",
+        | "SESSION_INTERRUPTED"
+        | "VIDEO_FINALIZATION_FAILED",
       payload: Record<string, unknown>,
     ) => void,
     private readonly emitPreview: (frame: RuntimeHumanPreviewFrame) => void,
     private readonly emitProfileLifecycle: (
       event: PendingProfileLifecycleEvent,
     ) => void = () => undefined,
-  ) {}
+    emitDiagnostic?: (
+      session: LiveSession,
+      payload: Record<string, unknown>,
+    ) => Promise<void>,
+  ) {
+    this.emitDiagnostic =
+      emitDiagnostic ??
+      (async (session, payload) => {
+        this.emitEvent(session, "VIDEO_FINALIZATION_FAILED", payload);
+      });
+  }
 
   startProfileCleanup() {
     if (this.profileCleanupTimer) return;
@@ -1200,20 +1323,36 @@ export class BrowserSessionManager {
           );
           return null;
         });
+        const videoStartedAt = Date.now();
+        let video: RuntimeArtifactPayload | null = null;
         let videoError: ReturnType<typeof classifyCommandError> | null = null;
-        const video = await this.composeStepVideo(session).catch(
-          (error: unknown) => {
-            videoError = classifyCommandError(error, "session.close", false);
-            runtimeLog(
-              "warn",
-              "runtime.step_video.compose_failed",
-              { sessionId: command.sessionId },
-              error,
-            );
-            return null;
-          },
-        );
+        try {
+          video = await this.composeStepVideo(session);
+        } catch (error) {
+          videoError = classifyCommandError(error, "session.close", false);
+          runtimeLog(
+            "warn",
+            "runtime.step_video.compose_failed",
+            { sessionId: command.sessionId },
+            error,
+          );
+        }
         const frameCount = session.stepFrames.length;
+        const videoFinalizationDurationMs = Date.now() - videoStartedAt;
+        if (videoError) {
+          const attempts = Array.isArray(videoError.details?.attempts)
+            ? videoError.details.attempts.slice(0, 4)
+            : [];
+          await this.emitDiagnostic(session, {
+            attempts,
+            code: boundedUtf8Text(redactText(videoError.code), 80),
+            commandId: command.commandId,
+            durationMs: videoFinalizationDurationMs,
+            frameCount,
+            message: boundedUtf8Text(redactText(videoError.message), 500),
+            runtimeVersion,
+          });
+        }
         await this.close(command.sessionId);
         return {
           artifacts: [finalScreenshot, video].filter(
@@ -1223,7 +1362,13 @@ export class BrowserSessionManager {
             closed: true,
             stepFrameCount: frameCount,
             videoCreated: video !== null,
-            ...(videoError ? { videoError } : {}),
+            ...(videoError
+              ? {
+                  videoError,
+                  videoFinalizationDurationMs,
+                  videoRuntimeVersion: runtimeVersion,
+                }
+              : {}),
           },
         };
       }
@@ -2583,12 +2728,13 @@ export class BrowserSessionManager {
         videoBitsPerSecond: 600_000,
       },
     ];
-    const failures: Array<{ code: string; message: string; profile: string }> =
-      [];
+    const failures: StepVideoEncodingFailure[] = [];
 
     for (const profile of profiles) {
-      const composer = await session.context.newPage();
+      const attemptStartedAt = Date.now();
+      let composer: Page | null = null;
       try {
+        composer = await session.context.newPage();
         const encoded = await composer.evaluate(
           async ({ durationMs, encoding, frameDurationMs, frames }) => {
             if (typeof MediaRecorder === "undefined") {
@@ -2732,9 +2878,15 @@ export class BrowserSessionManager {
       } catch (error) {
         const classified = classifyCommandError(error, "session.close", false);
         failures.push({
-          code: classified.code,
+          code: boundedUtf8Text(redactText(classified.code), 80),
+          durationMs: Date.now() - attemptStartedAt,
+          ...(profile.maxHeight ? { maxHeight: profile.maxHeight } : {}),
+          ...(profile.maxWidth ? { maxWidth: profile.maxWidth } : {}),
           message: boundedUtf8Text(redactText(classified.message), 500),
           profile: profile.name,
+          ...(profile.videoBitsPerSecond
+            ? { videoBitsPerSecond: profile.videoBitsPerSecond }
+            : {}),
         });
         runtimeLog(
           "warn",
@@ -2743,7 +2895,7 @@ export class BrowserSessionManager {
           error,
         );
       } finally {
-        await composer.close().catch(() => undefined);
+        await composer?.close().catch(() => undefined);
       }
     }
 
@@ -3133,6 +3285,7 @@ export class RuntimeClient {
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private stopped = false;
   private reconnectAttempt = 0;
+  private negotiatedProtocolMinor = 0;
   private connectionReady = false;
   private deliveryAcknowledgements = false;
   private readonly outbox: Array<{
@@ -3141,6 +3294,7 @@ export class RuntimeClient {
     messageId: string;
     messageType: BufferedRuntimeMessageType;
     sent: boolean;
+    priority: BufferedRuntimeMessagePriority;
   }> = [];
   private outboxBytes = 0;
   private droppedMessages = 0;
@@ -3158,6 +3312,13 @@ export class RuntimeClient {
       store,
       proxy.server,
       (session, kind, payload) => {
+        if (
+          kind === "VIDEO_FINALIZATION_FAILED" &&
+          this.negotiatedProtocolMinor <
+            VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR
+        ) {
+          return;
+        }
         this.send({
           eventId: randomUUID(),
           fencingToken: session.fencingToken,
@@ -3171,6 +3332,46 @@ export class RuntimeClient {
       },
       (frame) => this.send(frame),
       (event) => this.send(event),
+      async (session, payload) => {
+        if (
+          this.negotiatedProtocolMinor <
+          VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR
+        ) {
+          return;
+        }
+        let event: PendingRuntimeDiagnosticEvent;
+        try {
+          event = runtimeEventSchema.parse({
+            eventId: randomUUID(),
+            fencingToken: session.fencingToken,
+            kind: "VIDEO_FINALIZATION_FAILED",
+            leaseToken: session.leaseToken,
+            payload,
+            sessionId: session.sessionId,
+            timestamp: new Date().toISOString(),
+            type: "runtime.event",
+          }) as PendingRuntimeDiagnosticEvent;
+        } catch (error) {
+          runtimeLog(
+            "error",
+            "runtime.diagnostic.validation_failed",
+            { kind: "VIDEO_FINALIZATION_FAILED" },
+            error,
+          );
+          return;
+        }
+        try {
+          await persistRuntimeDiagnosticEvent(diagnosticRoot, event);
+        } catch (error) {
+          runtimeLog(
+            "error",
+            "runtime.diagnostic.persist_failed",
+            { kind: "VIDEO_FINALIZATION_FAILED" },
+            error,
+          );
+        }
+        this.send(event);
+      },
     );
   }
 
@@ -3223,6 +3424,20 @@ export class RuntimeClient {
     for (const event of await readPendingProfileLifecycleEvents(profileRoot)) {
       if (interruptedProfileKeys.has(event.profileKey)) continue;
       await purgePersistentProfileDirectory(profileRoot, event.profileKey);
+      this.send(event);
+    }
+  }
+
+  private async restoreRuntimeDiagnosticEvents() {
+    if (
+      this.negotiatedProtocolMinor <
+      VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR
+    ) {
+      return;
+    }
+    for (const event of await readPendingRuntimeDiagnosticEvents(
+      diagnosticRoot,
+    )) {
       this.send(event);
     }
   }
@@ -3295,11 +3510,13 @@ export class RuntimeClient {
       throw new Error(message.code + ": " + message.message);
     }
     if (message.type === "runtime.hello.accepted") {
+      this.negotiatedProtocolMinor = message.protocol.minor;
       this.deliveryAcknowledgements = message.protocol.minor >= 3;
       this.connectionReady = true;
       this.applyNetworkPolicy(message.networkAllowlist, "gateway_handshake");
       await this.manager.applyReconcile(message.reconcile);
       void this.manager.cleanupExpiredProfiles();
+      await this.restoreRuntimeDiagnosticEvents();
       runtimeLog("info", "runtime.gateway.online", {
         protocolMajor: message.protocol.major,
         protocolMinor: message.protocol.minor,
@@ -3525,6 +3742,7 @@ export class RuntimeClient {
     const bytes = Buffer.byteLength(serialized);
     const maxBytes = 10 * 1_024 * 1_024;
     const maxMessages = 500;
+    const priority = this.bufferedMessagePriority(message, messageType);
     if (bytes > maxBytes) {
       this.recordDrop(messageType, "message_too_large");
       return;
@@ -3533,11 +3751,28 @@ export class RuntimeClient {
       this.outbox.length > 0 &&
       (this.outbox.length >= maxMessages || this.outboxBytes + bytes > maxBytes)
     ) {
-      const removed = this.outbox.shift()!;
-      this.outboxBytes -= removed.bytes;
-      this.recordDrop(removed.messageType, "outbox_capacity");
+      const lowestQueuedPriority = Math.min(
+        ...this.outbox.map((queued) => queued.priority),
+      ) as BufferedRuntimeMessagePriority;
+      if (lowestQueuedPriority > priority) {
+        this.recordDrop(messageType, "outbox_priority");
+        return;
+      }
+      const removalIndex = this.outbox.findIndex(
+        (queued) => queued.priority === lowestQueuedPriority,
+      );
+      const [removed] = this.outbox.splice(removalIndex, 1);
+      this.outboxBytes -= removed!.bytes;
+      this.recordDrop(removed!.messageType, "outbox_capacity");
     }
-    this.outbox.push({ bytes, message, messageId, messageType, sent: false });
+    this.outbox.push({
+      bytes,
+      message,
+      messageId,
+      messageType,
+      priority,
+      sent: false,
+    });
     this.outboxBytes += bytes;
     runtimeLog("warn", "runtime.message.buffered", {
       bytes,
@@ -3606,6 +3841,17 @@ export class RuntimeClient {
           ),
       );
     }
+    if (messageType === "runtime.event") {
+      void removePendingRuntimeDiagnosticEvent(diagnosticRoot, messageId).catch(
+        (error) =>
+          runtimeLog(
+            "warn",
+            "runtime.diagnostic.ack_cleanup_failed",
+            { eventId: messageId },
+            error,
+          ),
+      );
+    }
     runtimeLog("debug", "runtime.outbox.acknowledged", {
       messageId,
       messageType,
@@ -3641,6 +3887,29 @@ export class RuntimeClient {
       };
     }
     return undefined;
+  }
+
+  private bufferedMessagePriority(
+    message: unknown,
+    messageType: BufferedRuntimeMessageType,
+  ): BufferedRuntimeMessagePriority {
+    if (
+      messageType === "command.result" ||
+      messageType === "human.input.result"
+    ) {
+      return 3;
+    }
+    if (messageType === "profile.lifecycle") return 2;
+    if (
+      messageType === "runtime.event" &&
+      message &&
+      typeof message === "object" &&
+      "kind" in message &&
+      message.kind === "VIDEO_FINALIZATION_FAILED"
+    ) {
+      return 2;
+    }
+    return 1;
   }
 
   private recordDrop(messageType: string, reason: string) {

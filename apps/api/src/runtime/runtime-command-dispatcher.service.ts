@@ -35,6 +35,12 @@ function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 @Injectable()
 export class RuntimeCommandDispatcher {
   constructor(
@@ -272,8 +278,8 @@ export class RuntimeCommandDispatcher {
       });
       return;
     }
-    await this.prisma.browserRuntimeEvent.upsert({
-      create: {
+    const persisted = await this.prisma.browserRuntimeEvent.createMany({
+      data: {
         fencingToken: session.fencingToken,
         id: event.eventId,
         kind: event.kind,
@@ -282,14 +288,65 @@ export class RuntimeCommandDispatcher {
         payload: asJson(event.payload),
         sessionId: event.sessionId,
       },
-      update: {},
-      where: { id: event.eventId },
+      skipDuplicates: true,
     });
+    if (persisted.count !== 1) return;
     this.metrics?.increment(
       "devproof_runtime_events_total",
       "Accepted Browser Runtime events by kind.",
       { kind: event.kind.toLowerCase() },
     );
+    if (event.kind === "VIDEO_FINALIZATION_FAILED") {
+      const attempts = Array.isArray(event.payload.attempts)
+        ? event.payload.attempts.slice(0, 4).map(record)
+        : [];
+      this.metrics?.increment(
+        "devproof_runtime_video_finalization_failures_total",
+        "Browser Runtime video finalization failures by terminal error code.",
+        { code: String(event.payload.code).toLowerCase() },
+      );
+      this.metrics?.observe(
+        "devproof_runtime_video_finalization_duration_seconds",
+        "Failed Browser Runtime video finalization duration in seconds.",
+        Number(event.payload.durationMs) / 1_000,
+      );
+      this.metrics?.observe(
+        "devproof_runtime_video_finalization_frames",
+        "Step frame count for failed Browser Runtime video finalizations.",
+        Number(event.payload.frameCount),
+      );
+      for (const attempt of attempts) {
+        const labels = {
+          code: String(attempt.code).toLowerCase(),
+          profile: String(attempt.profile).toLowerCase(),
+        };
+        this.metrics?.increment(
+          "devproof_runtime_video_encoding_attempt_failures_total",
+          "Failed Browser Runtime video encoding attempts by profile and error code.",
+          labels,
+        );
+        this.metrics?.observe(
+          "devproof_runtime_video_encoding_attempt_duration_seconds",
+          "Failed Browser Runtime video encoding attempt duration in seconds.",
+          Number(attempt.durationMs) / 1_000,
+          { profile: labels.profile },
+        );
+      }
+      this.observability?.log("warn", "runtime.video_finalization.failed", {
+        attempts: attempts.map((attempt) => ({
+          code: attempt.code,
+          durationMs: attempt.durationMs,
+          profile: attempt.profile,
+        })),
+        code: event.payload.code,
+        commandId: event.payload.commandId,
+        durationMs: event.payload.durationMs,
+        eventId: event.eventId,
+        frameCount: event.payload.frameCount,
+        runtimeVersion: event.payload.runtimeVersion,
+        sessionId: event.sessionId,
+      });
+    }
   }
 
   private async waitForCompletion(
