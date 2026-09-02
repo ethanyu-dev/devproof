@@ -37,7 +37,7 @@ export class ControlPlaneClient {
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
-    private readonly pool: RuntimePool,
+    private readonly pool?: RuntimePool,
   ) {}
 
   async register(workerId: string, signal?: AbortSignal) {

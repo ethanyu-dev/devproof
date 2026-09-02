@@ -7,6 +7,7 @@ import {
   type RuntimeOutcome,
   type RuntimePostRunAnalysisOutcome,
   type RuntimePostRunAnalysisTaskLease,
+  type RuntimePool,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
   type RuntimeTaskLease,
@@ -26,6 +27,7 @@ import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 import type { PostRunAnalysisExecutor } from "./post-run-analysis.executor.js";
 
 export class AgentRuntimeWorker {
+  private boundPool: RuntimePool | undefined;
   private executor: BrowserVerificationExecutor | undefined;
   private readonly instanceWorkerId: string;
   private readonly lanes = new Map<
@@ -40,12 +42,13 @@ export class AgentRuntimeWorker {
     private readonly controlPlane: ControlPlaneClient,
     private readonly modelClient: ResponsesClientFactory,
   ) {
+    this.boundPool = config.DEVPROOF_AGENT_RUNTIME_POOL;
     this.instanceWorkerId = `${config.DEVPROOF_AGENT_WORKER_ID}:${randomUUID()}`;
   }
 
   async run(signal: AbortSignal) {
     log("runtime.started", {
-      pool: this.config.DEVPROOF_AGENT_RUNTIME_POOL,
+      pool: this.boundPool ?? "CREDENTIAL_BOUND",
       workerId: this.instanceWorkerId,
     });
     try {
@@ -80,11 +83,23 @@ export class AgentRuntimeWorker {
     },
     signal: AbortSignal,
   ) {
-    const expectedPool = this.config.DEVPROOF_AGENT_RUNTIME_POOL;
-    if (allocation.pools.length !== 1 || allocation.pools[0] !== expectedPool) {
+    if (allocation.pools.length !== 1) {
       throw new Error(
-        `Control plane assigned ${allocation.pools.join(", ") || "no pool"}; Runtime is isolated to ${expectedPool}.`,
+        `Control plane assigned ${allocation.pools.join(", ") || "no pool"}; Runtime requires exactly one credential-bound pool.`,
       );
+    }
+    const assignedPool = allocation.pools[0]!;
+    if (this.boundPool && assignedPool !== this.boundPool) {
+      throw new Error(
+        `Control plane assigned ${assignedPool}; Runtime is isolated to ${this.boundPool}.`,
+      );
+    }
+    if (!this.boundPool) {
+      this.boundPool = assignedPool;
+      log("runtime.pool.bound", {
+        pool: assignedPool,
+        workerId: this.instanceWorkerId,
+      });
     }
     const assignments = {
       POST_RUN_ANALYSIS: {
@@ -107,10 +122,10 @@ export class AgentRuntimeWorker {
           allocation.browserConcurrency > 0,
       },
     } as const;
-    const assignment = assignments[expectedPool];
+    const assignment = assignments[assignedPool];
     if (assignment.unexpected) {
       throw new Error(
-        `Control plane returned cross-pool concurrency to isolated ${expectedPool} Runtime.`,
+        `Control plane returned cross-pool concurrency to isolated ${assignedPool} Runtime.`,
       );
     }
     this.reconcileLanes(assignment.lane, assignment.desired, signal);

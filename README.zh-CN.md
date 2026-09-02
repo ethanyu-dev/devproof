@@ -114,7 +114,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
        pnpm prisma:deploy
        pnpm dev
 
-5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS`、`BROWSER_EXECUTION` 和 `POST_RUN_ANALYSIS` 三个池的有序模型列表。模型不会在池之间隐式共享，每个池拥有独立的故障下沉与恢复优先级；升级时迁移会把原共享列表复制到三个池，便于上线后再分别调整。三个池使用独立的 Agent Runtime 身份，分别执行 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>`。本地开发时，将三个仅显示一次的 Token 分别配置为 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN`、`DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN` 和 `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`；独立部署的 Runtime 进程必须同时配置 `DEVPROOF_AGENT_RUNTIME_POOL` 与对应的 `DEVPROOF_AGENT_RUNTIME_TOKEN`，声明池与凭证池不一致时注册会被拒绝。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。
+5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS`、`BROWSER_EXECUTION` 和 `POST_RUN_ANALYSIS` 三个池的有序模型列表。模型不会在池之间隐式共享，每个池拥有独立的故障下沉与恢复优先级；升级时迁移会把原共享列表复制到三个池，便于上线后再分别调整。三个池使用独立的 Agent Runtime 身份，分别执行 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>`。本地开发时，将三个仅显示一次的 Token 分别配置为 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN`、`DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN` 和 `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`；独立部署的 Runtime 进程将对应 Token 配置为 `DEVPROOF_AGENT_RUNTIME_TOKEN`，并建议配置 `DEVPROOF_AGENT_RUNTIME_POOL` 作为显式断言。省略 Pool 变量时，Runtime 会在首次注册时绑定到凭证携带的唯一 Pool；声明值与凭证池不一致时注册会被拒绝。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。
 
 6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
 

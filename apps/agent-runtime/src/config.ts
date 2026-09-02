@@ -8,11 +8,9 @@ for (const envPath of ["../../.env", ".env"]) {
 const configSchema = z
   .object({
     DEVPROOF_API_URL: z.string().url().default("http://localhost:4433"),
-    DEVPROOF_AGENT_RUNTIME_POOL: z.enum([
-      "SPEC_ANALYSIS",
-      "BROWSER_EXECUTION",
-      "POST_RUN_ANALYSIS",
-    ]),
+    DEVPROOF_AGENT_RUNTIME_POOL: z
+      .enum(["SPEC_ANALYSIS", "BROWSER_EXECUTION", "POST_RUN_ANALYSIS"])
+      .optional(),
     DEVPROOF_AGENT_RUNTIME_TOKEN: z.string().min(16),
     DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: z.string().default(""),
     DEVPROOF_AGENT_POLL_INTERVAL_MS: z.coerce
