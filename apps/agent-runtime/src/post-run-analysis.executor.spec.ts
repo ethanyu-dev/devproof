@@ -222,6 +222,385 @@ describe("PostRunAnalysisExecutor", () => {
     );
   });
 
+  it("finishes from failure-first candidates without paging a truncated manifest", async () => {
+    const evidenceRef = "artifact://network-log";
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-evidence",
+        output: [
+          call(
+            "read_analysis_evidence",
+            {
+              analysisSummary: "核验失败优先摘要选出的网络证据。",
+              cursor: 0,
+              evidenceRef,
+              maxBytes: 2_048,
+            },
+            "call-evidence",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-finish",
+        output: [
+          call(
+            "finish_analysis",
+            {
+              report: {
+                findings: [],
+                summary: "候选证据未显示达到报告阈值的问题。",
+              },
+            },
+            "call-finish",
+          ),
+        ],
+      });
+    const readPostRunAnalysisEvidence = vi.fn().mockResolvedValue({
+      body: '{"status":500}',
+      contentType: "application/json",
+      evidenceRef,
+      nextCursor: null,
+      sha256: "b".repeat(64),
+      totalBytes: 14,
+      truncated: false,
+    });
+    const readPostRunAnalysisManifest = vi.fn();
+    const outcome = await new PostRunAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      {
+        appendPostRunAnalysisEvent: vi.fn().mockResolvedValue({
+          accepted: true,
+        }),
+        readPostRunAnalysisEvidence,
+        readPostRunAnalysisManifest,
+      } as never,
+      300,
+    ).execute(
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          input: {
+            ...task.snapshot.input,
+            manifest: {
+              ...task.snapshot.input.manifest,
+              analysisSynopsis: {
+                candidateCount: 1,
+                candidates: [{ evidenceRef }],
+                cleanPass: false,
+                selectedCandidateCount: 1,
+                strategy: "failure-first-v1",
+                truncated: false,
+              },
+              truncated: true,
+            },
+          },
+        },
+      },
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(readPostRunAnalysisManifest).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      kind: "ANALYSIS_COMPLETED",
+      report: {
+        coverage: {
+          candidateCount: 1,
+          evidenceBytesRead: 14,
+          evidenceReadCount: 1,
+          manifestBytesRead: 0,
+          manifestFullyScanned: false,
+          strategy: "failure-first-v1",
+        },
+      },
+    });
+  });
+
+  it("requires at least one evidence read before dismissing anomaly candidates", async () => {
+    const evidenceRef = "artifact://network-log";
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-premature-finish",
+        output: [
+          call(
+            "finish_analysis",
+            { report: { findings: [], summary: "没有需要报告的问题。" } },
+            "call-premature-finish",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-evidence",
+        output: [
+          call(
+            "read_analysis_evidence",
+            {
+              analysisSummary: "先核验异常候选。",
+              cursor: 0,
+              evidenceRef,
+              maxBytes: 2_048,
+            },
+            "call-evidence",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-finish",
+        output: [
+          call(
+            "finish_analysis",
+            { report: { findings: [], summary: "候选已核验。" } },
+            "call-finish",
+          ),
+        ],
+      });
+    const appendPostRunAnalysisEvent = vi.fn().mockResolvedValue({
+      accepted: true,
+    });
+    const outcome = await new PostRunAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      {
+        appendPostRunAnalysisEvent,
+        readPostRunAnalysisEvidence: vi.fn().mockResolvedValue({
+          body: '{"status":500}',
+          contentType: "application/json",
+          evidenceRef,
+          nextCursor: null,
+          sha256: "b".repeat(64),
+          totalBytes: 14,
+          truncated: false,
+        }),
+      } as never,
+      10,
+    ).execute(
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          input: {
+            ...task.snapshot.input,
+            manifest: {
+              ...task.snapshot.input.manifest,
+              analysisSynopsis: {
+                candidateCount: 1,
+                candidates: [{ evidenceRef }],
+                cleanPass: false,
+                completenessSufficient: true,
+                selectedCandidateCount: 1,
+                strategy: "failure-first-v1",
+                truncated: false,
+              },
+              truncated: true,
+            },
+          },
+        },
+      },
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(outcome).toMatchObject({ kind: "ANALYSIS_COMPLETED" });
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(
+      appendPostRunAnalysisEvent.mock.calls.some(
+        (entry) =>
+          entry[1] === "analysis.report.validation_failed" &&
+          entry[2].reason === "CANDIDATE_EVIDENCE_NOT_READ",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not charge provider failover attempts as logical analysis turns", async () => {
+    const unavailableProvider = vi
+      .fn()
+      .mockRejectedValue(new Error("provider unavailable"));
+    const availableProvider = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-evidence",
+        output: [
+          call(
+            "read_analysis_evidence",
+            {
+              analysisSummary: "核验网络证据。",
+              cursor: 0,
+              evidenceRef: "artifact://network-log",
+              maxBytes: 2_048,
+            },
+            "call-evidence",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-finish",
+        output: [
+          call(
+            "finish_analysis",
+            { report: { findings: [], summary: "分析完成。" } },
+            "call-finish",
+          ),
+        ],
+      });
+    const outcome = await new PostRunAnalysisExecutor(
+      (candidate) =>
+        ({
+          responses: {
+            create:
+              candidate.modelId === "unavailable"
+                ? unavailableProvider
+                : availableProvider,
+          },
+        }) as never,
+      {
+        appendPostRunAnalysisEvent: vi.fn().mockResolvedValue({
+          accepted: true,
+        }),
+        readPostRunAnalysisEvidence: vi.fn().mockResolvedValue({
+          body: '{"status":500}',
+          contentType: "application/json",
+          evidenceRef: "artifact://network-log",
+          nextCursor: null,
+          sha256: "b".repeat(64),
+          totalBytes: 14,
+          truncated: false,
+        }),
+      } as never,
+      2,
+    ).execute(
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          modelCandidates: [
+            { ...task.snapshot.modelCandidates[0]!, modelId: "unavailable" },
+            { ...task.snapshot.modelCandidates[0]!, modelId: "available" },
+          ],
+        },
+      },
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(outcome).toMatchObject({ kind: "ANALYSIS_COMPLETED" });
+    expect(unavailableProvider).toHaveBeenCalledTimes(2);
+    expect(availableProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("reserves enough turns to page a large fallback manifest", async () => {
+    const appendPostRunAnalysisEvent = vi.fn().mockResolvedValue({
+      accepted: true,
+    });
+    const create = vi.fn().mockResolvedValue({
+      id: "response-finish",
+      output: [
+        call(
+          "finish_analysis",
+          { report: { findings: [], summary: "无需进一步报告。" } },
+          "call-finish",
+        ),
+      ],
+    });
+    await new PostRunAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendPostRunAnalysisEvent } as never,
+      300,
+    ).execute(
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          input: {
+            ...task.snapshot.input,
+            manifest: {
+              analysisSynopsis: {
+                candidateCount: 0,
+                candidates: [],
+                cleanPass: false,
+                completenessSufficient: false,
+                strategy: "failure-first-v1",
+              },
+              manifestByteSize: 12_800_000,
+              task: { verdict: "FAILED" },
+              truncated: true,
+            },
+          },
+        },
+      },
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(appendPostRunAnalysisEvent).toHaveBeenCalledWith(
+      lease,
+      "analysis.executor.started",
+      expect.objectContaining({ executionLimit: 108 }),
+    );
+  });
+
+  it("skips model invocation for a clean pass synopsis", async () => {
+    const create = vi.fn();
+    const appendPostRunAnalysisEvent = vi.fn().mockResolvedValue({
+      accepted: true,
+    });
+    const outcome = await new PostRunAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendPostRunAnalysisEvent } as never,
+      300,
+    ).execute(
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          modelCandidates: [],
+          input: {
+            ...task.snapshot.input,
+            completeness: {
+              browserExecutionsFinalized: true,
+              durableEvents: true,
+              evidenceMetadata: true,
+            },
+            manifest: {
+              analysisSynopsis: {
+                candidateCount: 0,
+                candidates: [],
+                cleanPass: true,
+                completenessSufficient: true,
+                selectedCandidateCount: 0,
+                strategy: "failure-first-v1",
+                truncated: false,
+              },
+              evidenceLocations: [],
+              evidenceRefs: [],
+              task: { verdict: "PASSED" },
+              truncated: true,
+            },
+          },
+        },
+      },
+      lease,
+      new AbortController().signal,
+    );
+
+    expect(create).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      kind: "ANALYSIS_COMPLETED",
+      report: {
+        coverage: {
+          candidateCount: 0,
+          evidenceReadCount: 0,
+          strategy: "failure-first-v1",
+        },
+        findings: [],
+      },
+    });
+    expect(
+      appendPostRunAnalysisEvent.mock.calls.map((entry) => entry[1]),
+    ).toEqual(["analysis.executor.started", "analysis.report.generated"]);
+  });
+
   it("allows a model to jump to a relevant range in a large text artifact", async () => {
     const create = vi
       .fn()
@@ -622,6 +1001,12 @@ describe("PostRunAnalysisExecutor", () => {
 
     expect(outcome).toMatchObject({ kind: "ANALYSIS_COMPLETED" });
     expect(readPostRunAnalysisManifest).toHaveBeenCalledTimes(2);
+    expect(readPostRunAnalysisManifest).toHaveBeenNthCalledWith(
+      1,
+      lease,
+      expect.objectContaining({ maxBytes: 128_000 }),
+      expect.any(AbortSignal),
+    );
     const firstRequest = create.mock.calls[0]?.[0] as {
       input: Array<{ content?: string }>;
     };

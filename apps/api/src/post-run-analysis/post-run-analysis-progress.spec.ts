@@ -25,6 +25,7 @@ describe("buildPostRunAnalysisProgress", () => {
         event(1, "analysis.started", { queueWaitMs: 1_310_000 }),
         event(2, "analysis.model.started", {
           callId: "call-1",
+          candidateCount: 12,
           model: "xai/grok-4.6",
           turn: 1,
         }),
@@ -42,6 +43,7 @@ describe("buildPostRunAnalysisProgress", () => {
           },
         }),
         event(4, "analysis.evidence.read", {
+          bytesRead: 256,
           evidenceRef: "browser-command://failed-command",
         }),
         event(5, "analysis.report.validation_failed", {
@@ -57,6 +59,8 @@ describe("buildPostRunAnalysisProgress", () => {
       currentAttemptElapsedMs: 299_000,
       deadlineRemainingMs: 1_500_000,
       metrics: {
+        candidateCount: 12,
+        evidenceBytesRead: 256,
         evidenceReads: 1,
         inputTokens: 4_990,
         modelCalls: 1,

@@ -59,6 +59,11 @@ type FindingRuntimeLocation = {
   title: string;
 };
 
+type PostRunAnalysisOutcomeJob = Omit<
+  Prisma.PostRunAnalysisJobGetPayload<Record<string, never>>,
+  "inputManifest"
+>;
+
 function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
@@ -88,10 +93,6 @@ export class PostRunAnalysisRuntimeService {
       teamId,
       "POST_RUN_ANALYSIS",
     );
-    if (!modelCandidates.length) {
-      await this.failUnconfiguredJob(teamId);
-      return { task: null };
-    }
 
     for (let collision = 0; collision < 5; collision += 1) {
       const claimed = await this.prisma.$transaction(async (tx) => {
@@ -116,6 +117,24 @@ export class PostRunAnalysisRuntimeService {
             },
             hardDeadlineAt: { gt: now },
             teamId,
+            ...(modelCandidates.length
+              ? {}
+              : {
+                  AND: [
+                    {
+                      inputManifest: {
+                        equals: true,
+                        path: ["analysisSynopsis", "cleanPass"],
+                      },
+                    },
+                    {
+                      inputManifest: {
+                        equals: true,
+                        path: ["analysisSynopsis", "completenessSufficient"],
+                      },
+                    },
+                  ],
+                }),
             OR: [
               {
                 status: "READY",
@@ -170,7 +189,25 @@ export class PostRunAnalysisRuntimeService {
         });
         if (acquired.count !== 1) return undefined;
         const job = await tx.postRunAnalysisJob.findUniqueOrThrow({
-          include: { taskExecution: true },
+          select: {
+            analysisCheckpoint: true,
+            analyzerVersion: true,
+            attemptNumber: true,
+            deadlineAt: true,
+            fencingToken: true,
+            hardDeadlineAt: true,
+            id: true,
+            inputByteSize: true,
+            inputCompleteness: true,
+            inputSha256: true,
+            inputStorageKey: true,
+            leaseExpiresAt: true,
+            leaseToken: true,
+            taskExecution: {
+              select: { sourceRef: true, title: true, traceId: true },
+            },
+            taskExecutionId: true,
+          },
           where: { id: candidate.id },
         });
         await tx.postRunAnalysisEvent.createMany({
@@ -210,7 +247,10 @@ export class PostRunAnalysisRuntimeService {
         return job;
       });
       if (claimed === undefined) continue;
-      if (claimed === null) return { task: null };
+      if (claimed === null) {
+        if (!modelCandidates.length) await this.failUnconfiguredJob(teamId);
+        return { task: null };
+      }
       if (
         !claimed.inputStorageKey ||
         !claimed.inputSha256 ||
@@ -220,6 +260,10 @@ export class PostRunAnalysisRuntimeService {
           "The analysis input bundle is unavailable.",
         );
       }
+      const inlineManifest = await this.inlineManifestForJob(
+        teamId,
+        claimed.id,
+      );
       return {
         task: {
           fencingToken: claimed.fencingToken.toString(),
@@ -236,9 +280,7 @@ export class PostRunAnalysisRuntimeService {
             input: {
               byteSize: claimed.inputByteSize,
               completeness: record(claimed.inputCompleteness),
-              manifest: compactInlineManifest(
-                publicAnalysisManifest(claimed.inputManifest),
-              ),
+              manifest: inlineManifest,
               schemaVersion: "devproof.task-logs.v2" as const,
               sha256: claimed.inputSha256,
             },
@@ -341,7 +383,6 @@ export class PostRunAnalysisRuntimeService {
         analysisCheckpoint: true,
         fencingToken: true,
         inputByteSize: true,
-        inputManifest: true,
         inputSha256: true,
         inputStorageKey: true,
         leaseExpiresAt: true,
@@ -359,11 +400,16 @@ export class PostRunAnalysisRuntimeService {
       throw new ConflictException("The analysis bundle is not readable.");
     }
     if (input.name === "read_analysis_manifest") {
+      const inputManifest = await this.inputManifestForJob(
+        teamId,
+        id,
+        embeddedInputManifest(job),
+      );
       const source = await this.cachedChunkSource(
         `manifest:${id}:${job.fencingToken.toString()}`,
         async () => ({
           body: Buffer.from(
-            JSON.stringify(publicAnalysisManifest(job.inputManifest), null, 2),
+            JSON.stringify(publicAnalysisManifest(inputManifest)),
           ),
           contentType: "application/vnd.devproof.execution-manifest+json",
         }),
@@ -381,7 +427,13 @@ export class PostRunAnalysisRuntimeService {
       return output;
     }
     if (input.name === "read_analysis_evidence") {
-      if (!manifestEvidenceRefs(job.inputManifest).has(input.evidenceRef)) {
+      const structuredEvidence = await this.structuredEvidenceForJob(
+        teamId,
+        id,
+        input.evidenceRef,
+        embeddedInputManifest(job),
+      );
+      if (!structuredEvidence) {
         throw new NotFoundException(
           `Evidence ${input.evidenceRef} is not present in the execution manifest.`,
         );
@@ -434,15 +486,6 @@ export class PostRunAnalysisRuntimeService {
         return output;
       }
 
-      const structuredEvidence = structuredEvidenceSource(
-        job.inputManifest,
-        input.evidenceRef,
-      );
-      if (!structuredEvidence) {
-        throw new NotFoundException(
-          `Evidence ${input.evidenceRef} is not present in the structured evidence archive.`,
-        );
-      }
       const output = await this.readObjectChunk({
         contentType: "application/vnd.devproof.evidence+json",
         cursor: input.cursor,
@@ -529,6 +572,90 @@ export class PostRunAnalysisRuntimeService {
       throw new ConflictException("The post-run analysis lease is stale.");
     }
     job.analysisCheckpoint = checkpoint;
+  }
+
+  private async inputManifestForJob(
+    teamId: string,
+    analysisId: string,
+    embedded: Record<string, unknown> | null,
+  ) {
+    if (embedded) return publicAnalysisManifest(embedded);
+    const rows = await this.prisma.$queryRaw<
+      Array<{ manifest: Prisma.JsonValue | null }>
+    >(Prisma.sql`
+      SELECT
+        "input_manifest"
+          - ${POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD}
+          - ${POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD} AS "manifest"
+      FROM "post_run_analysis_jobs"
+      WHERE "id" = ${analysisId}::uuid
+        AND "team_id" = ${teamId}::uuid
+      LIMIT 1
+    `);
+    if (!rows[0]) {
+      throw new NotFoundException("Post-run analysis job was not found.");
+    }
+    return record(rows[0].manifest);
+  }
+
+  private async inlineManifestForJob(teamId: string, analysisId: string) {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ manifest: Prisma.JsonValue | null }>
+    >(Prisma.sql`
+      WITH source AS (
+        SELECT
+          "input_manifest"
+            - ${POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD}
+            - ${POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD} AS "publicManifest"
+        FROM "post_run_analysis_jobs"
+        WHERE "id" = ${analysisId}::uuid
+          AND "team_id" = ${teamId}::uuid
+        LIMIT 1
+      )
+      SELECT
+        CASE
+          WHEN octet_length("publicManifest"::text) <= ${INLINE_MANIFEST_MAX_BYTES}
+            THEN "publicManifest"
+          ELSE jsonb_build_object(
+            'analysisSynopsis', "publicManifest" -> 'analysisSynopsis',
+            'eventCounts', "publicManifest" -> 'eventCounts',
+            'evidenceLocationCount', COALESCE(jsonb_array_length("publicManifest" -> 'evidenceLocations'), 0),
+            'evidenceRefCount', COALESCE(jsonb_array_length("publicManifest" -> 'evidenceRefs'), 0),
+            'manifestByteSize', octet_length("publicManifest"::text),
+            'runCount', COALESCE(jsonb_array_length("publicManifest" -> 'runs'), 0),
+            'schemaVersion', "publicManifest" -> 'schemaVersion',
+            'stageCount', COALESCE(jsonb_array_length("publicManifest" -> 'stages'), 0),
+            'task', "publicManifest" -> 'task',
+            'truncated', true
+          )
+        END AS "manifest"
+      FROM source
+    `);
+    if (!rows[0]) {
+      throw new NotFoundException("Post-run analysis job was not found.");
+    }
+    return compactInlineManifest(record(rows[0].manifest));
+  }
+
+  private async structuredEvidenceForJob(
+    teamId: string,
+    analysisId: string,
+    evidenceRef: string,
+    embedded: Record<string, unknown> | null,
+  ) {
+    if (embedded) return structuredEvidenceSource(embedded, evidenceRef);
+    const rows = await this.prisma.$queryRaw<
+      Array<{ entry: Prisma.JsonValue | null; storageKey: string | null }>
+    >(Prisma.sql`
+      SELECT
+        "input_manifest" -> ${POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD} -> ${evidenceRef} AS "entry",
+        "input_manifest" ->> ${POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD} AS "storageKey"
+      FROM "post_run_analysis_jobs"
+      WHERE "id" = ${analysisId}::uuid
+        AND "team_id" = ${teamId}::uuid
+      LIMIT 1
+    `);
+    return structuredEvidenceRow(rows[0]);
   }
 
   private async readObjectChunk(input: {
@@ -663,6 +790,7 @@ export class PostRunAnalysisRuntimeService {
         },
         workItem: true,
       },
+      omit: { inputManifest: true },
       where: { id, teamId },
     });
     if (!existing)
@@ -693,7 +821,7 @@ export class PostRunAnalysisRuntimeService {
 
   private async complete(
     teamId: string,
-    job: Prisma.PostRunAnalysisJobGetPayload<Record<string, never>>,
+    job: PostRunAnalysisOutcomeJob,
     completionId: string,
     report: {
       findings: Array<{
@@ -718,7 +846,13 @@ export class PostRunAnalysisRuntimeService {
     const safeReport = runtimePostRunAnalysisReportSchema.parse(
       sanitizeLogBundleValue(report),
     );
-    const evidenceRefs = manifestEvidenceRefs(job.inputManifest);
+    const validation = await this.completionValidationContext(
+      teamId,
+      job.id,
+      safeReport.findings,
+    );
+    const evidenceRefs = manifestEvidenceRefs(validation.manifest);
+    const candidateCount = validation.candidateCount;
     for (const finding of safeReport.findings) {
       const unknown = finding.evidenceRefs.filter(
         (ref) => !evidenceRefs.has(ref),
@@ -729,7 +863,7 @@ export class PostRunAnalysisRuntimeService {
         );
       }
     }
-    validateFindingRuntimeLocations(safeReport.findings, job.inputManifest);
+    validateFindingRuntimeLocations(safeReport.findings, validation.manifest);
     const normalized = safeReport.findings.map((finding) => ({
       ...finding,
       fingerprint: findingFingerprint(finding),
@@ -757,7 +891,7 @@ export class PostRunAnalysisRuntimeService {
           safeReport.findings.flatMap((finding) => finding.evidenceRefs),
         ),
       ];
-      if (citedEvidenceRefs.length) {
+      if (citedEvidenceRefs.length || candidateCount > 0) {
         const servedEvents = await tx.postRunAnalysisEvent.findMany({
           select: { payload: true },
           where: {
@@ -775,6 +909,11 @@ export class PostRunAnalysisRuntimeService {
               : [];
           }),
         );
+        if (candidateCount > 0 && servedEvidenceRefs.size === 0) {
+          throw new BadRequestException(
+            "Analysis with anomaly candidates must read at least one evidence record during the active lease.",
+          );
+        }
         const unread = citedEvidenceRefs.filter(
           (evidenceRef) => !servedEvidenceRefs.has(evidenceRef),
         );
@@ -877,6 +1016,7 @@ export class PostRunAnalysisRuntimeService {
           kind: "analysis.completed",
           payload: json({
             actionableFindingCount: actionable.length,
+            coverage: safeReport.coverage ?? null,
             findingCount: unique.length,
             workItemId: workItem?.id ?? null,
           }),
@@ -894,7 +1034,7 @@ export class PostRunAnalysisRuntimeService {
 
   private async fail(
     teamId: string,
-    job: Prisma.PostRunAnalysisJobGetPayload<Record<string, never>>,
+    job: PostRunAnalysisOutcomeJob,
     completionId: string,
     outcome: Exclude<
       RuntimePostRunAnalysisOutcome,
@@ -962,7 +1102,26 @@ export class PostRunAnalysisRuntimeService {
       const job = await tx.postRunAnalysisJob.findFirst({
         orderBy: { createdAt: "asc" },
         select: { id: true },
-        where: { status: "READY", teamId },
+        where: {
+          NOT: {
+            AND: [
+              {
+                inputManifest: {
+                  equals: true,
+                  path: ["analysisSynopsis", "cleanPass"],
+                },
+              },
+              {
+                inputManifest: {
+                  equals: true,
+                  path: ["analysisSynopsis", "completenessSufficient"],
+                },
+              },
+            ],
+          },
+          status: "READY",
+          teamId,
+        },
       });
       if (!job) return;
       const now = new Date();
@@ -989,6 +1148,218 @@ export class PostRunAnalysisRuntimeService {
         },
       });
     });
+  }
+
+  private async completionValidationContext(
+    teamId: string,
+    analysisId: string,
+    findings: FindingRuntimeLocation[],
+  ) {
+    const evidenceRefs = [
+      ...new Set(findings.flatMap((finding) => finding.evidenceRefs)),
+    ];
+    const runIds = [
+      ...new Set(
+        findings.flatMap((finding) => (finding.runId ? [finding.runId] : [])),
+      ),
+    ];
+    const runtimeIds = [
+      ...new Set(
+        findings.flatMap((finding) =>
+          finding.runtimeId ? [finding.runtimeId] : [],
+        ),
+      ),
+    ];
+    const attemptNumbers = [
+      ...new Set(
+        findings.flatMap((finding) =>
+          finding.attemptNumber === null ? [] : [finding.attemptNumber],
+        ),
+      ),
+    ];
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        candidateCount: string | null;
+        evidenceLocations: Prisma.JsonValue | null;
+        evidenceRefs: Prisma.JsonValue | null;
+        runs: Prisma.JsonValue | null;
+        stages: Prisma.JsonValue | null;
+      }>
+    >(Prisma.sql`
+      WITH source AS (
+        SELECT "input_manifest" AS "manifest"
+        FROM "post_run_analysis_jobs"
+        WHERE "id" = ${analysisId}::uuid
+          AND "team_id" = ${teamId}::uuid
+        LIMIT 1
+      ),
+      requested_refs AS (
+        SELECT "value"
+        FROM jsonb_array_elements_text(${JSON.stringify(evidenceRefs)}::jsonb) AS requested("value")
+      ),
+      requested_runs AS (
+        SELECT "value"
+        FROM jsonb_array_elements_text(${JSON.stringify(runIds)}::jsonb) AS requested("value")
+      ),
+      requested_runtimes AS (
+        SELECT "value"
+        FROM jsonb_array_elements_text(${JSON.stringify(runtimeIds)}::jsonb) AS requested("value")
+      ),
+      requested_attempts AS (
+        SELECT "value"
+        FROM jsonb_array_elements(${JSON.stringify(attemptNumbers)}::jsonb) AS requested("value")
+      )
+      SELECT
+        COALESCE(
+          "manifest" #>> '{analysisSynopsis,candidateCount}',
+          jsonb_array_length(
+            CASE
+              WHEN jsonb_typeof("manifest" #> '{analysisSynopsis,candidates}') = 'array'
+                THEN "manifest" #> '{analysisSynopsis,candidates}'
+              ELSE '[]'::jsonb
+            END
+          )::text,
+          '0'
+        ) AS "candidateCount",
+        COALESCE((
+          SELECT jsonb_agg(DISTINCT location."value")
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof("manifest" -> 'evidenceLocations') = 'array'
+                THEN "manifest" -> 'evidenceLocations'
+              ELSE '[]'::jsonb
+            END
+          ) AS location("value")
+          WHERE location."value" ->> 'evidenceRef' IN (SELECT "value" FROM requested_refs)
+        ), '[]'::jsonb) AS "evidenceLocations",
+        COALESCE((
+          SELECT jsonb_agg(DISTINCT ref."value")
+          FROM jsonb_array_elements_text(
+            CASE
+              WHEN jsonb_typeof("manifest" -> 'evidenceRefs') = 'array'
+                THEN "manifest" -> 'evidenceRefs'
+              ELSE '[]'::jsonb
+            END
+          ) AS ref("value")
+          WHERE ref."value" IN (SELECT "value" FROM requested_refs)
+        ), '[]'::jsonb) AS "evidenceRefs",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'attempts', COALESCE((
+              SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                'attemptId', attempt."value" -> 'attemptId',
+                'number', attempt."value" -> 'number'
+              ))
+              FROM jsonb_array_elements(
+                CASE
+                  WHEN jsonb_typeof(run."value" -> 'attempts') = 'array'
+                    THEN run."value" -> 'attempts'
+                  ELSE '[]'::jsonb
+                END
+              ) AS attempt("value")
+              WHERE attempt."value" -> 'number' IN (SELECT "value" FROM requested_attempts)
+            ), '[]'::jsonb),
+            'browserExecutions', COALESCE((
+              SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                'attemptId', execution."value" -> 'attemptId',
+                'runtimeId', execution."value" -> 'runtimeId'
+              ))
+              FROM jsonb_array_elements(
+                CASE
+                  WHEN jsonb_typeof(run."value" -> 'browserExecutions') = 'array'
+                    THEN run."value" -> 'browserExecutions'
+                  ELSE '[]'::jsonb
+                END
+              ) AS execution("value")
+              WHERE execution."value" ->> 'runtimeId' IN (SELECT "value" FROM requested_runtimes)
+            ), '[]'::jsonb),
+            'runId', run."value" -> 'runId'
+          ))
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof("manifest" -> 'runs') = 'array'
+                THEN "manifest" -> 'runs'
+              ELSE '[]'::jsonb
+            END
+          ) AS run("value")
+          WHERE run."value" ->> 'runId' IN (SELECT "value" FROM requested_runs)
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                CASE
+                  WHEN jsonb_typeof(run."value" -> 'attempts') = 'array'
+                    THEN run."value" -> 'attempts'
+                  ELSE '[]'::jsonb
+                END
+              ) AS attempt("value")
+              WHERE attempt."value" -> 'number' IN (SELECT "value" FROM requested_attempts)
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                CASE
+                  WHEN jsonb_typeof(run."value" -> 'browserExecutions') = 'array'
+                    THEN run."value" -> 'browserExecutions'
+                  ELSE '[]'::jsonb
+                END
+              ) AS execution("value")
+              WHERE execution."value" ->> 'runtimeId' IN (SELECT "value" FROM requested_runtimes)
+            )
+        ), '[]'::jsonb) AS "runs",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'attempts', COALESCE((
+              SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                'number', attempt."value" -> 'number'
+              ))
+              FROM jsonb_array_elements(
+                CASE
+                  WHEN jsonb_typeof(stage."value" -> 'attempts') = 'array'
+                    THEN stage."value" -> 'attempts'
+                  ELSE '[]'::jsonb
+                END
+              ) AS attempt("value")
+              WHERE attempt."value" -> 'number' IN (SELECT "value" FROM requested_attempts)
+            ), '[]'::jsonb)
+          ))
+          FROM jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof("manifest" -> 'stages') = 'array'
+                THEN "manifest" -> 'stages'
+              ELSE '[]'::jsonb
+            END
+          ) AS stage("value")
+          WHERE EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(stage."value" -> 'attempts') = 'array'
+                  THEN stage."value" -> 'attempts'
+                ELSE '[]'::jsonb
+              END
+            ) AS attempt("value")
+            WHERE attempt."value" -> 'number' IN (SELECT "value" FROM requested_attempts)
+          )
+        ), '[]'::jsonb) AS "stages"
+      FROM source
+    `);
+    const row = rows[0];
+    if (!row) {
+      throw new NotFoundException("Post-run analysis job was not found.");
+    }
+    const candidateCount = Number(row.candidateCount);
+    return {
+      candidateCount:
+        Number.isSafeInteger(candidateCount) && candidateCount >= 0
+          ? candidateCount
+          : 0,
+      manifest: {
+        evidenceLocations: array(row.evidenceLocations),
+        evidenceRefs: array(row.evidenceRefs),
+        runs: array(row.runs),
+        stages: array(row.stages),
+      },
+    };
   }
 
   private findJob(tx: Prisma.TransactionClient, teamId: string, id: string) {
@@ -1275,14 +1646,45 @@ function redactArtifactBody(body: Buffer, contentType: string) {
 export function compactInlineManifest(value: unknown): Record<string, unknown> {
   const manifest = record(value);
   const serialized = Buffer.from(JSON.stringify(manifest));
-  if (serialized.byteLength <= INLINE_MANIFEST_MAX_BYTES) return manifest;
+  if (
+    manifest.truncated !== true &&
+    serialized.byteLength <= INLINE_MANIFEST_MAX_BYTES
+  ) {
+    return manifest;
+  }
+  const evidenceLocationCount = manifestCollectionCount(
+    manifest,
+    "evidenceLocationCount",
+    "evidenceLocations",
+  );
+  const evidenceRefCount = manifestCollectionCount(
+    manifest,
+    "evidenceRefCount",
+    "evidenceRefs",
+  );
+  const manifestByteSize =
+    nonnegativeInteger(manifest.manifestByteSize) ?? serialized.byteLength;
+  const runCount = manifestCollectionCount(manifest, "runCount", "runs");
+  const stageCount = manifestCollectionCount(manifest, "stageCount", "stages");
+  const analysisSynopsis = compactAnalysisSynopsis(manifest.analysisSynopsis);
+  const candidateLocations = synopsisEvidenceLocations(analysisSynopsis);
+  const candidateEvidenceRefs = candidateLocations.map(
+    (location) => location.evidenceRef,
+  );
   const summary = {
+    analysisSynopsis,
     eventCounts: record(manifest.eventCounts),
-    evidenceLocationCount: array(manifest.evidenceLocations).length,
-    evidenceRefCount: array(manifest.evidenceRefs).length,
-    manifestByteSize: serialized.byteLength,
-    runs: array(manifest.runs).map(compactManifestRun),
+    evidenceLocations: candidateLocations,
+    evidenceLocationCount,
+    evidenceRefs: candidateEvidenceRefs,
+    evidenceRefCount,
+    manifestByteSize,
+    runCount,
+    runs: array(manifest.runs).length
+      ? array(manifest.runs).map(compactManifestRun)
+      : candidateRunsFromLocations(candidateLocations),
     schemaVersion: stringValue(manifest.schemaVersion),
+    stageCount,
     stages: array(manifest.stages).map(compactManifestStage),
     task: record(manifest.task),
     truncated: true,
@@ -1291,22 +1693,259 @@ export function compactInlineManifest(value: unknown): Record<string, unknown> {
     return summary;
   }
   const task = record(manifest.task);
-  return {
-    evidenceLocationCount: array(manifest.evidenceLocations).length,
-    evidenceRefCount: array(manifest.evidenceRefs).length,
-    manifestByteSize: serialized.byteLength,
-    runCount: array(manifest.runs).length,
+  const candidateRunIds = new Set(
+    candidateLocations.flatMap((location) =>
+      location.runId ? [location.runId] : [],
+    ),
+  );
+  const fallback = {
+    analysisSynopsis,
+    evidenceLocations: candidateLocations,
+    evidenceLocationCount,
+    evidenceRefs: candidateEvidenceRefs,
+    evidenceRefCount,
+    manifestByteSize,
+    runCount,
+    runs: relatedCandidateRuns(
+      manifest.runs,
+      candidateRunIds,
+      candidateLocations,
+    ),
     schemaVersion: stringValue(manifest.schemaVersion),
-    stageCount: array(manifest.stages).length,
-    task: {
-      currentStage: stringValue(task.currentStage),
-      executionDisposition: stringValue(task.executionDisposition),
-      lifecycle: stringValue(task.lifecycle),
-      taskExecutionId: stringValue(task.taskExecutionId),
-      verdict: stringValue(task.verdict),
-    },
+    stageCount,
+    task: compactManifestTask(task),
     truncated: true,
   };
+  if (
+    Buffer.byteLength(JSON.stringify(fallback)) <= INLINE_MANIFEST_MAX_BYTES
+  ) {
+    return fallback;
+  }
+  const tightSynopsis = compactAnalysisSynopsis(
+    manifest.analysisSynopsis,
+    16,
+    120,
+  );
+  const tightLocations = synopsisEvidenceLocations(tightSynopsis);
+  const tightRunIds = new Set(
+    tightLocations.flatMap((location) =>
+      location.runId ? [location.runId] : [],
+    ),
+  );
+  const tight = {
+    ...fallback,
+    analysisSynopsis: tightSynopsis,
+    evidenceLocations: tightLocations,
+    evidenceRefs: tightLocations.map((location) => location.evidenceRef),
+    runs: relatedCandidateRuns(manifest.runs, tightRunIds, tightLocations),
+  };
+  if (Buffer.byteLength(JSON.stringify(tight)) <= INLINE_MANIFEST_MAX_BYTES) {
+    return tight;
+  }
+
+  for (let candidateLimit = 16; candidateLimit >= 0; candidateLimit -= 1) {
+    const minimalSynopsis = compactAnalysisSynopsis(
+      manifest.analysisSynopsis,
+      candidateLimit,
+      120,
+    );
+    const minimalLocations = synopsisEvidenceLocations(minimalSynopsis);
+    const minimal = {
+      analysisSynopsis: minimalSynopsis,
+      evidenceLocationCount,
+      evidenceLocations: minimalLocations,
+      evidenceRefCount,
+      evidenceRefs: minimalLocations.map((location) => location.evidenceRef),
+      manifestByteSize,
+      runCount,
+      runs: candidateRunsFromLocations(minimalLocations),
+      schemaVersion: boundedString(manifest.schemaVersion, 160),
+      stageCount,
+      task: compactManifestTask(task),
+      truncated: true,
+    };
+    if (
+      Buffer.byteLength(JSON.stringify(minimal)) <= INLINE_MANIFEST_MAX_BYTES
+    ) {
+      return minimal;
+    }
+  }
+  throw new Error("Unable to compact the execution manifest below 64 KB.");
+}
+
+function compactAnalysisSynopsis(
+  value: unknown,
+  candidateLimit = 32,
+  summaryLimit = 240,
+) {
+  const synopsis = record(value);
+  const allCandidates = array(synopsis.candidates);
+  const candidates = allCandidates
+    .slice(0, candidateLimit)
+    .map((item) => {
+      const candidate = record(item);
+      return {
+        attemptNumber: positiveInteger(candidate.attemptNumber),
+        evidenceRef: exactBoundedString(candidate.evidenceRef, 500),
+        occurredAt: boundedString(candidate.occurredAt, 40),
+        priority: nonnegativeInteger(candidate.priority),
+        runId: exactBoundedString(candidate.runId, 80),
+        runtimeId: exactBoundedString(candidate.runtimeId, 80),
+        signal: boundedString(candidate.signal, 120),
+        summary: boundedString(candidate.summary, summaryLimit),
+      };
+    })
+    .filter((candidate) => candidate.evidenceRef);
+  const candidateCount =
+    nonnegativeInteger(synopsis.candidateCount) ?? allCandidates.length;
+  return {
+    candidateCount,
+    candidateReasonCounts: compactCandidateReasonCounts(
+      synopsis.candidateReasonCounts,
+    ),
+    candidates,
+    cleanPass: synopsis.cleanPass === true,
+    completenessSufficient: synopsis.completenessSufficient === true,
+    incompleteReasons: array(synopsis.incompleteReasons)
+      .flatMap((reason) => {
+        const value = boundedString(reason, 120);
+        return value ? [value] : [];
+      })
+      .slice(0, 16),
+    selectedCandidateCount: candidates.length,
+    strategy:
+      synopsis.strategy === "failure-first-v1" ? "failure-first-v1" : undefined,
+    truncated:
+      synopsis.truncated === true || candidates.length < candidateCount,
+  };
+}
+
+function compactCandidateReasonCounts(value: unknown) {
+  return Object.fromEntries(
+    Object.entries(record(value))
+      .slice(0, 32)
+      .flatMap(([key, count]) => {
+        const normalized = nonnegativeInteger(count);
+        return normalized === null ? [] : [[key.slice(0, 120), normalized]];
+      }),
+  );
+}
+
+function relatedCandidateRuns(
+  runsValue: unknown,
+  candidateRunIds: Set<string>,
+  locations: ReturnType<typeof synopsisEvidenceLocations>,
+) {
+  const runs = array(runsValue)
+    .filter((item) =>
+      candidateRunIds.has(stringValue(record(item).runId) ?? ""),
+    )
+    .map(compactManifestRun);
+  return runs.length ? runs : candidateRunsFromLocations(locations);
+}
+
+function candidateRunsFromLocations(
+  locations: ReturnType<typeof synopsisEvidenceLocations>,
+) {
+  const runs = new Map<
+    string,
+    {
+      attempts: Map<number, string>;
+      browserExecutions: Map<
+        string,
+        { attemptId: string | null; runtimeId: string }
+      >;
+    }
+  >();
+  for (const location of locations) {
+    if (!location.runId) continue;
+    const run = runs.get(location.runId) ?? {
+      attempts: new Map<number, string>(),
+      browserExecutions: new Map<
+        string,
+        { attemptId: string | null; runtimeId: string }
+      >(),
+    };
+    const attemptId =
+      location.attemptNumber === null
+        ? null
+        : `inline-attempt-${location.attemptNumber}`;
+    if (location.attemptNumber !== null && attemptId) {
+      run.attempts.set(location.attemptNumber, attemptId);
+    }
+    if (location.runtimeId) {
+      run.browserExecutions.set(location.runtimeId, {
+        attemptId,
+        runtimeId: location.runtimeId,
+      });
+    }
+    runs.set(location.runId, run);
+  }
+  return [...runs.entries()].map(([runId, run]) => ({
+    attempts: [...run.attempts.entries()].map(([number, attemptId]) => ({
+      attemptId,
+      number,
+      status: null,
+    })),
+    browserExecutions: [...run.browserExecutions.values()],
+    executionDisposition: null,
+    lifecycle: null,
+    runId,
+    verdict: null,
+  }));
+}
+
+function compactManifestTask(value: Record<string, unknown>) {
+  return {
+    currentStage: boundedString(value.currentStage, 120),
+    executionDisposition: boundedString(value.executionDisposition, 120),
+    lifecycle: boundedString(value.lifecycle, 120),
+    taskExecutionId: exactBoundedString(value.taskExecutionId, 80),
+    verdict: boundedString(value.verdict, 120),
+  };
+}
+
+function manifestCollectionCount(
+  manifest: Record<string, unknown>,
+  countKey: string,
+  collectionKey: string,
+) {
+  return (
+    nonnegativeInteger(manifest[countKey]) ??
+    array(manifest[collectionKey]).length
+  );
+}
+
+function nonnegativeInteger(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function boundedString(value: unknown, limit: number) {
+  return typeof value === "string" && value ? value.slice(0, limit) : null;
+}
+
+function exactBoundedString(value: unknown, limit: number) {
+  return typeof value === "string" && value && value.length <= limit
+    ? value
+    : null;
+}
+
+function synopsisEvidenceLocations(value: unknown) {
+  return array(record(value).candidates).flatMap((item) => {
+    const candidate = record(item);
+    const evidenceRef = stringValue(candidate.evidenceRef);
+    if (!evidenceRef) return [];
+    return [
+      {
+        attemptNumber: positiveInteger(candidate.attemptNumber),
+        evidenceRef,
+        runId: stringValue(candidate.runId),
+        runtimeId: stringValue(candidate.runtimeId),
+      },
+    ];
+  });
 }
 
 function compactManifestRun(value: unknown) {
@@ -1360,6 +1999,16 @@ function manifestEvidenceRefs(value: unknown) {
   );
 }
 
+function manifestAnalysisCandidateCount(value: unknown) {
+  const synopsis = record(record(value).analysisSynopsis);
+  const candidateCount = synopsis.candidateCount;
+  return typeof candidateCount === "number" &&
+    Number.isSafeInteger(candidateCount) &&
+    candidateCount >= 0
+    ? candidateCount
+    : array(synopsis.candidates).length;
+}
+
 function publicAnalysisManifest(value: unknown): Record<string, unknown> {
   const manifest = record(value);
   return Object.fromEntries(
@@ -1371,18 +2020,27 @@ function publicAnalysisManifest(value: unknown): Record<string, unknown> {
   );
 }
 
-function structuredEvidenceSource(
-  value: unknown,
-  evidenceRef: string,
-): {
-  entry: StructuredEvidenceIndexEntry;
-  storageKey: string;
-} | null {
+function structuredEvidenceSource(value: unknown, evidenceRef: string) {
   const manifest = record(value);
-  const storageKey = manifest[POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD];
   const rawEntry = record(manifest[POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD])[
     evidenceRef
   ];
+  return structuredEvidenceRow({
+    entry: rawEntry,
+    storageKey:
+      typeof manifest[POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD] === "string"
+        ? manifest[POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD]
+        : null,
+  });
+}
+
+function structuredEvidenceRow(value: unknown): {
+  entry: StructuredEvidenceIndexEntry;
+  storageKey: string;
+} | null {
+  const row = record(value);
+  const storageKey = row.storageKey;
+  const rawEntry = row.entry;
   const entry = record(rawEntry);
   if (
     typeof storageKey !== "string" ||
@@ -1407,6 +2065,14 @@ function structuredEvidenceSource(
     },
     storageKey,
   };
+}
+
+function embeddedInputManifest(value: unknown) {
+  const manifest = record(value).inputManifest;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    return null;
+  }
+  return manifest as Record<string, unknown>;
 }
 
 function terminalOutputStatus(status: string) {

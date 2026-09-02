@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Readable } from "node:stream";
 
 import {
   CreateBucketCommand,
@@ -72,6 +73,27 @@ export class ObjectStorageService implements OnModuleInit {
       }),
     );
     return { byteSize: body.byteLength, sha256 };
+  }
+
+  async putStream(
+    storageKey: string,
+    contentType: string,
+    body: Readable,
+    byteSize: number,
+    sha256: string,
+    metadata: Record<string, string>,
+  ) {
+    await this.client.send(
+      new PutObjectCommand({
+        Body: body,
+        Bucket: this.config.OBJECT_STORAGE_BUCKET,
+        ContentLength: byteSize,
+        ContentType: contentType,
+        Key: storageKey,
+        Metadata: { ...metadata, sha256 },
+      }),
+    );
+    return { byteSize, sha256 };
   }
 
   async get(storageKey: string, range?: { end: number; start: number }) {

@@ -183,10 +183,14 @@ export interface TaskEvent {
 }
 
 interface PostRunAnalysisMetrics {
+  bundleBytesRead: number;
   bundleReads: number;
+  candidateCount: number;
+  evidenceBytesRead: number;
   evidenceReads: number;
   failedModelCalls: number;
   inputTokens: number;
+  manifestBytesRead: number;
   manifestReads: number;
   modelCalls: number;
   modelDurationMs: number;

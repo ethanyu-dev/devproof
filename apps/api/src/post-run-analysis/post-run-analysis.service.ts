@@ -15,6 +15,8 @@ import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 import {
   POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD,
   POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD,
+  prepareJsonObjectStream,
+  prepareStructuredEvidenceArchiveStream,
   TaskLogBundleService,
 } from "./task-log-bundle.service.js";
 import {
@@ -839,21 +841,38 @@ export class PostRunAnalysisService {
       throw new Error("The capture claim does not have durable storage keys.");
     }
     try {
-      const bundle = await this.bundles.build(job.teamId, job.taskExecutionId);
-      const stored = await this.storage.put(
+      const bundle = await this.bundles.buildForCapture(
+        job.teamId,
+        job.taskExecutionId,
+      );
+      let preparedBundle: ReturnType<typeof prepareJsonObjectStream> | null =
+        prepareJsonObjectStream(bundle.bundle);
+      const stored = await this.storage.putStream(
         storageKey,
         "application/json",
-        bundle.body,
+        preparedBundle.openStream(),
+        preparedBundle.byteSize,
+        preparedBundle.sha256,
         {
           analysisId: job.id,
           schemaVersion: bundle.schemaVersion,
           taskExecutionId: job.taskExecutionId,
         },
       );
-      await this.storage.put(
+      preparedBundle = null;
+      let evidenceArchive: ReturnType<
+        typeof prepareStructuredEvidenceArchiveStream
+      > | null = prepareStructuredEvidenceArchiveStream(
+        bundle.bundle,
+        [...bundle.evidenceRefs].sort(),
+      );
+      const evidenceArchiveByteSize = evidenceArchive.byteSize;
+      await this.storage.putStream(
         evidenceStorageKey,
         "application/x-ndjson",
-        bundle.evidenceBody,
+        evidenceArchive.openStream(),
+        evidenceArchive.byteSize,
+        evidenceArchive.sha256,
         {
           analysisId: job.id,
           kind: "structured-evidence",
@@ -861,11 +880,24 @@ export class PostRunAnalysisService {
           taskExecutionId: job.taskExecutionId,
         },
       );
+      const evidenceIndex = evidenceArchive.index;
+      evidenceArchive = null;
+      bundle.bundle = {};
       const persistedManifest = {
         ...bundle.manifest,
-        [POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD]: bundle.evidenceIndex,
+        [POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD]: evidenceIndex,
         [POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD]: evidenceStorageKey,
       };
+      const synopsis = bundle.manifest.analysisSynopsis as
+        | {
+            candidateCount?: number;
+            selectedCandidateCount?: number;
+            strategy?: string;
+          }
+        | undefined;
+      const manifestByteSize = Buffer.byteLength(
+        JSON.stringify(bundle.manifest),
+      );
       const now = new Date();
       const hardDeadlineAt = postRunAnalysisHardDeadline(now);
       const updated = await this.prisma.$transaction(async (tx) => {
@@ -900,9 +932,15 @@ export class PostRunAnalysisService {
             analysisId: job.id,
             kind: "analysis.bundle.captured",
             payload: json({
+              analysisStrategy: synopsis?.strategy ?? null,
               byteSize: stored.byteSize,
+              candidateCount: synopsis?.candidateCount ?? 0,
               completeness: bundle.completeness,
+              evidenceArchiveByteSize,
+              evidenceRefCount: bundle.evidenceRefs.size,
+              manifestByteSize,
               schemaVersion: bundle.schemaVersion,
+              selectedCandidateCount: synopsis?.selectedCandidateCount ?? 0,
               sha256: stored.sha256,
             }),
             teamId: job.teamId,

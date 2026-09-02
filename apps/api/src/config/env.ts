@@ -118,7 +118,7 @@ const envSchema = z
       .trim()
       .min(1)
       .max(160)
-      .default("post-run-analysis-v3"),
+      .default("post-run-analysis-v4"),
     POST_RUN_ANALYSIS_CAPTURE_GRACE_SECONDS: z.coerce
       .number()
       .int()
