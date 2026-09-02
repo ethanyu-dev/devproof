@@ -40,6 +40,7 @@ const KEY_EVENT_KINDS = [
   "analysis.deadline_exceeded",
   "analysis.executor.started",
   "analysis.failed",
+  "analysis.lease_recovered",
   "analysis.report.generated",
   "analysis.report.validation_failed",
   "analysis.retry_queued",
@@ -72,6 +73,18 @@ const EVIDENCE_EVENT_KINDS = [
   "analysis.manifest.read",
 ] as const;
 
+const ATTEMPT_END_EVENT_KINDS = new Set([
+  "analysis.attempt_deadline_exceeded",
+  "analysis.attempts_exhausted",
+  "analysis.completed",
+  "analysis.configuration_failed",
+  "analysis.deadline_exceeded",
+  "analysis.failed",
+  "analysis.lease_recovered",
+  "analysis.retry_queued",
+  "analysis.superseded",
+]);
+
 export function postRunAnalysisEventKinds(
   category: PostRunAnalysisEventCategory,
 ) {
@@ -94,47 +107,11 @@ export function buildPostRunAnalysisProgress(
         ? 1
         : 0,
   );
-  const modelStarted = ordered.filter(
-    (event) => event.kind === "analysis.model.started",
-  );
-  const modelFinished = ordered.filter((event) =>
-    ["analysis.model.completed", "analysis.model.failed"].includes(event.kind),
-  );
-  const completedModelCalls = ordered.filter(
-    (event) => event.kind === "analysis.model.completed",
-  );
-  const failedModelCalls = ordered.filter(
-    (event) => event.kind === "analysis.model.failed",
-  );
-  const modelCallIds = new Set(
-    [...modelStarted, ...modelFinished]
-      .map((event) => text(record(event.payload).callId))
-      .filter((value): value is string => Boolean(value)),
-  );
-  const legacyModelStarts = modelStarted.filter(
-    (event) => !text(record(event.payload).callId),
-  ).length;
-  const legacyModelFinishes = modelFinished.filter(
-    (event) => !text(record(event.payload).callId),
-  ).length;
-  const evidenceReads = ordered.filter(
-    (event) => event.kind === "analysis.evidence.read",
-  );
-  const evidenceRefs = new Set(
-    evidenceReads
-      .map((event) => text(record(event.payload).evidenceRef))
-      .filter((value): value is string => Boolean(value)),
-  );
-  const manifestReads = ordered.filter(
-    (event) => event.kind === "analysis.manifest.read",
-  );
-  const bundleReads = ordered.filter(
-    (event) => event.kind === "analysis.bundle.read",
-  );
-  const reportValidationFailures = ordered.filter(
-    (event) => event.kind === "analysis.report.validation_failed",
-  );
   const currentAttemptEvents = eventsForCurrentAttempt(ordered);
+  const attempts = attemptProgress(job, ordered, now);
+  const currentAttempt = attempts.at(-1) ?? null;
+  const metrics = metricsForEvents(ordered);
+  const currentAttemptMetrics = metricsForEvents(currentAttemptEvents);
   const latestReportEvent = currentAttemptEvents.findLast((event) =>
     ["analysis.report.generated", "analysis.report.validation_failed"].includes(
       event.kind,
@@ -151,10 +128,78 @@ export function buildPostRunAnalysisProgress(
   const queueWaitMs =
     job.status === "READY" && job.readyAt
       ? Math.max(0, now.getTime() - job.readyAt.getTime())
-      : (number(record(startedEvent?.payload).queueWaitMs) ??
+      : (currentAttempt?.queueWaitMs ??
+        number(record(startedEvent?.payload).queueWaitMs) ??
         (job.startedAt && job.readyAt
           ? Math.max(0, job.startedAt.getTime() - job.readyAt.getTime())
           : null));
+  const findingCount =
+    number(record(latestReportEvent?.payload).findingCount) ??
+    job.findings.length;
+  const activeElapsedMs = attempts.reduce(
+    (total, attempt) => total + attempt.elapsedMs,
+    0,
+  );
+  const lifecycleElapsedMs = Math.max(
+    0,
+    (job.finishedAt ?? now).getTime() - job.createdAt.getTime(),
+  );
+
+  return {
+    activeElapsedMs,
+    attempts,
+    currentMessage: progressMessage(job, latestEvent, phase),
+    currentAttemptElapsedMs: currentAttempt?.elapsedMs ?? 0,
+    currentAttemptMetrics,
+    deadlineAt: deadline.toISOString(),
+    deadlineRemainingMs: terminal
+      ? 0
+      : Math.max(0, deadline.getTime() - now.getTime()),
+    elapsedMs: activeElapsedMs,
+    findingCount,
+    lastActivityAt:
+      latestEvent?.occurredAt.toISOString() ?? job.updatedAt.toISOString(),
+    lastEventKind: latestEvent?.kind ?? null,
+    lifecycleElapsedMs,
+    metrics,
+    nextAttemptAt: job.nextAttemptAt?.toISOString() ?? null,
+    phase,
+    phaseLabel: phaseLabel(phase),
+    queueWaitMs,
+    steps: progressSteps(job, phase, currentAttemptEvents),
+  };
+}
+
+function metricsForEvents(events: PostRunAnalysisProgressEvent[]) {
+  const modelStarted = events.filter(
+    (event) => event.kind === "analysis.model.started",
+  );
+  const completedModelCalls = events.filter(
+    (event) => event.kind === "analysis.model.completed",
+  );
+  const failedModelCalls = events.filter(
+    (event) => event.kind === "analysis.model.failed",
+  );
+  const modelFinished = [...completedModelCalls, ...failedModelCalls];
+  const modelCallIds = new Set(
+    [...modelStarted, ...modelFinished]
+      .map((event) => text(record(event.payload).callId))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const legacyModelStarts = modelStarted.filter(
+    (event) => !text(record(event.payload).callId),
+  ).length;
+  const legacyModelFinishes = modelFinished.filter(
+    (event) => !text(record(event.payload).callId),
+  ).length;
+  const evidenceReads = events.filter(
+    (event) => event.kind === "analysis.evidence.read",
+  );
+  const evidenceRefs = new Set(
+    evidenceReads
+      .map((event) => text(record(event.payload).evidenceRef))
+      .filter((value): value is string => Boolean(value)),
+  );
   const usage = completedModelCalls.reduce(
     (total, event) => {
       const value = record(record(event.payload).usage);
@@ -167,56 +212,121 @@ export function buildPostRunAnalysisProgress(
     },
     { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   );
-  const models = [
-    ...new Set(
-      [...modelStarted, ...modelFinished]
-        .map((event) => text(record(event.payload).model))
-        .filter((value): value is string => Boolean(value)),
-    ),
-  ];
-  const findingCount =
-    number(record(latestReportEvent?.payload).findingCount) ??
-    job.findings.length;
 
   return {
-    currentMessage: progressMessage(job, latestEvent, phase),
-    deadlineAt: deadline.toISOString(),
-    deadlineRemainingMs: terminal
-      ? 0
-      : Math.max(0, deadline.getTime() - now.getTime()),
-    elapsedMs: Math.max(
+    bundleReads: events.filter((event) => event.kind === "analysis.bundle.read")
+      .length,
+    evidenceReads: evidenceReads.length,
+    failedModelCalls: failedModelCalls.length,
+    inputTokens: usage.inputTokens,
+    manifestReads: events.filter(
+      (event) => event.kind === "analysis.manifest.read",
+    ).length,
+    modelCalls:
+      modelCallIds.size + Math.max(legacyModelStarts, legacyModelFinishes),
+    modelDurationMs: modelFinished.reduce(
+      (total, event) => total + (number(record(event.payload).durationMs) ?? 0),
       0,
-      (job.finishedAt ?? now).getTime() - job.createdAt.getTime(),
     ),
-    findingCount,
-    lastActivityAt:
-      latestEvent?.occurredAt.toISOString() ?? job.updatedAt.toISOString(),
-    lastEventKind: latestEvent?.kind ?? null,
-    metrics: {
-      bundleReads: bundleReads.length,
-      evidenceReads: evidenceReads.length,
-      failedModelCalls: failedModelCalls.length,
-      inputTokens: usage.inputTokens,
-      manifestReads: manifestReads.length,
-      modelCalls:
-        modelCallIds.size + Math.max(legacyModelStarts, legacyModelFinishes),
-      modelDurationMs: [...completedModelCalls, ...failedModelCalls].reduce(
-        (total, event) =>
-          total + (number(record(event.payload).durationMs) ?? 0),
-        0,
+    models: [
+      ...new Set(
+        [...modelStarted, ...modelFinished]
+          .map((event) => text(record(event.payload).model))
+          .filter((value): value is string => Boolean(value)),
       ),
-      models,
-      outputTokens: usage.outputTokens,
-      reportValidationFailures: reportValidationFailures.length,
-      totalTokens: usage.totalTokens,
-      uniqueEvidence: evidenceRefs.size,
-    },
-    nextAttemptAt: job.nextAttemptAt?.toISOString() ?? null,
-    phase,
-    phaseLabel: phaseLabel(phase),
-    queueWaitMs,
-    steps: progressSteps(job, phase, currentAttemptEvents),
+    ],
+    outputTokens: usage.outputTokens,
+    reportValidationFailures: events.filter(
+      (event) => event.kind === "analysis.report.validation_failed",
+    ).length,
+    totalTokens: usage.totalTokens,
+    uniqueEvidence: evidenceRefs.size,
   };
+}
+
+function attemptProgress(
+  job: ProgressJob,
+  events: PostRunAnalysisProgressEvent[],
+  now: Date,
+) {
+  const starts = events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.kind === "analysis.started");
+
+  return starts.map(({ event: started, index: startedIndex }, position) => {
+    const nextStarted = starts[position + 1]?.event ?? null;
+    const nextStartedIndex = starts[position + 1]?.index ?? events.length;
+    const attemptEvents = events.slice(startedIndex, nextStartedIndex);
+    const endEvent = attemptEvents.find((event) =>
+      ATTEMPT_END_EVENT_KINDS.has(event.kind),
+    );
+    const isCurrent = position === starts.length - 1;
+    const endAt =
+      (endEvent ? attemptEndAt(endEvent) : null) ??
+      nextStarted?.occurredAt ??
+      (isCurrent && job.status === "RUNNING"
+        ? now
+        : (job.finishedAt ?? attemptEvents.at(-1)?.occurredAt ?? now));
+    const elapsedMs = Math.max(
+      0,
+      endAt.getTime() - started.occurredAt.getTime(),
+    );
+    const attemptNumber =
+      number(record(started.payload).attemptNumber) ?? position + 1;
+    const terminalKind = endEvent?.kind ?? null;
+
+    return {
+      attemptNumber,
+      elapsedMs,
+      finishedAt:
+        endEvent || nextStarted || job.status !== "RUNNING"
+          ? endAt.toISOString()
+          : null,
+      metrics: metricsForEvents(attemptEvents),
+      queueWaitMs: number(record(started.payload).queueWaitMs),
+      startedAt: started.occurredAt.toISOString(),
+      status: attemptStatus(terminalKind, isCurrent ? job.status : null),
+    };
+  });
+}
+
+function attemptStatus(terminalKind: string | null, jobStatus: string | null) {
+  if (terminalKind === "analysis.completed") return "SUCCEEDED";
+  if (
+    terminalKind === "analysis.retry_queued" ||
+    terminalKind === "analysis.attempt_deadline_exceeded" ||
+    terminalKind === "analysis.lease_recovered"
+  ) {
+    return "RETRYING";
+  }
+  if (terminalKind === "analysis.superseded" || jobStatus === "CANCELLED") {
+    return "CANCELLED";
+  }
+  if (
+    terminalKind &&
+    [
+      "analysis.attempts_exhausted",
+      "analysis.configuration_failed",
+      "analysis.deadline_exceeded",
+      "analysis.failed",
+    ].includes(terminalKind)
+  ) {
+    return "FAILED";
+  }
+  if (jobStatus === "SUCCEEDED") return "SUCCEEDED";
+  if (jobStatus === "FAILED") return "FAILED";
+  return jobStatus === "RUNNING" ? "RUNNING" : "RETRYING";
+}
+
+function attemptEndAt(event: PostRunAnalysisProgressEvent) {
+  const payload = record(event.payload);
+  const value =
+    text(payload.endedAt) ??
+    text(payload.previousLeaseExpiredAt) ??
+    text(payload.deadlineAt);
+  if (!value) return event.occurredAt;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : event.occurredAt;
 }
 
 function eventsForCurrentAttempt(events: PostRunAnalysisProgressEvent[]) {

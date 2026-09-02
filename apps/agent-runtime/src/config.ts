@@ -30,7 +30,7 @@ const configSchema = z
       .int()
       .min(10)
       .max(1_000)
-      .default(64),
+      .default(300),
     DEVPROOF_AGENT_WORKER_ID: z
       .string()
       .trim()

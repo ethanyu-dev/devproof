@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 8,
+  minor: 9,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -241,10 +241,29 @@ export const runtimeSpecAnalysisClaimOutputSchema = z.object({
   task: runtimeSpecAnalysisTaskLeaseSchema.nullable(),
 });
 
+export const runtimePostRunAnalysisCheckpointSchema = z.object({
+  analysisSummary: z
+    .string()
+    .trim()
+    .min(1)
+    .max(16_000)
+    .nullable()
+    .default(null),
+  bundleComplete: z.boolean().default(false),
+  bundleCursor: z.number().int().nonnegative().default(0),
+  evidenceRefs: z
+    .array(z.string().trim().min(1).max(500))
+    .max(500)
+    .default([])
+    .transform((values) => Array.from(new Set(values))),
+  updatedAt: z.string().datetime().nullable().default(null),
+});
+
 export const runtimePostRunAnalysisTaskSnapshotSchema = z.object({
   analysisId: z.string().uuid(),
   analyzerVersion: z.string().trim().min(1).max(160),
   attemptNumber: z.number().int().positive(),
+  checkpoint: runtimePostRunAnalysisCheckpointSchema.optional(),
   deadlineAt: z.string().datetime(),
   input: z.object({
     byteSize: z.number().int().nonnegative(),

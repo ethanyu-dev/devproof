@@ -16,7 +16,7 @@
     ]
   },
   "deploy": {
-    "drainingSeconds": 30,
+    "drainingSeconds": 120,
     "multiRegionConfig": {
       "asia-southeast1-eqsg3a": {
         "numReplicas": 1

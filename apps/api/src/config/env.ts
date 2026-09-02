@@ -136,13 +136,13 @@ const envSchema = z
       .int()
       .min(60)
       .max(86400)
-      .default(1800),
+      .default(21600),
     POST_RUN_ANALYSIS_HARD_DEADLINE_SECONDS: z.coerce
       .number()
       .int()
       .min(300)
       .max(604800)
-      .default(7200),
+      .default(86400),
     POST_RUN_ANALYSIS_MAX_ATTEMPTS: z.coerce
       .number()
       .int()

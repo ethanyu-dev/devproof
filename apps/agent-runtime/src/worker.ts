@@ -345,7 +345,7 @@ export class AgentRuntimeWorker {
 
   private async executePostRunAnalysisTask(
     task: RuntimePostRunAnalysisTaskLease,
-    shutdown: AbortSignal,
+    _shutdown: AbortSignal,
     workerId: string,
   ) {
     const lease = activeLease(task, workerId);
@@ -354,8 +354,6 @@ export class AgentRuntimeWorker {
       controller,
       task.snapshot.deadlineAt,
     );
-    const abortFromShutdown = () => controller.abort(shutdown.reason);
-    shutdown.addEventListener("abort", abortFromShutdown, { once: true });
     const heartbeat = setInterval(() => {
       void this.controlPlane
         .heartbeatPostRunAnalysis(lease)
@@ -452,7 +450,6 @@ export class AgentRuntimeWorker {
     } finally {
       clearInterval(heartbeat);
       deadline.dispose();
-      shutdown.removeEventListener("abort", abortFromShutdown);
     }
   }
 

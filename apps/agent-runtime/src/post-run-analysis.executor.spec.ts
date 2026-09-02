@@ -388,6 +388,85 @@ describe("PostRunAnalysisExecutor", () => {
     );
   });
 
+  it("continues bundle reading from a persisted checkpoint after a retry", async () => {
+    const resumedTask: RuntimePostRunAnalysisTaskLease = {
+      ...task,
+      snapshot: {
+        ...task.snapshot,
+        attemptNumber: 2,
+        checkpoint: {
+          analysisSummary: "已检查前 4096 字节，下一步继续定位失败阶段。",
+          bundleComplete: false,
+          bundleCursor: 4_096,
+          evidenceRefs: ["artifact://network-log"],
+          updatedAt: "2026-09-02T07:00:00.000Z",
+        },
+        input: { ...task.snapshot.input, byteSize: 10_000 },
+      },
+    };
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "response-resume",
+        output: [
+          call(
+            "read_analysis_bundle",
+            {
+              analysisSummary: "从断点继续读取失败阶段。",
+              cursor: 4_096,
+              maxBytes: 64_000,
+            },
+            "call-resume",
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "response-finished",
+        output: [
+          call(
+            "finish_analysis",
+            { report: { findings: [], summary: "分析完成。" } },
+            "call-finished",
+          ),
+        ],
+      });
+    const readPostRunAnalysisBundle = vi.fn().mockResolvedValue({
+      body: "{}",
+      contentType: "application/json",
+      nextCursor: null,
+      sha256: "a".repeat(64),
+      totalBytes: 10_000,
+      truncated: false,
+    });
+    const executor = new PostRunAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      {
+        appendPostRunAnalysisEvent: vi.fn().mockResolvedValue({
+          accepted: true,
+        }),
+        readPostRunAnalysisBundle,
+      } as never,
+      10,
+    );
+
+    await expect(
+      executor.execute(resumedTask, lease, new AbortController().signal),
+    ).resolves.toMatchObject({ kind: "ANALYSIS_COMPLETED" });
+
+    expect(readPostRunAnalysisBundle).toHaveBeenCalledWith(
+      lease,
+      expect.objectContaining({ cursor: 4_096 }),
+      expect.any(AbortSignal),
+    );
+    const firstRequest = create.mock.calls[0]?.[0] as {
+      input: Array<{ content?: string }>;
+    };
+    expect(firstRequest.input[1]?.content).toContain('"bundleCursor": 4096');
+    expect(JSON.stringify(create.mock.calls[0]?.[0])).toContain(
+      "已检查前 4096 字节",
+    );
+  });
+
   it("does not scan a multi-megabyte bundle when the manifest is sufficient", async () => {
     const totalBytes = 6_303_712;
     const requestSizes: number[] = [];

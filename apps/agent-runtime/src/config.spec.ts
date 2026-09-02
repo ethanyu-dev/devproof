@@ -67,7 +67,7 @@ describe("Agent Runtime configuration", () => {
       DEVPROOF_AGENT_RUNTIME_TOKEN: "legacy-runtime-token",
       DEVPROOF_AGENT_RUNTIME_POOL: "SPEC_ANALYSIS",
       DEVPROOF_AGENT_TOOL_LIMIT: 30,
-      DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: 64,
+      DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: 300,
       DEVPROOF_AGENT_WORKER_ID: "legacy-worker",
     });
   });

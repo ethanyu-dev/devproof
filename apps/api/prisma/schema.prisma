@@ -1449,6 +1449,7 @@ model PostRunAnalysisJob {
   inputByteSize             Int?                   @map("input_byte_size")
   inputCompleteness         Json                   @default("{}") @map("input_completeness")
   inputManifest             Json                   @default("{}") @map("input_manifest")
+  analysisCheckpoint        Json                   @default("{}") @map("analysis_checkpoint")
   result                    Json?
   error                     Json?
   leaseOwner                String?                @map("lease_owner")
