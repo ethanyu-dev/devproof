@@ -159,6 +159,82 @@ describe("Agent Runtime post-run outcome submission", () => {
   });
 });
 
+describe("Agent Runtime pool isolation", () => {
+  it("creates lanes only for its declared pool", () => {
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_RUNTIME_POOL: "SPEC_ANALYSIS",
+        DEVPROOF_AGENT_WORKER_ID: "spec-worker",
+      } as never,
+      {} as never,
+      vi.fn() as never,
+    );
+    const reconcileLanes = vi.fn();
+    (
+      worker as unknown as {
+        reconcileAllocation(
+          allocation: Record<string, unknown>,
+          signal: AbortSignal,
+        ): void;
+        reconcileLanes: typeof reconcileLanes;
+      }
+    ).reconcileLanes = reconcileLanes;
+
+    (
+      worker as unknown as {
+        reconcileAllocation(
+          allocation: Record<string, unknown>,
+          signal: AbortSignal,
+        ): void;
+      }
+    ).reconcileAllocation(
+      {
+        analysisConcurrency: 0,
+        browserConcurrency: 0,
+        pools: ["SPEC_ANALYSIS"],
+        specConcurrency: 5,
+      },
+      new AbortController().signal,
+    );
+
+    expect(reconcileLanes).toHaveBeenCalledWith(
+      "spec",
+      5,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("rejects cross-pool allocations", () => {
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_RUNTIME_POOL: "BROWSER_EXECUTION",
+        DEVPROOF_AGENT_WORKER_ID: "browser-worker",
+      } as never,
+      {} as never,
+      vi.fn() as never,
+    );
+
+    expect(() =>
+      (
+        worker as unknown as {
+          reconcileAllocation(
+            allocation: Record<string, unknown>,
+            signal: AbortSignal,
+          ): void;
+        }
+      ).reconcileAllocation(
+        {
+          analysisConcurrency: 1,
+          browserConcurrency: 2,
+          pools: ["BROWSER_EXECUTION"],
+          specConcurrency: 0,
+        },
+        new AbortController().signal,
+      ),
+    ).toThrow(/cross-pool concurrency/u);
+  });
+});
+
 describe("RuntimeDeadlineController", () => {
   afterEach(() => vi.useRealTimers());
 

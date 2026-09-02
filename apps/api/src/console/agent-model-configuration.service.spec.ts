@@ -15,10 +15,14 @@ function fixture() {
     displayName: "Primary model",
     id: "model-1",
     modelId: "provider/model-1",
+    pool: "BROWSER_EXECUTION" as const,
     position: 0,
     updatedAt: new Date("2026-08-25T00:00:00.000Z"),
   };
   const prisma = {
+    $transaction: vi.fn(async (operations: Array<Promise<unknown>>) =>
+      Promise.all(operations),
+    ),
     agentModelConfiguration: {
       aggregate: vi.fn().mockResolvedValue({ _max: { position: null } }),
       count: vi.fn().mockResolvedValue(0),
@@ -59,6 +63,7 @@ describe("AgentModelConfigurationService", () => {
       baseUrl: "https://gateway.example.com/v1",
       displayName: "Primary model",
       modelId: "provider/model-1",
+      pool: "BROWSER_EXECUTION",
     });
 
     expect(cipher.encrypt).toHaveBeenCalledWith("sk-secret");
@@ -66,12 +71,57 @@ describe("AgentModelConfigurationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           apiKeyEncrypted: "encrypted:sk-secret",
+          pool: "BROWSER_EXECUTION",
           position: 0,
         }),
       }),
     );
     expect(result).not.toHaveProperty("apiKey");
     expect(result).not.toHaveProperty("apiKeyEncrypted");
+  });
+
+  it("applies the model limit independently to each Runtime pool", async () => {
+    const { prisma, service } = fixture();
+    prisma.agentModelConfiguration.count.mockResolvedValue(10);
+
+    await expect(
+      service.create(current, {
+        apiKey: "sk-secret",
+        baseUrl: "https://gateway.example.com/v1",
+        displayName: "Overflow",
+        modelId: "provider/model-overflow",
+        pool: "POST_RUN_ANALYSIS",
+      }),
+    ).rejects.toThrow(/POST_RUN_ANALYSIS/u);
+    expect(prisma.agentModelConfiguration.count).toHaveBeenCalledWith({
+      where: {
+        pool: "POST_RUN_ANALYSIS",
+        teamId: current.team.id,
+      },
+    });
+    expect(prisma.agentModelConfiguration.create).not.toHaveBeenCalled();
+  });
+
+  it("reorders models only inside the selected Runtime pool", async () => {
+    const { prisma, service } = fixture();
+    const ids = [
+      "d63bd843-b89d-48ea-90c9-caad5b51d526",
+      "d11bd843-b89d-48ea-90c9-caad5b51d527",
+    ];
+    prisma.agentModelConfiguration.findMany
+      .mockResolvedValueOnce(ids.map((id) => ({ id })) as never)
+      .mockResolvedValueOnce([]);
+
+    await service.reorder(current, { ids, pool: "SPEC_ANALYSIS" });
+
+    expect(prisma.agentModelConfiguration.findMany).toHaveBeenNthCalledWith(1, {
+      select: { id: true },
+      where: { pool: "SPEC_ANALYSIS", teamId: current.team.id },
+    });
+    expect(prisma.agentModelConfiguration.update).toHaveBeenNthCalledWith(1, {
+      data: { position: 0 },
+      where: { id: ids[0] },
+    });
   });
 
   it("keeps the encrypted key when an update omits API key", async () => {
@@ -145,7 +195,9 @@ describe("AgentModelConfigurationService", () => {
       },
     ] as never);
 
-    await expect(service.candidatesForTeam(current.team.id)).resolves.toEqual([
+    await expect(
+      service.candidatesForPool(current.team.id, "SPEC_ANALYSIS"),
+    ).resolves.toEqual([
       {
         apiKey: "plain:ciphertext",
         baseUrl: "https://gateway.example.com/v1",
@@ -153,6 +205,11 @@ describe("AgentModelConfigurationService", () => {
         modelId: "provider/model-1",
       },
     ]);
+    expect(prisma.agentModelConfiguration.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { pool: "SPEC_ANALYSIS", teamId: current.team.id },
+      }),
+    );
     expect(cipher.decrypt).toHaveBeenCalledWith("ciphertext");
   });
 });

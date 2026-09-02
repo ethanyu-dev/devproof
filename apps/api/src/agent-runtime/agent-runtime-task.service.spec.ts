@@ -115,7 +115,7 @@ describe("AgentRuntimeTaskService completed evidence validation", () => {
 
 describe("AgentRuntimeTaskService Runtime model configuration", () => {
   it("rejects workers that cannot consume Console-managed model credentials", async () => {
-    const agentModels = { candidatesForTeam: vi.fn() };
+    const agentModels = { candidatesForPool: vi.fn() };
     const service = new AgentRuntimeTaskService(
       {} as never,
       agentModels as never,
@@ -132,7 +132,7 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
         workerId: "legacy-worker",
       }),
     ).rejects.toMatchObject({ status: 400 });
-    expect(agentModels.candidatesForTeam).not.toHaveBeenCalled();
+    expect(agentModels.candidatesForPool).not.toHaveBeenCalled();
   });
 
   it("injects the team's ordered encrypted model configuration", async () => {
@@ -181,7 +181,7 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       },
     ];
     const agentModels = {
-      candidatesForTeam: vi.fn().mockResolvedValue(modelCandidates),
+      candidatesForPool: vi.fn().mockResolvedValue(modelCandidates),
     };
     const service = new AgentRuntimeTaskService(
       prisma as never,
@@ -198,7 +198,10 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       workerId: "worker-1",
     });
 
-    expect(agentModels.candidatesForTeam).toHaveBeenCalledWith(snapshot.teamId);
+    expect(agentModels.candidatesForPool).toHaveBeenCalledWith(
+      snapshot.teamId,
+      "BROWSER_EXECUTION",
+    );
     expect(result.task?.snapshot.modelCandidates).toEqual(modelCandidates);
   });
 });

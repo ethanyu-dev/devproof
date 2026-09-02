@@ -620,22 +620,23 @@ model AgentRuntimeCredential {
 }
 
 model AgentModelConfiguration {
-  id                 String   @id @default(uuid()) @db.Uuid
-  teamId             String   @map("team_id") @db.Uuid
-  baseUrl            String   @map("base_url")
-  apiKeyEncrypted    String   @map("api_key_encrypted")
-  apiKeyHint         String   @map("api_key_hint")
-  modelId            String   @map("model_id")
-  displayName        String   @map("display_name")
+  id                 String           @id @default(uuid()) @db.Uuid
+  teamId             String           @map("team_id") @db.Uuid
+  pool               AgentRuntimePool
+  baseUrl            String           @map("base_url")
+  apiKeyEncrypted    String           @map("api_key_encrypted")
+  apiKeyHint         String           @map("api_key_hint")
+  modelId            String           @map("model_id")
+  displayName        String           @map("display_name")
   position           Int
-  configuredByUserId String   @map("configured_by_user_id") @db.Uuid
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
-  team               Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  configuredBy       User     @relation(fields: [configuredByUserId], references: [id], onDelete: Restrict)
+  configuredByUserId String           @map("configured_by_user_id") @db.Uuid
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+  team               Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  configuredBy       User             @relation(fields: [configuredByUserId], references: [id], onDelete: Restrict)
 
-  @@unique([teamId, displayName])
-  @@index([teamId, position])
+  @@unique([teamId, pool, displayName])
+  @@index([teamId, pool, position])
   @@map("agent_model_configurations")
 }
 

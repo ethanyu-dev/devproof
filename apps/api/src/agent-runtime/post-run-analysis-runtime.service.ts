@@ -83,7 +83,10 @@ export class PostRunAnalysisRuntimeService {
         `Agent Runtime protocol minor ${POST_RUN_ANALYSIS_PROTOCOL_MINOR} or newer is required for post-run analysis.`,
       );
     }
-    const modelCandidates = await this.models.candidatesForTeam(teamId);
+    const modelCandidates = await this.models.candidatesForPool(
+      teamId,
+      "POST_RUN_ANALYSIS",
+    );
     if (!modelCandidates.length) {
       await this.failUnconfiguredJob(teamId);
       return { task: null };

@@ -95,7 +95,10 @@ export class SpecAnalysisRuntimeService {
         `Agent Runtime protocol minor ${SPEC_PROTOCOL_MINOR} or newer is required for Spec analysis.`,
       );
     }
-    const modelCandidates = await this.models.candidatesForTeam(teamId);
+    const modelCandidates = await this.models.candidatesForPool(
+      teamId,
+      "SPEC_ANALYSIS",
+    );
     if (!modelCandidates.length) return { task: null };
 
     for (let collision = 0; collision < 5; collision += 1) {

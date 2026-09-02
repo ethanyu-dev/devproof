@@ -15,6 +15,7 @@ const config = runtimeConfig();
 const controlPlane = new ControlPlaneClient(
   config.DEVPROOF_API_URL,
   config.DEVPROOF_AGENT_RUNTIME_TOKEN,
+  config.DEVPROOF_AGENT_RUNTIME_POOL,
 );
 const modelFetch = createModelFetch(
   parseModelHostAllowlist(config.DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST),

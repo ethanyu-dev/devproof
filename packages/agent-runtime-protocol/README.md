@@ -33,5 +33,13 @@ v2.4 control plane during a rolling deployment; the control plane still
 requires v2.7 before it leases post-run work. Completed analysis reports are
 limited to 512 KiB of UTF-8 JSON before transport.
 
+Protocol v2.8 makes the Runtime's single declared pool part of registration.
+The control plane rejects a declaration that does not match the pool bound to
+the Runtime credential. The field remains wire-optional only so an already
+pool-scoped v2.4-v2.7 worker can drain during a rolling upgrade; v2.8 Runtime
+configuration requires it. Agent model candidates are selected from an
+independent ordered list for that same pool; models are never shared implicitly
+across Spec Analysis, Browser Execution, and Post-run Analysis.
+
 This package is intentionally separate from `@devproof/runtime-protocol`, which
 is the browser data-plane protocol.

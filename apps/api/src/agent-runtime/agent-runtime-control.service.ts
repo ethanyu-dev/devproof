@@ -22,7 +22,12 @@ export class AgentRuntimeControlService {
 
   async register(
     current: ToolAuthContext,
-    input: { protocol: { minor: number }; workerId: string },
+    input: {
+      pool?:
+        "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS" | undefined;
+      protocol: { minor: number };
+      workerId: string;
+    },
   ) {
     if (input.protocol.minor < AGENT_RUNTIME_REGISTRATION_MIN_MINOR) {
       throw new BadRequestException(
@@ -33,6 +38,11 @@ export class AgentRuntimeControlService {
     if (pool === "MIXED") {
       throw new BadRequestException(
         "Legacy MIXED Agent Runtime credentials are disabled; provision pool-specific Agent Runtime credentials.",
+      );
+    }
+    if (input.pool && pool !== input.pool) {
+      throw new BadRequestException(
+        `Runtime declared pool ${input.pool}, but its credential is bound to ${pool}.`,
       );
     }
     const pools = [pool] as const;
