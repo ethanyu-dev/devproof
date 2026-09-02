@@ -75,12 +75,14 @@ describe("DevProof contracts", () => {
         baseUrl: "https://gateway.example.com/v1/",
         displayName: "Primary model",
         modelId: "provider/model-1",
+        pool: "BROWSER_EXECUTION",
       }),
     ).toEqual({
       apiKey: "sk-model-secret",
       baseUrl: "https://gateway.example.com/v1",
       displayName: "Primary model",
       modelId: "provider/model-1",
+      pool: "BROWSER_EXECUTION",
     });
     expect(
       agentModelConfigurationUpdateInputSchema.parse({
@@ -95,6 +97,7 @@ describe("DevProof contracts", () => {
           "d63bd843-b89d-48ea-90c9-caad5b51d526",
           "d63bd843-b89d-48ea-90c9-caad5b51d526",
         ],
+        pool: "BROWSER_EXECUTION",
       }).success,
     ).toBe(false);
   });

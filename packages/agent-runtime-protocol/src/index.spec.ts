@@ -10,6 +10,7 @@ import {
   runtimePostRunAnalysisOutcomeSchema,
   runtimePostRunAnalysisReportSchema,
   runtimePostRunAnalysisToolInputSchema,
+  runtimeRegistrationInputSchema,
   runtimeRegistrationOutputSchema,
   runtimeOutcomeSchema,
   runtimeSpecAnalysisOutcomeSchema,
@@ -31,6 +32,31 @@ describe("agent runtime protocol", () => {
         specConcurrency: 0,
       }),
     ).toMatchObject({ analysisConcurrency: 0 });
+  });
+
+  it("registers a v8 Runtime with one declared pool", () => {
+    expect(
+      runtimeRegistrationInputSchema.parse({
+        pool: "SPEC_ANALYSIS",
+        protocol: {
+          major: 2,
+          minor: 8,
+          name: "devproof-agent-runtime",
+        },
+        workerId: "spec-runtime-1",
+      }).pool,
+    ).toBe("SPEC_ANALYSIS");
+    expect(
+      runtimeRegistrationInputSchema.safeParse({
+        pool: "MIXED",
+        protocol: {
+          major: 2,
+          minor: 8,
+          name: "devproof-agent-runtime",
+        },
+        workerId: "mixed-runtime",
+      }).success,
+    ).toBe(false);
   });
 
   it("validates an OpenAI-compatible model candidate", () => {

@@ -36,7 +36,11 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "BROWSER_EXECUTION" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 4 }, workerId: "browser-worker" },
+        {
+          pool: "BROWSER_EXECUTION",
+          protocol: { minor: 8 },
+          workerId: "browser-worker",
+        },
       ),
     ).resolves.toEqual({
       analysisConcurrency: 0,
@@ -65,7 +69,11 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "SPEC_ANALYSIS" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 7 }, workerId: "spec-worker" },
+        {
+          pool: "SPEC_ANALYSIS",
+          protocol: { minor: 8 },
+          workerId: "spec-worker",
+        },
       ),
     ).resolves.toMatchObject({
       analysisConcurrency: 0,
@@ -85,7 +93,11 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "POST_RUN_ANALYSIS" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 7 }, workerId: "analysis-worker" },
+        {
+          pool: "POST_RUN_ANALYSIS",
+          protocol: { minor: 8 },
+          workerId: "analysis-worker",
+        },
       ),
     ).resolves.toMatchObject({
       analysisConcurrency: 3,
@@ -103,7 +115,11 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "MIXED" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 7 }, workerId: "legacy-worker" },
+        {
+          pool: "BROWSER_EXECUTION",
+          protocol: { minor: 8 },
+          workerId: "legacy-worker",
+        },
       ),
     ).rejects.toThrow("MIXED");
   });
@@ -117,8 +133,30 @@ describe("Agent Runtime pool registration", () => {
           credential: { pool: "SPEC_ANALYSIS" },
           team: { id: teamId },
         } as never,
-        { protocol: { minor: 3 }, workerId: "outdated-worker" },
+        {
+          pool: "SPEC_ANALYSIS",
+          protocol: { minor: 3 },
+          workerId: "outdated-worker",
+        },
       ),
     ).rejects.toThrow("minor 4 or newer");
+  });
+
+  it("rejects a declared pool that differs from the credential pool", async () => {
+    const service = new AgentRuntimeControlService({} as never, {} as never);
+
+    await expect(
+      service.register(
+        {
+          credential: { pool: "SPEC_ANALYSIS" },
+          team: { id: teamId },
+        } as never,
+        {
+          pool: "BROWSER_EXECUTION",
+          protocol: { minor: 8 },
+          workerId: "misconfigured-worker",
+        },
+      ),
+    ).rejects.toThrow(/credential is bound to SPEC_ANALYSIS/u);
   });
 });

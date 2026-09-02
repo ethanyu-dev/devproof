@@ -116,6 +116,7 @@ try {
   if (specAnalysisRuntimeToken) {
     start("@devproof/agent-runtime", {
       env: {
+        DEVPROOF_AGENT_RUNTIME_POOL: "SPEC_ANALYSIS",
         DEVPROOF_AGENT_RUNTIME_TOKEN: specAnalysisRuntimeToken,
         DEVPROOF_AGENT_WORKER_ID: "local-spec-analysis",
       },
@@ -125,6 +126,7 @@ try {
   if (browserExecutionRuntimeToken) {
     start("@devproof/agent-runtime", {
       env: {
+        DEVPROOF_AGENT_RUNTIME_POOL: "BROWSER_EXECUTION",
         DEVPROOF_AGENT_RUNTIME_TOKEN: browserExecutionRuntimeToken,
         DEVPROOF_AGENT_WORKER_ID: "local-browser-execution",
       },
@@ -134,6 +136,7 @@ try {
   if (postRunAnalysisRuntimeToken) {
     start("@devproof/agent-runtime", {
       env: {
+        DEVPROOF_AGENT_RUNTIME_POOL: "POST_RUN_ANALYSIS",
         DEVPROOF_AGENT_RUNTIME_TOKEN: postRunAnalysisRuntimeToken,
         DEVPROOF_AGENT_WORKER_ID: "local-post-run-analysis",
       },
@@ -145,9 +148,16 @@ try {
     !specAnalysisRuntimeToken &&
     !browserExecutionRuntimeToken &&
     !postRunAnalysisRuntimeToken &&
-    legacyAgentRuntimeToken
+    legacyAgentRuntimeToken &&
+    process.env.DEVPROOF_AGENT_RUNTIME_POOL
   ) {
-    start("@devproof/agent-runtime");
+    start("@devproof/agent-runtime", {
+      env: {
+        DEVPROOF_AGENT_RUNTIME_POOL: process.env.DEVPROOF_AGENT_RUNTIME_POOL,
+        DEVPROOF_AGENT_RUNTIME_TOKEN: legacyAgentRuntimeToken,
+      },
+      label: `${process.env.DEVPROOF_AGENT_RUNTIME_POOL} Agent Runtime`,
+    });
   } else if (
     !specAnalysisRuntimeToken &&
     !browserExecutionRuntimeToken &&

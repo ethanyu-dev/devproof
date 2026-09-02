@@ -56,6 +56,8 @@ The API is a modular monolith backed by PostgreSQL, Redis, and S3-compatible obj
 
 Agent Runtime is a stateless lease worker. It claims one Runtime Task, heartbeats the lease, invokes a model, calls a constrained execution interface, appends bounded events, and submits an idempotent outcome. It does not own retry policy or final Run state.
 
+Each Agent Runtime deployment declares exactly one pool: `SPEC_ANALYSIS`, `BROWSER_EXECUTION`, or `POST_RUN_ANALYSIS`. Registration must match the pool bound to its credential, the worker creates lanes and loads an Executor only for that pool, and each pool receives candidates from its own independently ordered model list.
+
 ### Execution Runner
 
 An Execution Runner provides a controlled environment in which actions run. Browser Runtime is the first implementation. It connects outbound to Runtime Gateway, runs Playwright locally, protects persistent browser data on the Runtime host, and returns artifacts through the versioned protocol.

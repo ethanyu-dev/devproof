@@ -9,6 +9,7 @@ import type {
   AgentModelConfigurationCreateInput,
   AgentModelConfigurationOrderInput,
   AgentModelConfigurationUpdateInput,
+  AgentModelPool,
 } from "@devproof/contracts";
 
 import type { AuthContext } from "../auth/auth.types.js";
@@ -23,6 +24,7 @@ const publicModelSelect = {
   displayName: true,
   id: true,
   modelId: true,
+  pool: true,
   position: true,
   updatedAt: true,
 } satisfies Prisma.AgentModelConfigurationSelect;
@@ -44,7 +46,7 @@ export class AgentModelConfigurationService {
 
   list(current: AuthContext) {
     return this.prisma.agentModelConfiguration.findMany({
-      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      orderBy: [{ pool: "asc" }, { position: "asc" }, { createdAt: "asc" }],
       select: publicModelSelect,
       where: { teamId: current.team.id },
     });
@@ -56,15 +58,17 @@ export class AgentModelConfigurationService {
   ) {
     const [count, last] = await Promise.all([
       this.prisma.agentModelConfiguration.count({
-        where: { teamId: current.team.id },
+        where: { pool: input.pool, teamId: current.team.id },
       }),
       this.prisma.agentModelConfiguration.aggregate({
         _max: { position: true },
-        where: { teamId: current.team.id },
+        where: { pool: input.pool, teamId: current.team.id },
       }),
     ]);
     if (count >= 10) {
-      throw new BadRequestException("At most 10 models can be configured.");
+      throw new BadRequestException(
+        `At most 10 models can be configured for the ${input.pool} pool.`,
+      );
     }
     const row = await this.prisma.agentModelConfiguration
       .create({
@@ -75,6 +79,7 @@ export class AgentModelConfigurationService {
           configuredByUserId: current.user.id,
           displayName: input.displayName,
           modelId: input.modelId,
+          pool: input.pool,
           position: (last._max.position ?? -1) + 1,
           teamId: current.team.id,
         },
@@ -156,7 +161,7 @@ export class AgentModelConfigurationService {
   ) {
     const rows = await this.prisma.agentModelConfiguration.findMany({
       select: { id: true },
-      where: { teamId: current.team.id },
+      where: { pool: input.pool, teamId: current.team.id },
     });
     const ownedIds = new Set(rows.map((row) => row.id));
     if (
@@ -164,7 +169,7 @@ export class AgentModelConfigurationService {
       input.ids.some((id) => !ownedIds.has(id))
     ) {
       throw new BadRequestException(
-        "Model order must contain every configured model exactly once.",
+        `Model order must contain every model in the ${input.pool} pool exactly once.`,
       );
     }
     await this.prisma.$transaction(
@@ -180,12 +185,15 @@ export class AgentModelConfigurationService {
       "agent_model.reordered",
       "agent_model_configuration",
       current.team.id,
-      { ids: input.ids },
+      { ids: input.ids, pool: input.pool },
     );
     return this.list(current);
   }
 
-  async candidatesForTeam(teamId: string): Promise<AgentModelCandidate[]> {
+  async candidatesForPool(
+    teamId: string,
+    pool: AgentModelPool,
+  ): Promise<AgentModelCandidate[]> {
     const rows = await this.prisma.agentModelConfiguration.findMany({
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
       select: {
@@ -194,7 +202,7 @@ export class AgentModelConfigurationService {
         displayName: true,
         modelId: true,
       },
-      where: { teamId },
+      where: { pool, teamId },
     });
     return rows.map((row) => ({
       apiKey: this.cipher.decrypt(row.apiKeyEncrypted),
@@ -219,6 +227,7 @@ function auditMetadata(row: {
   baseUrl: string;
   displayName: string;
   modelId: string;
+  pool: string;
   position: number;
 }) {
   return {
@@ -226,6 +235,7 @@ function auditMetadata(row: {
     baseUrl: row.baseUrl,
     displayName: row.displayName,
     modelId: row.modelId,
+    pool: row.pool,
     position: row.position,
   };
 }
@@ -236,7 +246,7 @@ function throwModelConflict(error: unknown): never {
     error.code === "P2002"
   ) {
     throw new ConflictException(
-      "An Agent model with this display name already exists.",
+      "An Agent model with this display name already exists in this Runtime pool.",
     );
   }
   if (

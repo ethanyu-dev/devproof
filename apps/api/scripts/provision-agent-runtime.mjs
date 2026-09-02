@@ -61,6 +61,7 @@ try {
     [
       `Agent Runtime ${options.pool} credential provisioned for team ${team.slug}.`,
       "The plaintext token is shown once; store it in the Runtime deployment:",
+      `DEVPROOF_AGENT_RUNTIME_POOL=${options.pool}`,
       `DEVPROOF_AGENT_RUNTIME_TOKEN=${token}`,
     ].join("\n") + "\n",
   );

@@ -209,7 +209,10 @@ export class AgentRuntimeTaskService {
         `Agent Runtime protocol minor ${MODEL_CONFIGURATION_PROTOCOL_MINOR} or newer is required for Console-managed models.`,
       );
     }
-    const modelCandidates = await this.agentModels.candidatesForTeam(teamId);
+    const modelCandidates = await this.agentModels.candidatesForPool(
+      teamId,
+      "BROWSER_EXECUTION",
+    );
     if (modelCandidates.length === 0) return { task: null };
     for (let collision = 0; collision < 5; collision += 1) {
       const claimed = await this.prisma.$transaction(

@@ -488,7 +488,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
         ),
       } as never,
       {
-        candidatesForTeam: vi.fn().mockResolvedValue([
+        candidatesForPool: vi.fn().mockResolvedValue([
           {
             apiKey: "secret",
             baseUrl: "https://gateway.example.com/v1",
@@ -552,7 +552,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
     };
     const service = new PostRunAnalysisRuntimeService(
       prisma as never,
-      { candidatesForTeam: vi.fn().mockResolvedValue([]) } as never,
+      { candidatesForPool: vi.fn().mockResolvedValue([]) } as never,
       {} as never,
     );
 
@@ -603,7 +603,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
         ),
     };
     const models = {
-      candidatesForTeam: vi.fn().mockResolvedValue([
+      candidatesForPool: vi.fn().mockResolvedValue([
         {
           apiKey: "secret",
           baseUrl: "https://gateway.example.com/v1",

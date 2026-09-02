@@ -18,6 +18,7 @@ import {
   type RuntimeOutcome,
   type RuntimePostRunAnalysisOutcome,
   type RuntimePostRunAnalysisTaskLease,
+  type RuntimePool,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
   type RuntimeSpecAnalysisToolInput,
@@ -36,11 +37,12 @@ export class ControlPlaneClient {
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
+    private readonly pool: RuntimePool,
   ) {}
 
   async register(workerId: string, signal?: AbortSignal) {
     const result = await this.request("/internal/v2/runtime/registration", {
-      body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
+      body: { pool: this.pool, protocol: AGENT_RUNTIME_PROTOCOL, workerId },
       ...(signal ? { signal } : {}),
     });
     return runtimeRegistrationOutputSchema.parse(result);

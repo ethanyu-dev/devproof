@@ -111,9 +111,19 @@ interface AgentModelConfiguration {
   displayName: string;
   id: string;
   modelId: string;
+  pool: AgentModelPool;
   position: number;
   updatedAt: string;
 }
+
+type AgentModelPool =
+  "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS";
+
+const agentModelPoolLabels: Record<AgentModelPool, string> = {
+  SPEC_ANALYSIS: "Spec 分析 Runtime",
+  BROWSER_EXECUTION: "浏览器执行 Runtime",
+  POST_RUN_ANALYSIS: "运行后分析 Runtime",
+};
 
 type AccessSection = "browser" | "github" | "agent-runtime" | "mcp";
 
@@ -227,6 +237,8 @@ export function AccessClient() {
   const [agentModels, setAgentModels] = useState<
     AgentModelConfiguration[] | null
   >(null);
+  const [agentModelPool, setAgentModelPool] =
+    useState<AgentModelPool>("BROWSER_EXECUTION");
   const [agentModelId, setAgentModelId] = useState<string | null>(null);
   const [agentModelBaseUrl, setAgentModelBaseUrl] = useState("");
   const [agentModelApiKey, setAgentModelApiKey] = useState("");
@@ -281,6 +293,10 @@ export function AccessClient() {
   );
   const editedAgentModel = agentModels?.find(
     (model) => model.id === agentModelId,
+  );
+  const pooledAgentModels = useMemo(
+    () => agentModels?.filter((model) => model.pool === agentModelPool) ?? [],
+    [agentModelPool, agentModels],
   );
   const agentModelEndpointChanged = Boolean(
     editedAgentModel &&
@@ -729,6 +745,7 @@ export function AccessClient() {
             baseUrl: agentModelBaseUrl.trim(),
             displayName: agentModelDisplayName.trim(),
             modelId: agentModelModelId.trim(),
+            ...(!agentModelId ? { pool: agentModelPool } : {}),
             ...(agentModelApiKey.trim()
               ? { apiKey: agentModelApiKey.trim() }
               : {}),
@@ -760,8 +777,8 @@ export function AccessClient() {
   async function moveAgentModel(index: number, direction: -1 | 1) {
     if (!agentModels || pendingItem) return;
     const target = index + direction;
-    if (target < 0 || target >= agentModels.length) return;
-    const reordered = [...agentModels];
+    if (target < 0 || target >= pooledAgentModels.length) return;
+    const reordered = [...pooledAgentModels];
     const current = reordered[index];
     const adjacent = reordered[target];
     if (!current || !adjacent) return;
@@ -773,7 +790,10 @@ export function AccessClient() {
       const rows = await consoleApi<AgentModelConfiguration[]>(
         "/agent-models/order",
         {
-          body: JSON.stringify({ ids: reordered.map((row) => row.id) }),
+          body: JSON.stringify({
+            ids: reordered.map((row) => row.id),
+            pool: agentModelPool,
+          }),
           method: "PUT",
         },
       );
@@ -1617,6 +1637,27 @@ export function AccessClient() {
                       onSubmit={saveAgentModel}
                     >
                       <div className="dp-form-grid">
+                        <Field label="Runtime Pool">
+                          <Select
+                            disabled={agentModelId !== null}
+                            onChange={(event) => {
+                              setAgentModelPool(
+                                event.target.value as AgentModelPool,
+                              );
+                              resetAgentModelForm();
+                              setAgentRuntimeMessage(null);
+                            }}
+                            value={agentModelPool}
+                          >
+                            {Object.entries(agentModelPoolLabels).map(
+                              ([pool, label]) => (
+                                <option key={pool} value={pool}>
+                                  {label}
+                                </option>
+                              ),
+                            )}
+                          </Select>
+                        </Field>
                         <Field label="Display Name">
                           <Input
                             onChange={(event) =>
@@ -1689,7 +1730,7 @@ export function AccessClient() {
                             (!agentModelId && !agentModelApiKey.trim()) ||
                             (agentModelEndpointChanged &&
                               !agentModelApiKey.trim()) ||
-                            (!agentModelId && (agentModels?.length ?? 0) >= 10)
+                            (!agentModelId && pooledAgentModels.length >= 10)
                           }
                           type="submit"
                         >
@@ -1706,15 +1747,15 @@ export function AccessClient() {
                     <div className="dp-section-head">
                       <span>
                         <Bot />
-                        <b>模型优先级</b>
+                        <b>{agentModelPoolLabels[agentModelPool]} 模型优先级</b>
                       </span>
                       <span className="dp-count">
-                        {agentModels?.length ?? 0}/10
+                        {pooledAgentModels.length}/10
                       </span>
                     </div>
                     <div className="dp-agent-model-list">
-                      {agentModels?.length ? (
-                        agentModels.map((model, index) => (
+                      {pooledAgentModels.length ? (
+                        pooledAgentModels.map((model, index) => (
                           <div
                             className={`dp-agent-model-item ${agentModelId === model.id ? "selected" : ""}`}
                             key={model.id}
@@ -1741,7 +1782,7 @@ export function AccessClient() {
                                 <Button
                                   aria-label={`下移 ${model.displayName}`}
                                   disabled={
-                                    index === agentModels.length - 1 ||
+                                    index === pooledAgentModels.length - 1 ||
                                     pendingItem !== null
                                   }
                                   onClick={() => void moveAgentModel(index, 1)}

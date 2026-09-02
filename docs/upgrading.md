@@ -24,6 +24,13 @@ DevProof keeps its complete Prisma migration chain so an existing installation c
 
 Never use `pnpm prisma:migrate` in production; it is for creating development migrations. Do not edit, delete, reorder, or squash a migration that may already have been applied.
 
+For the Agent Runtime pool-isolation migration, the database deployment clones
+the previous team-wide model order into the `SPEC_ANALYSIS`,
+`BROWSER_EXECUTION`, and `POST_RUN_ANALYSIS` pools. Review the three lists in
+Console after deployment and remove models that a pool should not use. Before
+rolling each standalone Agent Runtime, set `DEVPROOF_AGENT_RUNTIME_POOL` to the
+pool bound to its credential; a mismatched declaration is rejected.
+
 ## Legacy compatibility
 
 `POST /v2/tasks` is the current entry point. The repository retains:

@@ -6,6 +6,7 @@ import {
   runtimeBusinessReferenceSchema,
   runtimeCriterionSchema,
   runtimeFailureClassSchema,
+  runtimePoolSchema,
 } from "@devproof/agent-runtime-protocol";
 import {
   runtimeNetworkAllowlistSchema,
@@ -101,9 +102,12 @@ const agentModelConfigurationFields = {
   modelId: z.string().trim().min(1).max(160),
 };
 
+export const agentModelPoolSchema = runtimePoolSchema;
+
 export const agentModelConfigurationCreateInputSchema = z.object({
   ...agentModelConfigurationFields,
   apiKey: z.string().trim().min(1).max(4_096),
+  pool: agentModelPoolSchema,
 });
 
 export const agentModelConfigurationUpdateInputSchema = z.object({
@@ -114,6 +118,7 @@ export const agentModelConfigurationUpdateInputSchema = z.object({
 export const agentModelConfigurationOrderInputSchema = z
   .object({
     ids: z.array(z.string().uuid()).min(1).max(10),
+    pool: agentModelPoolSchema,
   })
   .refine((value) => new Set(value.ids).size === value.ids.length, {
     message: "Model order cannot contain duplicate IDs.",
@@ -1664,6 +1669,7 @@ export type AgentModelConfigurationUpdateInput = z.infer<
 export type AgentModelConfigurationOrderInput = z.infer<
   typeof agentModelConfigurationOrderInputSchema
 >;
+export type AgentModelPool = z.infer<typeof agentModelPoolSchema>;
 export type BrowserProfilePurgeInput = z.infer<
   typeof browserProfilePurgeInputSchema
 >;

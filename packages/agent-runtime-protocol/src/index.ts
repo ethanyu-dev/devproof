@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 7,
+  minor: 8,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -351,6 +351,7 @@ export const runtimeTaskClaimOutputSchema = z.object({
 });
 
 export const runtimeRegistrationInputSchema = z.object({
+  pool: runtimePoolSchema.optional(),
   protocol: runtimeProtocolVersionSchema,
   workerId: z.string().trim().min(1).max(200),
 });
@@ -845,6 +846,7 @@ export type RuntimeFailureClass = z.infer<typeof runtimeFailureClassSchema>;
 export type RuntimeEvidenceKind = z.infer<typeof runtimeEvidenceKindSchema>;
 export type RuntimeEvidenceRef = z.infer<typeof runtimeEvidenceRefSchema>;
 export type RuntimeOutcome = z.infer<typeof runtimeOutcomeSchema>;
+export type RuntimePool = z.infer<typeof runtimePoolSchema>;
 export type RuntimeModelCandidate = z.infer<typeof runtimeModelCandidateSchema>;
 export type RuntimeGeneratedSpec = z.infer<typeof runtimeGeneratedSpecSchema>;
 export type RuntimeSpecAnalysisOutcome = z.infer<

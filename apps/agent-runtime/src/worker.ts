@@ -12,9 +12,9 @@ import {
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
-import {
+import type {
   BrowserVerificationExecutor,
-  type ResponsesClientFactory,
+  ResponsesClientFactory,
 } from "./browser-verification.executor.js";
 import {
   activeLease,
@@ -22,44 +22,30 @@ import {
   ControlPlaneError,
 } from "./control-plane.client.js";
 import type { RuntimeConfig } from "./config.js";
-import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
-import { PostRunAnalysisExecutor } from "./post-run-analysis.executor.js";
+import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
+import type { PostRunAnalysisExecutor } from "./post-run-analysis.executor.js";
 
 export class AgentRuntimeWorker {
-  private readonly executor: BrowserVerificationExecutor;
+  private executor: BrowserVerificationExecutor | undefined;
   private readonly instanceWorkerId: string;
   private readonly lanes = new Map<
     string,
     { draining: boolean; promise: Promise<void> }
   >();
-  private readonly specExecutor: SpecAnalysisExecutor;
-  private readonly postRunAnalysisExecutor: PostRunAnalysisExecutor;
+  private specExecutor: SpecAnalysisExecutor | undefined;
+  private postRunAnalysisExecutor: PostRunAnalysisExecutor | undefined;
 
   constructor(
     private readonly config: RuntimeConfig,
     private readonly controlPlane: ControlPlaneClient,
-    modelClient: ResponsesClientFactory,
+    private readonly modelClient: ResponsesClientFactory,
   ) {
     this.instanceWorkerId = `${config.DEVPROOF_AGENT_WORKER_ID}:${randomUUID()}`;
-    this.executor = new BrowserVerificationExecutor(
-      modelClient,
-      controlPlane,
-      config.DEVPROOF_AGENT_TOOL_LIMIT,
-    );
-    this.specExecutor = new SpecAnalysisExecutor(
-      modelClient,
-      controlPlane,
-      config.DEVPROOF_AGENT_TOOL_LIMIT,
-    );
-    this.postRunAnalysisExecutor = new PostRunAnalysisExecutor(
-      modelClient,
-      controlPlane,
-      config.DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT,
-    );
   }
 
   async run(signal: AbortSignal) {
     log("runtime.started", {
+      pool: this.config.DEVPROOF_AGENT_RUNTIME_POOL,
       workerId: this.instanceWorkerId,
     });
     try {
@@ -69,13 +55,7 @@ export class AgentRuntimeWorker {
             this.instanceWorkerId,
             signal,
           );
-          this.reconcileLanes("spec", allocation.specConcurrency, signal);
-          this.reconcileLanes("browser", allocation.browserConcurrency, signal);
-          this.reconcileLanes(
-            "analysis",
-            allocation.analysisConcurrency,
-            signal,
-          );
+          this.reconcileAllocation(allocation, signal);
           await delay(allocation.refreshAfterMs, signal);
         } catch (error) {
           if (signal.aborted) break;
@@ -89,6 +69,51 @@ export class AgentRuntimeWorker {
         [...this.lanes.values()].map((lane) => lane.promise),
       );
     }
+  }
+
+  private reconcileAllocation(
+    allocation: {
+      analysisConcurrency: number;
+      browserConcurrency: number;
+      pools: Array<"SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS">;
+      specConcurrency: number;
+    },
+    signal: AbortSignal,
+  ) {
+    const expectedPool = this.config.DEVPROOF_AGENT_RUNTIME_POOL;
+    if (allocation.pools.length !== 1 || allocation.pools[0] !== expectedPool) {
+      throw new Error(
+        `Control plane assigned ${allocation.pools.join(", ") || "no pool"}; Runtime is isolated to ${expectedPool}.`,
+      );
+    }
+    const assignments = {
+      POST_RUN_ANALYSIS: {
+        desired: allocation.analysisConcurrency,
+        lane: "analysis" as const,
+        unexpected:
+          allocation.browserConcurrency > 0 || allocation.specConcurrency > 0,
+      },
+      BROWSER_EXECUTION: {
+        desired: allocation.browserConcurrency,
+        lane: "browser" as const,
+        unexpected:
+          allocation.analysisConcurrency > 0 || allocation.specConcurrency > 0,
+      },
+      SPEC_ANALYSIS: {
+        desired: allocation.specConcurrency,
+        lane: "spec" as const,
+        unexpected:
+          allocation.analysisConcurrency > 0 ||
+          allocation.browserConcurrency > 0,
+      },
+    } as const;
+    const assignment = assignments[expectedPool];
+    if (assignment.unexpected) {
+      throw new Error(
+        `Control plane returned cross-pool concurrency to isolated ${expectedPool} Runtime.`,
+      );
+    }
+    this.reconcileLanes(assignment.lane, assignment.desired, signal);
   }
 
   private reconcileLanes(
@@ -194,6 +219,15 @@ export class AgentRuntimeWorker {
     try {
       let outcome: RuntimeOutcome;
       try {
+        if (!this.executor) {
+          const { BrowserVerificationExecutor } =
+            await import("./browser-verification.executor.js");
+          this.executor = new BrowserVerificationExecutor(
+            this.modelClient,
+            this.controlPlane,
+            this.config.DEVPROOF_AGENT_TOOL_LIMIT,
+          );
+        }
         outcome = await this.executor.execute(task, lease, controller.signal);
       } catch (error) {
         if (controller.signal.aborted && isCancellation(error)) {
@@ -253,6 +287,15 @@ export class AgentRuntimeWorker {
     try {
       let outcome: RuntimeSpecAnalysisOutcome;
       try {
+        if (!this.specExecutor) {
+          const { SpecAnalysisExecutor } =
+            await import("./spec-analysis.executor.js");
+          this.specExecutor = new SpecAnalysisExecutor(
+            this.modelClient,
+            this.controlPlane,
+            this.config.DEVPROOF_AGENT_TOOL_LIMIT,
+          );
+        }
         outcome = await this.specExecutor.execute(
           task,
           lease,
@@ -315,6 +358,15 @@ export class AgentRuntimeWorker {
     try {
       let outcome: RuntimePostRunAnalysisOutcome;
       try {
+        if (!this.postRunAnalysisExecutor) {
+          const { PostRunAnalysisExecutor } =
+            await import("./post-run-analysis.executor.js");
+          this.postRunAnalysisExecutor = new PostRunAnalysisExecutor(
+            this.modelClient,
+            this.controlPlane,
+            this.config.DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT,
+          );
+        }
         outcome = await this.postRunAnalysisExecutor.execute(
           task,
           lease,
