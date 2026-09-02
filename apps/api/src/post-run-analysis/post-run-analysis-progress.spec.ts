@@ -52,7 +52,9 @@ describe("buildPostRunAnalysisProgress", () => {
     );
 
     expect(progress).toMatchObject({
+      activeElapsedMs: 299_000,
       currentMessage: "分析报告校验未通过，正在补充证据或修正定位。",
+      currentAttemptElapsedMs: 299_000,
       deadlineRemainingMs: 1_500_000,
       metrics: {
         evidenceReads: 1,
@@ -64,6 +66,7 @@ describe("buildPostRunAnalysisProgress", () => {
         uniqueEvidence: 1,
       },
       phase: "REPORTING",
+      lifecycleElapsedMs: 1_620_000,
       queueWaitMs: 1_310_000,
       steps: [
         { key: "CAPTURE", label: "采集日志", status: "COMPLETED" },
@@ -148,7 +151,23 @@ describe("buildPostRunAnalysisProgress", () => {
     );
 
     expect(progress).toMatchObject({
+      activeElapsedMs: 298_000,
+      attempts: [
+        expect.objectContaining({
+          attemptNumber: 1,
+          elapsedMs: 2_000,
+          status: "RETRYING",
+        }),
+        expect.objectContaining({
+          attemptNumber: 2,
+          elapsedMs: 296_000,
+          metrics: expect.objectContaining({ modelCalls: 1 }),
+          status: "RUNNING",
+        }),
+      ],
       currentMessage: "正在进行第 1 轮模型分析（xai/grok-4.6）。",
+      currentAttemptElapsedMs: 296_000,
+      lifecycleElapsedMs: 300_000,
       phase: "EVIDENCE",
       queueWaitMs: 5_000,
       steps: expect.arrayContaining([
@@ -156,6 +175,51 @@ describe("buildPostRunAnalysisProgress", () => {
         { key: "PERSISTING", label: "保存结果", status: "PENDING" },
       ]),
     });
+  });
+
+  it("does not count time between retry attempts as active analysis", () => {
+    const progress = buildPostRunAnalysisProgress(
+      {
+        createdAt: new Date("2026-09-01T00:00:00.000Z"),
+        deadlineAt: new Date("2026-09-02T02:00:00.000Z"),
+        error: null,
+        findings: [],
+        finishedAt: null,
+        hardDeadlineAt: new Date("2026-09-02T08:00:00.000Z"),
+        inputSha256: "a".repeat(64),
+        nextAttemptAt: null,
+        readyAt: new Date("2026-09-02T00:00:00.000Z"),
+        startedAt: new Date("2026-09-01T00:01:00.000Z"),
+        status: "RUNNING",
+        updatedAt: new Date("2026-09-02T00:02:00.000Z"),
+      },
+      [
+        {
+          kind: "analysis.started",
+          occurredAt: new Date("2026-09-01T00:01:00.000Z"),
+          payload: { attemptNumber: 1 },
+          sequence: 1n,
+        },
+        {
+          kind: "analysis.retry_queued",
+          occurredAt: new Date("2026-09-01T00:11:00.000Z"),
+          payload: { attemptNumber: 1 },
+          sequence: 2n,
+        },
+        {
+          kind: "analysis.started",
+          occurredAt: new Date("2026-09-02T00:01:00.000Z"),
+          payload: { attemptNumber: 2 },
+          sequence: 3n,
+        },
+      ],
+      new Date("2026-09-02T00:06:00.000Z"),
+    );
+
+    expect(progress.activeElapsedMs).toBe(15 * 60_000);
+    expect(progress.currentAttemptElapsedMs).toBe(5 * 60_000);
+    expect(progress.lifecycleElapsedMs).toBe(24 * 60 * 60_000 + 6 * 60_000);
+    expect(progress.elapsedMs).toBe(progress.activeElapsedMs);
   });
 });
 

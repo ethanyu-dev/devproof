@@ -182,6 +182,21 @@ export interface TaskEvent {
   sequence: string;
 }
 
+interface PostRunAnalysisMetrics {
+  bundleReads: number;
+  evidenceReads: number;
+  failedModelCalls: number;
+  inputTokens: number;
+  manifestReads: number;
+  modelCalls: number;
+  modelDurationMs: number;
+  models: string[];
+  outputTokens: number;
+  reportValidationFailures: number;
+  totalTokens: number;
+  uniqueEvidence: number;
+}
+
 export interface PostRunAnalysisDetail {
   analyzerVersion: string;
   attemptNumber: number;
@@ -225,27 +240,27 @@ export interface PostRunAnalysisDetail {
   } | null;
   maxAttempts: number;
   progress: {
+    activeElapsedMs: number;
+    attempts: Array<{
+      attemptNumber: number;
+      elapsedMs: number;
+      finishedAt: string | null;
+      metrics: PostRunAnalysisMetrics;
+      queueWaitMs: number | null;
+      startedAt: string;
+      status: string;
+    }>;
     currentMessage: string;
+    currentAttemptElapsedMs: number;
+    currentAttemptMetrics: PostRunAnalysisMetrics;
     deadlineAt: string;
     deadlineRemainingMs: number;
     elapsedMs: number;
     findingCount: number;
     lastActivityAt: string;
     lastEventKind: string | null;
-    metrics: {
-      bundleReads: number;
-      evidenceReads: number;
-      failedModelCalls: number;
-      inputTokens: number;
-      manifestReads: number;
-      modelCalls: number;
-      modelDurationMs: number;
-      models: string[];
-      outputTokens: number;
-      reportValidationFailures: number;
-      totalTokens: number;
-      uniqueEvidence: number;
-    };
+    lifecycleElapsedMs: number;
+    metrics: PostRunAnalysisMetrics;
     nextAttemptAt: string | null;
     phase: string;
     phaseLabel: string;

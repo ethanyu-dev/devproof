@@ -81,6 +81,7 @@ function createService(contentType = "application/json") {
   }
   const archive = Buffer.concat(archiveChunks);
   const job = {
+    analysisCheckpoint: {},
     fencingToken: 3n,
     id: analysisId,
     inputByteSize: 10,
@@ -105,7 +106,10 @@ function createService(contentType = "application/json") {
   };
   const prisma = {
     postRunAnalysisEvent: { create: vi.fn().mockResolvedValue({}) },
-    postRunAnalysisJob: { findFirst: vi.fn().mockResolvedValue(job) },
+    postRunAnalysisJob: {
+      findFirst: vi.fn().mockResolvedValue(job),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     runEvidence: {
       findFirst: vi.fn().mockResolvedValue({
         externalId: "artifact://console-log",
@@ -193,6 +197,23 @@ describe("PostRunAnalysisRuntimeService evidence tools", () => {
         teamId,
       }),
     });
+    expect(prisma.postRunAnalysisJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          analysisCheckpoint: expect.objectContaining({
+            analysisSummary: "读取控制台日志。",
+            evidenceRefs: ["artifact://console-log"],
+            updatedAt: expect.any(String),
+          }),
+        },
+        where: expect.objectContaining({
+          fencingToken: 3n,
+          leaseOwner: lease.workerId,
+          leaseToken: lease.leaseToken,
+          status: "RUNNING",
+        }),
+      }),
+    );
   });
 
   it("caches a redacted text artifact across pages and permits a targeted jump", async () => {
@@ -447,9 +468,9 @@ describe("PostRunAnalysisRuntimeService claims", () => {
       startedAt: null,
       status: "READY",
     });
-    const create = vi.fn().mockResolvedValue({});
+    const createMany = vi.fn().mockResolvedValue({ count: 1 });
     const transactionClient = {
-      postRunAnalysisEvent: { create },
+      postRunAnalysisEvent: { createMany },
       postRunAnalysisJob: {
         fields: { maxAttempts: { field: "maxAttempts" } },
         findFirst,
@@ -502,7 +523,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
 
     try {
       const result = await service.claim(teamId, {
-        protocol: { minor: 7 },
+        protocol: { minor: 9 },
         workerId: lease.workerId,
       });
 
@@ -519,12 +540,14 @@ describe("PostRunAnalysisRuntimeService claims", () => {
           }),
         }),
       );
-      expect(create).toHaveBeenCalledWith(
+      expect(createMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
-            kind: "analysis.started",
-            payload: expect.objectContaining({ queueWaitMs: 1_200_000 }),
-          }),
+          data: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "analysis.started",
+              payload: expect.objectContaining({ queueWaitMs: 1_200_000 }),
+            }),
+          ]),
         }),
       );
     } finally {
@@ -558,7 +581,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
 
     await expect(
       service.claim(teamId, {
-        protocol: { minor: 7 },
+        protocol: { minor: 9 },
         workerId: lease.workerId,
       }),
     ).resolves.toEqual({ task: null });
@@ -620,7 +643,7 @@ describe("PostRunAnalysisRuntimeService claims", () => {
 
     await expect(
       service.claim(teamId, {
-        protocol: { minor: 7 },
+        protocol: { minor: 9 },
         workerId: lease.workerId,
       }),
     ).resolves.toEqual({ task: null });

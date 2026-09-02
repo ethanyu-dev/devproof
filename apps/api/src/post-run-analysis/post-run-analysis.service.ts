@@ -76,6 +76,18 @@ function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
 
+function earliestDate(
+  beforeOrAt: Date,
+  ...values: Array<Date | null | undefined>
+) {
+  return values
+    .filter(
+      (value): value is Date =>
+        value instanceof Date && value.getTime() <= beforeOrAt.getTime(),
+    )
+    .sort((left, right) => left.getTime() - right.getTime())[0];
+}
+
 async function enqueueObjectDeletions(
   tx: Prisma.TransactionClient,
   storageKeys: Array<string | null | undefined>,
@@ -143,6 +155,7 @@ export async function supersedePostRunAnalyses(
   for (const job of jobs) {
     const changed = await tx.postRunAnalysisJob.updateMany({
       data: {
+        analysisCheckpoint: json({}),
         captureEvidenceStorageKey: null,
         captureStorageKey: null,
         error: json({
@@ -415,6 +428,7 @@ export class PostRunAnalysisService {
           nextAttemptAt: ready ? now : null,
           readyAt: ready ? now : null,
           status: ready ? "READY" : "PENDING_CAPTURE",
+          ...(!ready ? { analysisCheckpoint: json({}) } : {}),
         },
         where: {
           attemptNumber: currentJob.attemptNumber,
@@ -456,7 +470,9 @@ export class PostRunAnalysisService {
       orderBy: { createdAt: "asc" },
       select: {
         attemptNumber: true,
+        deadlineAt: true,
         id: true,
+        leaseExpiresAt: true,
         maxAttempts: true,
         status: true,
         teamId: true,
@@ -518,6 +534,14 @@ export class PostRunAnalysisService {
             kind: "analysis.attempts_exhausted",
             payload: json({
               attemptNumber: job.attemptNumber,
+              endedAt:
+                job.status === "RUNNING"
+                  ? earliestDate(
+                      now,
+                      job.deadlineAt,
+                      job.leaseExpiresAt,
+                    )?.toISOString()
+                  : null,
               maxAttempts: job.maxAttempts,
               previousStatus: job.status,
             }),
@@ -538,7 +562,10 @@ export class PostRunAnalysisService {
       select: {
         captureEvidenceStorageKey: true,
         captureStorageKey: true,
+        deadlineAt: true,
+        hardDeadlineAt: true,
         id: true,
+        leaseExpiresAt: true,
         status: true,
         teamId: true,
         updatedAt: true,
@@ -554,6 +581,7 @@ export class PostRunAnalysisService {
       const changed = await this.prisma.$transaction(async (tx) => {
         const result = await tx.postRunAnalysisJob.updateMany({
           data: {
+            analysisCheckpoint: json({}),
             captureEvidenceStorageKey: null,
             captureStorageKey: null,
             error: json({
@@ -588,6 +616,15 @@ export class PostRunAnalysisService {
             kind: "analysis.deadline_exceeded",
             payload: json({
               deadlineType: "hard",
+              endedAt: (job.status === "RUNNING"
+                ? (earliestDate(
+                    now,
+                    job.deadlineAt,
+                    job.leaseExpiresAt,
+                    job.hardDeadlineAt,
+                  ) ?? job.hardDeadlineAt)
+                : job.hardDeadlineAt
+              ).toISOString(),
               previousStatus: job.status,
             }),
             teamId: job.teamId,
@@ -610,6 +647,7 @@ export class PostRunAnalysisService {
         deadlineAt: true,
         hardDeadlineAt: true,
         id: true,
+        leaseExpiresAt: true,
         maxAttempts: true,
         teamId: true,
         updatedAt: true,
@@ -659,6 +697,10 @@ export class PostRunAnalysisService {
             kind: "analysis.attempt_deadline_exceeded",
             payload: json({
               attemptNumber: job.attemptNumber,
+              endedAt: (
+                earliestDate(now, job.deadlineAt, job.leaseExpiresAt) ??
+                job.deadlineAt
+              ).toISOString(),
               maxAttempts: job.maxAttempts,
               nextAttemptAt: nextAttemptAt.toISOString(),
             }),
@@ -829,6 +871,7 @@ export class PostRunAnalysisService {
       const updated = await this.prisma.$transaction(async (tx) => {
         const changed = await tx.postRunAnalysisJob.updateMany({
           data: {
+            analysisCheckpoint: json({}),
             captureEvidenceStorageKey: null,
             captureStorageKey: null,
             deadlineAt: hardDeadlineAt,

@@ -260,7 +260,11 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
         typeof archiveStorageKey === "string" ? archiveStorageKey : null;
       await this.prisma.$transaction(async (tx) => {
         const detached = await tx.postRunAnalysisJob.updateMany({
-          data: { inputManifest: {}, inputStorageKey: null },
+          data: {
+            analysisCheckpoint: {},
+            inputManifest: {},
+            inputStorageKey: null,
+          },
           where: {
             id: job.id,
             inputStorageKey: job.inputStorageKey,

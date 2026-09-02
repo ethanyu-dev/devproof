@@ -157,6 +157,82 @@ describe("Agent Runtime post-run outcome submission", () => {
       submitPostRunAnalysisOutcome.mock.calls[1]?.[2],
     );
   });
+
+  it("drains an active analysis instead of aborting it on process shutdown", async () => {
+    let finishExecution!: (value: {
+      kind: "ANALYSIS_COMPLETED";
+      report: { findings: never[]; summary: string };
+    }) => void;
+    const execution = new Promise<{
+      kind: "ANALYSIS_COMPLETED";
+      report: { findings: never[]; summary: string };
+    }>((resolve) => {
+      finishExecution = resolve;
+    });
+    let executionSignal: AbortSignal | undefined;
+    const submitPostRunAnalysisOutcome = vi
+      .fn()
+      .mockResolvedValue({ accepted: true, jobStatus: "SUCCEEDED" });
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_TOOL_LIMIT: 10,
+        DEVPROOF_AGENT_WORKER_ID: "worker-1",
+      } as never,
+      {
+        appendPostRunAnalysisEvent: vi.fn(),
+        heartbeatPostRunAnalysis: vi.fn(),
+        submitPostRunAnalysisOutcome,
+      } as never,
+      vi.fn() as never,
+    );
+    (
+      worker as unknown as {
+        postRunAnalysisExecutor: {
+          execute(
+            _task: unknown,
+            _lease: unknown,
+            signal: AbortSignal,
+          ): typeof execution;
+        };
+      }
+    ).postRunAnalysisExecutor = {
+      execute: vi.fn((_task, _lease, signal) => {
+        executionSignal = signal;
+        return execution;
+      }),
+    };
+    const postRunTask = {
+      fencingToken: "3",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      snapshot: {
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
+      },
+      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+    } as RuntimePostRunAnalysisTaskLease;
+    const shutdown = new AbortController();
+
+    const running = (
+      worker as unknown as {
+        executePostRunAnalysisTask(
+          task: RuntimePostRunAnalysisTaskLease,
+          signal: AbortSignal,
+          workerId: string,
+        ): Promise<void>;
+      }
+    ).executePostRunAnalysisTask(postRunTask, shutdown.signal, "worker-1");
+    await vi.waitFor(() => expect(executionSignal).toBeDefined());
+
+    shutdown.abort(new Error("SIGTERM"));
+    expect(executionSignal?.aborted).toBe(false);
+
+    finishExecution({
+      kind: "ANALYSIS_COMPLETED",
+      report: { findings: [], summary: "分析完成。" },
+    });
+    await running;
+    expect(submitPostRunAnalysisOutcome).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Agent Runtime pool isolation", () => {

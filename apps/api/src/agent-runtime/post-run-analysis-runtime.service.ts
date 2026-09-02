@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
+  runtimePostRunAnalysisCheckpointSchema,
   runtimePostRunAnalysisOutcomeSchema,
   runtimePostRunAnalysisReportSchema,
   type RuntimePostRunAnalysisOutcome,
@@ -32,7 +33,7 @@ import {
   type StructuredEvidenceIndexEntry,
 } from "../post-run-analysis/task-log-bundle.service.js";
 
-const POST_RUN_ANALYSIS_PROTOCOL_MINOR = 7;
+const POST_RUN_ANALYSIS_PROTOCOL_MINOR = 9;
 const INLINE_MANIFEST_MAX_BYTES = 64_000;
 const CHUNK_SOURCE_CACHE_MAX_BYTES = 64 * 1_024 * 1_024;
 const CHUNK_SOURCE_CACHE_TTL_MS = 5 * 60 * 1_000;
@@ -104,6 +105,7 @@ export class PostRunAnalysisRuntimeService {
           select: {
             hardDeadlineAt: true,
             id: true,
+            leaseExpiresAt: true,
             readyAt: true,
             startedAt: true,
             status: true,
@@ -171,22 +173,39 @@ export class PostRunAnalysisRuntimeService {
           include: { taskExecution: true },
           where: { id: candidate.id },
         });
-        await tx.postRunAnalysisEvent.create({
-          data: {
-            actor: "AGENT_RUNTIME",
-            analysisId: job.id,
-            kind: "analysis.started",
-            payload: json({
-              attemptNumber: job.attemptNumber,
-              deadlineAt: job.deadlineAt.toISOString(),
-              hardDeadlineAt: job.hardDeadlineAt.toISOString(),
-              queueWaitMs:
-                candidate.status === "READY" && candidate.readyAt
-                  ? Math.max(0, now.getTime() - candidate.readyAt.getTime())
-                  : null,
-            }),
-            teamId,
-          },
+        await tx.postRunAnalysisEvent.createMany({
+          data: [
+            ...(candidate.status === "RUNNING" && candidate.leaseExpiresAt
+              ? [
+                  {
+                    actor: "CONTROL_PLANE" as const,
+                    analysisId: job.id,
+                    kind: "analysis.lease_recovered",
+                    payload: json({
+                      attemptNumber: job.attemptNumber - 1,
+                      previousLeaseExpiredAt:
+                        candidate.leaseExpiresAt.toISOString(),
+                    }),
+                    teamId,
+                  },
+                ]
+              : []),
+            {
+              actor: "AGENT_RUNTIME",
+              analysisId: job.id,
+              kind: "analysis.started",
+              payload: json({
+                attemptNumber: job.attemptNumber,
+                deadlineAt: job.deadlineAt.toISOString(),
+                hardDeadlineAt: job.hardDeadlineAt.toISOString(),
+                queueWaitMs:
+                  candidate.status === "READY" && candidate.readyAt
+                    ? Math.max(0, now.getTime() - candidate.readyAt.getTime())
+                    : null,
+              }),
+              teamId,
+            },
+          ],
         });
         return job;
       });
@@ -210,6 +229,9 @@ export class PostRunAnalysisRuntimeService {
             analysisId: claimed.id,
             analyzerVersion: claimed.analyzerVersion,
             attemptNumber: claimed.attemptNumber,
+            checkpoint: runtimePostRunAnalysisCheckpointSchema.parse(
+              claimed.analysisCheckpoint ?? {},
+            ),
             deadlineAt: claimed.deadlineAt.toISOString(),
             input: {
               byteSize: claimed.inputByteSize,
@@ -316,6 +338,7 @@ export class PostRunAnalysisRuntimeService {
   ) {
     const job = await this.prisma.postRunAnalysisJob.findFirst({
       select: {
+        analysisCheckpoint: true,
         fencingToken: true,
         inputByteSize: true,
         inputManifest: true,
@@ -345,7 +368,7 @@ export class PostRunAnalysisRuntimeService {
           contentType: "application/vnd.devproof.execution-manifest+json",
         }),
       );
-      return this.readObjectChunk({
+      const output = await this.readObjectChunk({
         body: source.body,
         contentType: source.contentType,
         cursor: input.cursor,
@@ -354,6 +377,8 @@ export class PostRunAnalysisRuntimeService {
         storageKey: job.inputStorageKey,
         totalBytes: source.body.byteLength,
       });
+      await this.saveAnalysisCheckpoint(teamId, id, job, input, output);
+      return output;
     }
     if (input.name === "read_analysis_evidence") {
       if (!manifestEvidenceRefs(job.inputManifest).has(input.evidenceRef)) {
@@ -405,6 +430,7 @@ export class PostRunAnalysisRuntimeService {
           input,
           output,
         );
+        await this.saveAnalysisCheckpoint(teamId, id, job, input, output);
         return output;
       }
 
@@ -434,9 +460,10 @@ export class PostRunAnalysisRuntimeService {
         input,
         output,
       );
+      await this.saveAnalysisCheckpoint(teamId, id, job, input, output);
       return output;
     }
-    return this.readObjectChunk({
+    const output = await this.readObjectChunk({
       contentType: "application/json",
       cursor: input.cursor,
       maxBytes: input.maxBytes,
@@ -444,6 +471,64 @@ export class PostRunAnalysisRuntimeService {
       storageKey: job.inputStorageKey,
       totalBytes: job.inputByteSize ?? 0,
     });
+    await this.saveAnalysisCheckpoint(teamId, id, job, input, output);
+    return output;
+  }
+
+  private async saveAnalysisCheckpoint(
+    teamId: string,
+    analysisId: string,
+    job: {
+      analysisCheckpoint: unknown;
+      fencingToken: bigint;
+      leaseOwner: string | null;
+      leaseToken: string | null;
+    },
+    input: RuntimePostRunAnalysisToolInput,
+    _output: { nextCursor: number | null; totalBytes: number },
+  ) {
+    const current = runtimePostRunAnalysisCheckpointSchema.parse(
+      job.analysisCheckpoint ?? {},
+    );
+    const sanitizedSummary = sanitizeLogBundleValue(input.analysisSummary);
+    const checkpoint = runtimePostRunAnalysisCheckpointSchema.parse({
+      ...current,
+      analysisSummary:
+        typeof sanitizedSummary === "string"
+          ? sanitizedSummary
+          : "分析断点摘要已被安全过滤。",
+      ...(input.name === "read_analysis_bundle"
+        ? {
+            // The summary was produced before this chunk was returned. Persist
+            // the requested cursor as the last acknowledged position so a
+            // connection loss can at worst replay one chunk, never skip one.
+            bundleComplete: false,
+            bundleCursor: Math.max(current.bundleCursor, input.cursor),
+          }
+        : {}),
+      evidenceRefs:
+        input.name === "read_analysis_evidence"
+          ? [...current.evidenceRefs, input.evidenceRef]
+          : current.evidenceRefs,
+      updatedAt: new Date().toISOString(),
+    });
+    const now = new Date();
+    const saved = await this.prisma.postRunAnalysisJob.updateMany({
+      data: { analysisCheckpoint: json(checkpoint) },
+      where: {
+        fencingToken: job.fencingToken,
+        id: analysisId,
+        leaseExpiresAt: { gt: now },
+        leaseOwner: job.leaseOwner,
+        leaseToken: job.leaseToken,
+        status: "RUNNING",
+        teamId,
+      },
+    });
+    if (saved.count !== 1) {
+      throw new ConflictException("The post-run analysis lease is stale.");
+    }
+    job.analysisCheckpoint = checkpoint;
   }
 
   private async readObjectChunk(input: {
@@ -701,6 +786,7 @@ export class PostRunAnalysisRuntimeService {
       }
       const finalized = await tx.postRunAnalysisJob.updateMany({
         data: {
+          analysisCheckpoint: json({}),
           completionId,
           error: Prisma.JsonNull,
           finishedAt: now,

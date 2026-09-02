@@ -34,13 +34,13 @@ describe("agent runtime protocol", () => {
     ).toMatchObject({ analysisConcurrency: 0 });
   });
 
-  it("registers a v8 Runtime with one declared pool", () => {
+  it("registers a v9 Runtime with one declared pool", () => {
     expect(
       runtimeRegistrationInputSchema.parse({
         pool: "SPEC_ANALYSIS",
         protocol: {
           major: 2,
-          minor: 8,
+          minor: 9,
           name: "devproof-agent-runtime",
         },
         workerId: "spec-runtime-1",
@@ -51,7 +51,7 @@ describe("agent runtime protocol", () => {
         pool: "MIXED",
         protocol: {
           major: 2,
-          minor: 8,
+          minor: 9,
           name: "devproof-agent-runtime",
         },
         workerId: "mixed-runtime",

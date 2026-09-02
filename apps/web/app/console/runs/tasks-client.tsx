@@ -1511,8 +1511,24 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
             </div>
             <div className="dp-post-run-analysis-kpis">
               <div>
-                <small>总耗时</small>
-                <b>{formatAnalysisDuration(analysis.progress.elapsedMs)}</b>
+                <small>本次 Attempt</small>
+                <b>
+                  {formatAnalysisDuration(
+                    analysis.progress.currentAttemptElapsedMs,
+                  )}
+                </b>
+              </div>
+              <div>
+                <small>累计实际执行</small>
+                <b>
+                  {formatAnalysisDuration(analysis.progress.activeElapsedMs)}
+                </b>
+              </div>
+              <div>
+                <small>任务生命周期</small>
+                <b>
+                  {formatAnalysisDuration(analysis.progress.lifecycleElapsedMs)}
+                </b>
               </div>
               <div>
                 <small>排队等待</small>
@@ -1523,20 +1539,30 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
                 </b>
               </div>
               <div>
-                <small>模型调用</small>
+                <small>本次模型调用</small>
+                <b>
+                  {formatAnalysisNumber(
+                    analysis.progress.currentAttemptMetrics.modelCalls,
+                  )}{" "}
+                  次
+                  {analysis.progress.currentAttemptMetrics.modelDurationMs
+                    ? ` · ${formatAnalysisDuration(
+                        analysis.progress.currentAttemptMetrics.modelDurationMs,
+                      )}`
+                    : ""}
+                  {analysis.progress.currentAttemptMetrics.failedModelCalls
+                    ? ` · ${formatAnalysisNumber(
+                        analysis.progress.currentAttemptMetrics
+                          .failedModelCalls,
+                      )} 失败`
+                    : ""}
+                </b>
+              </div>
+              <div>
+                <small>累计模型调用</small>
                 <b>
                   {formatAnalysisNumber(analysis.progress.metrics.modelCalls)}{" "}
                   次
-                  {analysis.progress.metrics.modelDurationMs
-                    ? ` · ${formatAnalysisDuration(
-                        analysis.progress.metrics.modelDurationMs,
-                      )}`
-                    : ""}
-                  {analysis.progress.metrics.failedModelCalls
-                    ? ` · ${formatAnalysisNumber(
-                        analysis.progress.metrics.failedModelCalls,
-                      )} 失败`
-                    : ""}
                 </b>
               </div>
               <div>
@@ -1548,7 +1574,7 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
                 </b>
               </div>
               <div>
-                <small>Token 输入 / 输出</small>
+                <small>累计 Token 输入 / 输出</small>
                 <b>
                   {formatAnalysisNumber(analysis.progress.metrics.inputTokens)}{" "}
                   /{" "}
@@ -1577,6 +1603,62 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
             </div>
           ) : null}
           <div className="dp-run-technical-body dp-post-run-analysis-body">
+            {analysis.progress.attempts.length ? (
+              <details className="dp-run-technical-details dp-post-run-analysis-details">
+                <summary>
+                  <span>
+                    <Activity />
+                    <b>Attempt 指标</b>
+                    <small>{analysis.progress.attempts.length} 次</small>
+                  </span>
+                  <ChevronDown />
+                </summary>
+                <div className="dp-post-run-analysis-events">
+                  {[...analysis.progress.attempts].reverse().map((attempt) => (
+                    <article key={attempt.attemptNumber}>
+                      <header>
+                        <span>
+                          <strong>Attempt #{attempt.attemptNumber}</strong>
+                          <small>
+                            {displayLabel(attempt.status)} · 执行{" "}
+                            {formatAnalysisDuration(attempt.elapsedMs)}
+                            {attempt.queueWaitMs === null
+                              ? ""
+                              : ` · 排队 ${formatAnalysisDuration(
+                                  attempt.queueWaitMs,
+                                )}`}
+                          </small>
+                        </span>
+                        <time dateTime={attempt.startedAt}>
+                          {new Date(attempt.startedAt).toLocaleString("zh-CN", {
+                            hour12: false,
+                          })}
+                        </time>
+                      </header>
+                      <p>
+                        模型 {formatAnalysisNumber(attempt.metrics.modelCalls)}{" "}
+                        次 · 模型耗时{" "}
+                        {formatAnalysisDuration(
+                          attempt.metrics.modelDurationMs,
+                        )}
+                        {attempt.metrics.failedModelCalls
+                          ? ` · ${formatAnalysisNumber(
+                              attempt.metrics.failedModelCalls,
+                            )} 次失败`
+                          : ""}
+                        {` · Token ${formatAnalysisNumber(
+                          attempt.metrics.inputTokens,
+                        )} / ${formatAnalysisNumber(
+                          attempt.metrics.outputTokens,
+                        )} · 证据 ${formatAnalysisNumber(
+                          attempt.metrics.uniqueEvidence,
+                        )}`}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              </details>
+            ) : null}
             {analysis.input ? (
               <details className="dp-run-technical-details dp-post-run-analysis-details">
                 <summary>

@@ -160,7 +160,11 @@ describe("RetentionWorker", () => {
     await worker.sweep();
 
     expect(tx.postRunAnalysisJob.updateMany).toHaveBeenCalledWith({
-      data: { inputManifest: {}, inputStorageKey: null },
+      data: {
+        analysisCheckpoint: {},
+        inputManifest: {},
+        inputStorageKey: null,
+      },
       where: {
         id: "analysis-1",
         inputStorageKey: "post-run-analysis/team/task/job/bundle.json",
