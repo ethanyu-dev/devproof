@@ -17,10 +17,11 @@ function setup(composers: Array<ReturnType<typeof composer>>) {
     replaceSession: vi.fn().mockResolvedValue(undefined),
     value: () => ({ sessions: [] }),
   };
+  const emitEvent = vi.fn();
   const manager = new BrowserSessionManager(
     store as never,
     "http://127.0.0.1:1",
-    vi.fn(),
+    emitEvent,
     vi.fn(),
   );
   const sessionId = randomUUID();
@@ -70,7 +71,7 @@ function setup(composers: Array<ReturnType<typeof composer>>) {
       sessionId,
       type: "command.execute",
     });
-  return { context, executeClose, store };
+  return { context, emitEvent, executeClose, store };
 }
 
 describe("step video finalization", () => {
@@ -108,7 +109,7 @@ describe("step video finalization", () => {
   });
 
   it("reports a durable finalization error when every profile fails", async () => {
-    const { executeClose, store } = setup([
+    const { emitEvent, executeClose, store } = setup([
       composer(Promise.reject(new Error("VP9 encoder failed"))),
       composer(Promise.reject(new Error("VP8 encoder failed"))),
     ]);
@@ -125,10 +126,34 @@ describe("step video finalization", () => {
       videoError: {
         code: "VIDEO_COMPOSITION_FAILED",
         details: {
-          attempts: [{ profile: "native" }, { profile: "compatibility" }],
+          attempts: [
+            { durationMs: expect.any(Number), profile: "native" },
+            { durationMs: expect.any(Number), profile: "compatibility" },
+          ],
         },
       },
     });
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: expect.any(String) }),
+      "VIDEO_FINALIZATION_FAILED",
+      expect.objectContaining({
+        attempts: [
+          expect.objectContaining({
+            durationMs: expect.any(Number),
+            profile: "native",
+          }),
+          expect.objectContaining({
+            durationMs: expect.any(Number),
+            profile: "compatibility",
+          }),
+        ],
+        code: "VIDEO_COMPOSITION_FAILED",
+        commandId: expect.any(String),
+        durationMs: expect.any(Number),
+        frameCount: 1,
+        runtimeVersion: "0.2.16",
+      }),
+    );
     expect(store.removeSession).toHaveBeenCalledOnce();
   });
 });

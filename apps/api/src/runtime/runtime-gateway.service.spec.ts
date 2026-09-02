@@ -110,7 +110,7 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
     const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
     expect(accepted).toMatchObject({
       networkAllowlist: ["test-console.paigod.work"],
-      protocol: { minor: 11 },
+      protocol: { minor: 12 },
       type: "runtime.hello.accepted",
     });
   });
@@ -130,6 +130,25 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
     const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
     expect(accepted).toMatchObject({
       protocol: { major: 1, minor: 10 },
+      type: "runtime.hello.accepted",
+    });
+  });
+
+  it("negotiates protocol v1.12 for structured Runtime diagnostics", async () => {
+    const { handleHello, prisma, service, socket } = fixture();
+
+    await handleHello.call(service, socket, hello("0.2.16", 12));
+
+    expect(prisma.browserRuntime.update).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        protocolMinor: 12,
+        version: "0.2.16",
+      }),
+      where: { id: "6f090d88-8987-487f-8338-1a734beab6a6" },
+    });
+    const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
+    expect(accepted).toMatchObject({
+      protocol: { major: 1, minor: 12 },
       type: "runtime.hello.accepted",
     });
   });

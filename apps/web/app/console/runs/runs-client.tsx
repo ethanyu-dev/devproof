@@ -71,11 +71,19 @@ interface RunDetail extends RunSummary {
         id: string;
         kind: string;
         occurredAt: string;
+        payload: unknown;
       }>;
       id: string;
       lastError: unknown;
+      protocolMajor: number;
+      protocolMinor: number;
       profileMode: string;
-      runtime: { id: string; name: string; status: string };
+      runtime: {
+        id: string;
+        name: string;
+        status: string;
+        version: string | null;
+      };
       status: string;
     } | null;
     status: string;
@@ -188,14 +196,133 @@ function evidenceMetadata(evidence: RunDetail["evidences"][number]) {
 
 function videoFinalizationFailure(value: unknown) {
   if (!isRecord(value) || value.type !== "VIDEO_FINALIZATION") return null;
+  const attempts = Array.isArray(value.attempts)
+    ? value.attempts.flatMap((candidate) => {
+        if (!isRecord(candidate)) return [];
+        if (
+          typeof candidate.code !== "string" ||
+          typeof candidate.message !== "string" ||
+          !["native", "compatibility"].includes(String(candidate.profile)) ||
+          typeof candidate.durationMs !== "number"
+        ) {
+          return [];
+        }
+        return [
+          {
+            code: candidate.code,
+            durationMs: candidate.durationMs,
+            maxHeight:
+              typeof candidate.maxHeight === "number"
+                ? candidate.maxHeight
+                : null,
+            maxWidth:
+              typeof candidate.maxWidth === "number"
+                ? candidate.maxWidth
+                : null,
+            message: candidate.message,
+            profile: candidate.profile as "native" | "compatibility",
+            videoBitsPerSecond:
+              typeof candidate.videoBitsPerSecond === "number"
+                ? candidate.videoBitsPerSecond
+                : null,
+          },
+        ];
+      })
+    : [];
   return {
+    attempts,
     code:
       typeof value.code === "string" ? value.code : "VIDEO_COMPOSITION_FAILED",
+    durationMs: typeof value.durationMs === "number" ? value.durationMs : null,
     message:
       typeof value.message === "string"
         ? value.message
         : "浏览器节点未能生成操作视频。",
+    runtimeVersion:
+      typeof value.runtimeVersion === "string" ? value.runtimeVersion : null,
+    stepFrameCount:
+      typeof value.stepFrameCount === "number"
+        ? value.stepFrameCount
+        : typeof value.frameCount === "number"
+          ? value.frameCount
+          : null,
   };
+}
+
+function videoFinalizationDiagnosticValue(
+  session: RunDetail["browserExecutions"][number]["runtimeSession"],
+) {
+  if (!session) return null;
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index];
+    if (event?.kind === "VIDEO_FINALIZATION_FAILED") {
+      return {
+        ...(isRecord(event.payload) ? event.payload : {}),
+        type: "VIDEO_FINALIZATION",
+      };
+    }
+  }
+  return session.lastError;
+}
+
+function videoEncodingProfileLabel(profile: "native" | "compatibility") {
+  return profile === "native" ? "原生编码" : "兼容编码";
+}
+
+function videoAttemptConfiguration(
+  attempt: NonNullable<
+    ReturnType<typeof videoFinalizationFailure>
+  >["attempts"][number],
+) {
+  const dimensions =
+    attempt.maxWidth && attempt.maxHeight
+      ? `${attempt.maxWidth}×${attempt.maxHeight}`
+      : null;
+  const bitrate = attempt.videoBitsPerSecond
+    ? `${Math.round(attempt.videoBitsPerSecond / 1_000)} kbps`
+    : null;
+  return [dimensions, bitrate, `${attempt.durationMs} ms`]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function VideoFinalizationDiagnostics({ value }: { value: unknown }) {
+  const failure = videoFinalizationFailure(value);
+  if (!failure) return null;
+  return (
+    <div className="dp-run-video-diagnostics">
+      <p>
+        <b>操作视频生成失败：{failure.code}</b>
+        <span>{failure.message}</span>
+        <small>
+          {failure.runtimeVersion ? `Runtime ${failure.runtimeVersion} · ` : ""}
+          {failure.stepFrameCount === null
+            ? ""
+            : `${failure.stepFrameCount} 帧 · `}
+          {failure.durationMs === null && failure.attempts.length === 0
+            ? "节点未返回编码尝试明细"
+            : failure.durationMs === null
+              ? `已记录 ${failure.attempts.length} 次编码尝试`
+              : `总耗时 ${failure.durationMs} ms · ${failure.attempts.length} 次编码尝试`}
+          。步骤截图仍可用于回放和排查。
+        </small>
+      </p>
+      {failure.attempts.length ? (
+        <div>
+          {failure.attempts.map((attempt, index) => (
+            <div key={`${attempt.profile}-${index}`}>
+              <span>
+                {index + 1}. {videoEncodingProfileLabel(attempt.profile)}
+              </span>
+              <Badge tone="danger">{attempt.code}</Badge>
+              <small>{videoAttemptConfiguration(attempt)}</small>
+              <p>{attempt.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function isVideoEvidence(evidence: RunDetail["evidences"][number]) {
@@ -640,7 +767,9 @@ function RunDetailClient({ id }: { id: string }) {
   const videoFailure =
     detail?.browserExecutions
       .map((execution) =>
-        videoFinalizationFailure(execution.runtimeSession?.lastError),
+        videoFinalizationFailure(
+          videoFinalizationDiagnosticValue(execution.runtimeSession),
+        ),
       )
       .find((failure) => failure !== null) ?? null;
   const passedCriteria = criteria.filter(
@@ -1104,7 +1233,7 @@ function RunDetailClient({ id }: { id: string }) {
                                 </b>
                                 <small>
                                   {execution.runtimeSession
-                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · 会话 ${displayLabel(execution.runtimeSession.status)}`
+                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · 会话 ${displayLabel(execution.runtimeSession.status)} · Runtime ${execution.runtimeSession.runtime.version ?? "未知版本"} · 协议 v${execution.runtimeSession.protocolMajor}.${execution.runtimeSession.protocolMinor}`
                                     : "尚未分配浏览器执行会话"}
                                 </small>
                               </span>
@@ -1112,19 +1241,11 @@ function RunDetailClient({ id }: { id: string }) {
                                 {displayLabel(execution.status)}
                               </Badge>
                             </header>
-                            {videoFinalizationFailure(
-                              execution.runtimeSession?.lastError,
-                            ) ? (
-                              <p className="dp-run-card-copy">
-                                操作视频生成失败：
-                                {
-                                  videoFinalizationFailure(
-                                    execution.runtimeSession?.lastError,
-                                  )?.code
-                                }
-                                。步骤截图仍可用于回放和排查。
-                              </p>
-                            ) : null}
+                            <VideoFinalizationDiagnostics
+                              value={videoFinalizationDiagnosticValue(
+                                execution.runtimeSession,
+                              )}
+                            />
                             {execution.runtimeSession?.commands.length ? (
                               <div className="dp-run-runtime-list">
                                 {execution.runtimeSession.commands.map(

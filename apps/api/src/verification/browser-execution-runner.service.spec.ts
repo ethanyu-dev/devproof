@@ -33,14 +33,54 @@ describe("Browser Runtime video finalization", () => {
           videoCreated: false,
           videoError: {
             code: "VIDEO_COMPOSITION_FAILED",
+            details: {
+              attempts: [
+                {
+                  code: "COMMAND_FAILED",
+                  durationMs: 420,
+                  message: "VP9 encoder failed.",
+                  profile: "native",
+                },
+                {
+                  code: "COMMAND_FAILED",
+                  durationMs: 380,
+                  maxHeight: 540,
+                  maxWidth: 960,
+                  message: "VP8 encoder failed.",
+                  profile: "compatibility",
+                  videoBitsPerSecond: 600_000,
+                },
+              ],
+            },
             message: "Every encoding profile failed.",
           },
+          videoFinalizationDurationMs: 805,
+          videoRuntimeVersion: "0.2.16",
         },
         status: "SUCCEEDED",
       }),
     ).toEqual({
+      attempts: [
+        {
+          code: "COMMAND_FAILED",
+          durationMs: 420,
+          message: "VP9 encoder failed.",
+          profile: "native",
+        },
+        {
+          code: "COMMAND_FAILED",
+          durationMs: 380,
+          maxHeight: 540,
+          maxWidth: 960,
+          message: "VP8 encoder failed.",
+          profile: "compatibility",
+          videoBitsPerSecond: 600_000,
+        },
+      ],
       code: "VIDEO_COMPOSITION_FAILED",
+      durationMs: 805,
       message: "Every encoding profile failed.",
+      runtimeVersion: "0.2.16",
       stepFrameCount: 16,
       type: "VIDEO_FINALIZATION",
     });

@@ -185,7 +185,7 @@ that Runtime reconnects. Use `--version` to pin a release or `--force-active`
 only when interruption risk is explicitly accepted:
 
     curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh | \
-      bash -s -- --version 0.2.15
+      bash -s -- --version 0.2.16
 
 A Runtime host must be able to use its systemd user manager and reach GitHub
 Releases, the Node.js download source, npm registry, Playwright CDN, DevProof
@@ -208,7 +208,7 @@ MCP exposes only the unified Task control plane: `get_integration_status`, `crea
 
 Console Playground is the end-to-end integration entry point. Issue mode creates a Task, then background workers resolve context into an immutable task-level Spec Snapshot, resolve the `EPHEMERAL`, `REQUESTER`, `ISSUE_ASSIGNEE`, or `EXPLICIT_PROFILE` strategy, and idempotently create a Run v2 for each Case. Direct mode creates a Task and skips analysis and Profile resolution. A user Profile may be used only for trigger sources and target domains authorized by its owner, and Tasks using the same Profile execute with FIFO exclusivity. Case dispatch uses database claims, stable idempotency keys, and background compensation; the Task Execution detail page presents stages, Cases, and recent errors together.
 
-When an Agent requests HITL on a still-live Browser Session, the Task Execution detail page presents Browser Human Handoff. A human takes control of the Agent's original page to complete login, CAPTCHA, or MFA. Releasing control writes a structured response back to the same Runtime Task, which resumes under a new fencing lease. Live JPEG frames and mouse/keyboard input travel only over an ephemeral lease-protected channel and are not written to prompts, traces, the database, or object storage. The full browser data plane, SSRF protection, and fault injection require Browser Runtime protocol v1.2; physical control-plane cleanup requires v1.6; enhanced evidence capture requires v1.7; 30-day user Profile cleanup and lifecycle reporting require v1.8; per-step screenshots and action video require v1.10; and structured locator recovery diagnostics require v1.11. Rebuild and restart Runtime after upgrading the code.
+When an Agent requests HITL on a still-live Browser Session, the Task Execution detail page presents Browser Human Handoff. A human takes control of the Agent's original page to complete login, CAPTCHA, or MFA. Releasing control writes a structured response back to the same Runtime Task, which resumes under a new fencing lease. Live JPEG frames and mouse/keyboard input travel only over an ephemeral lease-protected channel and are not written to prompts, traces, the database, or object storage. The full browser data plane, SSRF protection, and fault injection require Browser Runtime protocol v1.2; physical control-plane cleanup requires v1.6; enhanced evidence capture requires v1.7; 30-day user Profile cleanup and lifecycle reporting require v1.8; per-step screenshots and action video require v1.10; structured locator recovery diagnostics require v1.11; and acknowledged, bounded video-finalization diagnostics require v1.12. Rebuild and restart Runtime after upgrading the code.
 
 ## User-level Browser Profiles
 

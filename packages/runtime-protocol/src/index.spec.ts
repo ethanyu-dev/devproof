@@ -56,12 +56,68 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(11);
+    expect(RUNTIME_PROTOCOL.minor).toBe(12);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");
     }
     expect(result.artifacts[0]?.kind).toBe("VIDEO");
+  });
+
+  it("accepts bounded video finalization diagnostics", () => {
+    const result = runtimeClientMessageSchema.parse({
+      eventId: "4a73bdf6-a1ad-4f78-af39-78e686539314",
+      fencingToken: "7",
+      kind: "VIDEO_FINALIZATION_FAILED",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      payload: {
+        attempts: [
+          {
+            code: "COMMAND_FAILED",
+            durationMs: 420,
+            message: "Video encoding failed.",
+            profile: "native",
+          },
+        ],
+        code: "VIDEO_COMPOSITION_FAILED",
+        commandId: "5c934746-41e4-4b41-8cab-5f79bf00cba0",
+        durationMs: 421,
+        frameCount: 21,
+        message: "Step video composition failed for every encoding profile.",
+        runtimeVersion: "0.2.16",
+      },
+      sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+      timestamp: new Date().toISOString(),
+      type: "runtime.event",
+    });
+
+    expect(result).toMatchObject({
+      kind: "VIDEO_FINALIZATION_FAILED",
+      payload: { frameCount: 21 },
+    });
+  });
+
+  it("rejects unbounded video finalization diagnostics", () => {
+    expect(() =>
+      runtimeClientMessageSchema.parse({
+        eventId: "4a73bdf6-a1ad-4f78-af39-78e686539314",
+        fencingToken: "7",
+        kind: "VIDEO_FINALIZATION_FAILED",
+        leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+        payload: {
+          attempts: [],
+          code: "VIDEO_COMPOSITION_FAILED",
+          commandId: "5c934746-41e4-4b41-8cab-5f79bf00cba0",
+          durationMs: 421,
+          frameCount: 21,
+          message: "x".repeat(501),
+          runtimeVersion: "0.2.16",
+        },
+        sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+        timestamp: new Date().toISOString(),
+        type: "runtime.event",
+      }),
+    ).toThrow();
   });
 
   it("accepts structured locator recovery diagnostics", () => {

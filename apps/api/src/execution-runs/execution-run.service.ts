@@ -369,7 +369,9 @@ export class ExecutionRunService {
               include: {
                 commands: { orderBy: { createdAt: "asc" }, take: 500 },
                 events: { orderBy: { occurredAt: "asc" }, take: 500 },
-                runtime: { select: { id: true, name: true, status: true } },
+                runtime: {
+                  select: { id: true, name: true, status: true, version: true },
+                },
               },
             },
           },

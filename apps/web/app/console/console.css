@@ -2992,6 +2992,57 @@
   display: grid;
 }
 
+.dp-run-video-diagnostics {
+  border-top: 1px solid
+    color-mix(in oklch, var(--ek-danger) 35%, var(--ek-border));
+  background: color-mix(in oklch, var(--ek-danger-soft) 55%, var(--ek-surface));
+  padding: 12px 16px;
+}
+
+.dp-run-video-diagnostics > p,
+.dp-run-video-diagnostics > div > div {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.dp-run-video-diagnostics > p > b {
+  color: var(--ek-danger);
+}
+
+.dp-run-video-diagnostics span,
+.dp-run-video-diagnostics small,
+.dp-run-video-diagnostics p {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dp-run-video-diagnostics small {
+  color: var(--ek-muted);
+}
+
+.dp-run-video-diagnostics > div {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dp-run-video-diagnostics > div > div {
+  align-items: center;
+  border: 1px solid var(--ek-border);
+  border-radius: 7px;
+  background: var(--ek-surface);
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 9px 10px;
+}
+
+.dp-run-video-diagnostics > div p,
+.dp-run-video-diagnostics > div small {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .dp-run-runtime-list > div {
   align-items: center;
   border-top: 1px solid var(--ek-border);

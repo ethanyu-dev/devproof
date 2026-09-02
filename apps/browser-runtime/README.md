@@ -60,6 +60,8 @@ Browser Runtime protocol v1.10 captures a screenshot after each successful navig
 
 Protocol v1.11 adds structured locator recovery diagnostics. When a selector matches multiple elements, Runtime automatically accepts a unique visible candidate; otherwise it returns bounded candidate details and instructs the Agent to resnapshot and retarget without guessing.
 
+Protocol v1.12 reports acknowledged `VIDEO_FINALIZATION_FAILED` events with the Runtime version, close command correlation, frame count, total duration, and bounded encoding-attempt summaries. Pending failure events are kept in a permission-restricted, 64-entry, 7-day local spool and replayed after reconnect or process restart until the control plane acknowledges them. Raw Runtime logs, screenshots, page content, and URLs are never included in these diagnostic events.
+
 Protocol v1.7 also supports open Shadow DOM capture and bounded, recursively redacted same-origin JSON response bodies when network evidence is narrowed by `urlIncludes`.
 
 See [`docs/runtime-protocol.md`](../../docs/runtime-protocol.md) for compatibility rules and [`packages/runtime-protocol/README.md`](../../packages/runtime-protocol/README.md) for the canonical protocol changelog.
