@@ -125,6 +125,28 @@ const agentModelPoolLabels: Record<AgentModelPool, string> = {
   POST_RUN_ANALYSIS: "运行后分析 Runtime",
 };
 
+const agentModelPoolTabs: Array<{
+  icon: typeof MonitorUp;
+  id: AgentModelPool;
+  label: string;
+}> = [
+  {
+    icon: Bot,
+    id: "SPEC_ANALYSIS",
+    label: agentModelPoolLabels.SPEC_ANALYSIS,
+  },
+  {
+    icon: MonitorUp,
+    id: "BROWSER_EXECUTION",
+    label: agentModelPoolLabels.BROWSER_EXECUTION,
+  },
+  {
+    icon: ShieldCheck,
+    id: "POST_RUN_ANALYSIS",
+    label: agentModelPoolLabels.POST_RUN_ANALYSIS,
+  },
+];
+
 type AccessSection = "browser" | "github" | "agent-runtime" | "mcp";
 
 type RoutingFallbackPolicy = "WAIT" | "FAIL_FAST";
@@ -1623,13 +1645,57 @@ export function AccessClient() {
 
           {activeSection === "agent-runtime" ? (
             <section className="dp-access-module">
-              <div className="dp-runtime-layout">
+              <nav
+                aria-label="Agent Runtime 模型池"
+                className="dp-agent-model-navigation"
+                role="tablist"
+              >
+                {agentModelPoolTabs.map((pool) => {
+                  const Icon = pool.icon;
+                  const active = agentModelPool === pool.id;
+                  const count =
+                    agentModels?.filter((model) => model.pool === pool.id)
+                      .length ?? 0;
+                  return (
+                    <button
+                      aria-controls="agent-model-pool-panel"
+                      aria-selected={active}
+                      id={`agent-model-pool-${pool.id.toLowerCase()}`}
+                      key={pool.id}
+                      onClick={() => {
+                        if (active) return;
+                        setAgentModelPool(pool.id);
+                        resetAgentModelForm();
+                        setAgentRuntimeMessage(null);
+                      }}
+                      role="tab"
+                      type="button"
+                    >
+                      <Icon />
+                      <span>
+                        <strong>{pool.label}</strong>
+                        <small>{count}/10 个模型</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+
+              <div
+                aria-labelledby={`agent-model-pool-${agentModelPool.toLowerCase()}`}
+                className="dp-runtime-layout"
+                id="agent-model-pool-panel"
+                role="tabpanel"
+              >
                 <div className="dp-runtime-primary">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
                       <span>
                         <Plus />
-                        <b>{agentModelId ? "编辑模型" : "新增模型"}</b>
+                        <b>
+                          {agentModelPoolLabels[agentModelPool]} ·{" "}
+                          {agentModelId ? "编辑模型" : "新增模型"}
+                        </b>
                       </span>
                     </div>
                     <form
@@ -1637,27 +1703,6 @@ export function AccessClient() {
                       onSubmit={saveAgentModel}
                     >
                       <div className="dp-form-grid">
-                        <Field label="Runtime Pool">
-                          <Select
-                            disabled={agentModelId !== null}
-                            onChange={(event) => {
-                              setAgentModelPool(
-                                event.target.value as AgentModelPool,
-                              );
-                              resetAgentModelForm();
-                              setAgentRuntimeMessage(null);
-                            }}
-                            value={agentModelPool}
-                          >
-                            {Object.entries(agentModelPoolLabels).map(
-                              ([pool, label]) => (
-                                <option key={pool} value={pool}>
-                                  {label}
-                                </option>
-                              ),
-                            )}
-                          </Select>
-                        </Field>
                         <Field label="Display Name">
                           <Input
                             onChange={(event) =>
