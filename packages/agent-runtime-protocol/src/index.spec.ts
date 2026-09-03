@@ -9,6 +9,7 @@ import {
   runtimeModelCandidateSchema,
   runtimePostRunAnalysisOutcomeSchema,
   runtimePostRunAnalysisReportSchema,
+  runtimePostRunAnalysisTaskLeaseSchema,
   runtimePostRunAnalysisToolInputSchema,
   runtimeRegistrationInputSchema,
   runtimeRegistrationOutputSchema,
@@ -269,6 +270,16 @@ describe("agent runtime protocol", () => {
     const outcome = runtimePostRunAnalysisOutcomeSchema.parse({
       kind: "ANALYSIS_COMPLETED",
       report: {
+        coverage: {
+          bundleBytesRead: 0,
+          bundleFullyScanned: false,
+          candidateCount: 8,
+          evidenceBytesRead: 64_000,
+          evidenceReadCount: 2,
+          manifestBytesRead: 0,
+          manifestFullyScanned: false,
+          strategy: "failure-first-v1",
+        },
         findings: [
           {
             attemptNumber: 3,
@@ -293,6 +304,11 @@ describe("agent runtime protocol", () => {
 
     expect(outcome).toMatchObject({
       report: {
+        coverage: {
+          candidateCount: 8,
+          evidenceReadCount: 2,
+          strategy: "failure-first-v1",
+        },
         findings: [
           {
             failureClass: "CONTEXT_WINDOW_EXCEEDED",
@@ -301,6 +317,46 @@ describe("agent runtime protocol", () => {
         ],
       },
     });
+  });
+
+  it("permits a model-free lease for a deterministic clean pass", () => {
+    const lease = runtimePostRunAnalysisTaskLeaseSchema.parse({
+      fencingToken: "1",
+      leaseExpiresAt: "2026-09-02T08:00:00.000Z",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      snapshot: {
+        analysisId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+        analyzerVersion: "post-run-analysis-v4",
+        attemptNumber: 1,
+        deadlineAt: "2026-09-02T08:00:00.000Z",
+        input: {
+          byteSize: 2,
+          completeness: {
+            browserExecutionsFinalized: true,
+            durableEvents: true,
+            evidenceMetadata: true,
+          },
+          manifest: {
+            analysisSynopsis: {
+              candidateCount: 0,
+              cleanPass: true,
+              completenessSufficient: true,
+            },
+          },
+          schemaVersion: "devproof.task-logs.v2",
+          sha256: "a".repeat(64),
+        },
+        modelCandidates: [],
+        sourceRef: null,
+        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
+        teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
+        title: "clean pass",
+        traceId: "1".repeat(32),
+      },
+      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+    });
+
+    expect(lease.snapshot.modelCandidates).toEqual([]);
   });
 
   it("rejects a post-run report that cannot fit inside the API request limit", () => {

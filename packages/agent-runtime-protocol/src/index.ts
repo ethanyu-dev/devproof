@@ -272,7 +272,7 @@ export const runtimePostRunAnalysisTaskSnapshotSchema = z.object({
     schemaVersion: z.literal("devproof.task-logs.v2"),
     sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   }),
-  modelCandidates: z.array(runtimeModelCandidateSchema).min(1).max(10),
+  modelCandidates: z.array(runtimeModelCandidateSchema).max(10),
   sourceRef: z.string().trim().max(500).nullable(),
   taskExecutionId: z.string().uuid(),
   teamId: z.string().uuid(),
@@ -730,8 +730,20 @@ export const runtimePostRunFindingSchema = z
     }
   });
 
+export const runtimePostRunAnalysisCoverageSchema = z.object({
+  bundleBytesRead: z.number().int().nonnegative(),
+  bundleFullyScanned: z.boolean(),
+  candidateCount: z.number().int().nonnegative(),
+  evidenceBytesRead: z.number().int().nonnegative(),
+  evidenceReadCount: z.number().int().nonnegative(),
+  manifestBytesRead: z.number().int().nonnegative(),
+  manifestFullyScanned: z.boolean(),
+  strategy: z.enum(["failure-first-v1", "full-manifest-fallback"]),
+});
+
 export const runtimePostRunAnalysisReportSchema = z
   .object({
+    coverage: runtimePostRunAnalysisCoverageSchema.optional(),
     findings: z.array(runtimePostRunFindingSchema).max(100),
     summary: z.string().trim().min(1).max(12_000),
   })
@@ -883,6 +895,9 @@ export type RuntimeSpecAnalysisToolInput = z.infer<
 export type RuntimeSpecSourceRef = z.infer<typeof runtimeSpecSourceRefSchema>;
 export type RuntimePostRunAnalysisOutcome = z.infer<
   typeof runtimePostRunAnalysisOutcomeSchema
+>;
+export type RuntimePostRunAnalysisReport = z.infer<
+  typeof runtimePostRunAnalysisReportSchema
 >;
 export type RuntimePostRunAnalysisTaskLease = z.infer<
   typeof runtimePostRunAnalysisTaskLeaseSchema

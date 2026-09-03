@@ -503,7 +503,7 @@ describe("PostRunAnalysisService", () => {
     let transactionCall = 0;
     const storage = {
       delete: vi.fn().mockResolvedValue(undefined),
-      put: vi.fn().mockResolvedValue({
+      putStream: vi.fn().mockResolvedValue({
         byteSize: 128,
         sha256: "a".repeat(64),
       }),
@@ -522,11 +522,10 @@ describe("PostRunAnalysisService", () => {
         },
       } as never,
       {
-        build: vi.fn().mockResolvedValue({
-          body: Buffer.from("{}"),
+        buildForCapture: vi.fn().mockResolvedValue({
+          bundle: {},
           completeness: {},
-          evidenceBody: Buffer.from("{}\n"),
-          evidenceIndex: {},
+          evidenceRefs: new Set<string>(),
           manifest: {},
           schemaVersion: "devproof.task-logs.v2",
         }),
@@ -585,16 +584,15 @@ describe("PostRunAnalysisService", () => {
         postRunAnalysisJob: { findFirst: vi.fn().mockResolvedValue(null) },
       } as never,
       {
-        build: vi.fn().mockResolvedValue({
-          body: Buffer.from("{}"),
+        buildForCapture: vi.fn().mockResolvedValue({
+          bundle: {},
           completeness: {},
-          evidenceBody: Buffer.from("{}\n"),
-          evidenceIndex: {},
+          evidenceRefs: new Set<string>(),
           manifest: {},
           schemaVersion: "devproof.task-logs.v2",
         }),
       } as never,
-      { put: vi.fn().mockRejectedValue(uploadError) } as never,
+      { putStream: vi.fn().mockRejectedValue(uploadError) } as never,
     );
     const job = {
       captureEvidenceStorageKey: null,
@@ -632,14 +630,14 @@ describe("PostRunAnalysisService", () => {
     const databaseError = new Error("transaction response was lost");
     const storage = {
       delete: vi.fn().mockResolvedValue(undefined),
-      put: vi.fn().mockImplementation(async (storageKey: string) => ({
+      putStream: vi.fn().mockImplementation(async (storageKey: string) => ({
         byteSize: 128,
         sha256: "a".repeat(64),
         storageKey,
       })),
     };
     const findFirst = vi.fn().mockImplementation(async () => ({
-      inputStorageKey: storage.put.mock.calls[0]?.[0] as string,
+      inputStorageKey: storage.putStream.mock.calls[0]?.[0] as string,
     }));
     const transactionClient = {
       objectStorageDeletionTask: {
@@ -665,11 +663,10 @@ describe("PostRunAnalysisService", () => {
         },
       } as never,
       {
-        build: vi.fn().mockResolvedValue({
-          body: Buffer.from("{}"),
+        buildForCapture: vi.fn().mockResolvedValue({
+          bundle: {},
           completeness: {},
-          evidenceBody: Buffer.from("{}\n"),
-          evidenceIndex: {},
+          evidenceRefs: new Set<string>(),
           manifest: {},
           schemaVersion: "devproof.task-logs.v2",
         }),
@@ -731,31 +728,48 @@ describe("PostRunAnalysisService", () => {
             operation(transactionClient),
         ),
     };
-    const evidenceIndex = {
-      "browser-command://command-1": {
-        byteSize: 42,
-        offset: 0,
-        sha256: "b".repeat(64),
+    const buildForCapture = vi.fn().mockResolvedValue({
+      bundle: {
+        runEvents: [],
+        task: {
+          analysisSources: [],
+          executionRuns: [
+            {
+              browserExecutions: [
+                {
+                  runtimeSession: {
+                    commands: [
+                      {
+                        evidenceRef: "browser-command://command-1",
+                        status: "FAILED",
+                      },
+                    ],
+                    events: [],
+                  },
+                },
+              ],
+              evidences: [],
+            },
+          ],
+          taskEvents: [],
+          toolInvocations: [],
+        },
       },
-    };
-    const build = vi.fn().mockResolvedValue({
-      body: Buffer.from("{}"),
       completeness: { durableEvents: true },
-      evidenceBody: Buffer.from("{}\n"),
-      evidenceIndex,
+      evidenceRefs: new Set(["browser-command://command-1"]),
       manifest: { evidenceRefs: ["browser-command://command-1"] },
       schemaVersion: "devproof.task-logs.v2",
     });
     const storage = {
       delete: vi.fn().mockResolvedValue(undefined),
-      put: vi.fn().mockResolvedValue({
+      putStream: vi.fn().mockResolvedValue({
         byteSize: 128,
         sha256: "a".repeat(64),
       }),
     };
     const service = new PostRunAnalysisService(
       prisma as never,
-      { build } as never,
+      { buildForCapture } as never,
       storage as never,
     );
     const job = {
@@ -784,8 +798,8 @@ describe("PostRunAnalysisService", () => {
       false,
     ]);
 
-    expect(build).toHaveBeenCalledOnce();
-    expect(storage.put).toHaveBeenCalledTimes(2);
+    expect(buildForCapture).toHaveBeenCalledOnce();
+    expect(storage.putStream).toHaveBeenCalledTimes(2);
     expect(updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -800,7 +814,13 @@ describe("PostRunAnalysisService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           inputManifest: expect.objectContaining({
-            [POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD]: evidenceIndex,
+            [POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD]: {
+              "browser-command://command-1": {
+                byteSize: expect.any(Number),
+                offset: 0,
+                sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+              },
+            },
             [POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD]:
               expect.stringMatching(/\.evidence\.ndjson$/u),
           }),

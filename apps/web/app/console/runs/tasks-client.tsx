@@ -1566,11 +1566,28 @@ function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
                 </b>
               </div>
               <div>
+                <small>失败优先候选</small>
+                <b>
+                  {formatAnalysisNumber(
+                    analysis.progress.metrics.candidateCount,
+                  )}
+                </b>
+              </div>
+              <div>
                 <small>已核验证据</small>
                 <b>
                   {formatAnalysisNumber(
                     analysis.progress.metrics.uniqueEvidence,
                   )}
+                </b>
+              </div>
+              <div>
+                <small>累计读取索引 / 证据 / 原始包</small>
+                <b>
+                  {formatByteSize(analysis.progress.metrics.manifestBytesRead)}{" "}
+                  /{" "}
+                  {formatByteSize(analysis.progress.metrics.evidenceBytesRead)}{" "}
+                  / {formatByteSize(analysis.progress.metrics.bundleBytesRead)}
                 </b>
               </div>
               <div>

@@ -214,11 +214,34 @@ function metricsForEvents(events: PostRunAnalysisProgressEvent[]) {
   );
 
   return {
+    bundleBytesRead: events
+      .filter((event) => event.kind === "analysis.bundle.read")
+      .reduce(
+        (total, event) =>
+          total + (number(record(event.payload).bytesRead) ?? 0),
+        0,
+      ),
     bundleReads: events.filter((event) => event.kind === "analysis.bundle.read")
       .length,
+    candidateCount: events.reduce(
+      (maximum, event) =>
+        Math.max(maximum, number(record(event.payload).candidateCount) ?? 0),
+      0,
+    ),
+    evidenceBytesRead: evidenceReads.reduce(
+      (total, event) => total + (number(record(event.payload).bytesRead) ?? 0),
+      0,
+    ),
     evidenceReads: evidenceReads.length,
     failedModelCalls: failedModelCalls.length,
     inputTokens: usage.inputTokens,
+    manifestBytesRead: events
+      .filter((event) => event.kind === "analysis.manifest.read")
+      .reduce(
+        (total, event) =>
+          total + (number(record(event.payload).bytesRead) ?? 0),
+        0,
+      ),
     manifestReads: events.filter(
       (event) => event.kind === "analysis.manifest.read",
     ).length,

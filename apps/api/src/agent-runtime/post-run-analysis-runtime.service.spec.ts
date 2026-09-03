@@ -105,6 +105,7 @@ function createService(contentType = "application/json") {
     teamId,
   };
   const prisma = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     postRunAnalysisEvent: { create: vi.fn().mockResolvedValue({}) },
     postRunAnalysisJob: {
       findFirst: vi.fn().mockResolvedValue(job),
@@ -143,6 +144,7 @@ function createService(contentType = "application/json") {
       ),
   };
   return {
+    job,
     prisma,
     service: new PostRunAnalysisRuntimeService(
       prisma as never,
@@ -214,6 +216,41 @@ describe("PostRunAnalysisRuntimeService evidence tools", () => {
         }),
       }),
     );
+  });
+
+  it("extracts one structured index entry without loading the full manifest", async () => {
+    const { job, prisma, service, storage } = createService();
+    const evidenceRef = "browser-event://event-1";
+    const entry = (
+      job.inputManifest[POST_RUN_ANALYSIS_EVIDENCE_INDEX_FIELD] as Record<
+        string,
+        { byteSize: number; offset: number; sha256: string }
+      >
+    )[evidenceRef]!;
+    delete (job as { inputManifest?: unknown }).inputManifest;
+    prisma.runEvidence.findFirst.mockResolvedValue(null);
+    prisma.$queryRaw.mockResolvedValue([
+      {
+        entry,
+        storageKey: "analysis/evidence.ndjson",
+      },
+    ]);
+
+    const output = await service.executeTool(teamId, analysisId, {
+      ...lease,
+      analysisSummary: "读取浏览器异常事件。",
+      cursor: 0,
+      evidenceRef,
+      maxBytes: 32_000,
+      name: "read_analysis_evidence",
+    });
+
+    expect(prisma.$queryRaw).toHaveBeenCalledOnce();
+    expect(storage.get).toHaveBeenCalledWith("analysis/evidence.ndjson", {
+      end: entry.offset + entry.byteSize - 1,
+      start: entry.offset,
+    });
+    expect(output).toMatchObject({ evidenceRef, nextCursor: null });
   });
 
   it("caches a redacted text artifact across pages and permits a targeted jump", async () => {
@@ -503,6 +540,18 @@ describe("PostRunAnalysisRuntimeService claims", () => {
     };
     const service = new PostRunAnalysisRuntimeService(
       {
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            manifest: {
+              evidenceLocations: [],
+              evidenceRefs: [],
+              runs: [],
+              schemaVersion: "devproof.execution-manifest.v2",
+              stages: [],
+              task: { verdict: "FAILED" },
+            },
+          },
+        ]),
         $transaction: vi.fn(
           (operation: (tx: typeof transactionClient) => unknown) =>
             operation(transactionClient),
@@ -550,18 +599,122 @@ describe("PostRunAnalysisRuntimeService claims", () => {
           ]),
         }),
       );
+      expect(
+        transactionClient.postRunAnalysisJob.findUniqueOrThrow,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.not.objectContaining({ inputManifest: true }),
+        }),
+      );
     } finally {
       vi.useRealTimers();
     }
   });
 
+  it("claims a complete clean pass without requiring a model configuration", async () => {
+    const now = new Date();
+    const hardDeadlineAt = new Date(now.getTime() + 60 * 60_000);
+    let claimedData: Record<string, unknown> = {};
+    const findFirst = vi.fn().mockResolvedValue({
+      hardDeadlineAt,
+      id: analysisId,
+      readyAt: now,
+      startedAt: null,
+      status: "READY",
+    });
+    const transactionClient = {
+      postRunAnalysisEvent: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      postRunAnalysisJob: {
+        fields: { maxAttempts: { field: "maxAttempts" } },
+        findFirst,
+        findUniqueOrThrow: vi.fn().mockImplementation(() => ({
+          analysisCheckpoint: {},
+          analyzerVersion: "post-run-analysis-v4",
+          attemptNumber: 1,
+          deadlineAt: claimedData.deadlineAt,
+          fencingToken: 1n,
+          hardDeadlineAt,
+          id: analysisId,
+          inputByteSize: 2,
+          inputCompleteness: {
+            browserExecutionsFinalized: true,
+            durableEvents: true,
+            evidenceMetadata: true,
+          },
+          inputSha256: "a".repeat(64),
+          inputStorageKey: "analysis/bundle.json",
+          leaseExpiresAt: claimedData.leaseExpiresAt,
+          leaseToken: claimedData.leaseToken,
+          taskExecution: {
+            sourceRef: "PROD-1",
+            title: "clean pass",
+            traceId: "1".repeat(32),
+          },
+          taskExecutionId,
+        })),
+        updateMany: vi.fn().mockImplementation(({ data }) => {
+          claimedData = data;
+          return { count: 1 };
+        }),
+      },
+    };
+    const service = new PostRunAnalysisRuntimeService(
+      {
+        $queryRaw: vi.fn().mockResolvedValue([
+          {
+            manifest: {
+              analysisSynopsis: {
+                candidateCount: 0,
+                candidates: [],
+                cleanPass: true,
+                completenessSufficient: true,
+                strategy: "failure-first-v1",
+              },
+              evidenceLocations: [],
+              evidenceRefs: [],
+              runs: [],
+              schemaVersion: "devproof.execution-manifest.v2",
+              stages: [],
+              task: { verdict: "PASSED" },
+            },
+          },
+        ]),
+        $transaction: vi.fn(
+          (operation: (tx: typeof transactionClient) => unknown) =>
+            operation(transactionClient),
+        ),
+      } as never,
+      { candidatesForPool: vi.fn().mockResolvedValue([]) } as never,
+      {} as never,
+    );
+
+    const result = await service.claim(teamId, {
+      protocol: { minor: 9 },
+      workerId: lease.workerId,
+    });
+
+    expect(result.task?.snapshot.modelCandidates).toEqual([]);
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ AND: expect.any(Array) }),
+      }),
+    );
+  });
+
   it("terminalizes a ready job without consuming an attempt when no model is configured", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const create = vi.fn().mockResolvedValue({});
+    const findFirst = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: analysisId });
     const transactionClient = {
       postRunAnalysisEvent: { create },
       postRunAnalysisJob: {
-        findFirst: vi.fn().mockResolvedValue({ id: analysisId }),
+        fields: { maxAttempts: { field: "maxAttempts" } },
+        findFirst,
         updateMany,
       },
     };
@@ -790,6 +943,20 @@ describe("PostRunAnalysisRuntimeService retries", () => {
 describe("compactInlineManifest", () => {
   it("keeps large evidence indexes out of the initial model context", () => {
     const manifest = {
+      analysisSynopsis: {
+        candidateCount: 2_000,
+        candidates: Array.from({ length: 64 }, (_, index) => ({
+          attemptNumber: 1,
+          evidenceRef: `artifact://${index}-${"candidate".repeat(50)}`,
+          runId: null,
+          runtimeId: null,
+          signal: "TASK_EVENT_ANOMALY",
+          summary: "异常详情".repeat(200),
+        })),
+        selectedCandidateCount: 64,
+        strategy: "failure-first-v1",
+        truncated: true,
+      },
       evidenceLocations: Array.from({ length: 2_000 }, (_, index) => ({
         evidenceRef: `artifact://${index}-${"x".repeat(80)}`,
       })),
@@ -811,8 +978,54 @@ describe("compactInlineManifest", () => {
       evidenceRefCount: 2_000,
       truncated: true,
     });
-    expect(compact).not.toHaveProperty("evidenceRefs");
+    expect(compact).toHaveProperty(
+      "analysisSynopsis.selectedCandidateCount",
+      16,
+    );
+    expect(compact).toHaveProperty("evidenceRefs.length", 16);
     expect(Buffer.byteLength(JSON.stringify(compact))).toBeLessThan(64_000);
+  });
+
+  it("enforces the byte limit when candidate runs contain oversized history", () => {
+    const candidates = Array.from({ length: 16 }, (_, index) => ({
+      attemptNumber: 1,
+      evidenceRef: `artifact://candidate-${index}`,
+      runId: `run-${index}`,
+      runtimeId: `runtime-${index}`,
+      signal: "FAILED_RUN_ARTIFACT",
+      summary: "failure",
+    }));
+    const compact = compactInlineManifest({
+      analysisSynopsis: {
+        candidateCount: candidates.length,
+        candidates,
+        cleanPass: false,
+        completenessSufficient: true,
+        selectedCandidateCount: candidates.length,
+        strategy: "failure-first-v1",
+      },
+      evidenceLocations: candidates,
+      evidenceRefs: candidates.map((candidate) => candidate.evidenceRef),
+      runs: candidates.map((candidate) => ({
+        attempts: Array.from({ length: 10 }, (_, number) => ({
+          attemptId: `attempt-${number}`,
+          failureClass: "x".repeat(10_000),
+          number: number + 1,
+          status: "FAILED",
+        })),
+        browserExecutions: [],
+        runId: candidate.runId,
+      })),
+      schemaVersion: "devproof.execution-manifest.v2",
+      stages: [],
+      task: { lifecycle: "COMPLETED", verdict: "FAILED" },
+    });
+
+    expect(Buffer.byteLength(JSON.stringify(compact))).toBeLessThanOrEqual(
+      64_000,
+    );
+    expect(compact).toHaveProperty("analysisSynopsis.candidates.length", 16);
+    expect(compact).toHaveProperty("runs.0.attempts.length", 1);
   });
 });
 
@@ -871,7 +1084,10 @@ describe("PostRunAnalysisRuntimeService work item recurrence", () => {
       fencingToken: 3n,
       findings: [],
       id: analysisId,
-      inputManifest: { evidenceRefs: ["artifact://network-log"] },
+      inputManifest: {
+        analysisSynopsis: { candidateCount: 1 },
+        evidenceRefs: ["artifact://network-log"],
+      },
       inputStorageKey: "analysis/bundle.json",
       leaseExpiresAt: new Date(Date.now() + 60_000),
       leaseOwner: lease.workerId,
@@ -915,6 +1131,15 @@ describe("PostRunAnalysisRuntimeService work item recurrence", () => {
       },
     };
     const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([
+        {
+          candidateCount: "1",
+          evidenceLocations: [],
+          evidenceRefs: ["artifact://network-log"],
+          runs: [],
+          stages: [],
+        },
+      ]),
       $transaction: vi
         .fn()
         .mockImplementation(
@@ -965,10 +1190,23 @@ describe("PostRunAnalysisRuntimeService work item recurrence", () => {
       service.submitOutcome(teamId, analysisId, {
         ...lease,
         completedAt: new Date().toISOString(),
+        completionId: "113b2298-d48e-4fc7-a031-e1ed087b83ad",
+        outcome: {
+          kind: "ANALYSIS_COMPLETED",
+          report: { findings: [], summary: "没有发现问题。" },
+        },
+      }),
+    ).rejects.toThrow(/must read at least one evidence record/u);
+
+    servedEvidence.mockResolvedValueOnce([]);
+    await expect(
+      service.submitOutcome(teamId, analysisId, {
+        ...lease,
+        completedAt: new Date().toISOString(),
         completionId: "5b13eac0-467f-45a5-aa34-388511f5443e",
         outcome,
       }),
-    ).rejects.toThrow(/was not read during the active lease/u);
+    ).rejects.toThrow(/must read at least one evidence record/u);
     expect(
       transactionClient.postRunAnalysisJob.updateMany,
     ).not.toHaveBeenCalled();
@@ -979,6 +1217,11 @@ describe("PostRunAnalysisRuntimeService work item recurrence", () => {
       completionId: "716f2dcb-85ab-4fb7-a11d-350c2f85cc53",
       outcome,
     });
+
+    expect(prisma.postRunAnalysisJob.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ omit: { inputManifest: true } }),
+    );
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
 
     expect(servedEvidence).toHaveBeenCalledWith({
       select: { payload: true },
