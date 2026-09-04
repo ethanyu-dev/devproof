@@ -49,6 +49,16 @@ describe("BrowserRuntimeService managed configuration", () => {
     ];
     const prisma = {
       browserExecution: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            error: { code: "NO_AVAILABLE_SLOT" },
+            targetRuntimeId: "runtime-a",
+          },
+          {
+            error: { code: "IDENTITY_CAPACITY" },
+            targetRuntimeId: "runtime-b",
+          },
+        ]),
         count: vi.fn().mockResolvedValue(5),
         groupBy: vi.fn().mockResolvedValue([
           { _count: { _all: 7 }, targetRuntimeId: "runtime-a" },
@@ -56,6 +66,31 @@ describe("BrowserRuntimeService managed configuration", () => {
         ]),
       },
       browserRuntime: { findMany: vi.fn().mockResolvedValue(runtimes) },
+      browserRuntimeSession: { groupBy: vi.fn().mockResolvedValue([]) },
+      taskCaseExecution: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            taskExecutionId: "task-1",
+            caseId: "case-1",
+            deploymentId: "deployment-1",
+            executionOrdinal: 1,
+            dispatchStatus: "PENDING",
+            dispatchAttempts: 0,
+            runId: null,
+            scheduling: { state: "WAITING", reason: "PROFILE_RESERVED" },
+          },
+          {
+            taskExecutionId: "task-1",
+            caseId: "case-2",
+            deploymentId: "deployment-1",
+            executionOrdinal: 1,
+            dispatchStatus: "CANCELLED",
+            dispatchAttempts: 0,
+            runId: null,
+            scheduling: null,
+          },
+        ]),
+      },
       browserRuntimeSlot: {
         groupBy: vi.fn().mockResolvedValue([
           { _count: { _all: 4 }, runtimeId: "runtime-a" },
@@ -71,6 +106,10 @@ describe("BrowserRuntimeService managed configuration", () => {
     );
 
     await expect(service.capacity(current)).resolves.toEqual({
+      runtimeWaiting: 1,
+      flexibleRuntimeWaiting: 0,
+      upstreamWaiting: 2,
+      upstreamWaitingByReason: { IDENTITY_LIMIT: 1, PROFILE_RESERVED: 1 },
       availableCapacity: 5,
       configuredCapacity: 12,
       drainingCapacity: 0,
@@ -84,6 +123,8 @@ describe("BrowserRuntimeService managed configuration", () => {
           name: "Browser A",
           occupied: 4,
           online: true,
+          quarantined: 0,
+          runtimeWaiting: 1,
           waiting: 7,
         },
         {
@@ -94,12 +135,77 @@ describe("BrowserRuntimeService managed configuration", () => {
           name: "Browser B",
           occupied: 3,
           online: true,
+          quarantined: 0,
+          runtimeWaiting: 0,
           waiting: 1,
         },
       ],
       occupiedCapacity: 7,
       schedulableCapacity: 12,
     });
+  });
+
+  it("counts admitted Agent waits once without counting terminal, stale, or admission-waiting rows twice", async () => {
+    const row = (
+      caseId: string,
+      runId: string,
+      lifecycle = "PREPARING",
+      executionOrdinal = 1,
+    ) => ({
+      taskExecutionId: "task-1",
+      caseId,
+      deploymentId: "deployment-1",
+      executionOrdinal,
+      dispatchStatus: "LINKED",
+      dispatchAttempts: 1,
+      runId,
+      run: { lifecycle, executionDisposition: null, verdict: null },
+      scheduling: { state: "ADMITTED", reason: "AGENT_CAPACITY" },
+    });
+    const prisma = {
+      browserRuntime: { findMany: vi.fn().mockResolvedValue([]) },
+      browserRuntimeSlot: { groupBy: vi.fn().mockResolvedValue([]) },
+      browserRuntimeSession: { groupBy: vi.fn().mockResolvedValue([]) },
+      browserExecution: {
+        count: vi.fn().mockResolvedValue(1),
+        groupBy: vi.fn().mockResolvedValue([]),
+        findMany: vi.fn().mockResolvedValue([
+          {
+            runId: "admitting",
+            targetRuntimeId: null,
+            error: { code: "NO_AVAILABLE_SLOT" },
+          },
+        ]),
+      },
+      taskCaseExecution: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            row("ready", "waiting-agent"),
+            row("admission", "admitting"),
+            row("finished", "complete", "COMPLETED"),
+            row("human", "human-run", "WAITING_HUMAN"),
+            row("retried", "old-run", "PREPARING", 1),
+            row("retried", "new-run", "COMPLETED", 2),
+          ]),
+      },
+    };
+    const service = new BrowserRuntimeService(
+      prisma as never,
+      {} as never,
+      { isRuntimeOnline: vi.fn().mockResolvedValue(true) } as never,
+      {} as never,
+    );
+    await expect(service.capacity(current)).resolves.toMatchObject({
+      runtimeWaiting: 1,
+      upstreamWaiting: 1,
+      upstreamWaitingByReason: { AGENT_CAPACITY: 1 },
+    });
+    expect(prisma.browserExecution.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ runId: true }),
+      }),
+    );
   });
 
   it("persists and audits capacity while pushing network policy to a compatible online Runtime", async () => {

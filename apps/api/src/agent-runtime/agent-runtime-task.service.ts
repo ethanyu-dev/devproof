@@ -4,7 +4,9 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
@@ -30,6 +32,10 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { AgentModelConfigurationService } from "../console/agent-model-configuration.service.js";
 import { PrismaService } from "../database/prisma.service.js";
+import { BrowserExecutionRunner } from "../verification/browser-execution-runner.service.js";
+import { RuntimeCommandDispatcher } from "../runtime/runtime-command-dispatcher.service.js";
+import { releaseCompletedSessionData } from "../runtime/session-resource-cleanup.js";
+import { potentialWriteCommandWhere } from "../runtime/session-write-audit.js";
 
 const MODEL_CONFIGURATION_PROTOCOL_MINOR = 2;
 
@@ -196,12 +202,370 @@ function leaseExpiry(now: Date) {
   );
 }
 
+class BrowserClaimChanged extends Error {
+  constructor(readonly taskId: string) {
+    super("Browser admission changed before Agent claim.");
+  }
+}
+
 @Injectable()
 export class AgentRuntimeTaskService {
+  private readonly logger = new Logger(AgentRuntimeTaskService.name);
+  private recoveryTimer?: ReturnType<typeof setInterval>;
+  private recovering = false;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentModels: AgentModelConfigurationService,
+    @Optional() private readonly browser?: BrowserExecutionRunner,
+    @Optional() private readonly commands?: RuntimeCommandDispatcher,
   ) {}
+
+  onModuleInit() {
+    if (!this.browser) return;
+    this.recoveryTimer = setInterval(
+      () =>
+        void this.recoverExpiredLeases().catch((error: Error) =>
+          this.logger.error(error.message),
+        ),
+      2_000,
+    );
+    this.recoveryTimer.unref();
+  }
+
+  onModuleDestroy() {
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+  }
+
+  async recoverExpiredLeases() {
+    if (this.recovering || !this.browser) return;
+    this.recovering = true;
+    try {
+      const now = new Date();
+      const expired = await this.prisma.agentRuntimeTask.findMany({
+        include: {
+          run: true,
+          attempt: { include: { browserExecution: true } },
+        },
+        where: { status: "RUNNING", leaseExpiresAt: { lte: now } },
+        orderBy: { leaseExpiresAt: "asc" },
+        take: 25,
+      });
+      for (const task of expired) {
+        await this.prisma.$transaction(async (tx) => {
+          const claimed = await tx.agentRuntimeTask.updateMany({
+            data: {
+              status: "FAILED",
+              fencingToken: { increment: 1 },
+              leaseOwner: null,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              leaseLostAt: now,
+              recoveryStatus: "PENDING",
+              recoveryNextAttemptAt: now,
+            },
+            where: {
+              id: task.id,
+              status: "RUNNING",
+              fencingToken: task.fencingToken,
+              leaseExpiresAt: { lte: now },
+            },
+          });
+          if (claimed.count !== 1) return;
+          const error = {
+            code: "RUNTIME_LEASE_LOST",
+            failureClass: "RUNTIME_LOST",
+            message:
+              "Agent ownership expired; the old browser must stop before retrying.",
+            phase: "browser_verification",
+          };
+          await tx.runAttempt.update({
+            data: {
+              status: "FAILED",
+              finishedAt: now,
+              failureClass: "RUNTIME_LOST",
+              error,
+            },
+            where: { id: task.attemptId },
+          });
+          if (task.attempt.browserExecution?.runtimeSessionId) {
+            await tx.browserRuntimeSession.updateMany({
+              data: { executionPermitExpiresAt: now, quarantinedAt: now },
+              where: { id: task.attempt.browserExecution.runtimeSessionId },
+            });
+          }
+          await tx.runEvent.create({
+            data: {
+              actor: "CONTROL_PLANE",
+              attemptId: task.attemptId,
+              kind: "runtime.lease_lost",
+              payload: {
+                lostFencingToken: task.fencingToken.toString(),
+                workerId: task.leaseOwner,
+              },
+              runId: task.runId,
+              taskId: task.id,
+              teamId: task.run.teamId,
+            },
+          });
+          await tx.taskCaseExecution.updateMany({
+            data: {
+              scheduling: {
+                state: "RECOVERING",
+                reason: "LEASE_RECOVERY",
+                waitingSince: now.toISOString(),
+                evaluatedAt: now.toISOString(),
+                blockedBy: null,
+                queue: null,
+                nextRetryAt: now.toISOString(),
+              },
+            },
+            where: { runId: task.runId },
+          });
+          if (task.run.taskExecutionId)
+            await tx.taskExecution.update({
+              data: { projectionNeededAt: now },
+              where: { id: task.run.taskExecutionId },
+            });
+        });
+      }
+      const recoveries = await this.prisma.agentRuntimeTask.findMany({
+        include: {
+          run: true,
+          attempt: { include: { browserExecution: true } },
+        },
+        where: {
+          recoveryStatus: { in: ["PENDING", "CLOSING"] },
+          recoveryNextAttemptAt: { lte: now },
+        },
+        orderBy: { leaseLostAt: "asc" },
+        take: 25,
+      });
+      for (const task of recoveries) {
+        const execution = task.attempt.browserExecution;
+        const policy = task.run.concurrencyPolicy as {
+          accessMode?: string;
+        } | null;
+        const commandCount = execution?.runtimeSessionId
+          ? await this.prisma.browserRuntimeCommand.count({
+              where: {
+                sessionId: execution.runtimeSessionId,
+                ...potentialWriteCommandWhere,
+              },
+            })
+          : 0;
+        const unknownWrite =
+          policy?.accessMode !== "READ_ONLY" && commandCount > 0;
+        if (unknownWrite && execution?.runtimeSessionId) {
+          await this.prisma.executionResourceLease.updateMany({
+            data: { quarantined: true },
+            where: { sessionId: execution.runtimeSessionId },
+          });
+        }
+        if (this.commands && execution?.runtimeSessionId) {
+          const pending = await this.prisma.browserRuntimeCommand.findMany({
+            select: { id: true },
+            where: {
+              sessionId: execution.runtimeSessionId,
+              status: { in: ["PENDING", "DISPATCHED"] },
+              commandType: { not: "session.close" },
+            },
+          });
+          await Promise.allSettled(
+            pending.map((command) =>
+              this.commands!.cancel(command.id, "Agent lease was lost."),
+            ),
+          );
+        }
+        if (execution)
+          void this.browser
+            .releaseForExecutionRun(task.run.teamId, execution.id)
+            .catch((error: Error) =>
+              this.logger.warn(
+                `Recovery browser close remains unresolved: ${error.message}`,
+              ),
+            );
+        const session = execution?.runtimeSessionId
+          ? await this.prisma.browserRuntimeSession.findUnique({
+              where: { id: execution.runtimeSessionId },
+            })
+          : null;
+        const closed =
+          !session ||
+          Boolean(session.closureVerifiedAt) ||
+          session.status === "CLOSED";
+        const expiredRun =
+          task.run.deadlineAt <= new Date() ||
+          task.run.cancelRequestedAt ||
+          ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.run.lifecycle);
+        if (!closed && !unknownWrite && !expiredRun) {
+          await this.prisma.agentRuntimeTask.updateMany({
+            data: {
+              recoveryStatus: "CLOSING",
+              recoveryNextAttemptAt: new Date(Date.now() + 5_000),
+            },
+            where: {
+              id: task.id,
+              recoveryStatus: { in: ["PENDING", "CLOSING"] },
+            },
+          });
+          continue;
+        }
+        await this.prisma.$transaction(
+          async (tx) => {
+            const current = await this.findTask(tx, task.run.teamId, task.id);
+            const currentSession = execution?.runtimeSessionId
+              ? await tx.browserRuntimeSession.findUnique({
+                  where: { id: execution.runtimeSessionId },
+                })
+              : null;
+            const verifiedClosed =
+              !execution?.runtimeSessionId ||
+              Boolean(
+                currentSession &&
+                (currentSession.closureVerifiedAt ||
+                  currentSession.status === "CLOSED"),
+              );
+            const potentialWrites = execution?.runtimeSessionId
+              ? await tx.browserRuntimeCommand.count({
+                  where: {
+                    sessionId: execution.runtimeSessionId,
+                    ...potentialWriteCommandWhere,
+                  },
+                })
+              : 0;
+            const recoveryUnknownWrite =
+              (current.run.concurrencyPolicy as { accessMode?: string } | null)
+                ?.accessMode !== "READ_ONLY" && potentialWrites > 0;
+            const decision = leaseRecoveryDecision({
+              closed: verifiedClosed,
+              unknownWrite: recoveryUnknownWrite,
+              expired:
+                Boolean(expiredRun) ||
+                current.run.deadlineAt <= new Date() ||
+                Boolean(current.run.cancelRequestedAt) ||
+                ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+                  current.run.lifecycle,
+                ),
+              infrastructureRecoveries: current.run.infrastructureRecoveryCount,
+              attemptNumber: current.attempt.number,
+              maxAttempts: current.run.maxAttempts,
+            });
+            const changed = await tx.agentRuntimeTask.updateMany({
+              data: {
+                recoveryStatus: decision,
+                recoveryNextAttemptAt: null,
+                finishedAt: new Date(),
+                error: {
+                  code:
+                    decision === "WRITE_OUTCOME_UNKNOWN"
+                      ? decision
+                      : "RUNTIME_LEASE_LOST",
+                  failureClass: "RUNTIME_LOST",
+                  message:
+                    decision === "WRITE_OUTCOME_UNKNOWN"
+                      ? "A browser operation may have changed business data; reconcile state before replaying."
+                      : "The Runtime lease was lost.",
+                  phase: "browser_verification",
+                },
+              },
+              where: {
+                id: task.id,
+                recoveryStatus: { in: ["PENDING", "CLOSING"] },
+              },
+            });
+            if (changed.count !== 1) return;
+            if (execution?.runtimeSessionId) {
+              if (recoveryUnknownWrite) {
+                await tx.executionResourceLease.updateMany({
+                  where: { sessionId: execution.runtimeSessionId },
+                  data: { quarantined: true },
+                });
+              } else if (verifiedClosed && potentialWrites === 0) {
+                // Closure plus complete command audit proves this reserved writer never ran.
+                await tx.executionResourceLease.deleteMany({
+                  where: { sessionId: execution.runtimeSessionId },
+                });
+                await tx.browserRuntimeSession.updateMany({
+                  where: { id: execution.runtimeSessionId },
+                  data: { quarantinedAt: null },
+                });
+              }
+            }
+            if (decision === "RETRY_SCHEDULED") {
+              await tx.executionRun.update({
+                data: {
+                  infrastructureRecoveryCount: { increment: 1 },
+                  lifecycle: "QUEUED",
+                  executionDisposition: "RUNTIME_LOST",
+                },
+                where: { id: current.runId },
+              });
+              await this.scheduleNextAttempt(tx, current, task.run.teamId);
+            } else if (
+              !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+                current.run.lifecycle,
+              )
+            ) {
+              await tx.executionRun.update({
+                data: {
+                  lifecycle:
+                    current.run.deadlineAt <= new Date()
+                      ? "TIMED_OUT"
+                      : "COMPLETED",
+                  verdict: null,
+                  executionDisposition:
+                    decision === "WRITE_OUTCOME_UNKNOWN"
+                      ? "BLOCKED"
+                      : "RUNTIME_LOST",
+                  finishedAt: new Date(),
+                },
+                where: { id: current.runId },
+              });
+            }
+            await tx.runEvent.create({
+              data: {
+                actor: "CONTROL_PLANE",
+                attemptId: task.attemptId,
+                kind: "runtime.lease_recovery.completed",
+                payload: {
+                  decision,
+                  oldSessionClosed: verifiedClosed,
+                  unknownWrite: recoveryUnknownWrite,
+                },
+                runId: task.runId,
+                taskId: task.id,
+                teamId: task.run.teamId,
+              },
+            });
+            await tx.taskCaseExecution.updateMany({
+              data: {
+                scheduling: {
+                  state: decision === "RETRY_SCHEDULED" ? "READY" : "TERMINAL",
+                  reason:
+                    decision === "RETRY_SCHEDULED" ? null : "LEASE_RECOVERY",
+                  waitingSince: null,
+                  evaluatedAt: new Date().toISOString(),
+                  blockedBy: null,
+                  queue: null,
+                  nextRetryAt: null,
+                },
+              },
+              where: { runId: task.runId },
+            });
+            if (task.run.taskExecutionId)
+              await tx.taskExecution.update({
+                data: { projectionNeededAt: new Date() },
+                where: { id: task.run.taskExecutionId },
+              });
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+      }
+    } finally {
+      this.recovering = false;
+    }
+  }
 
   async claim(teamId: string, input: RuntimeTaskClaimInput) {
     if (input.protocol.minor < MODEL_CONFIGURATION_PROTOCOL_MINOR) {
@@ -214,97 +578,211 @@ export class AgentRuntimeTaskService {
       "BROWSER_EXECUTION",
     );
     if (modelCandidates.length === 0) return { task: null };
+    const skipped = new Set<string>();
     for (let collision = 0; collision < 5; collision += 1) {
-      const claimed = await this.prisma.$transaction(
-        async (tx) => {
-          const now = new Date();
-          const candidate = await tx.agentRuntimeTask.findFirst({
-            orderBy: { createdAt: "asc" },
-            where: {
-              capability: { in: input.capabilities },
-              deadlineAt: { gt: now },
-              run: {
-                cancelRequestedAt: null,
-                lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
-                teamId,
-              },
-              attempt: {
-                browserExecution: {
-                  is: {
-                    runtimeSessionId: { not: null },
-                    status: { in: ["ACTIVE", "HUMAN_CONTROL"] },
+      const claimed = await this.prisma
+        .$transaction(
+          async (tx) => {
+            const now = await databaseNow(tx);
+            const candidate = await tx.agentRuntimeTask.findFirst({
+              orderBy: { createdAt: "asc" },
+              where: {
+                id: { notIn: [...skipped] },
+                capability: { in: input.capabilities },
+                deadlineAt: { gt: now },
+                OR: [
+                  { recoveryStatus: null },
+                  { recoveryStatus: { not: "STARTUP_CLOSING" } },
+                ],
+                run: {
+                  cancelRequestedAt: null,
+                  lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+                  teamId,
+                },
+                attempt: {
+                  browserExecution: {
+                    is: {
+                      runtimeSessionId: { not: null },
+                      status: "ACTIVE",
+                      runtimeSession: {
+                        is: {
+                          status: "ACTIVE",
+                          quarantinedAt: null,
+                          closureVerifiedAt: null,
+                          leaseExpiresAt: { gt: now },
+                          executionPermitExpiresAt: { gt: now },
+                        },
+                      },
+                    },
                   },
                 },
+                status: "PENDING",
               },
-              OR: [
-                { status: "PENDING" },
-                {
-                  leaseExpiresAt: { lt: now },
-                  status: "RUNNING",
-                },
-              ],
-            },
-          });
-          if (!candidate) return null;
+            });
+            if (!candidate) return null;
 
-          const leaseToken = randomUUID();
-          const leaseExpiresAt = leaseExpiry(now);
-          const acquired = await tx.agentRuntimeTask.updateMany({
-            data: {
-              fencingToken: { increment: 1 },
-              lastHeartbeatAt: now,
-              leaseExpiresAt,
-              leaseOwner: input.workerId,
-              leaseToken,
-              startedAt: candidate.startedAt ?? now,
-              status: "RUNNING",
-            },
-            where: {
-              id: candidate.id,
-              OR: [
-                { status: "PENDING" },
-                {
-                  leaseExpiresAt: { lt: now },
-                  status: "RUNNING",
-                },
-              ],
-            },
-          });
-          if (acquired.count !== 1) return undefined;
+            const leaseToken = randomUUID();
+            const leaseExpiresAt = leaseExpiry(now);
+            const acquired = await tx.agentRuntimeTask.updateMany({
+              data: {
+                fencingToken: { increment: 1 },
+                lastHeartbeatAt: now,
+                leaseExpiresAt,
+                leaseOwner: input.workerId,
+                leaseToken,
+                startedAt: candidate.startedAt ?? now,
+                status: "RUNNING",
+              },
+              where: {
+                id: candidate.id,
+                status: "PENDING",
+                OR: [
+                  { recoveryStatus: null },
+                  { recoveryStatus: { not: "STARTUP_CLOSING" } },
+                ],
+              },
+            });
+            if (acquired.count !== 1) return undefined;
 
-          const task = await tx.agentRuntimeTask.findUniqueOrThrow({
-            include: { run: true },
-            where: { id: candidate.id },
-          });
-          await tx.runAttempt.update({
-            data: { startedAt: now, status: "RUNNING" },
-            where: { id: task.attemptId },
-          });
-          await tx.executionRun.update({
-            data: {
-              lifecycle: "RUNNING",
-              startedAt: task.run.startedAt ?? now,
-            },
-            where: { id: task.runId },
-          });
-          await tx.runEvent.create({
-            data: {
-              actor: "AGENT_RUNTIME",
-              attemptId: task.attemptId,
-              kind: "runtime.task.claimed",
-              payload: json({
-                fencingToken: task.fencingToken.toString(),
-                workerId: input.workerId,
-              }),
-              runId: task.runId,
-              taskId: task.id,
-              teamId,
-            },
-          });
-          return task;
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
-      );
+            const task = await tx.agentRuntimeTask.findUniqueOrThrow({
+              include: { run: true },
+              where: { id: candidate.id },
+            });
+            if (
+              task.run.executionBudgetSeconds &&
+              !task.run.executionBudgetStartedAt
+            ) {
+              const parent = task.run.taskExecutionId
+                ? await tx.taskExecution.findUnique({
+                    select: { deadlineAt: true },
+                    where: { id: task.run.taskExecutionId },
+                  })
+                : null;
+              const budget = initializeExecutionBudget({
+                now,
+                seconds: task.run.executionBudgetSeconds,
+                extensionSeconds: task.run.executionMaxExtensionSeconds ?? 0,
+                parentDeadlineAt: parent?.deadlineAt ?? null,
+              });
+              const initialized = await tx.executionRun.updateMany({
+                data: {
+                  ...budget,
+                  initialDeadlineAt: budget.deadlineAt,
+                  executionBudgetStartedAt: now,
+                },
+                where: { id: task.runId, executionBudgetStartedAt: null },
+              });
+              if (initialized.count !== 1)
+                throw new ConflictException(
+                  "Execution budget initialization conflicted.",
+                );
+              const nextSnapshot = runtimeTaskSnapshotSchema.parse({
+                ...runtimeTaskSnapshotSchema.parse(task.snapshot),
+                deadlineAt: budget.deadlineAt.toISOString(),
+                hardDeadlineAt: budget.hardDeadlineAt.toISOString(),
+              });
+              task.snapshot = nextSnapshot as Prisma.JsonValue;
+              task.deadlineAt = budget.deadlineAt;
+              task.run.deadlineAt = budget.deadlineAt;
+              task.run.hardDeadlineAt = budget.hardDeadlineAt;
+              await tx.agentRuntimeTask.update({
+                data: {
+                  snapshot: json(nextSnapshot),
+                  deadlineAt: budget.deadlineAt,
+                },
+                where: { id: task.id },
+              });
+            }
+            const execution = await tx.browserExecution.findUnique({
+              where: { attemptId: task.attemptId },
+            });
+            if (!execution?.runtimeSessionId || execution.status !== "ACTIVE")
+              throw new BrowserClaimChanged(candidate.id);
+            {
+              const owned = await tx.browserRuntimeSession.updateMany({
+                data: {
+                  ownerTaskId: task.id,
+                  ownerFencingToken: task.fencingToken,
+                  executionPermitExpiresAt: new Date(
+                    Math.min(
+                      leaseExpiresAt.getTime(),
+                      task.run.deadlineAt.getTime(),
+                    ),
+                  ),
+                },
+                where: {
+                  id: execution.runtimeSessionId,
+                  status: "ACTIVE",
+                  quarantinedAt: null,
+                  closureVerifiedAt: null,
+                  leaseExpiresAt: { gt: now },
+                  executionPermitExpiresAt: { gt: now },
+                  OR: [
+                    { ownerTaskId: null },
+                    {
+                      ownerTaskId: task.id,
+                      ownerFencingToken: candidate.fencingToken,
+                    },
+                  ],
+                },
+              });
+              if (owned.count !== 1)
+                throw new BrowserClaimChanged(candidate.id);
+            }
+            await tx.runAttempt.update({
+              data: { startedAt: now, status: "RUNNING" },
+              where: { id: task.attemptId },
+            });
+            await tx.executionRun.update({
+              data: {
+                lifecycle: "RUNNING",
+                startedAt: task.run.startedAt ?? now,
+              },
+              where: { id: task.runId },
+            });
+            await tx.runEvent.create({
+              data: {
+                actor: "AGENT_RUNTIME",
+                attemptId: task.attemptId,
+                kind: "runtime.task.claimed",
+                payload: json({
+                  fencingToken: task.fencingToken.toString(),
+                  workerId: input.workerId,
+                }),
+                runId: task.runId,
+                taskId: task.id,
+                teamId,
+              },
+            });
+            if (task.run.taskExecutionId) {
+              await tx.taskCaseExecution.updateMany({
+                data: {
+                  scheduling: {
+                    state: "RUNNING",
+                    reason: null,
+                    waitingSince: null,
+                    evaluatedAt: now.toISOString(),
+                    blockedBy: null,
+                    queue: null,
+                    nextRetryAt: null,
+                  },
+                },
+                where: { runId: task.runId },
+              });
+              await tx.taskExecution.update({
+                data: { projectionNeededAt: now },
+                where: { id: task.run.taskExecutionId },
+              });
+            }
+            return task;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+        )
+        .catch((error: unknown) => {
+          if (!(error instanceof BrowserClaimChanged)) throw error;
+          skipped.add(error.taskId);
+          return undefined;
+        });
 
       if (claimed === undefined) continue;
       if (claimed === null) return { task: null };
@@ -315,6 +793,7 @@ export class AgentRuntimeTaskService {
           fencingToken: claimed.fencingToken.toString(),
           leaseExpiresAt: claimed.leaseExpiresAt?.toISOString(),
           leaseToken: claimed.leaseToken,
+          serverTime: new Date().toISOString(),
           snapshot: runtimeTaskSnapshotSchema.parse({
             ...snapshot,
             modelCandidates,
@@ -333,8 +812,8 @@ export class AgentRuntimeTaskService {
   ) {
     return this.prisma.$transaction(async (tx) => {
       const task = await this.findTask(tx, teamId, taskId);
-      this.requireLease(task, input);
-      const now = new Date();
+      const now = await databaseNow(tx);
+      this.requireLease(task, input, now);
       const cancelled =
         task.cancelRequestedAt !== null ||
         task.run.cancelRequestedAt !== null ||
@@ -348,6 +827,7 @@ export class AgentRuntimeTaskService {
           directive: "CANCEL" as const,
           hardDeadlineAt: task.run.hardDeadlineAt.toISOString(),
           leaseExpiresAt: (task.leaseExpiresAt ?? now).toISOString(),
+          serverTime: now.toISOString(),
         };
       }
       if (!(["RUNNING", "WAITING_HUMAN"] as string[]).includes(task.status)) {
@@ -355,6 +835,24 @@ export class AgentRuntimeTaskService {
       }
 
       const leaseExpiresAt = leaseExpiry(now);
+      const renewed = await tx.agentRuntimeTask.updateMany({
+        data: { lastHeartbeatAt: now, leaseExpiresAt },
+        where: leaseWhere(taskId, input, now),
+      });
+      if (renewed.count !== 1) throw staleLease();
+      await tx.browserRuntimeSession.updateMany({
+        data: {
+          executionPermitExpiresAt: new Date(
+            Math.min(leaseExpiresAt.getTime(), task.run.deadlineAt.getTime()),
+          ),
+        },
+        where: {
+          ownerTaskId: task.id,
+          ownerFencingToken: task.fencingToken,
+          status: "ACTIVE",
+          quarantinedAt: null,
+        },
+      });
       const policy = retryPolicySchema.parse(task.run.executionPolicy).deadline;
       const extension = decideAdaptiveDeadlineExtension({
         activeOperation: task.activeOperation,
@@ -407,7 +905,6 @@ export class AgentRuntimeTaskService {
             },
             where: { id: task.id },
           });
-          await this.extendBrowserLeases(tx, task.attemptId, nextDeadlineAt);
           await tx.runEvent.create({
             data: {
               actor: "CONTROL_PLANE",
@@ -453,21 +950,17 @@ export class AgentRuntimeTaskService {
               directive: "CANCEL" as const,
               hardDeadlineAt: hardDeadlineAt.toISOString(),
               leaseExpiresAt: (task.leaseExpiresAt ?? now).toISOString(),
+              serverTime: now.toISOString(),
             };
           }
         }
-      }
-      if (!acceptedExtension) {
-        await tx.agentRuntimeTask.update({
-          data: { lastHeartbeatAt: now, leaseExpiresAt },
-          where: { id: task.id },
-        });
       }
       return {
         deadlineAt: deadlineAt.toISOString(),
         directive: "CONTINUE" as const,
         hardDeadlineAt: hardDeadlineAt.toISOString(),
         leaseExpiresAt: leaseExpiresAt.toISOString(),
+        serverTime: now.toISOString(),
         ...(acceptedExtension
           ? {
               extension: {
@@ -497,7 +990,9 @@ export class AgentRuntimeTaskService {
   ) {
     return this.prisma.$transaction(async (tx) => {
       const task = await this.findTask(tx, teamId, taskId);
-      this.requireLease(task, input);
+      const now = await databaseNow(tx);
+      this.requireLease(task, input, now);
+      await this.lockCurrentLease(tx, taskId, input, now);
       try {
         const event = await tx.runEvent.create({
           data: {
@@ -559,7 +1054,50 @@ export class AgentRuntimeTaskService {
             taskStatus: normalizeAcknowledgedTaskStatus(task.status),
           };
         }
-        this.requireLease(task, input);
+        const now = await databaseNow(tx);
+        this.requireLease(task, input, now);
+        await this.lockCurrentLease(tx, taskId, input, now);
+        let outcome = input.outcome;
+        let writeOutcomeUnknown = false;
+        if (
+          (outcome.kind === "RETRYABLE_FAILURE" ||
+            outcome.kind === "FATAL_FAILURE") &&
+          (task.run.concurrencyPolicy as { accessMode?: string } | null)
+            ?.accessMode !== "READ_ONLY"
+        ) {
+          const writes = await tx.browserRuntimeCommand.count({
+            where: {
+              session: {
+                browserExecutions: { some: { attemptId: task.attemptId } },
+              },
+              ...potentialWriteCommandWhere,
+            },
+          });
+          if (writes > 0) {
+            writeOutcomeUnknown = true;
+            outcome = {
+              kind: "FATAL_FAILURE",
+              executionDisposition: "BLOCKED",
+              error: {
+                code: "WRITE_OUTCOME_UNKNOWN",
+                failureClass: "RUNTIME_LOST",
+                message:
+                  "Browser execution stopped after a possible write; reconcile the affected state before retrying.",
+                phase: "browser_verification",
+                details: {},
+              },
+              summary: "写操作结果尚未确认，相关资源已隔离，等待状态核对。",
+            };
+            await tx.executionResourceLease.updateMany({
+              data: { quarantined: true },
+              where: {
+                session: {
+                  browserExecutions: { some: { attemptId: task.attemptId } },
+                },
+              },
+            });
+          }
+        }
         if (!(["RUNNING", "WAITING_HUMAN"] as string[]).includes(task.status)) {
           throw new ConflictException("The Runtime task is already terminal.");
         }
@@ -570,7 +1108,7 @@ export class AgentRuntimeTaskService {
           throw new ConflictException("The run no longer accepts outcomes.");
         }
 
-        if (input.outcome.kind === "VERIFICATION_COMPLETED") {
+        if (outcome.kind === "VERIFICATION_COMPLETED") {
           const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
           const persisted = await tx.runEvidence.findMany({
             select: {
@@ -583,7 +1121,7 @@ export class AgentRuntimeTaskService {
           });
           const validationError = completedOutcomeEvidenceError(
             snapshot,
-            input.outcome,
+            outcome,
             persisted,
           );
           if (validationError) throw new ConflictException(validationError);
@@ -592,38 +1130,41 @@ export class AgentRuntimeTaskService {
         const policy = retryPolicySchema.parse(task.run.executionPolicy);
         const projection = projectRuntimeOutcome({
           attemptNumber: task.attempt.number,
-          outcome: input.outcome,
+          outcome: outcome,
           retryPolicy: effectiveRetryPolicy({
             ...(policy.browser
               ? {
                   browserAvailabilityPolicy: policy.browser.availabilityPolicy,
                 }
               : {}),
-            outcome: input.outcome,
+            outcome: outcome,
             retryPolicy: policy.retryPolicy,
           }),
         });
         const completedAt = new Date(input.completedAt);
-        const isWaiting = input.outcome.kind === "WAITING_HUMAN";
+        const isWaiting = outcome.kind === "WAITING_HUMAN";
         let pausedDeadlineAt: Date | null = null;
         const isFailure =
-          input.outcome.kind === "RETRYABLE_FAILURE" ||
-          input.outcome.kind === "FATAL_FAILURE";
+          outcome.kind === "RETRYABLE_FAILURE" ||
+          outcome.kind === "FATAL_FAILURE";
         const runtimeError =
-          input.outcome.kind === "RETRYABLE_FAILURE" ||
-          input.outcome.kind === "FATAL_FAILURE"
-            ? input.outcome.error
+          outcome.kind === "RETRYABLE_FAILURE" ||
+          outcome.kind === "FATAL_FAILURE"
+            ? outcome.error
             : null;
 
         await tx.agentRuntimeTask.update({
           data: {
             completionId: input.completionId,
+            ...(writeOutcomeUnknown
+              ? { recoveryStatus: "WRITE_OUTCOME_UNKNOWN" }
+              : {}),
             error: runtimeError ? json(runtimeError) : Prisma.JsonNull,
             finishedAt: isWaiting ? null : completedAt,
             leaseExpiresAt: null,
             leaseOwner: null,
             leaseToken: null,
-            result: json(input.outcome),
+            result: json(outcome),
             status: projection.taskStatus,
           },
           where: { id: task.id },
@@ -633,15 +1174,15 @@ export class AgentRuntimeTaskService {
             error: runtimeError ? json(runtimeError) : Prisma.JsonNull,
             failureClass: runtimeError ? runtimeError.failureClass : null,
             finishedAt: isWaiting ? null : completedAt,
-            result: json(input.outcome),
+            result: json(outcome),
             status: projection.attemptStatus,
           },
           where: { id: task.attemptId },
         });
 
-        if (input.outcome.kind === "VERIFICATION_COMPLETED") {
+        if (outcome.kind === "VERIFICATION_COMPLETED") {
           await tx.runCriterionResult.createMany({
-            data: input.outcome.criteria.map((criterion) => ({
+            data: outcome.criteria.map((criterion) => ({
               attemptId: task.attemptId,
               criterionId: criterion.criterionId,
               evidenceRefs: criterion.evidenceRefs,
@@ -651,9 +1192,9 @@ export class AgentRuntimeTaskService {
               teamId,
             })),
           });
-          if (input.outcome.evidence.length > 0) {
+          if (outcome.evidence.length > 0) {
             await tx.runEvidence.createMany({
-              data: input.outcome.evidence.map((evidence) => ({
+              data: outcome.evidence.map((evidence) => ({
                 attemptId: task.attemptId,
                 externalId: evidence.externalId,
                 kind: evidence.kind,
@@ -667,7 +1208,7 @@ export class AgentRuntimeTaskService {
           }
         }
 
-        if (input.outcome.kind === "WAITING_HUMAN") {
+        if (outcome.kind === "WAITING_HUMAN") {
           if (!policy.hitl.enabled) {
             throw new ConflictException("HITL is disabled for this Run.");
           }
@@ -678,10 +1219,10 @@ export class AgentRuntimeTaskService {
             pauseHumanWait,
             policyTimeoutSeconds: policy.hitl.timeoutSeconds,
             requestedAtMs: requestedAt.getTime(),
-            ...(input.outcome.intervention.expiresAt
+            ...(outcome.intervention.expiresAt
               ? {
                   requestedExpiresAtMs: Date.parse(
-                    input.outcome.intervention.expiresAt,
+                    outcome.intervention.expiresAt,
                   ),
                 }
               : {}),
@@ -692,12 +1233,12 @@ export class AgentRuntimeTaskService {
           const intervention = await tx.humanIntervention.create({
             data: {
               attemptId: task.attemptId,
-              context: json(input.outcome.intervention.context),
+              context: json(outcome.intervention.context),
               expiresAt,
-              kind: input.outcome.intervention.kind,
+              kind: outcome.intervention.kind,
               pausedExecutionRemainingMs,
-              prompt: input.outcome.intervention.prompt,
-              responseSchema: json(input.outcome.intervention.responseSchema),
+              prompt: outcome.intervention.prompt,
+              responseSchema: json(outcome.intervention.responseSchema),
               runId: task.runId,
               taskId: task.id,
               teamId,
@@ -796,12 +1337,12 @@ export class AgentRuntimeTaskService {
           data: {
             actor: "AGENT_RUNTIME",
             attemptId: task.attemptId,
-            kind: `runtime.outcome.${input.outcome.kind.toLowerCase()}`,
+            kind: `runtime.outcome.${outcome.kind.toLowerCase()}`,
             payload: json({
               completionId: input.completionId,
-              executionDisposition: input.outcome.executionDisposition,
+              executionDisposition: outcome.executionDisposition,
               nextAttemptScheduled: projection.nextAttemptScheduled,
-              summary: input.outcome.summary,
+              summary: outcome.summary,
             }),
             runId: task.runId,
             taskId: task.id,
@@ -811,6 +1352,28 @@ export class AgentRuntimeTaskService {
 
         if (projection.nextAttemptScheduled) {
           await this.scheduleNextAttempt(tx, task, teamId);
+        }
+        if (!isWaiting) await releaseCompletedSessionData(tx, task.id);
+        if (task.run.taskExecutionId) {
+          if (!isWaiting)
+            await tx.taskCaseExecution.updateMany({
+              data: {
+                scheduling: {
+                  state: projection.nextAttemptScheduled ? "READY" : "TERMINAL",
+                  reason: writeOutcomeUnknown ? "LEASE_RECOVERY" : null,
+                  waitingSince: null,
+                  evaluatedAt: new Date().toISOString(),
+                  blockedBy: null,
+                  queue: null,
+                  nextRetryAt: null,
+                },
+              },
+              where: { runId: task.runId },
+            });
+          await tx.taskExecution.update({
+            data: { projectionNeededAt: new Date() },
+            where: { id: task.run.taskExecutionId },
+          });
         }
 
         return {
@@ -901,34 +1464,6 @@ export class AgentRuntimeTaskService {
         taskId: nextTaskId,
         teamId,
       },
-    });
-  }
-
-  private async extendBrowserLeases(
-    tx: Prisma.TransactionClient,
-    attemptId: string,
-    deadlineAt: Date,
-  ) {
-    const execution = await tx.browserExecution.findUnique({
-      select: { runtimeSessionId: true },
-      where: { attemptId },
-    });
-    if (!execution?.runtimeSessionId) return;
-    const sessionId = execution.runtimeSessionId;
-    await tx.browserRuntimeSession.updateMany({
-      data: { leaseExpiresAt: deadlineAt },
-      where: {
-        id: sessionId,
-        status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL"] },
-      },
-    });
-    await tx.browserRuntimeSlot.updateMany({
-      data: { expiresAt: deadlineAt },
-      where: { expiresAt: { lt: deadlineAt }, sessionId },
-    });
-    await tx.browserRuntimeProfileLease.updateMany({
-      data: { expiresAt: deadlineAt },
-      where: { expiresAt: { lt: deadlineAt }, sessionId },
     });
   }
 
@@ -1027,15 +1562,97 @@ export class AgentRuntimeTaskService {
   private requireLease(
     task: Awaited<ReturnType<AgentRuntimeTaskService["findTask"]>>,
     input: { fencingToken: string; leaseToken: string; workerId: string },
+    now = new Date(),
   ) {
     if (
       task.leaseOwner !== input.workerId ||
       task.leaseToken !== input.leaseToken ||
-      task.fencingToken.toString() !== input.fencingToken
+      task.fencingToken.toString() !== input.fencingToken ||
+      !task.leaseExpiresAt ||
+      task.leaseExpiresAt <= now
     ) {
-      throw new ConflictException("The Runtime task lease is stale.");
+      throw staleLease();
     }
   }
+
+  private async lockCurrentLease(
+    tx: Prisma.TransactionClient,
+    taskId: string,
+    input: { fencingToken: string; leaseToken: string; workerId: string },
+    now: Date,
+  ) {
+    const locked = await tx.agentRuntimeTask.updateMany({
+      data: { updatedAt: now },
+      where: leaseWhere(taskId, input, now),
+    });
+    if (locked.count !== 1) throw staleLease();
+  }
+}
+
+function staleLease() {
+  return new ConflictException({
+    code: "RUNTIME_LEASE_LOST",
+    message: "The Runtime task lease is stale.",
+  });
+}
+
+export function leaseRecoveryDecision(input: {
+  closed: boolean;
+  unknownWrite: boolean;
+  expired: boolean;
+  infrastructureRecoveries: number;
+  attemptNumber: number;
+  maxAttempts: number;
+}) {
+  if (input.unknownWrite) return "WRITE_OUTCOME_UNKNOWN";
+  if (
+    !input.closed ||
+    input.expired ||
+    input.infrastructureRecoveries >= 1 ||
+    input.attemptNumber >= input.maxAttempts
+  )
+    return "EXHAUSTED";
+  return "RETRY_SCHEDULED";
+}
+
+function leaseWhere(
+  taskId: string,
+  input: { fencingToken: string; leaseToken: string; workerId: string },
+  now: Date,
+): Prisma.AgentRuntimeTaskWhereInput {
+  return {
+    id: taskId,
+    fencingToken: BigInt(input.fencingToken),
+    leaseOwner: input.workerId,
+    leaseToken: input.leaseToken,
+    leaseExpiresAt: { gt: now },
+    status: { in: ["RUNNING", "WAITING_HUMAN"] },
+  };
+}
+
+async function databaseNow(tx: Prisma.TransactionClient) {
+  const [row] = await tx.$queryRaw<
+    Array<{ now: Date }>
+  >`SELECT clock_timestamp() AS now`;
+  return row!.now;
+}
+
+export function initializeExecutionBudget(input: {
+  now: Date;
+  seconds: number;
+  extensionSeconds: number;
+  parentDeadlineAt: Date | null;
+}) {
+  const cap = input.parentDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY;
+  const deadlineAt = new Date(
+    Math.min(cap, input.now.getTime() + input.seconds * 1_000),
+  );
+  const hardDeadlineAt = new Date(
+    Math.min(cap, deadlineAt.getTime() + input.extensionSeconds * 1_000),
+  );
+  if (deadlineAt <= input.now)
+    throw new ConflictException("The parent task deadline has elapsed.");
+  return { deadlineAt, hardDeadlineAt };
 }
 
 function traceOperationKey(payload: { segmentId: string; step: number }) {

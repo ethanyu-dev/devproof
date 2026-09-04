@@ -21,6 +21,35 @@ function readyProfile() {
 }
 
 describe("ProfileReservationService", () => {
+  it("validates authorization but leaves isolated identity admission to the resource allocator", async () => {
+    const prisma = {
+      browserProfileReservation: { upsert: vi.fn() },
+      taskExecution: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "task-1",
+          teamId: "team-1",
+          lifecycle: "RUNNING",
+          environmentSnapshot: { targetUrl: "https://app.example.com" },
+          profileBinding: {
+            status: "RESOLVED",
+            triggerSource: "CONSOLE",
+            resolvedProfile: {
+              ...readyProfile(),
+              executionMode: "ISOLATED_AUTH",
+            },
+          },
+        }),
+      },
+    };
+    await expect(
+      new ProfileReservationService(prisma as never).acquire("task-1"),
+    ).resolves.toMatchObject({
+      acquired: true,
+      profile: { executionMode: "ISOLATED_AUTH" },
+    });
+    expect(prisma.browserProfileReservation.upsert).not.toHaveBeenCalled();
+  });
+
   it("activates only the FIFO head for a ready profile", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const prisma = {
@@ -68,6 +97,7 @@ describe("ProfileReservationService", () => {
   it("keeps later tasks queued while another reservation is active", async () => {
     const prisma = {
       browserProfileReservation: {
+        count: vi.fn().mockResolvedValue(0),
         findFirst: vi.fn().mockResolvedValue({ id: "reservation-active" }),
         findMany: vi.fn().mockResolvedValue([]),
         updateMany: vi.fn(),

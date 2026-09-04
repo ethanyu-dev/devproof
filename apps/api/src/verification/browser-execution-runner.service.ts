@@ -17,6 +17,18 @@ import {
 
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import {
+  quarantineSession,
+  releaseVerifiedSessionResources,
+} from "../runtime/session-resource-cleanup.js";
+import {
+  concurrencyPolicy,
+  ExecutionAdmissionBlocked,
+  executionTarget,
+  resourceClaims,
+  resourcesConflict,
+} from "./execution-concurrency.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import { RuntimeCommandDispatcher } from "../runtime/runtime-command-dispatcher.service.js";
 import type {
@@ -28,6 +40,7 @@ import { ExecutionRunnerUnavailableError } from "./runtime-adapters.js";
 import {
   resolveRuntimeRoutingPlan,
   verificationTargetHostname,
+  hostnameMatchesPattern,
 } from "./runtime-routing.js";
 import { VerificationLifecycleService } from "./verification-lifecycle.service.js";
 
@@ -151,6 +164,14 @@ export function browserVideoFinalizationFailure(
 
 class RuntimeCapacityExhaustedError extends Error {}
 
+export interface BrowserExecutionOwner {
+  taskId: string;
+  fencingToken: string;
+  leaseToken: string;
+  workerId: string;
+  expiresAt: Date;
+}
+
 export function supportsBrowserAgentProtocol(runtime: {
   protocolMajor: number | null;
   protocolMinor: number | null;
@@ -265,6 +286,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             runtimeId: runtime.id,
             slotNumber,
             teamId,
+            targetUrl: request.execution.targetUrl,
           });
           break;
         } catch (error) {
@@ -332,26 +354,117 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     teamId: string,
     browserExecutionId: string,
     request: VerificationRequest,
+    expectedAllocationToken?: string,
   ): Promise<ExecutionRunnerLease> {
-    const execution = await this.ownedBrowserExecution(
+    let execution = await this.ownedBrowserExecution(
       teamId,
       browserExecutionId,
     );
+    if (
+      expectedAllocationToken &&
+      execution.allocationToken !== expectedAllocationToken
+    )
+      throw new ExecutionAdmissionBlocked(
+        "ADMISSION_STALE",
+        "A newer admission worker owns this allocation.",
+      );
     if (execution.runtimeSessionId) {
       const session = await this.prisma.browserRuntimeSession.findUnique({
         where: { id: execution.runtimeSessionId },
       });
       if (
         session &&
-        ["OPENING", "ACTIVE", "HUMAN_CONTROL"].includes(session.status)
-      ) {
+        ["ACTIVE", "HUMAN_CONTROL"].includes(session.status) &&
+        session.leaseExpiresAt > new Date() &&
+        session.executionPermitExpiresAt &&
+        session.executionPermitExpiresAt > new Date() &&
+        !session.quarantinedAt &&
+        !session.closureVerifiedAt
+      )
         return this.lease(session.runtimeId, session);
-      }
+      if (
+        session &&
+        session.status === "OPENING" &&
+        session.leaseExpiresAt > new Date()
+      )
+        throw new ExecutionAdmissionBlocked(
+          "ADMISSION_STALE",
+          "This Attempt's browser is still opening.",
+        );
+      if (session && !session.closureVerifiedAt)
+        throw new ExecutionAdmissionBlocked(
+          "LEASE_RECOVERY",
+          "The previous browser must be confirmed closed before allocation.",
+        );
+      if (session?.ownerTaskId)
+        throw new ExecutionAdmissionBlocked(
+          "LEASE_RECOVERY",
+          "An execution that has started must recover through a new Attempt after its browser closes.",
+        );
+      // A failed startup may reopen only once. Runtime/Agent recovery after a
+      // claim must create a new Attempt, never replay the started Attempt here.
+      await this.prisma.$transaction(async (tx) => {
+        const task = await tx.agentRuntimeTask.findUnique({
+          where: { attemptId: execution.attemptId },
+        });
+        if (task) {
+          const unstarted = await tx.agentRuntimeTask.updateMany({
+            where: {
+              id: task.id,
+              status: "PENDING",
+              startedAt: null,
+              fencingToken: 0n,
+              OR: [
+                { recoveryStatus: null },
+                { recoveryStatus: { not: "STARTUP_CLOSING" } },
+              ],
+            },
+            data: { recoveryStatus: task.recoveryStatus },
+          });
+          if (unstarted.count !== 1)
+            throw new ExecutionAdmissionBlocked(
+              "LEASE_RECOVERY",
+              "A started Attempt cannot reopen its browser.",
+            );
+        }
+        const current = await tx.browserExecution.findUniqueOrThrow({
+          where: { id: execution.id },
+        });
+        if (current.startupRecoveryCount >= 1)
+          throw new ExecutionRunnerUnavailableError(
+            "SESSION_OPEN_FAILED",
+            "Browser startup recovery was exhausted.",
+            "FAIL_FAST",
+          );
+        const cleared = await tx.browserExecution.updateMany({
+          where: {
+            id: execution.id,
+            runtimeSessionId: execution.runtimeSessionId,
+            startupRecoveryCount: 0,
+            ...(expectedAllocationToken
+              ? { allocationToken: expectedAllocationToken }
+              : {}),
+            runtimeSession: {
+              is: { ownerTaskId: null, closureVerifiedAt: { not: null } },
+            },
+          },
+          data: {
+            runtimeSessionId: null,
+            startupRecoveryCount: { increment: 1 },
+          },
+        });
+        if (cleared.count !== 1)
+          throw new ExecutionAdmissionBlocked(
+            "ADMISSION_STALE",
+            "A newer worker changed startup recovery.",
+          );
+      });
+      execution = await this.ownedBrowserExecution(teamId, browserExecutionId);
     }
 
-    const profileMode = request.execution.profile.mode;
+    let profileMode = request.execution.profile.mode;
     const requestedProfileKey = request.execution.profile.key;
-    const profileKey =
+    let profileKey =
       requestedProfileKey ?? "execution-" + execution.runId.replaceAll("-", "");
     const userProfile =
       profileMode === "PERSISTENT"
@@ -387,6 +500,28 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         request.execution.availabilityPolicy,
       );
     }
+    const isolated = userProfile?.executionMode === "ISOLATED_AUTH";
+    if (isolated && process.env.BROWSER_ISOLATED_AUTH_ENABLED !== "true")
+      throw new ExecutionAdmissionBlocked(
+        "AUTH_REQUIRED",
+        "Isolated authenticated execution is disabled for this deployment.",
+      );
+    if (isolated && !userProfile.authSnapshotGeneration)
+      throw new ExecutionAdmissionBlocked(
+        "AUTH_REQUIRED",
+        "Prepare and verify a compatible authentication snapshot first.",
+      );
+    const authSnapshot =
+      isolated && userProfile.authSnapshotGeneration
+        ? {
+            profileKey: userProfile.runtimeProfileKey,
+            generation: userProfile.authSnapshotGeneration,
+          }
+        : undefined;
+    if (isolated) {
+      profileMode = "EPHEMERAL";
+      profileKey = `execution-${execution.attemptId.replaceAll("-", "")}`;
+    }
     const historicalAffinity =
       profileMode === "PERSISTENT" && !userProfile?.assignedRuntimeId
         ? await this.prisma.browserRuntimeSession.findFirst({
@@ -405,7 +540,8 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       "NO_MATCHING_RUNNER";
 
     for (const runtime of selection.runtimes) {
-      if (userProfile && (runtime.protocolMinor ?? 0) < 9) continue;
+      if (userProfile && (runtime.protocolMinor ?? 0) < (isolated ? 13 : 9))
+        continue;
       await this.expireSlots(runtime.id);
       const leaseToken = randomUUID();
       const leaseExpiresAt = new Date(
@@ -426,6 +562,12 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             runtimeId: runtime.id,
             slotNumber,
             teamId,
+            browserExecutionId,
+            allocationToken: execution.allocationToken,
+            targetUrl: request.execution.targetUrl,
+            ...(authSnapshot
+              ? { authSnapshotGeneration: authSnapshot.generation }
+              : {}),
             ...(userProfile ? { userBrowserProfileId: userProfile.id } : {}),
           });
           break;
@@ -451,7 +593,8 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           allowedOrigins: [],
           profileKey,
           profileMode,
-          ...(userProfile
+          ...(authSnapshot ? { authSnapshot } : {}),
+          ...(userProfile && !isolated
             ? {
                 profileRetention: {
                   inactivityTtlSeconds: 2_592_000,
@@ -470,21 +613,45 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       }
 
       const now = new Date();
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.update({
+      await this.prisma.$transaction(async (tx) => {
+        const activated = await tx.browserRuntimeSession.updateMany({
           data: { openedAt: now, status: "ACTIVE" },
-          where: { id: session.id },
-        }),
-        this.prisma.browserExecution.update({
+          where: {
+            id: session.id,
+            status: "OPENING",
+            leaseExpiresAt: { gt: now },
+          },
+        });
+        if (activated.count !== 1)
+          throw new ExecutionAdmissionBlocked(
+            "LEASE_RECOVERY",
+            "The browser open acknowledgment arrived after its session was revoked.",
+          );
+        const bound = await tx.browserExecution.updateMany({
           data: {
             error: Prisma.JsonNull,
             runtimeSessionId: session.id,
             startedAt: execution.startedAt ?? now,
             status: "ACTIVE",
           },
-          where: { id: browserExecutionId },
-        }),
-        this.prisma.runEvent.create({
+          where: {
+            id: browserExecutionId,
+            runtimeSessionId: session.id,
+            allocationToken: execution.allocationToken,
+            status: { in: ["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"] },
+            run: {
+              cancelRequestedAt: null,
+              deadlineAt: { gt: now },
+              lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+            },
+          },
+        });
+        if (bound.count !== 1)
+          throw new ExecutionAdmissionBlocked(
+            "ADMISSION_STALE",
+            "This allocation was superseded before its open acknowledgment arrived.",
+          );
+        await tx.runEvent.create({
           data: {
             actor: "BROWSER_RUNTIME",
             attemptId: execution.attemptId,
@@ -497,22 +664,40 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             runId: execution.runId,
             teamId,
           },
-        }),
-        ...(userProfile
-          ? [
-              this.prisma.userBrowserProfile.update({
-                data: {
-                  assignedRuntimeId: runtime.id,
-                  inactivityExpiresAt: new Date(
-                    now.getTime() + 30 * 24 * 60 * 60 * 1_000,
-                  ),
-                  lastUsedAt: now,
-                },
-                where: { id: userProfile.id },
-              }),
-            ]
-          : []),
-      ]);
+        });
+        await tx.taskCaseExecution.updateMany({
+          where: { runId: execution.runId },
+          data: {
+            scheduling: json({
+              state: "ADMITTED",
+              reason: "AGENT_CAPACITY",
+              waitingSince: (
+                execution.waitingSince ?? execution.createdAt
+              ).toISOString(),
+              evaluatedAt: now.toISOString(),
+              blockedBy: null,
+              queue: null,
+              nextRetryAt: null,
+            }),
+          },
+        });
+        if (execution.run.taskExecutionId)
+          await tx.taskExecution.updateMany({
+            where: { id: execution.run.taskExecutionId },
+            data: { projectionNeededAt: now },
+          });
+        if (userProfile)
+          await tx.userBrowserProfile.update({
+            data: {
+              assignedRuntimeId: runtime.id,
+              inactivityExpiresAt: new Date(
+                now.getTime() + 30 * 24 * 60 * 60 * 1_000,
+              ),
+              lastUsedAt: now,
+            },
+            where: { id: userProfile.id },
+          });
+      });
       return this.lease(runtime.id, session, selection.routing);
     }
 
@@ -524,7 +709,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         "Matching Browser Runtimes could not open a session.",
     } as const;
     await this.prisma.$transaction(async (tx) => {
-      await tx.browserExecution.update({
+      const changed = await tx.browserExecution.updateMany({
         data: {
           error: json({
             code: unavailableReason,
@@ -532,8 +717,17 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           }),
           status: "WAITING_CAPACITY",
         },
-        where: { id: browserExecutionId },
+        where: {
+          id: browserExecutionId,
+          allocationToken: execution.allocationToken,
+          status: { in: ["REQUESTED", "ALLOCATING", "WAITING_CAPACITY"] },
+          run: {
+            cancelRequestedAt: null,
+            lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+          },
+        },
       });
+      if (changed.count !== 1) return;
       if (execution.status !== "WAITING_CAPACITY") {
         await tx.runEvent.create({
           data: {
@@ -562,6 +756,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     browserExecutionId: string,
     input: RuntimeCommandInput,
     signal?: AbortSignal,
+    owner?: BrowserExecutionOwner,
   ) {
     const execution = await this.ownedBrowserExecution(
       teamId,
@@ -582,6 +777,17 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           : "Browser execution session is not active.",
       );
     }
+    if (
+      owner &&
+      (session.ownerTaskId !== owner.taskId ||
+        session.ownerFencingToken?.toString() !== owner.fencingToken ||
+        !session.executionPermitExpiresAt ||
+        session.executionPermitExpiresAt <= new Date())
+    )
+      throw new ConflictException({
+        code: "LEASE_LOST",
+        message: "Browser execution ownership is stale.",
+      });
     const requiredMinor = runtimeCommandMinimumMinor(input.commandType);
     if (session.protocolMinor < requiredMinor) {
       throw new ConflictException({
@@ -610,6 +816,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       sessionId: session.id,
       ...(signal ? { signal } : {}),
       source: "AGENT",
+      ...(owner ? { owner } : {}),
       ...(input.timeoutSeconds === undefined
         ? {}
         : { timeoutSeconds: input.timeoutSeconds }),
@@ -658,12 +865,14 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       ...command,
       evidenceRefs,
       fencingToken: command.fencingToken.toString(),
+      ownerFencingToken: command.ownerFencingToken?.toString() ?? null,
     };
   }
 
   async releaseForExecutionRun(
     teamId: string,
     browserExecutionId: string,
+    owner?: BrowserExecutionOwner,
   ): Promise<void> {
     const execution = await this.ownedBrowserExecution(
       teamId,
@@ -679,18 +888,47 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     const session = await this.prisma.browserRuntimeSession.findFirst({
       where: { id: execution.runtimeSessionId, teamId },
     });
-    if (!session || ["CLOSED", "FAILED", "LOST"].includes(session.status)) {
-      await this.prisma.browserExecution.update({
-        data: { finishedAt: new Date(), status: "RELEASED" },
-        where: { id: execution.id },
+    if (!session || session.status === "CLOSED" || session.closureVerifiedAt) {
+      await this.prisma.$transaction(async (tx) => {
+        if (session) await releaseVerifiedSessionResources(tx, session.id);
+        await tx.browserExecution.update({
+          data: { finishedAt: new Date(), status: "RELEASED" },
+          where: { id: execution.id },
+        });
       });
       return;
     }
+    if (
+      owner &&
+      (session.ownerTaskId !== owner.taskId ||
+        session.ownerFencingToken?.toString() !== owner.fencingToken ||
+        !session.executionPermitExpiresAt ||
+        session.executionPermitExpiresAt <= new Date())
+    )
+      throw new ConflictException({
+        code: "LEASE_LOST",
+        message: "A stale Agent cannot release this browser.",
+      });
     const claimed = await this.prisma.browserRuntimeSession.updateMany({
       data: { status: "CLOSING" },
       where: {
         id: session.id,
-        status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL"] },
+        status: {
+          in: [
+            "OPENING",
+            "ACTIVE",
+            "HUMAN_CONTROL",
+            "LOST",
+            "FAILED",
+            "CLOSING",
+          ],
+        },
+        ...(owner
+          ? {
+              ownerTaskId: owner.taskId,
+              ownerFencingToken: BigInt(owner.fencingToken),
+            }
+          : {}),
       },
     });
     if (claimed.count !== 1) return;
@@ -703,6 +941,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       sessionId: session.id,
       source: "SYSTEM",
       timeoutSeconds: 60,
+      ...(owner ? { owner } : {}),
     });
     if (closed?.artifacts.length) {
       await this.prisma.runEvidence.createMany({
@@ -724,7 +963,9 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     await this.prisma.$transaction([
       this.prisma.browserRuntimeSession.update({
         data: {
-          closedAt: now,
+          closedAt: released ? now : null,
+          closureVerifiedAt: released ? now : null,
+          quarantinedAt: released ? null : now,
           lastError: released
             ? videoFailure
               ? json(videoFailure)
@@ -736,19 +977,14 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         },
         where: { id: session.id },
       }),
-      this.prisma.browserRuntimeSlot.deleteMany({
-        where: { sessionId: session.id },
-      }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId: session.id },
-      }),
       this.prisma.browserExecution.update({
         data: {
           error: released
             ? Prisma.JsonNull
             : json(closed?.error ?? { code: "CLOSE_FAILED" }),
           finishedAt: now,
-          status: released ? "RELEASED" : "LOST",
+          // Retain a retryable state until all verified resources are cleaned up.
+          status: released ? "RELEASING" : "LOST",
         },
         where: { id: execution.id },
       }),
@@ -784,6 +1020,14 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           ]
         : []),
     ]);
+    if (released)
+      await this.prisma.$transaction(async (tx) => {
+        await releaseVerifiedSessionResources(tx, session.id);
+        await tx.browserExecution.update({
+          data: { finishedAt: now, status: "RELEASED" },
+          where: { id: execution.id },
+        });
+      });
   }
 
   async execute(
@@ -950,6 +1194,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       ...command,
       evidenceRefs,
       fencingToken: command.fencingToken.toString(),
+      ownerFencingToken: command.ownerFencingToken?.toString() ?? null,
     };
   }
 
@@ -961,14 +1206,27 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     const session = await this.prisma.browserRuntimeSession.findFirst({
       where: { id: run.runtimeSessionId, teamId },
     });
-    if (!session || ["CLOSED", "FAILED", "LOST"].includes(session.status)) {
+    if (
+      !session ||
+      session.status === "CLOSED" ||
+      !!session.closureVerifiedAt
+    ) {
       return;
     }
     const claimed = await this.prisma.browserRuntimeSession.updateMany({
       data: { status: "CLOSING" },
       where: {
         id: session.id,
-        status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL"] },
+        status: {
+          in: [
+            "OPENING",
+            "ACTIVE",
+            "HUMAN_CONTROL",
+            "LOST",
+            "CLOSING",
+            "FAILED",
+          ],
+        },
       },
     });
     if (claimed.count !== 1) return;
@@ -996,7 +1254,9 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     await this.prisma.$transaction([
       this.prisma.browserRuntimeSession.update({
         data: {
-          closedAt: new Date(),
+          closedAt: released ? new Date() : null,
+          closureVerifiedAt: released ? new Date() : null,
+          quarantinedAt: released ? null : new Date(),
           lastError: released
             ? videoFailure
               ? json(videoFailure)
@@ -1008,13 +1268,11 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         },
         where: { id: session.id },
       }),
-      this.prisma.browserRuntimeSlot.deleteMany({
-        where: { sessionId: session.id },
-      }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId: session.id },
-      }),
     ]);
+    if (released)
+      await this.prisma.$transaction((tx) =>
+        releaseVerifiedSessionResources(tx, session.id),
+      );
     await this.lifecycle.appendEvent({
       actor: "RUNNER",
       kind: "execution.released",
@@ -1150,21 +1408,21 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       }
       return { profileKey, purged: true, runtimeId: runtime.id };
     } finally {
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.update({
+      await this.prisma.$transaction(async (tx) => {
+        if (!purged) {
+          await quarantineSession(tx, session.id, "PURGE_UNCONFIRMED");
+          return;
+        }
+        await tx.browserRuntimeSession.update({
           data: {
             closedAt: new Date(),
-            status: purged ? "CLOSED" : "FAILED",
+            closureVerifiedAt: new Date(),
+            status: "CLOSED",
           },
           where: { id: session.id },
-        }),
-        this.prisma.browserRuntimeSlot.deleteMany({
-          where: { sessionId: session.id },
-        }),
-        this.prisma.browserRuntimeProfileLease.deleteMany({
-          where: { sessionId: session.id },
-        }),
-      ]);
+        });
+        await releaseVerifiedSessionResources(tx, session.id);
+      });
     }
   }
 
@@ -1244,7 +1502,6 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           _count: { _all: true },
           by: ["runtimeId"],
           where: {
-            expiresAt: { gt: now },
             runtimeId: { in: candidates.map((runtime) => runtime.id) },
           },
         }),
@@ -1310,19 +1567,370 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     slotNumber: number;
     teamId: string;
     userBrowserProfileId?: string;
+    browserExecutionId?: string;
+    allocationToken?: string | null;
+    authSnapshotGeneration?: number;
+    targetUrl?: string | undefined;
   }) {
     return this.prisma.$transaction(
       async (tx) => {
+        // One brief coordinator protects hierarchical roots, including UNKNOWN
+        // work without a target. No browser/network operation runs under it.
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+        if (input.userBrowserProfileId)
+          await acquireAdvisoryTransactionLock(
+            tx,
+            `browser-profile:${input.userBrowserProfileId}`,
+          );
+        await acquireAdvisoryTransactionLock(
+          tx,
+          `browser-runtime:${input.runtimeId}`,
+        );
+        const execution = input.browserExecutionId
+          ? await tx.browserExecution.findUniqueOrThrow({
+              where: { id: input.browserExecutionId },
+              include: {
+                run: {
+                  include: {
+                    taskCaseExecution: true,
+                    taskExecution: { include: { profileBinding: true } },
+                  },
+                },
+              },
+            })
+          : null;
+        if (
+          execution &&
+          (execution.runtimeSessionId ||
+            execution.allocationToken !== (input.allocationToken ?? null) ||
+            !["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"].includes(
+              execution.status,
+            ) ||
+            execution.run.cancelRequestedAt ||
+            execution.run.deadlineAt <= new Date() ||
+            !["QUEUED", "PREPARING", "RUNNING"].includes(
+              execution.run.lifecycle,
+            ))
+        ) {
+          throw new ExecutionAdmissionBlocked(
+            "ADMISSION_STALE",
+            "This Attempt has already been allocated or is no longer runnable.",
+          );
+        }
+        const policy = concurrencyPolicy(execution?.run.concurrencyPolicy);
+        const dependencies = policy.dependsOnCaseIds ?? [];
+        if (dependencies.length) {
+          const current = execution?.run.taskCaseExecution;
+          if (!current)
+            throw new ExecutionAdmissionBlocked(
+              "CASE_DEPENDENCY",
+              "Case dependencies require a Task execution unit.",
+            );
+          const predecessors = await tx.taskCaseExecution.findMany({
+            where: {
+              taskExecutionId: current.taskExecutionId,
+              deploymentId: current.deploymentId,
+              caseId: { in: dependencies },
+            },
+            orderBy: { executionOrdinal: "desc" },
+            include: { run: { select: { lifecycle: true, verdict: true } } },
+          });
+          const latest = new Map<string, (typeof predecessors)[number]>();
+          for (const predecessor of predecessors)
+            if (!latest.has(predecessor.caseId))
+              latest.set(predecessor.caseId, predecessor);
+          if (
+            dependencies.some(
+              (id) =>
+                latest.get(id)?.run?.lifecycle !== "COMPLETED" ||
+                latest.get(id)?.run?.verdict !== "PASSED",
+            )
+          )
+            throw new ExecutionAdmissionBlocked(
+              "CASE_DEPENDENCY",
+              "Required Cases have not completed successfully.",
+            );
+        }
+        let identityPermit: number | undefined;
+        if (input.userBrowserProfileId) {
+          const profile = await tx.userBrowserProfile.findUniqueOrThrow({
+            where: { id: input.userBrowserProfileId },
+            include: {
+              grants: { where: { revokedAt: null } },
+              owner: { include: { memberships: true } },
+            },
+          });
+          const source =
+            execution?.run.taskExecution?.profileBinding?.triggerSource;
+          const target = input.targetUrl
+            ? new URL(input.targetUrl).hostname
+            : null;
+          if (
+            input.purpose !== "PROFILE_PURGE" &&
+            (profile.teamId !== input.teamId ||
+              profile.status !== "READY" ||
+              !profile.inactivityExpiresAt ||
+              profile.inactivityExpiresAt <= new Date() ||
+              profile.owner.status !== "ACTIVE" ||
+              !profile.owner.memberships.some(
+                (member) => member.teamId === input.teamId,
+              ) ||
+              !source ||
+              !target ||
+              !profile.grants.some(
+                (grant) =>
+                  grant.triggerSource === source &&
+                  hostnameMatchesPattern(target, grant.hostnamePattern),
+              ))
+          ) {
+            throw new ExecutionAdmissionBlocked(
+              "AUTH_REQUIRED",
+              "Browser identity authorization changed before admission.",
+            );
+          }
+          if (input.purpose === "PROFILE_PURGE") {
+            if (
+              profile.teamId !== input.teamId ||
+              (await tx.browserRuntimeSession.count({
+                where: {
+                  userBrowserProfileId: profile.id,
+                  closureVerifiedAt: null,
+                  status: { not: "CLOSED" },
+                },
+              }))
+            )
+              throw new ExecutionAdmissionBlocked(
+                "AUTH_REFRESH",
+                "All sessions for this login identity must be verified closed before purge.",
+              );
+          }
+          if (input.authSnapshotGeneration !== undefined) {
+            if (
+              profile.executionMode !== "ISOLATED_AUTH" ||
+              profile.authSnapshotGeneration !== input.authSnapshotGeneration ||
+              profile.assignedRuntimeId !== input.runtimeId
+            )
+              throw new ExecutionAdmissionBlocked(
+                "AUTH_REFRESH",
+                "The authentication snapshot changed before admission.",
+              );
+            const holders = await tx.browserRuntimeSession.findMany({
+              where: {
+                userBrowserProfileId: profile.id,
+                OR: [
+                  { identityPermit: { not: null } },
+                  { closureVerifiedAt: null, status: { not: "CLOSED" } },
+                ],
+              },
+              select: { identityPermit: true, purpose: true },
+            });
+            if (holders.some((holder) => holder.purpose !== "EXECUTION"))
+              throw new ExecutionAdmissionBlocked(
+                "AUTH_REFRESH",
+                "Browser identity maintenance is in progress.",
+              );
+            const used = new Set(
+              holders.map((holder) => holder.identityPermit),
+            );
+            for (
+              let permit = 0;
+              permit < profile.executionConcurrency;
+              permit++
+            )
+              if (!used.has(permit)) {
+                identityPermit = permit;
+                break;
+              }
+            if (
+              identityPermit === undefined ||
+              holders.length >= profile.executionConcurrency
+            )
+              throw new ExecutionAdmissionBlocked(
+                "IDENTITY_CAPACITY",
+                "All concurrency permits for this login identity are occupied.",
+              );
+          }
+        }
+        const claims =
+          input.purpose === "PROFILE_PURGE"
+            ? []
+            : resourceClaims(input.targetUrl, execution?.run.concurrencyPolicy);
+        const existingLeases = claims.length
+          ? await tx.executionResourceLease.findMany({
+              where: claims.some((claim) => claim.rootKey === "*")
+                ? {}
+                : {
+                    rootKey: {
+                      in: [...claims.map((claim) => claim.rootKey), "*"],
+                    },
+                  },
+              include: {
+                session: {
+                  select: {
+                    id: true,
+                    teamId: true,
+                    browserExecutions: {
+                      select: {
+                        runId: true,
+                        run: { select: { taskExecutionId: true } },
+                      },
+                      take: 1,
+                    },
+                  },
+                },
+              },
+            })
+          : [];
+        const blocker = existingLeases.find((lease) =>
+          claims.some((claim) =>
+            resourcesConflict(claim, {
+              ...lease,
+              mode: lease.quarantined
+                ? "WRITE"
+                : (lease.mode as "READ" | "WRITE"),
+            }),
+          ),
+        );
+        if (blocker) {
+          const owner = blocker.session.browserExecutions[0];
+          throw new ExecutionAdmissionBlocked(
+            blocker.quarantined ? "LEASE_RECOVERY" : "DATA_LOCK",
+            blocker.quarantined
+              ? "A previous write has an unknown outcome and requires review."
+              : "Another execution holds a conflicting business-data lock.",
+            {
+              resourceType: "DATA",
+              ...(blocker.session.teamId === input.teamId
+                ? {
+                    sessionId: blocker.sessionId,
+                    ...(owner
+                      ? {
+                          runId: owner.runId,
+                          ...(owner.run.taskExecutionId
+                            ? { taskId: owner.run.taskExecutionId }
+                            : {}),
+                        }
+                      : {}),
+                  }
+                : {}),
+            },
+          );
+        }
+        // Pre-upgrade/direct sessions without data leases cannot bypass new
+        // readers. Unknown destinations conservatively conflict with all roots.
+        if (claims.length) {
+          const legacy = await tx.browserRuntimeSession.findMany({
+            where: {
+              purpose: "EXECUTION",
+              closureVerifiedAt: null,
+              status: { not: "CLOSED" },
+              resourceLeases: { none: {} },
+            },
+            include: {
+              browserExecutions: {
+                include: { run: { select: { environmentSnapshot: true } } },
+                take: 1,
+              },
+              verificationRuns: { select: { requestSnapshot: true }, take: 1 },
+            },
+          });
+          for (const holder of legacy) {
+            const bound = holder.browserExecutions[0];
+            const oldRequest = record(
+              holder.verificationRuns[0]?.requestSnapshot ?? null,
+            );
+            const target = bound
+              ? executionTarget(bound.input, bound.run.environmentSnapshot)
+              : executionTarget(oldRequest.execution);
+            if (
+              resourceClaims(target, null).some((lease) =>
+                claims.some((claim) => resourcesConflict(claim, lease)),
+              )
+            )
+              throw new ExecutionAdmissionBlocked(
+                "DATA_LOCK",
+                "A legacy execution must drain before this business environment can run concurrently.",
+                {
+                  resourceType: "DATA",
+                  ...(holder.teamId === input.teamId
+                    ? { sessionId: holder.id }
+                    : {}),
+                },
+              );
+          }
+        }
+        // Only recently evaluated data waiters receive writer preference.
+        // Authentication, dependency or offline-runtime waits must not block
+        // compatible work on another identity/runtime in the same environment.
+        if (execution && claims.length) {
+          const ahead = await tx.browserExecution.findMany({
+            where: {
+              id: { not: execution.id },
+              createdAt: { lte: execution.createdAt },
+              runtimeSessionId: null,
+              status: { in: ["WAITING_CAPACITY", "ALLOCATING"] },
+              error: { path: ["code"], equals: "DATA_LOCK" },
+              updatedAt: { gte: new Date(Date.now() - 10_000) },
+              run: {
+                cancelRequestedAt: null,
+                deadlineAt: { gt: new Date() },
+                lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+              },
+            },
+            include: {
+              run: {
+                select: {
+                  concurrencyPolicy: true,
+                  environmentSnapshot: true,
+                  teamId: true,
+                },
+              },
+            },
+          });
+          const earlierWriter = ahead.find(
+            (item) =>
+              (item.createdAt < execution.createdAt ||
+                item.id < execution.id) &&
+              resourceClaims(
+                executionTarget(item.input, item.run.environmentSnapshot),
+                item.run.concurrencyPolicy,
+              ).some(
+                (claim) =>
+                  claim.mode === "WRITE" &&
+                  claims.some((requested) =>
+                    resourcesConflict(requested, claim),
+                  ),
+              ),
+          );
+          if (earlierWriter)
+            throw new ExecutionAdmissionBlocked(
+              "DATA_LOCK",
+              "An earlier conflicting writer is waiting for admission.",
+              {
+                resourceType: "DATA",
+                ...(earlierWriter.run.teamId === input.teamId
+                  ? { runId: earlierWriter.runId }
+                  : {}),
+              },
+            );
+        }
         const runtime = await tx.browserRuntime.findUniqueOrThrow({
           where: { id: input.runtimeId },
         });
         const occupied = await tx.browserRuntimeSlot.count({
           where: {
-            expiresAt: { gt: new Date() },
             runtimeId: input.runtimeId,
           },
         });
-        if (occupied >= runtime.maxConcurrency) {
+        if (!runtime.enabled || runtime.revokedAt)
+          throw new ExecutionAdmissionBlocked(
+            "NO_MATCHING_RUNNER",
+            "The selected Browser Runtime was disabled before admission.",
+          );
+        if (
+          occupied >= runtime.maxConcurrency ||
+          input.slotNumber >= runtime.maxConcurrency
+        ) {
           throw new RuntimeCapacityExhaustedError(
             `Browser Runtime ${runtime.id} has no available slot.`,
           );
@@ -1340,6 +1948,15 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             profileKey: input.profileKey,
             profileMode: input.profileMode,
             purpose: input.purpose ?? "EXECUTION",
+            ...(input.authSnapshotGeneration === undefined
+              ? {}
+              : {
+                  authSnapshotGeneration: input.authSnapshotGeneration,
+                  identityPermit: identityPermit ?? null,
+                }),
+            executionPermitExpiresAt: new Date(
+              Math.min(input.leaseExpiresAt.getTime(), Date.now() + 120_000),
+            ),
             protocolMajor: RUNTIME_PROTOCOL.major,
             protocolMinor: runtime.protocolMinor ?? RUNTIME_PROTOCOL.minor,
             runtimeId: input.runtimeId,
@@ -1373,6 +1990,25 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             },
           });
         }
+        if (claims.length)
+          await tx.executionResourceLease.createMany({
+            data: claims.map((claim) => ({ ...claim, sessionId: session.id })),
+          });
+        if (execution) {
+          const linked = await tx.browserExecution.updateMany({
+            where: {
+              id: execution.id,
+              runtimeSessionId: null,
+              allocationToken: input.allocationToken ?? null,
+            },
+            data: { runtimeSessionId: session.id },
+          });
+          if (linked.count !== 1)
+            throw new ExecutionAdmissionBlocked(
+              "ADMISSION_STALE",
+              "This allocation was superseded before it could be bound.",
+            );
+        }
         return session;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -1383,19 +2019,33 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     sessionId: string,
     error: Prisma.JsonValue | null | undefined,
   ) {
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.update({
-        data: {
-          lastError: error ? json(error) : json({ code: "OPEN_FAILED" }),
-          status: "FAILED",
+    await this.prisma.$transaction((tx) =>
+      quarantineSession(tx, sessionId, "OPEN_UNCONFIRMED"),
+    );
+    const closed = await this.commands
+      .execute({
+        commandType: "session.close",
+        sessionId,
+        source: "SYSTEM",
+        timeoutSeconds: 15,
+      })
+      .catch(() => null);
+    if (closed?.status !== "SUCCEEDED") return;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.browserRuntimeSession.updateMany({
+        where: {
+          id: sessionId,
+          status: { in: ["LOST", "OPENING", "CLOSING"] },
         },
-        where: { id: sessionId },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({ where: { sessionId } }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId },
-      }),
-    ]);
+        data: {
+          status: "CLOSED",
+          closedAt: new Date(),
+          closureVerifiedAt: new Date(),
+          lastError: error ?? { code: "OPEN_FAILED" },
+        },
+      });
+      await releaseVerifiedSessionResources(tx, sessionId);
+    });
   }
 
   private async expireSlots(runtimeId: string) {
@@ -1403,26 +2053,11 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       select: { sessionId: true },
       where: { expiresAt: { lte: new Date() }, runtimeId },
     });
-    if (expired.length === 0) return;
-    const ids = expired.map((item) => item.sessionId);
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.updateMany({
-        data: {
-          lastError: {
-            code: "LEASE_EXPIRED",
-            message: "Runtime session lease expired.",
-          },
-          status: "LOST",
-        },
-        where: { id: { in: ids } },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({
-        where: { sessionId: { in: ids } },
-      }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId: { in: ids } },
-      }),
-    ]);
+    for (const item of expired)
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await releaseVerifiedSessionResources(tx, item.sessionId)))
+          await quarantineSession(tx, item.sessionId, "LEASE_EXPIRED");
+      });
   }
 
   private lease(

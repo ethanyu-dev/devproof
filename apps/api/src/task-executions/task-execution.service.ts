@@ -13,6 +13,8 @@ import { Prisma } from "@prisma/client";
 import { runtimeGeneratedSpecCaseSchema } from "@devproof/agent-runtime-protocol";
 import {
   generatedTestCaseDefinitionSchema,
+  executionConcurrencyPolicySchema,
+  type ExecutionConcurrencyPolicy,
   taskExecutionCreateInputSchema,
   taskExecutionStageTypeSchema,
   testGenerationContextSchema,
@@ -24,6 +26,12 @@ import {
 } from "@devproof/contracts";
 import {
   generateBusinessTestSpec,
+  countCaseExecutions,
+  summarizeCaseScheduling,
+  readCaseScheduling,
+  caseExecutionPhase,
+  type CaseSchedulingDecision,
+  type CaseExecutionProgress,
   projectTaskExecution,
   selectPrimaryPullRequest,
   SPECIFICATION_GENERATOR,
@@ -58,6 +66,11 @@ const ANALYSIS_WORKER = `task-analysis:${process.pid}`;
 const CASE_DISPATCH_MAX_ATTEMPTS = 3;
 const DISPATCH_RETRY_DELAY_MS = 5_000;
 const MINIMUM_CHILD_RUN_WINDOW_MS = 30_000;
+const currentAgentTaskInclude = {
+  orderBy: { createdAt: "desc" as const },
+  take: 1,
+  select: { recoveryStatus: true, leaseLostAt: true },
+};
 
 export function taskDeadlineElapsed(input: {
   deadlineAt: Date;
@@ -80,6 +93,7 @@ const taskDetailInclude = {
       run: {
         include: {
           _count: { select: { evidences: true, interventions: true } },
+          tasks: currentAgentTaskInclude,
         },
       },
       deployment: true,
@@ -93,6 +107,7 @@ const taskDetailInclude = {
   executionRuns: {
     include: {
       _count: { select: { evidences: true, interventions: true } },
+      tasks: currentAgentTaskInclude,
     },
     orderBy: { createdAt: "asc" as const },
   },
@@ -139,6 +154,7 @@ const taskListInclude = {
           executionDisposition: true,
           lifecycle: true,
           verdict: true,
+          tasks: currentAgentTaskInclude,
         },
       },
     },
@@ -148,12 +164,16 @@ const taskListInclude = {
       executionDisposition: true,
       lifecycle: true,
       verdict: true,
+      tasks: currentAgentTaskInclude,
     },
   },
-  deployments: { select: { id: true } },
+  deployments: { select: { id: true, enabled: true } },
   specificationSnapshots: {
     orderBy: { generatedAt: "desc" as const },
-    select: { _count: { select: { cases: true } } },
+    select: {
+      _count: { select: { cases: true } },
+      cases: { select: { id: true } },
+    },
     take: 1,
   },
 } satisfies Prisma.TaskExecutionInclude;
@@ -483,6 +503,100 @@ export class TaskExecutionService {
     return toTaskDetail(row);
   }
 
+  async setCaseExecutionPolicy(
+    current: ToolAuthContext,
+    taskId: string,
+    executionId: string,
+    input: ExecutionConcurrencyPolicy,
+  ) {
+    const policy = executionConcurrencyPolicySchema.parse(input);
+    await this.prisma.$transaction(
+      async (tx) => {
+        const candidate = await tx.taskCaseExecution.findFirst({
+          include: { taskExecution: true },
+          where: {
+            id: executionId,
+            taskExecutionId: taskId,
+            taskExecution: { teamId: current.team.id },
+          },
+        });
+        if (!candidate)
+          throw new NotFoundException("Case execution was not found.");
+        if (
+          candidate.runId ||
+          !["PENDING", "FAILED"].includes(candidate.dispatchStatus) ||
+          candidate.dispatchAttempts >= CASE_DISPATCH_MAX_ATTEMPTS ||
+          candidate.taskExecution.cancelRequestedAt ||
+          !["RUNNING", "QUEUED", "WAITING_INPUT"].includes(
+            candidate.taskExecution.lifecycle,
+          )
+        ) {
+          throw new ConflictException(
+            "Only an unstarted Case can change its execution policy.",
+          );
+        }
+        const peers = latestCaseExecutions(
+          await tx.taskCaseExecution.findMany({
+            where: {
+              taskExecutionId: taskId,
+              deploymentId: candidate.deploymentId,
+            },
+          }),
+        );
+        if (!peers.some((peer) => peer.id === candidate.id))
+          throw new ConflictException(
+            "Only the latest execution can change its policy.",
+          );
+        validateCaseDependencyGraph(
+          peers.map((peer) => ({
+            caseId: peer.caseId,
+            executionPolicy:
+              peer.id === candidate.id ? policy : peer.executionPolicy,
+          })),
+        );
+        const changed = await tx.taskCaseExecution.updateMany({
+          data: {
+            executionPolicy: json({
+              ...policy,
+              provenance: "CONSOLE_REVIEWED",
+              version: 1,
+            }),
+            scheduling: Prisma.JsonNull,
+          },
+          where: {
+            id: executionId,
+            runId: null,
+            updatedAt: candidate.updatedAt,
+            dispatchStatus: candidate.dispatchStatus,
+          },
+        });
+        if (changed.count !== 1)
+          throw new ConflictException(
+            "Case dispatch already started; refresh its status.",
+          );
+        await tx.taskExecution.update({
+          where: { id: taskId },
+          data: { projectionNeededAt: new Date() },
+        });
+        await tx.taskExecutionEvent.create({
+          data: event(
+            current.team.id,
+            taskId,
+            "HUMAN",
+            "task.case.policy_updated",
+            {
+              caseId: candidate.caseId,
+              caseExecutionId: executionId,
+              policy,
+            },
+          ),
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return this.detail(current, taskId);
+  }
+
   async events(current: ToolAuthContext, id: string, after?: bigint) {
     await this.requireTask(current.team.id, id);
     const rows = await this.prisma.taskExecutionEvent.findMany({
@@ -610,7 +724,12 @@ export class TaskExecutionService {
       const cases = task.specificationSnapshots[0]?.cases ?? [];
       if (cases.length) {
         await tx.taskCaseExecution.createMany({
-          data: taskDeploymentMatrix(id, cases, createdDeployments),
+          data: caseExecutionMatrix(
+            id,
+            cases,
+            createdDeployments,
+            task.inputSnapshot,
+          ),
         });
       }
       await tx.taskExecutionStage.updateMany({
@@ -784,6 +903,7 @@ export class TaskExecutionService {
             caseId: item.caseId,
             deploymentId: item.deploymentId,
             executionOrdinal: item.executionOrdinal + 1,
+            executionPolicy: item.executionPolicy ?? Prisma.JsonNull,
             taskExecutionId: id,
           })),
         });
@@ -902,6 +1022,7 @@ export class TaskExecutionService {
                 caseId,
                 deploymentId: latest.deploymentId,
                 executionOrdinal: latest.executionOrdinal + 1,
+                executionPolicy: latest.executionPolicy ?? Prisma.JsonNull,
                 taskExecutionId: task.id,
               },
               select: {
@@ -1150,13 +1271,19 @@ export class TaskExecutionService {
   async projectTask(taskExecutionId: string) {
     const task = await this.prisma.taskExecution.findUnique({
       include: {
-        caseExecutions: { include: { run: true } },
+        caseExecutions: {
+          include: { run: { include: { tasks: currentAgentTaskInclude } } },
+        },
         deployments: { select: { id: true } },
-        executionRuns: true,
+        executionRuns: { include: { tasks: currentAgentTaskInclude } },
         profileBinding: true,
         specificationSnapshots: {
           orderBy: { generatedAt: "desc" },
-          select: { primaryPullRequestUrl: true, summary: true },
+          select: {
+            primaryPullRequestUrl: true,
+            summary: true,
+            cases: { select: { id: true } },
+          },
           take: 1,
         },
         stages: true,
@@ -1180,20 +1307,28 @@ export class TaskExecutionService {
     );
     if (!analysis || !execution) return null;
     const environment = record(task.environmentSnapshot);
-    const issueCases = latestCaseExecutions(task.caseExecutions).map(
-      (item) => ({
-        dispatchAttempts: item.dispatchAttempts,
-        dispatchMaxAttempts: CASE_DISPATCH_MAX_ATTEMPTS,
-        dispatchStatus: item.dispatchStatus,
-        run: item.run
-          ? {
-              executionDisposition: item.run.executionDisposition,
-              lifecycle: item.run.lifecycle,
-              verdict: item.run.verdict,
-            }
-          : null,
-      }),
+    const currentCases = task.specificationSnapshots[0]?.cases;
+    const latestIssueExecutions = latestCaseExecutions(
+      task.caseExecutions.filter(
+        (item) =>
+          !currentCases ||
+          currentCases.some((testCase) => testCase.id === item.caseId),
+      ),
     );
+    const issueCases = latestIssueExecutions.map((item) => ({
+      scheduling: item.scheduling,
+      dispatchAttempts: item.dispatchAttempts,
+      dispatchMaxAttempts: CASE_DISPATCH_MAX_ATTEMPTS,
+      dispatchStatus: item.dispatchStatus,
+      run: item.run
+        ? {
+            executionDisposition: item.run.executionDisposition,
+            lifecycle: item.run.lifecycle,
+            verdict: item.run.verdict,
+            tasks: item.run.tasks,
+          }
+        : null,
+    }));
     const directCases = task.executionRuns.map((run) => ({
       dispatchAttempts: 1,
       dispatchMaxAttempts: 1,
@@ -1202,6 +1337,7 @@ export class TaskExecutionService {
         executionDisposition: run.executionDisposition,
         lifecycle: run.lifecycle,
         verdict: run.verdict,
+        tasks: run.tasks,
       },
     }));
     const waitingForHuman = [...issueCases, ...directCases].some(
@@ -1237,9 +1373,7 @@ export class TaskExecutionService {
     const completionRuns =
       task.kind === "DIRECT_RUN" || task.kind === "LEGACY_RUN"
         ? task.executionRuns
-        : latestCaseExecutions(task.caseExecutions).flatMap((item) =>
-            item.run ? [item.run] : [],
-          );
+        : latestIssueExecutions.flatMap((item) => (item.run ? [item.run] : []));
     const completionCounts = {
       failed: completionRuns.filter((run) => run.verdict === "FAILED").length,
       inconclusive: completionRuns.filter(
@@ -1976,10 +2110,11 @@ export class TaskExecutionService {
         ];
       }
       await tx.taskCaseExecution.createMany({
-        data: taskDeploymentMatrix(
+        data: caseExecutionMatrix(
           locked.stage.taskExecutionId,
           snapshot.cases,
           deployments,
+          locked.stage.taskExecution.inputSnapshot,
         ),
       });
       await tx.taskStageAttempt.update({
@@ -2286,29 +2421,141 @@ export class TaskExecutionService {
       where,
     });
     const issueQueue = issueRows.map((row) => row.taskExecutionId);
+    const inspected = new Set<string>();
     let dispatched = 0;
     while (issueQueue.length && dispatched < limit) {
       const currentTaskExecutionId = issueQueue.shift()!;
       const candidate = await this.prisma.taskCaseExecution.findFirst({
         include: dispatchCandidateInclude,
         orderBy: { createdAt: "asc" },
-        where: { AND: [where, { taskExecutionId: currentTaskExecutionId }] },
+        where: {
+          AND: [
+            where,
+            {
+              taskExecutionId: currentTaskExecutionId,
+              id: { notIn: [...inspected] },
+            },
+          ],
+        },
       });
-      if (!candidate) continue;
+      if (!candidate || inspected.has(candidate.id)) continue;
+      inspected.add(candidate.id);
+      issueQueue.push(currentTaskExecutionId);
+      const policy = executionConcurrencyPolicySchema.safeParse(
+        candidate.executionPolicy,
+      );
+      if (
+        record(candidate.taskExecution.inputSnapshot)
+          .casePolicyReviewRequired === true &&
+        (!policy.success ||
+          !["CONSOLE_REVIEWED", "REQUEST_REVIEWED"].includes(
+            policy.data.provenance ?? "",
+          ))
+      ) {
+        await this.recordScheduling(
+          candidate,
+          "WAITING",
+          "POLICY_REVIEW",
+          null,
+        );
+        continue;
+      }
+      const dependencies = policy.success
+        ? (policy.data.dependsOnCaseIds ?? [])
+        : [];
+      if (dependencies.length) {
+        const rows = latestCaseExecutions(
+          await this.prisma.taskCaseExecution.findMany({
+            include: { run: true },
+            where: {
+              taskExecutionId: candidate.taskExecutionId,
+              deploymentId: candidate.deploymentId,
+              caseId: { in: dependencies },
+            },
+          }),
+        );
+        const missing = dependencies.find(
+          (id) => !rows.some((row) => row.caseId === id),
+        );
+        const failed = rows.find(
+          (row) =>
+            caseExecutionPhase(row) === "terminal" &&
+            (row.run?.verdict !== "PASSED" ||
+              row.run.executionDisposition !== "EXECUTED"),
+        );
+        const pending = rows.find(
+          (row) => caseExecutionPhase(row) !== "terminal",
+        );
+        if (missing || failed) {
+          await this.recordScheduling(
+            candidate,
+            "TERMINAL",
+            missing ? "CASE_DEPENDENCY_INVALID" : "CASE_DEPENDENCY_FAILED",
+            failed
+              ? {
+                  resourceType: "CASE",
+                  caseExecutionId: failed.id,
+                  ...(failed.runId ? { runId: failed.runId } : {}),
+                  taskId: candidate.taskExecutionId,
+                }
+              : {
+                  resourceType: "CASE",
+                  ...(missing ? { resourceId: missing } : {}),
+                },
+          );
+          continue;
+        }
+        if (pending) {
+          await this.recordScheduling(candidate, "WAITING", "CASE_DEPENDENCY", {
+            resourceType: "CASE",
+            caseExecutionId: pending.id,
+            ...(pending.runId ? { runId: pending.runId } : {}),
+            taskId: candidate.taskExecutionId,
+          });
+          continue;
+        }
+      }
       const reservation = await this.reservations.acquire(
         candidate.taskExecutionId,
         candidate.deploymentId,
       );
-      if (!reservation.acquired) continue;
-      if (reservation.profile) {
+      if (!reservation.acquired) {
+        await this.recordScheduling(
+          candidate,
+          "WAITING",
+          reservation.reason,
+          reservation.blockedBy,
+          reservation.queue,
+        );
+        continue;
+      }
+      if (
+        reservation.profile &&
+        reservation.profile.executionMode !== "ISOLATED_AUTH"
+      ) {
         const activeRun = await this.prisma.executionRun.findFirst({
-          select: { id: true },
+          select: { id: true, taskExecutionId: true },
           where: {
             browserProfileId: reservation.profile.id,
             lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
           },
         });
-        if (activeRun) continue;
+        if (activeRun) {
+          await this.recordScheduling(
+            candidate,
+            "WAITING",
+            "PROFILE_SESSION_BUSY",
+            {
+              resourceType: "PROFILE",
+              resourceId: reservation.profile.id,
+              runId: activeRun.id,
+              ...(activeRun.taskExecutionId
+                ? { taskId: activeRun.taskExecutionId }
+                : {}),
+            },
+          );
+          continue;
+        }
       }
       const claimed = await this.prisma.taskCaseExecution.updateMany({
         data: {
@@ -2316,16 +2563,19 @@ export class TaskExecutionService {
           dispatchLastError: Prisma.JsonNull,
           dispatchRequestedAt: new Date(),
           dispatchStatus: "DISPATCHING",
+          scheduling: json(
+            newSchedulingDecision(candidate, "READY", null, null),
+          ),
         },
         where: {
           id: candidate.id,
           runId: null,
           dispatchAttempts: candidate.dispatchAttempts,
           dispatchStatus: candidate.dispatchStatus,
+          updatedAt: candidate.updatedAt,
         },
       });
       if (claimed.count !== 1) {
-        issueQueue.push(currentTaskExecutionId);
         continue;
       }
       try {
@@ -2400,6 +2650,24 @@ export class TaskExecutionService {
             data: {
               dispatchLastError: json(failure),
               dispatchStatus: "FAILED",
+              scheduling: json({
+                ...newSchedulingDecision(
+                  candidate,
+                  candidate.dispatchAttempts + 1 >= CASE_DISPATCH_MAX_ATTEMPTS
+                    ? "TERMINAL"
+                    : "WAITING",
+                  candidate.dispatchAttempts + 1 >= CASE_DISPATCH_MAX_ATTEMPTS
+                    ? "DISPATCH_EXHAUSTED"
+                    : "RETRY_BACKOFF",
+                  null,
+                ),
+                nextRetryAt:
+                  candidate.dispatchAttempts + 1 >= CASE_DISPATCH_MAX_ATTEMPTS
+                    ? null
+                    : new Date(
+                        Date.now() + DISPATCH_RETRY_DELAY_MS,
+                      ).toISOString(),
+              }),
             },
             where: { dispatchStatus: "DISPATCHING", id: candidate.id },
           });
@@ -2419,9 +2687,64 @@ export class TaskExecutionService {
           });
         });
       }
-      issueQueue.push(currentTaskExecutionId);
     }
     return dispatched;
+  }
+
+  private async recordScheduling(
+    candidate: {
+      id: string;
+      taskExecutionId: string;
+      scheduling?: unknown;
+      createdAt: Date;
+      updatedAt: Date;
+      dispatchStatus: string;
+    },
+    state: CaseSchedulingDecision["state"],
+    reason: string | null,
+    blockedBy: CaseSchedulingDecision["blockedBy"],
+    queue: CaseSchedulingDecision["queue"] = null,
+  ) {
+    const previous = readCaseScheduling(candidate.scheduling);
+    if (
+      previous?.state === state &&
+      previous.reason === reason &&
+      isDeepStrictEqual(previous.blockedBy, blockedBy) &&
+      previous.queue?.scope === queue?.scope &&
+      previous.queue?.position === queue?.position
+    )
+      return;
+    const scheduling = {
+      ...newSchedulingDecision(candidate, state, reason, blockedBy),
+      queue,
+    };
+    await this.prisma.$transaction(async (tx) => {
+      const changed = await tx.taskCaseExecution.updateMany({
+        data: {
+          scheduling: json(scheduling),
+          ...(state === "TERMINAL"
+            ? {
+                dispatchStatus: "FAILED",
+                dispatchAttempts: CASE_DISPATCH_MAX_ATTEMPTS,
+                dispatchLastError: json({
+                  code: reason,
+                  message: "A required Case could not complete successfully.",
+                }),
+              }
+            : {}),
+        },
+        where: {
+          id: candidate.id,
+          runId: null,
+          updatedAt: candidate.updatedAt,
+        },
+      });
+      if (changed.count !== 1) return;
+      await tx.taskExecution.update({
+        data: { projectionNeededAt: new Date() },
+        where: { id: candidate.taskExecutionId },
+      });
+    });
   }
 
   private async expireExhaustedDispatches(limit: number) {
@@ -2572,6 +2895,11 @@ function taskCaseRunRequest(
     }),
   );
   return {
+    concurrencyPolicy: executionConcurrencyPolicySchema.safeParse(
+      item.executionPolicy,
+    ).success
+      ? executionConcurrencyPolicySchema.parse(item.executionPolicy)
+      : { accessMode: "UNKNOWN" },
     browserPolicy: runtimeProfileKey
       ? {
           ...input.browserPolicy,
@@ -2683,6 +3011,102 @@ function taskCaseRunRequest(
   };
 }
 
+function newSchedulingDecision(
+  candidate: { scheduling?: unknown; createdAt?: Date },
+  state: CaseSchedulingDecision["state"],
+  reason: string | null,
+  blockedBy: CaseSchedulingDecision["blockedBy"],
+): CaseSchedulingDecision {
+  const previous = readCaseScheduling(candidate.scheduling);
+  const now = new Date().toISOString();
+  return {
+    state,
+    reason,
+    blockedBy,
+    waitingSince:
+      state === "WAITING" ||
+      state === "RECOVERING" ||
+      state === "READY" ||
+      state === "ADMITTED"
+        ? (previous?.waitingSince ?? candidate.createdAt?.toISOString() ?? now)
+        : null,
+    evaluatedAt: now,
+    queue: null,
+    nextRetryAt: null,
+  };
+}
+
+function caseExecutionMatrix(
+  taskId: string,
+  cases: readonly { id: string; position?: number }[],
+  deployments: readonly { id: string }[],
+  inputSnapshot: Prisma.JsonValue,
+) {
+  const policies = record(inputSnapshot).caseExecutionPolicies;
+  const configured =
+    policies && typeof policies === "object" && !Array.isArray(policies)
+      ? (policies as Record<string, unknown>)
+      : {};
+  const casePolicies = cases.map((testCase, index) => {
+    const policy =
+      configured[testCase.id] ??
+      configured[String((testCase.position ?? index) + 1)];
+    return {
+      caseId: testCase.id,
+      executionPolicy:
+        policy === undefined
+          ? { accessMode: "UNKNOWN" as const }
+          : {
+              ...executionConcurrencyPolicySchema.parse(policy),
+              provenance: "REQUEST_REVIEWED",
+              version: 1,
+            },
+    };
+  });
+  validateCaseDependencyGraph(casePolicies);
+  return taskDeploymentMatrix(taskId, cases, deployments).map((row) => ({
+    ...row,
+    executionPolicy: json(
+      casePolicies.find((policy) => policy.caseId === row.caseId)!
+        .executionPolicy,
+    ),
+  }));
+}
+
+export function validateCaseDependencyGraph(
+  rows: readonly { caseId: string; executionPolicy?: unknown }[],
+) {
+  const graph = new Map(
+    rows.map((row) => {
+      const policy = executionConcurrencyPolicySchema.safeParse(
+        row.executionPolicy,
+      );
+      return [
+        row.caseId,
+        policy.success ? (policy.data.dependsOnCaseIds ?? []) : [],
+      ];
+    }),
+  );
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id))
+      throw new BadRequestException(
+        "Case dependencies must not contain a cycle.",
+      );
+    if (visited.has(id)) return;
+    if (!graph.has(id))
+      throw new BadRequestException(
+        "Case dependencies must belong to this Task and deployment.",
+      );
+    visiting.add(id);
+    for (const dependency of graph.get(id)!) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of graph.keys()) visit(id);
+}
+
 function taskAnalysisBusinessReferences(
   taskId: string,
   requestedSourceRefs: string[],
@@ -2786,7 +3210,9 @@ function toTaskDetail(row: TaskDetailRow) {
   const caseDetails = cases.map((testCase) => ({
     definition: parseGeneratedCaseDefinition(testCase.definition),
     definitionHash: testCase.definitionHash,
-    executions: (executionsByCase.get(testCase.id) ?? []).map(toCaseExecution),
+    executions: (executionsByCase.get(testCase.id) ?? []).map((execution) =>
+      toCaseExecution(execution, row.lifecycle),
+    ),
     id: testCase.id,
     name: testCase.name,
     position: testCase.position,
@@ -2797,15 +3223,22 @@ function toTaskDetail(row: TaskDetailRow) {
           dispatchStatus: "LINKED",
           run,
         }))
-      : latestCaseExecutions(row.caseExecutions).map((execution) => ({
-          dispatchStatus: execution.dispatchStatus,
-          run: execution.run,
+      : latestCaseExecutions(
+          row.caseExecutions.filter((execution) =>
+            cases.some((testCase) => testCase.id === execution.caseId),
+          ),
+        ).map((execution) => ({
+          ...execution,
+          scheduling: caseSchedulingForDisplay(execution, row.lifecycle),
         }));
   const counts = executionCounts(
     allExecutions,
     row.kind === "DIRECT_RUN" || row.kind === "LEGACY_RUN"
       ? row.executionRuns.length
-      : cases.length * row.deployments.length,
+      : cases.length *
+          row.deployments.filter((deployment) => deployment.enabled !== false)
+            .length,
+    row.lifecycle,
   );
   return {
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
@@ -2815,6 +3248,8 @@ function toTaskDetail(row: TaskDetailRow) {
     },
     cases: caseDetails,
     counts,
+    scheduling: summarizeCaseScheduling(allExecutions, row.lifecycle),
+    projectedAt: row.projectedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     currentStage: row.currentStage,
     deadlineAt: row.deadlineAt.toISOString(),
@@ -2848,6 +3283,16 @@ function toTaskDetail(row: TaskDetailRow) {
         }
       : null,
     runs: row.executionRuns.map((run) => ({
+      infrastructureRecoveryCount: run.infrastructureRecoveryCount,
+      scheduling: caseSchedulingForDisplay(
+        {
+          dispatchStatus: "LINKED",
+          run,
+          createdAt: run.createdAt,
+          updatedAt: run.updatedAt,
+        },
+        row.lifecycle,
+      ),
       currentAttemptNumber: run.currentAttemptNumber,
       evidenceCount: run._count.evidences,
       executionDisposition: run.executionDisposition,
@@ -2916,17 +3361,27 @@ function toTaskSummary(
   const executions =
     row.kind === "DIRECT_RUN" || row.kind === "LEGACY_RUN"
       ? row.executionRuns.map((run) => ({ dispatchStatus: "LINKED", run }))
-      : latestCaseExecutions(row.caseExecutions).map((execution) => ({
-          dispatchStatus: execution.dispatchStatus,
-          run: execution.run,
+      : latestCaseExecutions(
+          row.caseExecutions.filter(
+            (execution) =>
+              !row.specificationSnapshots[0]?.cases ||
+              row.specificationSnapshots[0].cases.some(
+                (testCase) => testCase.id === execution.caseId,
+              ),
+          ),
+        ).map((execution) => ({
+          ...execution,
+          scheduling: caseSchedulingForDisplay(execution, row.lifecycle),
         }));
   const total =
     row.kind === "ISSUE_SPEC"
       ? (row.specificationSnapshots[0]?._count.cases ?? 0) *
-        row.deployments.length
+        row.deployments.filter((deployment) => deployment.enabled !== false)
+          .length
       : row.executionRuns.length;
   return {
-    counts: executionCounts(executions, total),
+    counts: executionCounts(executions, total, row.lifecycle),
+    scheduling: summarizeCaseScheduling(executions, row.lifecycle),
     createdAt: row.createdAt.toISOString(),
     currentStage: row.currentStage,
     executionDisposition: row.executionDisposition,
@@ -2942,37 +3397,11 @@ function toTaskSummary(
 }
 
 export function executionCounts(
-  executions: Array<{
-    dispatchStatus: string;
-    run: {
-      executionDisposition: string | null;
-      lifecycle: string;
-      verdict: string | null;
-    } | null;
-  }>,
+  executions: readonly CaseExecutionProgress[],
   total: number,
+  parentLifecycle?: string,
 ) {
-  return {
-    blocked: executions.filter(
-      (item) =>
-        item.run &&
-        item.run.executionDisposition !== null &&
-        item.run.executionDisposition !== "EXECUTED",
-    ).length,
-    failed: executions.filter((item) => item.run?.verdict === "FAILED").length,
-    inconclusive: executions.filter(
-      (item) => item.run?.verdict === "INCONCLUSIVE",
-    ).length,
-    passed: executions.filter((item) => item.run?.verdict === "PASSED").length,
-    running: executions.filter((item) =>
-      ["RUNNING", "WAITING_INPUT"].includes(item.run?.lifecycle ?? ""),
-    ).length,
-    total,
-    waiting: executions.filter(
-      (item) =>
-        !item.run || ["QUEUED", "PREPARING"].includes(item.run.lifecycle),
-    ).length,
-  };
+  return countCaseExecutions(executions, total, parentLifecycle);
 }
 
 function latestCaseExecutions<
@@ -3035,8 +3464,13 @@ function compatibilityTaskLifecycle(lifecycle: string) {
   }
 }
 
-function toCaseExecution(execution: TaskDetailRow["caseExecutions"][number]) {
+function toCaseExecution(
+  execution: TaskDetailRow["caseExecutions"][number],
+  parentLifecycle: string,
+) {
   return {
+    executionPolicy: execution.executionPolicy,
+    scheduling: caseSchedulingForDisplay(execution, parentLifecycle),
     dispatch: {
       attempts: execution.dispatchAttempts,
       lastError: execution.dispatchLastError,
@@ -3053,6 +3487,8 @@ function toCaseExecution(execution: TaskDetailRow["caseExecutions"][number]) {
     id: execution.id,
     run: execution.run
       ? {
+          infrastructureRecoveryCount:
+            execution.run.infrastructureRecoveryCount,
           currentAttemptNumber: execution.run.currentAttemptNumber,
           evidenceCount: execution.run._count.evidences,
           executionDisposition: execution.run.executionDisposition,
@@ -3063,6 +3499,81 @@ function toCaseExecution(execution: TaskDetailRow["caseExecutions"][number]) {
           verdict: execution.run.verdict,
         }
       : null,
+  };
+}
+
+function caseSchedulingForDisplay(
+  execution: CaseExecutionProgress & {
+    createdAt: Date;
+    updatedAt: Date;
+    dispatchRequestedAt?: Date | null;
+  },
+  parentLifecycle?: string,
+): CaseSchedulingDecision {
+  const previous = readCaseScheduling(execution.scheduling);
+  const phase = caseExecutionPhase(execution);
+  const terminal =
+    phase === "terminal" ||
+    (!execution.run &&
+      ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(parentLifecycle ?? ""));
+  if (terminal)
+    return {
+      state: "TERMINAL",
+      reason:
+        !execution.run && execution.dispatchStatus === "LINKED"
+          ? "RUN_RECORD_MISSING"
+          : (previous?.reason ?? null),
+      waitingSince: null,
+      evaluatedAt: execution.updatedAt.toISOString(),
+      blockedBy: null,
+      queue: null,
+      nextRetryAt: null,
+    };
+  if (phase === "recovering")
+    return {
+      ...newSchedulingDecision(execution, "RECOVERING", "LEASE_RECOVERY", null),
+      ...previous,
+      state: "RECOVERING",
+      reason: "LEASE_RECOVERY",
+    };
+  if (!execution.run && execution.dispatchStatus === "FAILED")
+    return {
+      ...newSchedulingDecision(execution, "WAITING", "RETRY_BACKOFF", null),
+      nextRetryAt: execution.dispatchRequestedAt
+        ? new Date(
+            execution.dispatchRequestedAt.getTime() + DISPATCH_RETRY_DELAY_MS,
+          ).toISOString()
+        : null,
+    };
+  if (
+    previous &&
+    (previous.state === "RECOVERING" ||
+      !execution.run ||
+      (execution.run.lifecycle !== "RUNNING" && previous.state !== "READY"))
+  )
+    return previous;
+  const running = execution.run?.lifecycle === "RUNNING";
+  return {
+    state: running ? "RUNNING" : "WAITING",
+    reason: running
+      ? null
+      : execution.run
+        ? "BROWSER_ADMISSION"
+        : execution.dispatchStatus === "FAILED"
+          ? "RETRY_BACKOFF"
+          : "SCHEDULER_PENDING",
+    waitingSince: running
+      ? null
+      : (previous?.waitingSince ?? execution.createdAt.toISOString()),
+    evaluatedAt: execution.updatedAt.toISOString(),
+    blockedBy: null,
+    queue: null,
+    nextRetryAt:
+      execution.dispatchStatus === "FAILED" && execution.dispatchRequestedAt
+        ? new Date(
+            execution.dispatchRequestedAt.getTime() + DISPATCH_RETRY_DELAY_MS,
+          ).toISOString()
+        : null,
   };
 }
 

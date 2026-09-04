@@ -90,6 +90,7 @@ export class BrowserVerificationExecutor {
     lease: ActiveLease,
     signal: AbortSignal,
   ): Promise<RuntimeOutcome> {
+    signal.throwIfAborted();
     const targetUrl = readTargetUrl(task.snapshot.environment);
     const browserPolicy = readBrowserPolicy(task.snapshot.executionPolicy);
     await this.acquireBrowserWithPolicy(task, lease, signal, {
@@ -153,6 +154,7 @@ export class BrowserVerificationExecutor {
 
     try {
       for (let callCount = 0; callCount < this.toolLimit;) {
+        signal.throwIfAborted();
         const deadlineOutcome = deadlineFinalizationOutcome({
           browserCommandCount,
           criterionResults,
@@ -399,10 +401,15 @@ export class BrowserVerificationExecutor {
   private async acquireBrowserWithPolicy(
     _task: RuntimeTaskLease,
     lease: ActiveLease,
-    _signal: AbortSignal,
+    signal: AbortSignal,
     execution: RuntimeBrowserAcquireInput["execution"],
   ) {
-    const result = await this.controlPlane.acquireBrowser(lease, execution);
+    signal.throwIfAborted();
+    const result = await this.controlPlane.acquireBrowser(
+      lease,
+      execution,
+      signal,
+    );
     if (result.status === "ACQUIRED") return result;
     throw new Error(
       `Browser admission was lost before Agent execution (${result.reason}); the task will be retried.`,

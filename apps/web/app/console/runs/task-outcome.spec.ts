@@ -1,12 +1,68 @@
 import { describe, expect, it } from "vitest";
+import type { TaskCaseExecution, TaskScheduling } from "./task-types";
 
 import {
   executionDispositionLabel,
+  executionSchedulingLabel,
+  schedulingWaitText,
   taskOutcomeDisplay,
   verificationVerdictLabel,
 } from "./task-outcome";
 
 describe("taskOutcomeDisplay", () => {
+  it("explains a nonterminal task with no active execution", () => {
+    expect(
+      taskOutcomeDisplay({
+        lifecycle: "RUNNING",
+        verdict: null,
+        executionDisposition: null,
+        scheduling: { state: "WAITING", reason: "PROFILE_RESERVED" },
+      }),
+    ).toMatchObject({ label: "等待浏览器身份", toneStatus: "PENDING" });
+    expect(
+      taskOutcomeDisplay({
+        lifecycle: "RUNNING",
+        verdict: null,
+        executionDisposition: null,
+        scheduling: { state: "RECOVERING", reason: "LEASE_RECOVERY" },
+      }),
+    ).toMatchObject({ label: "执行恢复中", toneStatus: "RUNNING" });
+  });
+  it("explains admitted Agent capacity waiting at Task, Case, and elapsed-time levels", () => {
+    const scheduling: TaskScheduling = {
+      state: "ADMITTED",
+      reason: "AGENT_CAPACITY",
+      waitingSince: "2026-09-04T01:00:00Z",
+      evaluatedAt: "2026-09-04T01:02:00Z",
+      blockedBy: null,
+      queue: null,
+      nextRetryAt: null,
+    };
+    const run = {
+      lifecycle: "PREPARING",
+      verdict: null,
+      executionDisposition: null,
+    };
+    expect(taskOutcomeDisplay({ ...run, scheduling })).toMatchObject({
+      label: "等待 Agent",
+      toneStatus: "PENDING",
+    });
+    expect(
+      executionSchedulingLabel({
+        scheduling,
+        run,
+        dispatch: { status: "LINKED" },
+      } as TaskCaseExecution),
+    ).toBe("等待 Agent");
+    expect(
+      schedulingWaitText(scheduling, Date.parse("2026-09-04T01:02:00Z")),
+    ).toBe("等待 Agent · 已等待 2 分钟");
+    expect(schedulingWaitText({ ...scheduling, state: "RUNNING" })).toBeNull();
+    expect(
+      taskOutcomeDisplay({ ...run, lifecycle: "TIMED_OUT", scheduling }),
+    ).toMatchObject({ label: "任务执行超时" });
+  });
+
   it("identifies a completed execution whose verification did not pass", () => {
     expect(
       taskOutcomeDisplay({

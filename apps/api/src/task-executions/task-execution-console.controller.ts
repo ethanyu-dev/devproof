@@ -15,6 +15,7 @@ import {
   taskExecutionCreateInputSchema,
   taskProfileSelectionInputSchema,
   taskStageRetryInputSchema,
+  executionConcurrencyPolicySchema,
 } from "@devproof/contracts";
 
 import { AuthGuard } from "../auth/auth.guard.js";
@@ -92,6 +93,21 @@ export class TaskExecutionConsoleController {
   @Get(":id/events")
   events(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.tasks.events(taskToolContext(current), id);
+  }
+
+  @Post(":id/cases/:caseExecutionId/policy")
+  setCaseExecutionPolicy(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("caseExecutionId") caseExecutionId: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.setCaseExecutionPolicy(
+      taskToolContext(current),
+      id,
+      caseExecutionId,
+      parseBody(executionConcurrencyPolicySchema, body),
+    );
   }
 
   @Get(":id/logs/export")

@@ -8,6 +8,7 @@ English is the canonical language for project documentation.
 - [Post-run optimization analysis](post-run-analysis.md): terminal log capture, Agent analysis, findings, and generated work items
 - [Browser Runtime protocol](runtime-protocol.md): compatibility rules and capability milestones
 - [User Browser Profiles](user-browser-profiles.md): identity, authorization, retention, and privacy
+- [Runtime concurrency and recovery proposal](runtime-concurrency-recovery-design.md): isolated authenticated sessions, bounded lease recovery, and explainable scheduling
 - [Test data model](test-data-model.md): immutable definitions, snapshots, traces, and artifacts
 - [Versioning](versioning.md): platform, Browser Runtime, and wire-protocol releases
 

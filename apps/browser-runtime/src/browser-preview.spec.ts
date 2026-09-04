@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
+import type { RuntimeSessionPermit } from "@devproof/runtime-protocol";
 
 import { atomicPointerClick, BrowserSessionManager } from "./index.js";
 
@@ -70,6 +71,65 @@ describe("BrowserSessionManager preview", () => {
         type: "human.input.dispatch",
       }),
     ).rejects.toThrow("Browser session is not in human control.");
+  });
+
+  it("checks the controller generation again before each event in a human input batch", async () => {
+    const manager = new BrowserSessionManager(
+      {
+        removeSession: vi.fn(),
+        replaceSession: vi.fn(),
+        value: () => ({ sessions: [] }),
+      } as never,
+      "http://localhost:1",
+      vi.fn(),
+      vi.fn(),
+    );
+    const permit: RuntimeSessionPermit = {
+      sessionId: randomUUID(),
+      leaseToken: randomUUID(),
+      fencingToken: "9",
+      ownerKind: "HUMAN",
+      controlGeneration: 1,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const insertText = vi.fn().mockImplementationOnce(async () => {
+      manager.acceptSessionPermits(
+        [{ ...permit, controlGeneration: 3 }],
+        new Date().toISOString(),
+      );
+    });
+    const session = {
+      ...permit,
+      permit,
+      state: "HUMAN_CONTROL",
+      pressedButtons: new Set(),
+      pressedKeys: new Set(),
+      page: {
+        keyboard: { insertText },
+        viewportSize: () => ({ height: 720, width: 1280 }),
+      },
+    };
+    (
+      manager as unknown as { sessions: Map<string, typeof session> }
+    ).sessions.set(permit.sessionId, session);
+    manager.acceptSessionPermits([permit], new Date().toISOString());
+    await expect(
+      manager.humanInput({
+        type: "human.input.dispatch",
+        dispatchId: randomUUID(),
+        sessionId: permit.sessionId,
+        leaseToken: permit.leaseToken,
+        fencingToken: permit.fencingToken,
+        controlGeneration: 1,
+        events: [
+          { type: "text", text: "before control changes" },
+          { type: "text", text: "must be rejected" },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "SESSION_PERMIT_EXPIRED" });
+    expect(insertText).toHaveBeenCalledExactlyOnceWith(
+      "before control changes",
+    );
   });
 
   it("applies a batched pointer click atomically", async () => {

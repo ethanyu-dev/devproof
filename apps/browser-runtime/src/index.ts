@@ -19,6 +19,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   RUNTIME_PROTOCOL,
+  RUNTIME_CAPABILITIES,
+  RUNTIME_SESSION_PERMIT_MINOR,
+  type RuntimeSessionPermit,
+  type AuthSnapshotReference,
   USER_PROFILE_INACTIVITY_TTL_SECONDS,
   runtimeCommandPayloadSchema,
   runtimeEventSchema,
@@ -44,8 +48,23 @@ import {
 
 import { parseHostAllowlist } from "./ip-rules.js";
 import { startSsrfProxy, type SsrfProxy } from "./ssrf-proxy.js";
+import { publishAuthSnapshot, readAuthSnapshot } from "./auth-snapshots.js";
+import {
+  probeAuthSnapshot,
+  ISOLATED_BROWSER_ARGS,
+} from "./auth-snapshot-probe.js";
+import { SessionPermits } from "./session-permits.js";
+import {
+  browserProcessMarker,
+  closeOrphanBrowser,
+  discoverBrowserProcess,
+  type BrowserProcessIdentity,
+} from "./browser-processes.js";
 
 interface PersistedSession {
+  processIdentity?: BrowserProcessIdentity | undefined;
+  authSnapshot?: AuthSnapshotReference;
+  permit?: RuntimeSessionPermit | undefined;
   fencingToken: string;
   leaseToken: string;
   profileKey: string;
@@ -83,6 +102,7 @@ type PendingRuntimeDiagnosticEvent = Extract<
 > & { kind: "VIDEO_FINALIZATION_FAILED" };
 
 interface RuntimeState {
+  revokedSessionIds?: string[];
   apiUrl: string;
   gatewayUrl: string;
   runtimeId: string;
@@ -91,6 +111,9 @@ interface RuntimeState {
 }
 
 interface LiveSession extends PersistedSession {
+  networkProxy?: SsrfProxy;
+  resumeState?: "OPEN" | "HUMAN_CONTROL";
+  browserClosed?: boolean;
   browser?: Browser;
   consoleEntries: Array<Record<string, unknown>>;
   context: BrowserContext;
@@ -156,6 +179,9 @@ interface StepVideoEncodingFailure {
 }
 
 interface RuntimeCommand {
+  permit?: RuntimeSessionPermit | undefined;
+  ownerTaskId?: string | undefined;
+  ownerFencingToken?: string | undefined;
   commandId: string;
   commandType: RuntimeCommandType;
   deadlineAt: string;
@@ -990,6 +1016,8 @@ function stringPayload(
 }
 
 class StateStore {
+  private saving: Promise<void> = Promise.resolve();
+
   constructor(private state: RuntimeState) {}
 
   static async load() {
@@ -1033,7 +1061,22 @@ class StateStore {
     await this.save();
   }
 
-  async save() {
+  async revokeSession(sessionId: string) {
+    this.state.revokedSessionIds ??= [];
+    if (!this.state.revokedSessionIds.includes(sessionId))
+      this.state.revokedSessionIds.push(sessionId);
+    await this.save();
+  }
+
+  save() {
+    const operation = this.saving
+      .catch(() => undefined)
+      .then(() => this.saveCurrent());
+    this.saving = operation;
+    return operation;
+  }
+
+  private async saveCurrent() {
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const temporaryPath = statePath + "." + process.pid + ".tmp";
     await writeFile(temporaryPath, JSON.stringify(this.state, null, 2), {
@@ -1062,6 +1105,17 @@ export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
 export class BrowserSessionManager {
   private readonly sessions = new Map<string, LiveSession>();
   private readonly openingProfileKeys = new Set<string>();
+  private readonly openingSessions = new Set<string>();
+  private readonly openingTasks = new Map<string, Promise<LiveSession>>();
+  private readonly openingDescriptors = new Map<string, PersistedSession>();
+  private readonly auxiliaryTasks = new Map<string, Set<Promise<unknown>>>();
+  private readonly closingSessions = new Map<string, Promise<void>>();
+  private readonly openingSnapshotProfiles = new Map<string, number>();
+  private readonly permits = new SessionPermits();
+  private leaseWatchdog: NodeJS.Timeout | undefined;
+  private requirePermits = false;
+  private networkAllowlist: ReadonlySet<string> = new Set();
+  private readonly profilesRoot: string;
   private profileCleanupTimer: NodeJS.Timeout | undefined;
   private readonly previewStreams = new Map<
     string,
@@ -1104,12 +1158,108 @@ export class BrowserSessionManager {
       session: LiveSession,
       payload: Record<string, unknown>,
     ) => Promise<void>,
+    options: {
+      profileRoot?: string;
+      requirePermits?: boolean;
+      networkAllowlist?: ReadonlySet<string>;
+    } = {},
   ) {
+    this.profilesRoot = options.profileRoot ?? profileRoot;
+    this.requirePermits = options.requirePermits ?? false;
+    this.networkAllowlist = options.networkAllowlist ?? new Set();
+    for (const sessionId of this.store.value?.().revokedSessionIds ?? [])
+      this.permits.revoke(sessionId);
     this.emitDiagnostic =
       emitDiagnostic ??
       (async (session, payload) => {
         this.emitEvent(session, "VIDEO_FINALIZATION_FAILED", payload);
       });
+  }
+
+  configureProtocol(minor: number, serverTime: string, roundTripMs = 0) {
+    this.requirePermits = minor >= RUNTIME_SESSION_PERMIT_MINOR;
+    this.permits.synchronizeClock(serverTime, roundTripMs);
+  }
+
+  setNetworkAllowlist(allowlist: ReadonlySet<string>) {
+    this.networkAllowlist = new Set(allowlist);
+    for (const session of this.sessions.values())
+      session.networkProxy?.setAllowlist(allowlist);
+  }
+
+  disconnect() {
+    this.permits.setConnected(false);
+    for (const session of this.sessions.values()) {
+      session.networkProxy?.setEnabled(false);
+      if (session.state !== "INTERRUPTED") session.resumeState = session.state;
+      session.state = "INTERRUPTED";
+      this.stopPreviewsForSession(session.sessionId);
+      void session.page.evaluate(() => window.stop()).catch(() => undefined);
+      void this.store.replaceSession(this.descriptor(session));
+    }
+  }
+
+  acceptSessionPermits(
+    permits: RuntimeSessionPermit[],
+    serverTime: string,
+    roundTripMs = 0,
+  ) {
+    this.permits.synchronizeClock(serverTime, roundTripMs);
+    for (const permit of permits) {
+      const session = this.sessions.get(permit.sessionId);
+      if (!session) continue;
+      try {
+        this.acceptPermit(session, permit, serverTime, roundTripMs);
+      } catch {
+        if (this.permits.isRevoked(session.sessionId))
+          void this.interruptExpiredSession(session).catch(() => undefined);
+      }
+    }
+  }
+
+  private acceptPermit(
+    session: LiveSession,
+    permit: RuntimeSessionPermit,
+    serverTime?: string,
+    roundTripMs = 0,
+  ) {
+    if (this.permits.accept(session, permit, serverTime, roundTripMs)) {
+      session.permit = permit;
+      session.networkProxy?.setEnabled(
+        session.state !== "INTERRUPTED" && this.permits.networkAllowed(session),
+      );
+    }
+  }
+
+  private startLeaseWatchdog() {
+    if (this.leaseWatchdog) return;
+    this.leaseWatchdog = setInterval(() => {
+      const expired = new Set([
+        ...this.permits.expired(),
+        ...[...this.sessions.keys()].filter((id) => this.permits.isRevoked(id)),
+      ]);
+      for (const id of expired) {
+        const session = this.sessions.get(id);
+        if (session)
+          void this.interruptExpiredSession(session).catch(() => undefined);
+        else this.permits.revoke(id);
+      }
+    }, 100);
+    this.leaseWatchdog.unref();
+  }
+
+  private async interruptExpiredSession(session: LiveSession) {
+    session.networkProxy?.setEnabled(false);
+    this.permits.revoke(session.sessionId);
+    this.emitEvent(session, "SESSION_INTERRUPTED", {
+      reason: "SESSION_PERMIT_EXPIRED",
+      localNetworkClosed: true,
+    });
+    await this.close(session.sessionId);
+    this.emitEvent(session, "SESSION_INTERRUPTED", {
+      reason: "SESSION_PERMIT_EXPIRED",
+      localClosureVerified: true,
+    });
   }
 
   startProfileCleanup() {
@@ -1128,33 +1278,25 @@ export class BrowserSessionManager {
   }
 
   async cleanupExpiredProfiles(now = new Date()) {
-    const active = new Set(this.openingProfileKeys);
+    const active = new Set([
+      ...this.openingProfileKeys,
+      ...this.openingSnapshotProfiles.keys(),
+    ]);
     for (const session of this.store.value().sessions) {
-      if (session.profileMode === "PERSISTENT") {
-        active.add(session.profileKey);
-      }
+      if (session.profileMode === "PERSISTENT") active.add(session.profileKey);
+      if (session.authSnapshot) active.add(session.authSnapshot.profileKey);
     }
     for (const session of this.sessions.values()) {
-      if (session.profileMode === "PERSISTENT") {
-        active.add(session.profileKey);
-      }
+      if (session.profileMode === "PERSISTENT") active.add(session.profileKey);
+      if (session.authSnapshot) active.add(session.authSnapshot.profileKey);
     }
     try {
       const purged = await cleanupExpiredUserProfiles(
-        profileRoot,
+        this.profilesRoot,
         active,
         now,
         (profileKey) => {
-          if (
-            this.openingProfileKeys.has(profileKey) ||
-            Array.from(this.sessions.values()).some(
-              (session) =>
-                session.profileMode === "PERSISTENT" &&
-                session.profileKey === profileKey,
-            )
-          ) {
-            return null;
-          }
+          if (this.profileInUse(profileKey)) return null;
           this.openingProfileKeys.add(profileKey);
           return () => this.openingProfileKeys.delete(profileKey);
         },
@@ -1183,6 +1325,8 @@ export class BrowserSessionManager {
   }
 
   async applyReconcile(actions: ReconcileAction[]) {
+    this.permits.setConnected(true);
+    const adopted = new Set<string>();
     for (const action of actions) {
       if (action.action === "CLOSE_LOCAL") {
         await this.close(action.sessionId);
@@ -1190,14 +1334,39 @@ export class BrowserSessionManager {
       }
       if (action.action === "ADOPT") {
         const session = this.sessions.get(action.sessionId);
-        if (session) {
-          session.fencingToken = action.fencingToken;
-          session.leaseToken = action.leaseToken;
+        if (!session) continue;
+        if (
+          session.fencingToken !== action.fencingToken ||
+          session.leaseToken !== action.leaseToken ||
+          (this.requirePermits && !action.permit)
+        ) {
+          await this.close(action.sessionId);
+          continue;
+        }
+        try {
+          if (action.permit) this.acceptPermit(session, action.permit);
+          session.state =
+            action.permit?.ownerKind === "HUMAN"
+              ? "HUMAN_CONTROL"
+              : (session.resumeState ?? "OPEN");
+          session.networkProxy?.setEnabled(
+            this.permits.networkAllowed(session),
+          );
           await this.store.replaceSession(this.descriptor(session));
+          adopted.add(session.sessionId);
+        } catch {
+          await this.interruptExpiredSession(session);
         }
         continue;
       }
+      // Restarted execution contexts are never reconstructed from disk. Preparation
+      // contexts may be restored only with a live control-plane SYSTEM permit.
+      if (this.requirePermits && action.permit?.ownerKind !== "SYSTEM") {
+        await this.close(action.sessionId);
+        continue;
+      }
       await this.open({
+        ...(action.permit ? { permit: action.permit } : {}),
         fencingToken: action.fencingToken,
         leaseToken: action.leaseToken,
         profileKey: action.profileKey,
@@ -1208,11 +1377,38 @@ export class BrowserSessionManager {
         sessionId: action.sessionId,
         state: "OPEN",
       });
+      adopted.add(action.sessionId);
+    }
+    if (this.requirePermits) {
+      for (const session of this.sessions.values()) {
+        if (session.state === "INTERRUPTED" && !adopted.has(session.sessionId))
+          await this.close(session.sessionId);
+      }
     }
   }
 
   async execute(command: RuntimeCommand) {
     const result = (await this.executeCommand(command)) ?? {};
+    if (
+      !["session.close", "session.open", "profile.purge"].includes(
+        command.commandType,
+      ) &&
+      (command.permit || this.requirePermits)
+    ) {
+      const session = this.sessions.get(command.sessionId);
+      if (!session)
+        throw codedError(
+          "SESSION_PERMIT_EXPIRED",
+          "Session closed before its command completed.",
+        );
+      this.permits.assert(session, {
+        controlGeneration: command.permit?.controlGeneration,
+        ownerKind: command.permit?.ownerKind,
+        ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
+        ownerFencingToken:
+          command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+      });
+    }
     if (!STEP_SCREENSHOT_COMMANDS.has(command.commandType)) return result;
     try {
       const stepArtifact = await this.captureStepArtifact(
@@ -1263,6 +1459,10 @@ export class BrowserSessionManager {
         throw new Error("profileMode must be PERSISTENT or EPHEMERAL.");
       }
       const session = await this.open({
+        ...(command.permit ? { permit: command.permit } : {}),
+        ...(parsed.payload.authSnapshot
+          ? { authSnapshot: parsed.payload.authSnapshot }
+          : {}),
         fencingToken: command.fencingToken,
         leaseToken: command.leaseToken,
         profileKey: parsed.payload.profileKey,
@@ -1290,6 +1490,25 @@ export class BrowserSessionManager {
     }
 
     const session = this.sessions.get(command.sessionId);
+    if (!session && command.commandType === "session.close") {
+      const descriptor =
+        this.openingDescriptors.get(command.sessionId) ??
+        this.store
+          .value?.()
+          .sessions.find((row) => row.sessionId === command.sessionId);
+      if (
+        descriptor &&
+        (descriptor.leaseToken !== command.leaseToken ||
+          descriptor.fencingToken !== command.fencingToken)
+      )
+        throw codedError(
+          "SESSION_LOST",
+          "Runtime close owns a stale session lease.",
+          true,
+        );
+      await this.close(command.sessionId);
+      return { result: { closed: true } };
+    }
     if (!session) {
       throw codedError("SESSION_LOST", "Runtime session is not open.", true);
     }
@@ -1304,13 +1523,83 @@ export class BrowserSessionManager {
       );
     }
 
+    if (command.commandType !== "session.close") {
+      if (command.permit) this.acceptPermit(session, command.permit);
+      if (session.permit || this.requirePermits)
+        this.permits.assert(session, {
+          controlGeneration: command.permit?.controlGeneration,
+          ownerKind: command.permit?.ownerKind,
+          ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
+          ownerFencingToken:
+            command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+        });
+    }
     const parsed = runtimeCommandPayloadSchema.parse({
       commandType: command.commandType,
       payload: command.payload,
     });
     const timeout = remainingTimeout(command);
     switch (parsed.commandType) {
+      case "profile.snapshot": {
+        if (
+          session.profileMode !== "PERSISTENT" ||
+          session.profileKey !== parsed.payload.profileKey ||
+          session.profileRetention?.kind !== "USER" ||
+          (session.permit &&
+            !["SYSTEM", "HUMAN"].includes(session.permit.ownerKind))
+        ) {
+          throw codedError(
+            "AUTH_SNAPSHOT_NOT_AUTHORIZED",
+            "Authentication snapshots can only be published from the matching profile preparation session.",
+          );
+        }
+        const verification = parsed.payload.verification;
+        const concurrency = parsed.payload.probeConcurrency ?? 1;
+        const operation = publishAuthSnapshot(
+          this.profilesRoot,
+          {
+            profileKey: parsed.payload.profileKey,
+            generation: parsed.payload.generation,
+          },
+          session.context,
+          verification
+            ? (state) => {
+                if (session.permit) this.permits.assert(session);
+                return probeAuthSnapshot({
+                  state,
+                  verification,
+                  concurrency,
+                  sessionId: session.sessionId,
+                  proxyServer: session.networkProxy?.server ?? this.proxyServer,
+                  timeoutMs: Math.max(1, remainingTimeout(command)),
+                });
+              }
+            : undefined,
+        );
+        const tasks =
+          this.auxiliaryTasks.get(session.sessionId) ??
+          new Set<Promise<unknown>>();
+        this.auxiliaryTasks.set(session.sessionId, tasks);
+        tasks.add(operation);
+        try {
+          const snapshot = await operation;
+          if (session.permit) this.permits.assert(session, undefined);
+          return {
+            result: {
+              ...snapshot,
+              verifiedConcurrency: verification ? concurrency : 0,
+            },
+          };
+        } finally {
+          tasks.delete(operation);
+          if (!tasks.size) this.auxiliaryTasks.delete(session.sessionId);
+        }
+      }
       case "session.close": {
+        if (session.permit && !this.permits.networkAllowed(session)) {
+          await this.close(command.sessionId);
+          return { result: { closed: true, videoCreated: false } };
+        }
         const finalScreenshot = await this.captureStepArtifact(
           command.sessionId,
           "session.complete",
@@ -2001,7 +2290,7 @@ export class BrowserSessionManager {
   }
 
   async cancel(sessionId: string, commandType?: RuntimeCommandType) {
-    if (commandType === "session.close") {
+    if (commandType === "session.close" || commandType === "session.open") {
       await this.close(sessionId);
       return;
     }
@@ -2024,28 +2313,60 @@ export class BrowserSessionManager {
     await page.keyboard.press("Escape").catch(() => undefined);
   }
 
-  async close(sessionId: string) {
+  close(sessionId: string) {
+    const pending = this.closingSessions.get(sessionId);
+    if (pending) return pending;
+    const operation = this.closeSession(sessionId).finally(() =>
+      this.closingSessions.delete(sessionId),
+    );
+    this.closingSessions.set(sessionId, operation);
+    return operation;
+  }
+
+  private async closeSession(sessionId: string) {
+    this.permits.revoke(sessionId);
+    const revoked = this.store.revokeSession?.(sessionId);
     this.stopPreviewsForSession(sessionId);
+    await this.openingTasks.get(sessionId)?.catch(() => undefined);
     const session = this.sessions.get(sessionId);
     if (session) {
-      this.sessions.delete(sessionId);
+      session.state = "INTERRUPTED";
+      session.networkProxy?.setEnabled(false);
+      await session.networkProxy?.stop();
       for (const policyId of session.networkFaultPolicies.keys()) {
         this.releaseNetworkFault(session, policyId, false);
       }
       await session.context
         .unrouteAll({ behavior: "ignoreErrors" })
         .catch(() => undefined);
-      if (session.browser) {
-        await session.browser.close().catch(() => undefined);
-      } else {
-        await session.context.close().catch(() => undefined);
+      try {
+        if (session.browser) await session.browser.close();
+        else await session.context.close();
+      } catch (error) {
+        const connected =
+          session.browser?.isConnected() ??
+          session.context.browser?.()?.isConnected();
+        if (
+          connected === true ||
+          (connected === undefined && !session.browserClosed)
+        )
+          throw error;
       }
+      // Snapshot probes may be launching in a separate browser when closure
+      // starts. Their proxy is already closed; wait for launch/finally cleanup
+      // and verify every process bearing this session's marker has stopped.
+      await Promise.allSettled([...(this.auxiliaryTasks.get(sessionId) ?? [])]);
+      if (session.permit) {
+        const remainingProcess = await discoverBrowserProcess(sessionId);
+        if (remainingProcess) await closeOrphanBrowser(remainingProcess);
+      }
+      this.sessions.delete(sessionId);
       if (
         session.profileMode === "PERSISTENT" &&
         session.profileRetention?.kind === "USER"
       ) {
         await touchUserProfileMetadata(
-          profileRoot,
+          this.profilesRoot,
           session.profileKey,
           new Date(),
         ).catch((error) =>
@@ -2060,22 +2381,58 @@ export class BrowserSessionManager {
         );
       }
     }
+    if (!session) {
+      const persisted = this.store
+        .value?.()
+        .sessions.find((row) => row.sessionId === sessionId);
+      if (persisted) {
+        if (!persisted.processIdentity)
+          throw codedError(
+            "CLOSURE_UNVERIFIED",
+            "The persisted browser process has no verifiable identity.",
+          );
+        await closeOrphanBrowser(persisted.processIdentity);
+        this.emitEvent(persisted as LiveSession, "SESSION_INTERRUPTED", {
+          reason: "RESTART_CLEANUP",
+          localClosureVerified: true,
+        });
+      } else if (/^[a-f\d-]{36}$/u.test(sessionId)) {
+        // A crash may happen after Chromium starts but before its descriptor is
+        // durable. Scan the unguessable launch marker before confirming closure.
+        const orphan = await discoverBrowserProcess(sessionId);
+        if (orphan) await closeOrphanBrowser(orphan);
+      }
+    }
+    await revoked;
     await this.store.removeSession(sessionId);
+    if (!this.sessions.size && this.leaseWatchdog) {
+      clearInterval(this.leaseWatchdog);
+      this.leaseWatchdog = undefined;
+    }
     await rm(join(recordingRoot, sessionId), {
       force: true,
       recursive: true,
     }).catch(() => undefined);
   }
 
-  private async purgeProfile(profileKey: string) {
-    if (
+  private profileInUse(profileKey: string) {
+    return (
       this.openingProfileKeys.has(profileKey) ||
-      Array.from(this.sessions.values()).some(
+      this.openingSnapshotProfiles.has(profileKey) ||
+      [
+        ...this.sessions.values(),
+        ...(this.store.value?.().sessions ?? []),
+      ].some(
         (session) =>
-          session.profileMode === "PERSISTENT" &&
-          session.profileKey === profileKey,
+          (session.profileMode === "PERSISTENT" &&
+            session.profileKey === profileKey) ||
+          session.authSnapshot?.profileKey === profileKey,
       )
-    ) {
+    );
+  }
+
+  private async purgeProfile(profileKey: string) {
+    if (this.profileInUse(profileKey)) {
       throw codedError(
         "PROFILE_IN_USE",
         "Persistent profile is still used by an active session.",
@@ -2084,23 +2441,80 @@ export class BrowserSessionManager {
     }
     this.openingProfileKeys.add(profileKey);
     try {
-      return await purgePersistentProfileDirectory(profileRoot, profileKey);
+      return await purgePersistentProfileDirectory(
+        this.profilesRoot,
+        profileKey,
+      );
     } finally {
       this.openingProfileKeys.delete(profileKey);
     }
   }
 
-  private async open(descriptor: PersistedSession) {
+  private open(descriptor: PersistedSession) {
+    const pending = this.openingTasks.get(descriptor.sessionId);
+    if (pending) {
+      const opening = this.openingDescriptors.get(descriptor.sessionId);
+      if (
+        opening?.leaseToken !== descriptor.leaseToken ||
+        opening?.fencingToken !== descriptor.fencingToken
+      )
+        return Promise.reject(
+          codedError(
+            "SESSION_LOST",
+            "A pending session belongs to another browser lease.",
+            true,
+          ),
+        );
+      return pending;
+    }
+    this.openingDescriptors.set(descriptor.sessionId, descriptor);
+    const operation = this.openSession(descriptor).finally(() => {
+      this.openingTasks.delete(descriptor.sessionId);
+      this.openingDescriptors.delete(descriptor.sessionId);
+    });
+    this.openingTasks.set(descriptor.sessionId, operation);
+    return operation;
+  }
+
+  private async openSession(descriptor: PersistedSession) {
+    if (this.permits.isRevoked(descriptor.sessionId)) {
+      throw codedError(
+        "SESSION_PERMIT_EXPIRED",
+        "A closed session cannot be reopened.",
+      );
+    }
     const existing = this.sessions.get(descriptor.sessionId);
     if (existing) {
       if (
         existing.leaseToken !== descriptor.leaseToken ||
         existing.fencingToken !== descriptor.fencingToken
       ) {
-        await this.close(descriptor.sessionId);
-      } else {
-        return existing;
+        throw codedError(
+          "SESSION_LOST",
+          "A session cannot be replaced with another lease.",
+        );
       }
+      if (descriptor.permit) this.acceptPermit(existing, descriptor.permit);
+      return existing;
+    }
+    if (this.openingSessions.has(descriptor.sessionId))
+      throw codedError(
+        "SESSION_OPENING",
+        "This session is already being opened.",
+        true,
+      );
+    if (
+      (this.requirePermits || descriptor.authSnapshot) &&
+      !descriptor.permit
+    ) {
+      throw codedError(
+        "SESSION_PERMIT_REQUIRED",
+        "The browser session requires an execution permit.",
+      );
+    }
+    if (descriptor.permit) {
+      this.permits.accept(descriptor, descriptor.permit);
+      this.startLeaseWatchdog();
     }
     const tracksUserProfile =
       descriptor.profileMode === "PERSISTENT" &&
@@ -2123,44 +2537,103 @@ export class BrowserSessionManager {
       }
       this.openingProfileKeys.add(descriptor.profileKey);
     }
+    this.openingSessions.add(descriptor.sessionId);
+    const snapshotKey = descriptor.authSnapshot?.profileKey;
+    if (snapshotKey) {
+      if (this.openingProfileKeys.has(snapshotKey)) {
+        this.openingSessions.delete(descriptor.sessionId);
+        throw codedError(
+          "PROFILE_IN_USE",
+          "The authentication profile is being prepared or purged.",
+          true,
+        );
+      }
+      this.openingSnapshotProfiles.set(
+        snapshotKey,
+        (this.openingSnapshotProfiles.get(snapshotKey) ?? 0) + 1,
+      );
+    }
+    let browser: Browser | undefined;
+    let context: BrowserContext | undefined;
+    let networkProxy: SsrfProxy | undefined;
     try {
+      if (descriptor.permit) {
+        networkProxy = await startSsrfProxy({
+          allowlist: this.networkAllowlist,
+          isAllowed: () => this.permits.networkAllowed(descriptor),
+        });
+        networkProxy.setEnabled(this.permits.networkAllowed(descriptor));
+      }
+      const proxyServer = networkProxy?.server ?? this.proxyServer;
+      const snapshot = descriptor.authSnapshot
+        ? await readAuthSnapshot(this.profilesRoot, descriptor.authSnapshot)
+        : undefined;
+      if (snapshotKey)
+        await assertUserProfileCanOpen(this.profilesRoot, snapshotKey);
       const headless = process.env.DEVPROOF_HEADLESS !== "false";
-      let browser: Browser | undefined;
-      let context: BrowserContext;
       if (descriptor.profileMode === "PERSISTENT") {
         if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(descriptor.profileKey)) {
           throw new Error("Persistent profile key is invalid.");
         }
-        const profilePath = join(profileRoot, descriptor.profileKey);
+        const profilePath = join(this.profilesRoot, descriptor.profileKey);
         if (tracksUserProfile) {
-          await assertUserProfileCanOpen(profileRoot, descriptor.profileKey);
+          await assertUserProfileCanOpen(
+            this.profilesRoot,
+            descriptor.profileKey,
+          );
         }
         await mkdir(profilePath, { recursive: true, mode: 0o700 });
         if (tracksUserProfile) {
           await touchUserProfileMetadata(
-            profileRoot,
+            this.profilesRoot,
             descriptor.profileKey,
             new Date(),
           );
         }
         context = await chromium.launchPersistentContext(profilePath, {
-          args: ["--proxy-bypass-list=<-loopback>"],
+          args: [
+            ...ISOLATED_BROWSER_ARGS,
+            browserProcessMarker(descriptor.sessionId),
+          ],
           channel: "chromium",
           headless,
-          proxy: { server: this.proxyServer },
+          proxy: { server: proxyServer },
           serviceWorkers: "block",
         });
       } else {
         browser = await chromium.launch({
-          args: ["--proxy-bypass-list=<-loopback>"],
+          args: [
+            ...ISOLATED_BROWSER_ARGS,
+            browserProcessMarker(descriptor.sessionId),
+          ],
           channel: "chromium",
           headless,
-          proxy: { server: this.proxyServer },
+          proxy: { server: proxyServer },
         });
-        context = await browser.newContext({ serviceWorkers: "block" });
+        context = await browser.newContext({
+          serviceWorkers: "block",
+          ...(snapshot ? { storageState: snapshot.state } : {}),
+        });
+      }
+      if (descriptor.permit) {
+        descriptor.processIdentity =
+          (await discoverBrowserProcess(descriptor.sessionId)) ?? undefined;
+        if (!descriptor.processIdentity)
+          throw codedError(
+            "BROWSER_PROCESS_IDENTITY_MISSING",
+            "The isolated browser process could not be identified.",
+          );
+        await this.store.replaceSession({
+          ...descriptor,
+          state: "INTERRUPTED",
+        });
       }
       let liveSession: LiveSession | undefined;
       await context.route("**/*", async (route) => {
+        if (descriptor.permit && !this.permits.networkAllowed(descriptor)) {
+          await route.abort("blockedbyclient");
+          return;
+        }
         if (liveSession && (await this.applyNetworkFault(liveSession, route))) {
           return;
         }
@@ -2171,6 +2644,7 @@ export class BrowserSessionManager {
       const session: LiveSession = {
         ...descriptor,
         ...(browser ? { browser } : {}),
+        ...(networkProxy ? { networkProxy } : {}),
         consoleEntries: [],
         context,
         networkEntries: [],
@@ -2187,6 +2661,9 @@ export class BrowserSessionManager {
         stepSequence: stepFrames.at(-1)?.index ?? 0,
       };
       liveSession = session;
+      context.once("close", () => {
+        session.browserClosed = true;
+      });
       this.attachObservers(session, page);
       context.on("page", (createdPage) => {
         session.pageIds.set(createdPage, randomUUID());
@@ -2201,10 +2678,48 @@ export class BrowserSessionManager {
           });
         }
       });
+      if (descriptor.permit) this.permits.assert(descriptor, undefined, true);
+      if (this.permits.isRevoked(descriptor.sessionId))
+        throw codedError(
+          "SESSION_PERMIT_EXPIRED",
+          "Session was cancelled while opening.",
+        );
       this.sessions.set(session.sessionId, session);
       await this.store.replaceSession(this.descriptor(session));
+      if (snapshotKey)
+        await touchUserProfileMetadata(
+          this.profilesRoot,
+          snapshotKey,
+          new Date(),
+        );
       return session;
+    } catch (error) {
+      networkProxy?.setEnabled(false);
+      await networkProxy?.stop();
+      try {
+        if (browser) await browser.close();
+        else await context?.close();
+      } catch {
+        if (descriptor.processIdentity)
+          await closeOrphanBrowser(descriptor.processIdentity);
+        else
+          throw codedError(
+            "CLOSURE_UNVERIFIED",
+            "A failed browser launch could not be closed.",
+          );
+      }
+      if (descriptor.processIdentity)
+        await this.store.removeSession(descriptor.sessionId);
+      this.permits.revoke(descriptor.sessionId);
+      await this.store.revokeSession?.(descriptor.sessionId);
+      throw error;
     } finally {
+      this.openingSessions.delete(descriptor.sessionId);
+      if (snapshotKey) {
+        const count = (this.openingSnapshotProfiles.get(snapshotKey) ?? 1) - 1;
+        if (count) this.openingSnapshotProfiles.set(snapshotKey, count);
+        else this.openingSnapshotProfiles.delete(snapshotKey);
+      }
       if (descriptor.profileMode === "PERSISTENT") {
         this.openingProfileKeys.delete(descriptor.profileKey);
       }
@@ -3023,6 +3538,11 @@ export class BrowserSessionManager {
 
   private descriptor(session: LiveSession): PersistedSession {
     return {
+      ...(session.processIdentity
+        ? { processIdentity: session.processIdentity }
+        : {}),
+      ...(session.authSnapshot ? { authSnapshot: session.authSnapshot } : {}),
+      ...(session.permit ? { permit: session.permit } : {}),
       fencingToken: session.fencingToken,
       leaseToken: session.leaseToken,
       profileKey: session.profileKey,
@@ -3097,6 +3617,7 @@ export class BrowserSessionManager {
     const click = atomicPointerClick(message.events);
     if (click) {
       await this.releaseHumanInput(session);
+      this.ownedHumanSession(message);
       const viewport = session.page.viewportSize() ?? {
         height: 720,
         width: 1280,
@@ -3108,6 +3629,7 @@ export class BrowserSessionManager {
       );
     } else {
       for (const event of message.events) {
+        this.ownedHumanSession(message);
         await this.applyHumanInput(session, event);
       }
     }
@@ -3122,6 +3644,7 @@ export class BrowserSessionManager {
   }
 
   private ownedHumanSession(input: {
+    controlGeneration?: number | undefined;
     fencingToken: string;
     leaseToken: string;
     sessionId: string;
@@ -3130,6 +3653,18 @@ export class BrowserSessionManager {
     if (session.state !== "HUMAN_CONTROL") {
       throw new Error("Browser session is not in human control.");
     }
+    if (
+      (session.permit || this.requirePermits) &&
+      !["HUMAN", "SYSTEM"].includes(
+        this.permits.assert(session, {
+          controlGeneration: input.controlGeneration ?? 0,
+        }).ownerKind,
+      )
+    )
+      throw codedError(
+        "SESSION_PERMIT_EXPIRED",
+        "Human input requires an active human controller.",
+      );
     return session;
   }
 
@@ -3149,6 +3684,7 @@ export class BrowserSessionManager {
     if (!["OPEN", "HUMAN_CONTROL"].includes(session.state)) {
       throw new Error("Browser session is unavailable for preview.");
     }
+    if (session.permit || this.requirePermits) this.permits.assert(session);
     return session;
   }
 
@@ -3283,6 +3819,9 @@ function terminalPreviewError(message: string) {
 export class RuntimeClient {
   private socket: WebSocket | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
+  private readonly pendingHeartbeats = new Map<string, number>();
+  private helloSentAt = performance.now();
+  private lastAcceptedHeartbeatAt = -Infinity;
   private stopped = false;
   private reconnectAttempt = 0;
   private negotiatedProtocolMinor = 0;
@@ -3411,6 +3950,9 @@ export class RuntimeClient {
   stop() {
     this.stopped = true;
     this.manager.stopProfileCleanup();
+    this.manager.disconnect();
+    for (const session of this.manager.descriptors())
+      void this.manager.close(session.sessionId).catch(() => undefined);
     this.socket?.close(1000, "Runtime is stopping.");
   }
 
@@ -3418,8 +3960,13 @@ export class RuntimeClient {
     const interruptedProfileKeys = new Set(
       this.store
         .value()
-        .sessions.filter((session) => session.profileMode === "PERSISTENT")
-        .map((session) => session.profileKey),
+        .sessions.flatMap((session) =>
+          session.authSnapshot
+            ? [session.authSnapshot.profileKey]
+            : session.profileMode === "PERSISTENT"
+              ? [session.profileKey]
+              : [],
+        ),
     );
     for (const event of await readPendingProfileLifecycleEvents(profileRoot)) {
       if (interruptedProfileKeys.has(event.profileKey)) continue;
@@ -3449,15 +3996,26 @@ export class RuntimeClient {
       this.socket = socket;
       let opened = false;
       socket.addEventListener("open", () => {
+        this.helloSentAt = performance.now();
         opened = true;
         runtimeLog("info", "runtime.gateway.socket_opened", {
           runtimeId: state.runtimeId,
         });
         this.send({
-          activeSessions:
-            this.manager.descriptors().length > 0
-              ? this.manager.descriptors()
-              : state.sessions,
+          activeSessions: [
+            ...this.manager
+              .descriptors()
+              .map((session) => ({ ...session, live: true })),
+            ...state.sessions
+              .filter(
+                (session) =>
+                  !this.manager
+                    .descriptors()
+                    .some((live) => live.sessionId === session.sessionId),
+              )
+              .map((session) => ({ ...session, live: false })),
+          ],
+          capabilities: [...RUNTIME_CAPABILITIES],
           instanceNonce: randomUUID() + randomUUID(),
           protocol: RUNTIME_PROTOCOL,
           runtimeId: state.runtimeId,
@@ -3468,6 +4026,7 @@ export class RuntimeClient {
         });
       });
       socket.addEventListener("message", (event) => {
+        if (this.socket !== socket) return;
         void this.handleMessage(String(event.data)).catch((error: Error) => {
           runtimeLog("error", "runtime.gateway.message_failed", {}, error);
           socket.close(1011, "Runtime failed to process server message.");
@@ -3479,6 +4038,17 @@ export class RuntimeClient {
         }
       });
       socket.addEventListener("close", (event) => {
+        if (this.socket !== socket) {
+          resolve();
+          return;
+        }
+        this.manager.disconnect();
+        this.pendingHeartbeats.clear();
+        this.lastAcceptedHeartbeatAt = -Infinity;
+        for (const operation of this.pending.values())
+          operation.controller.abort(
+            new Error("Runtime gateway disconnected."),
+          );
         if (this.heartbeatTimer) {
           clearInterval(this.heartbeatTimer);
           this.heartbeatTimer = undefined;
@@ -3512,9 +4082,14 @@ export class RuntimeClient {
     if (message.type === "runtime.hello.accepted") {
       this.negotiatedProtocolMinor = message.protocol.minor;
       this.deliveryAcknowledgements = message.protocol.minor >= 3;
-      this.connectionReady = true;
+      this.manager.configureProtocol(
+        message.protocol.minor,
+        message.serverTime,
+        performance.now() - this.helloSentAt,
+      );
       this.applyNetworkPolicy(message.networkAllowlist, "gateway_handshake");
       await this.manager.applyReconcile(message.reconcile);
+      this.connectionReady = true;
       void this.manager.cleanupExpiredProfiles();
       await this.restoreRuntimeDiagnosticEvents();
       runtimeLog("info", "runtime.gateway.online", {
@@ -3540,6 +4115,21 @@ export class RuntimeClient {
       return;
     }
     if (message.type === "runtime.heartbeat.ack") {
+      if (this.negotiatedProtocolMinor >= RUNTIME_SESSION_PERMIT_MINOR) {
+        const sentAt = message.heartbeatId
+          ? this.pendingHeartbeats.get(message.heartbeatId)
+          : undefined;
+        if (sentAt === undefined || sentAt <= this.lastAcceptedHeartbeatAt)
+          return;
+        this.lastAcceptedHeartbeatAt = sentAt;
+        for (const [id, timestamp] of this.pendingHeartbeats)
+          if (timestamp <= sentAt) this.pendingHeartbeats.delete(id);
+        this.manager.acceptSessionPermits(
+          message.sessionPermits ?? [],
+          message.serverTime,
+          performance.now() - sentAt,
+        );
+      }
       for (const sessionId of message.closeSessions) {
         await this.manager.close(sessionId);
       }
@@ -3589,6 +4179,7 @@ export class RuntimeClient {
   private applyNetworkPolicy(networkAllowlist: string[], source: string) {
     const allowlist = parseHostAllowlist(networkAllowlist.join(","));
     this.proxy.setAllowlist(allowlist);
+    this.manager.setNetworkAllowlist(allowlist);
     runtimeLog("info", "runtime.network_policy.applied", {
       allowlistEntries: allowlist.size,
       source,
@@ -3615,6 +4206,14 @@ export class RuntimeClient {
           { once: true },
         );
       });
+      if (
+        this.negotiatedProtocolMinor >= RUNTIME_SESSION_PERMIT_MINOR &&
+        !this.connectionReady
+      )
+        throw codedError(
+          "SESSION_PERMIT_EXPIRED",
+          "Runtime handshake is not complete.",
+        );
       const result = await Promise.race([
         this.manager.execute(command),
         aborted,
@@ -3626,6 +4225,15 @@ export class RuntimeClient {
       this.send({
         artifacts: commandResult.artifacts ?? [],
         commandId: command.commandId,
+        ...((command.ownerTaskId ?? command.permit?.ownerTaskId)
+          ? { ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId }
+          : {}),
+        ...((command.ownerFencingToken ?? command.permit?.ownerFencingToken)
+          ? {
+              ownerFencingToken:
+                command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+            }
+          : {}),
         fencingToken: command.fencingToken,
         leaseToken: command.leaseToken,
         ok: true,
@@ -3650,6 +4258,15 @@ export class RuntimeClient {
         artifacts: [],
         commandId: command.commandId,
         error: classified,
+        ...((command.ownerTaskId ?? command.permit?.ownerTaskId)
+          ? { ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId }
+          : {}),
+        ...((command.ownerFencingToken ?? command.permit?.ownerFencingToken)
+          ? {
+              ownerFencingToken:
+                command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+            }
+          : {}),
         fencingToken: command.fencingToken,
         leaseToken: command.leaseToken,
         ok: false,
@@ -3678,7 +4295,14 @@ export class RuntimeClient {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
+    const heartbeatId = randomUUID();
+    this.pendingHeartbeats.set(heartbeatId, performance.now());
+    if (this.pendingHeartbeats.size > 64)
+      this.pendingHeartbeats.delete(
+        this.pendingHeartbeats.keys().next().value!,
+      );
     this.send({
+      heartbeatId,
       activeSessions: this.manager.descriptors().map((session) => ({
         fencingToken: session.fencingToken,
         leaseToken: session.leaseToken,

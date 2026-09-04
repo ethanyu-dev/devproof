@@ -10,6 +10,7 @@ import type {
 import { RuntimeConnectionHub } from "./runtime-connection-hub.service.js";
 
 interface RuntimeSessionFence {
+  controlGeneration?: number;
   fencingToken: bigint;
   id: string;
   leaseToken: string;
@@ -111,6 +112,7 @@ export class RuntimeHumanControlRelay {
     });
     try {
       await this.hub.send(session.runtimeId, {
+        controlGeneration: session.controlGeneration ?? 0,
         dispatchId,
         events,
         fencingToken: session.fencingToken.toString(),

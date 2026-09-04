@@ -134,6 +134,14 @@ export class UnifiedBrowserExecutionService {
       teamId,
       execution.id,
       input.command,
+      undefined,
+      {
+        taskId,
+        fencingToken: input.fencingToken,
+        leaseToken: input.leaseToken,
+        workerId: input.workerId,
+        expiresAt: task.leaseExpiresAt!,
+      },
     );
   }
 
@@ -143,7 +151,13 @@ export class UnifiedBrowserExecutionService {
       where: { attemptId: task.attemptId },
     });
     if (execution) {
-      await this.browser.releaseForExecutionRun(teamId, execution.id);
+      await this.browser.releaseForExecutionRun(teamId, execution.id, {
+        taskId,
+        fencingToken: input.fencingToken,
+        leaseToken: input.leaseToken,
+        workerId: input.workerId,
+        expiresAt: task.leaseExpiresAt!,
+      });
     }
     return { released: true };
   }
@@ -162,9 +176,14 @@ export class UnifiedBrowserExecutionService {
       !task ||
       task.leaseOwner !== input.workerId ||
       task.leaseToken !== input.leaseToken ||
-      task.fencingToken.toString() !== input.fencingToken
+      task.fencingToken.toString() !== input.fencingToken ||
+      !task.leaseExpiresAt ||
+      task.leaseExpiresAt <= new Date()
     ) {
-      throw new ConflictException("The Runtime task lease is stale.");
+      throw new ConflictException({
+        code: "RUNTIME_LEASE_LOST",
+        message: "The Runtime task lease is stale.",
+      });
     }
     if (
       !allowTerminal &&

@@ -40,13 +40,30 @@ export interface ExecutionRunnerLease {
 }
 
 export type ExecutionUnavailableReason =
-  "NO_MATCHING_RUNNER" | "NO_AVAILABLE_SLOT" | "SESSION_OPEN_FAILED";
+  | "NO_MATCHING_RUNNER"
+  | "NO_AVAILABLE_SLOT"
+  | "SESSION_OPEN_FAILED"
+  | "DATA_LOCK"
+  | "IDENTITY_CAPACITY"
+  | "AUTH_REQUIRED"
+  | "AUTH_REFRESH"
+  | "CASE_DEPENDENCY"
+  | "LEASE_RECOVERY"
+  | "ADMISSION_STALE"
+  | "PROTOCOL_UNSUPPORTED"
+  | "AGENT_CAPACITY";
 
 export class ExecutionRunnerUnavailableError extends Error {
   constructor(
     readonly reason: ExecutionUnavailableReason,
     message: string,
     readonly availabilityPolicyOverride?: "WAIT" | "FAIL_FAST",
+    readonly blockedBy?: {
+      resourceType: string;
+      taskId?: string;
+      runId?: string;
+      sessionId?: string;
+    },
   ) {
     super(message);
     this.name = "ExecutionRunnerUnavailableError";

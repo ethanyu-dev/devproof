@@ -8,6 +8,8 @@ import {
   deadlinePolicyPausesHumanWait,
   decideAdaptiveDeadlineExtension,
   hitlWaitDeadline,
+  initializeExecutionBudget,
+  leaseRecoveryDecision,
 } from "./agent-runtime-task.service.js";
 
 const snapshot = runtimeTaskSnapshotSchema.parse({
@@ -36,6 +38,328 @@ const snapshot = runtimeTaskSnapshotSchema.parse({
   runId: "285146a8-5230-4b02-832a-5eef19e8dc8a",
   teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
   traceId: "1234567890abcdef1234567890abcdef",
+});
+
+describe("Agent Runtime ownership and recovery", () => {
+  it.each([
+    { potentialWrites: 0, casCount: 1, expected: "RETRY_SCHEDULED" },
+    { potentialWrites: 1, casCount: 1, expected: "WRITE_OUTCOME_UNKNOWN" },
+    { potentialWrites: 0, casCount: 0, expected: "RACE_LOST" },
+  ])(
+    "recovers a reserved writer without trapping its new Attempt behind old data locks: $expected",
+    async ({ potentialWrites, casCount, expected }) => {
+      const deadlineAt = new Date(Date.now() + 120_000);
+      const task = {
+        id: "task-1",
+        status: "FAILED",
+        recoveryStatus: "CLOSING",
+        attemptId: snapshot.attemptId,
+        runId: snapshot.runId,
+        capability: "browser.verification",
+        provider: "GENERIC",
+        snapshot: {
+          ...snapshot,
+          deadlineAt: deadlineAt.toISOString(),
+          executionPolicy: {
+            retryPolicy: { maxAttempts: 3, retryOn: ["RUNTIME_LOST"] },
+            browser: {
+              availabilityPolicy: "WAIT",
+              profile: { mode: "EPHEMERAL" },
+              requiredCapabilities: ["browser"],
+            },
+          },
+        },
+        attempt: {
+          number: 1,
+          browserExecution: {
+            id: "execution-1",
+            runtimeSessionId: "session-1",
+          },
+        },
+        run: {
+          teamId: snapshot.teamId,
+          lifecycle: "RUNNING",
+          deadlineAt,
+          hardDeadlineAt: deadlineAt,
+          cancelRequestedAt: null,
+          infrastructureRecoveryCount: 0,
+          maxAttempts: 3,
+          concurrencyPolicy: { accessMode: "MUTATING" },
+        },
+      };
+      const session = { status: "CLOSED", closureVerifiedAt: new Date() };
+      const tx = {
+        agentRuntimeTask: {
+          findFirst: vi.fn().mockResolvedValue(task),
+          updateMany: vi.fn().mockResolvedValue({ count: casCount }),
+          create: vi.fn().mockResolvedValue({}),
+        },
+        browserRuntimeSession: {
+          findUnique: vi.fn().mockResolvedValue(session),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        browserRuntimeCommand: {
+          count: vi.fn().mockResolvedValue(potentialWrites),
+        },
+        executionResourceLease: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        executionRun: { update: vi.fn().mockResolvedValue({}) },
+        runAttempt: { create: vi.fn().mockResolvedValue({}) },
+        browserExecution: { create: vi.fn().mockResolvedValue({}) },
+        runEvent: { create: vi.fn().mockResolvedValue({}) },
+        taskCaseExecution: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+      const prisma = {
+        agentRuntimeTask: {
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([task]),
+        },
+        browserRuntimeCommand: {
+          count: vi.fn().mockResolvedValue(potentialWrites),
+        },
+        browserRuntimeSession: {
+          findUnique: vi.fn().mockResolvedValue(session),
+        },
+        executionResourceLease: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
+      };
+      const browser = {
+        releaseForExecutionRun: vi.fn().mockResolvedValue(undefined),
+      };
+      const service = new AgentRuntimeTaskService(
+        prisma as never,
+        {} as never,
+        browser as never,
+      );
+      await service.recoverExpiredLeases();
+      expect(
+        tx.browserRuntimeCommand.count.mock.calls[0]![0].where,
+      ).not.toHaveProperty("source");
+      if (expected === "RETRY_SCHEDULED") {
+        expect(tx.executionResourceLease.deleteMany).toHaveBeenCalledWith({
+          where: { sessionId: "session-1" },
+        });
+        expect(tx.agentRuntimeTask.create).toHaveBeenCalledOnce();
+        expect(tx.browserExecution.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ status: "REQUESTED" }),
+          }),
+        );
+        expect(
+          tx.executionResourceLease.deleteMany.mock.invocationCallOrder[0],
+        ).toBeGreaterThan(
+          tx.agentRuntimeTask.updateMany.mock.invocationCallOrder[0]!,
+        );
+        expect(
+          tx.executionResourceLease.deleteMany.mock.invocationCallOrder[0],
+        ).toBeLessThan(tx.agentRuntimeTask.create.mock.invocationCallOrder[0]!);
+      } else {
+        expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+        expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
+      }
+      if (expected === "WRITE_OUTCOME_UNKNOWN")
+        expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ recoveryStatus: expected }),
+          }),
+        );
+    },
+  );
+
+  it("does not retry a failed write whose browser response may have been lost", async () => {
+    const now = new Date();
+    const task = {
+      id: "task-1",
+      attemptId: snapshot.attemptId,
+      runId: snapshot.runId,
+      snapshot,
+      status: "RUNNING",
+      completionId: null,
+      leaseOwner: "worker-1",
+      leaseToken: "token-1",
+      fencingToken: 2n,
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+      attempt: { number: 1 },
+      run: {
+        lifecycle: "RUNNING",
+        cancelRequestedAt: null,
+        taskExecutionId: null,
+        currentAttemptNumber: 1,
+        concurrencyPolicy: { accessMode: "MUTATING" },
+        executionPolicy: {
+          retryPolicy: { maxAttempts: 3, retryOn: ["PROVIDER"] },
+          deadline: { mode: "FIXED" },
+        },
+      },
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+      agentRuntimeTask: {
+        findFirst: vi.fn().mockResolvedValue(task),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn().mockResolvedValue({}),
+        findUnique: vi.fn().mockResolvedValue({
+          completionId: "completion-1",
+          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+        }),
+        create: vi.fn(),
+      },
+      browserRuntimeCommand: { count: vi.fn().mockResolvedValue(1) },
+      executionResourceLease: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        deleteMany: vi.fn(),
+      },
+      runAttempt: { update: vi.fn().mockResolvedValue({}) },
+      executionRun: { update: vi.fn().mockResolvedValue({}) },
+      runEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      $transaction: vi.fn((fn: (tx: unknown) => unknown) => fn(tx)),
+    };
+    const service = new AgentRuntimeTaskService(prisma as never, {} as never);
+    const result = await service.submitOutcome(snapshot.teamId, task.id, {
+      workerId: "worker-1",
+      leaseToken: "token-1",
+      fencingToken: "2",
+      completionId: "completion-1",
+      completedAt: now.toISOString(),
+      outcome: {
+        kind: "RETRYABLE_FAILURE",
+        executionDisposition: "PROVIDER_ERROR",
+        error: {
+          code: "PROVIDER_DISCONNECTED",
+          failureClass: "PROVIDER",
+          message: "response lost",
+          phase: "browser_verification",
+          details: {},
+        },
+        summary: "execution interrupted",
+      },
+    });
+    expect(result.nextAttemptScheduled).toBe(false);
+    expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
+    expect(tx.executionRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lifecycle: "COMPLETED",
+          verdict: null,
+          executionDisposition: "BLOCKED",
+        }),
+      }),
+    );
+    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+        }),
+      }),
+    );
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("does not acknowledge renewal when another owner wins after the lease read", async () => {
+    const now = new Date();
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+      agentRuntimeTask: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "task-1",
+          status: "RUNNING",
+          leaseOwner: "worker-1",
+          leaseToken: "token-1",
+          fencingToken: 2n,
+          leaseExpiresAt: new Date(now.getTime() + 30_000),
+          cancelRequestedAt: null,
+          run: {
+            cancelRequestedAt: null,
+            deadlineAt: new Date(now.getTime() + 60_000),
+            hardDeadlineAt: new Date(now.getTime() + 60_000),
+            lifecycle: "RUNNING",
+          },
+        }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      browserRuntimeSession: { updateMany: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn((fn: (tx: unknown) => unknown) => fn(tx)),
+    };
+    const service = new AgentRuntimeTaskService(prisma as never, {} as never);
+    await expect(
+      service.heartbeat("team-1", "task-1", {
+        workerId: "worker-1",
+        leaseToken: "token-1",
+        fencingToken: "2",
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          fencingToken: 2n,
+          leaseToken: "token-1",
+          leaseOwner: "worker-1",
+          leaseExpiresAt: { gt: now },
+        }),
+      }),
+    );
+    expect(tx.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("uses a new bounded Attempt only after closure and never replays uncertain writes", () => {
+    const base = {
+      closed: true,
+      unknownWrite: false,
+      expired: false,
+      infrastructureRecoveries: 0,
+      attemptNumber: 1,
+      maxAttempts: 3,
+    };
+    expect(leaseRecoveryDecision(base)).toBe("RETRY_SCHEDULED");
+    expect(
+      leaseRecoveryDecision({ ...base, infrastructureRecoveries: 1 }),
+    ).toBe("EXHAUSTED");
+    expect(leaseRecoveryDecision({ ...base, attemptNumber: 3 })).toBe(
+      "EXHAUSTED",
+    );
+    expect(leaseRecoveryDecision({ ...base, closed: false })).toBe("EXHAUSTED");
+    expect(leaseRecoveryDecision({ ...base, unknownWrite: true })).toBe(
+      "WRITE_OUTCOME_UNKNOWN",
+    );
+  });
+
+  it("starts execution time at first claim while preserving the parent deadline", () => {
+    const now = new Date("2026-09-04T08:00:00Z");
+    expect(
+      initializeExecutionBudget({
+        now,
+        seconds: 60,
+        extensionSeconds: 30,
+        parentDeadlineAt: null,
+      }),
+    ).toEqual({
+      deadlineAt: new Date("2026-09-04T08:01:00Z"),
+      hardDeadlineAt: new Date("2026-09-04T08:01:30Z"),
+    });
+    expect(
+      initializeExecutionBudget({
+        now,
+        seconds: 60,
+        extensionSeconds: 30,
+        parentDeadlineAt: new Date("2026-09-04T08:00:45Z"),
+      }),
+    ).toEqual({
+      deadlineAt: new Date("2026-09-04T08:00:45Z"),
+      hardDeadlineAt: new Date("2026-09-04T08:00:45Z"),
+    });
+  });
 });
 
 function outcome(evidenceRefs: string[]) {
@@ -143,11 +467,21 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       id: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
       leaseExpiresAt: new Date(Date.now() + 60_000),
       leaseToken,
-      run: { startedAt: null },
+      run: { startedAt: null, deadlineAt: new Date(Date.now() + 60_000) },
       runId: snapshot.runId,
       snapshot,
     };
     const tx = {
+      browserExecution: {
+        findUnique: vi.fn().mockResolvedValue({
+          runtimeSessionId: "session-1",
+          status: "ACTIVE",
+        }),
+      },
+      browserRuntimeSession: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ now: new Date() }]),
       agentRuntimeTask: {
         findFirst: vi.fn().mockResolvedValue({
           id: task.id,

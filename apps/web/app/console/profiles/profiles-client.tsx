@@ -49,7 +49,14 @@ type TriggerSource = "CONSOLE" | "FEISHU" | "ISSUE_ASSIGNEE";
 const PROFILE_FRAME_STALE_MS = 6_000;
 const PROFILE_OPERATION_TIMEOUT_MS = 120_000;
 type ProfileOperation =
-  "approve" | "close" | "delete" | "disable" | "prepare" | "reauth" | "verify";
+  | "approve"
+  | "close"
+  | "delete"
+  | "disable"
+  | "prepare"
+  | "reauth"
+  | "verify"
+  | "settings";
 
 interface Profile {
   activeSession: {
@@ -69,6 +76,10 @@ interface Profile {
   createdAt: string;
   displayName: string;
   environmentKey: string;
+  executionMode?: "SERIAL_PERSISTENT" | "ISOLATED_AUTH";
+  executionConcurrency?: number;
+  authSnapshotGeneration?: number | null;
+  isolatedExecutionAvailable?: boolean;
   grants: Array<{ hostnamePattern: string; triggerSource: TriggerSource }>;
   id: string;
   inactivityExpiresAt: string | null;
@@ -78,11 +89,14 @@ interface Profile {
   siteHostname: string | null;
   status: string;
   verificationUrl: string | null;
+  verificationError?: { message?: string } | null;
 }
 
 export function ProfilesClient() {
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [executionMode, setExecutionMode] = useState("SERIAL_PERSISTENT");
+  const [executionConcurrency, setExecutionConcurrency] = useState(4);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [operation, setOperation] = useState<ProfileOperation | null>(null);
   const operationAbort = useRef<AbortController | null>(null);
@@ -155,7 +169,38 @@ export function ProfilesClient() {
     setMessage(null);
   }
 
-  async function action(name: Exclude<ProfileOperation, "delete">) {
+  useEffect(() => {
+    setExecutionMode(selected?.executionMode ?? "SERIAL_PERSISTENT");
+    setExecutionConcurrency(selected?.executionConcurrency ?? 4);
+  }, [selected?.id, selected?.executionMode, selected?.executionConcurrency]);
+
+  async function saveExecutionSettings(event: FormEvent) {
+    event.preventDefault();
+    if (!selected || busy) return;
+    setOperation("settings");
+    setMessage(null);
+    try {
+      await consoleApi(`/browser-profiles/${selected.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          executionMode,
+          executionConcurrency:
+            executionMode === "SERIAL_PERSISTENT" ? 1 : executionConcurrency,
+        }),
+      });
+      await load(selected.id);
+      setMessage({ text: "执行方式已保存，将用于后续任务。", tone: "success" });
+    } catch (error) {
+      setMessage({ text: (error as Error).message, tone: "error" });
+    } finally {
+      setOperation(null);
+    }
+  }
+
+  async function action(
+    name: Exclude<ProfileOperation, "delete">,
+    prepareIsolatedAuth = false,
+  ) {
     if (!selected) return;
     if (operation && name !== "close") return;
     if (name === "close") operationAbort.current?.abort();
@@ -165,12 +210,14 @@ export function ProfilesClient() {
     setOperation(name);
     setMessage(null);
     try {
-      await consoleApi(
+      const result = await consoleApi<Profile>(
         `/browser-profiles/${selected.id}/${name}`,
         {
           ...(name === "prepare" || name === "reauth"
             ? { body: JSON.stringify({ ttlSeconds: 1800 }) }
-            : {}),
+            : name === "verify"
+              ? { body: JSON.stringify({ prepareIsolatedAuth }) }
+              : {}),
           method: "POST",
           signal: controller.signal,
         },
@@ -180,7 +227,10 @@ export function ProfilesClient() {
       setMessage({
         text:
           name === "verify"
-            ? "登录状态验证成功，浏览器身份已可用于任务。"
+            ? result.verificationError?.message ||
+              (prepareIsolatedAuth
+                ? "登录状态已保存，并发验证通过后可在执行方式中启用独立会话。"
+                : "登录状态验证成功，浏览器身份已可用于任务。")
             : name === "close"
               ? "已关闭本次登录窗口，未保存新的登录状态。"
               : name === "approve"
@@ -319,6 +369,57 @@ export function ProfilesClient() {
                     </span>
                   </div>
                 </div>
+                <form
+                  className="dp-form"
+                  onSubmit={(event) => void saveExecutionSettings(event)}
+                >
+                  <label>
+                    执行方式
+                    <select
+                      value={executionMode}
+                      onChange={(event) => setExecutionMode(event.target.value)}
+                      disabled={busy}
+                    >
+                      <option value="SERIAL_PERSISTENT">串行复用浏览器</option>
+                      <option
+                        value="ISOLATED_AUTH"
+                        disabled={
+                          !selected.isolatedExecutionAvailable ||
+                          !selected.authSnapshotGeneration
+                        }
+                      >
+                        独立会话并发执行
+                      </option>
+                    </select>
+                  </label>
+                  {executionMode === "ISOLATED_AUTH" ? (
+                    <label>
+                      此登录身份的并发上限
+                      <input
+                        type="number"
+                        min={1}
+                        max={4}
+                        value={executionConcurrency}
+                        onChange={(event) =>
+                          setExecutionConcurrency(Number(event.target.value))
+                        }
+                        disabled={busy}
+                        required
+                      />
+                    </label>
+                  ) : null}
+                  <p className="dp-muted">
+                    {selected.authSnapshotGeneration
+                      ? "已通过 4 个独立会话的登录验证。读写冲突的 Case 仍会按数据锁排队。"
+                      : "启用并发前，请重新登录，在登录窗口勾选“验证并发登录”并保存，再切换执行方式。"}
+                    {!selected.isolatedExecutionAvailable
+                      ? "当前部署尚未启用并发登录功能。"
+                      : ""}
+                  </p>
+                  <Button type="submit" disabled={busy}>
+                    保存执行方式
+                  </Button>
+                </form>
                 {selected.pendingTriggerSources.length ? (
                   <div className="dp-profile-consent">
                     <span>
@@ -407,7 +508,9 @@ export function ProfilesClient() {
           profile={selected}
           onClose={() => void action("close")}
           onReload={() => void action("prepare")}
-          onVerify={() => void action("verify")}
+          onVerify={(prepareIsolatedAuth) =>
+            void action("verify", prepareIsolatedAuth)
+          }
           operation={operation}
           operationError={message?.tone === "error" ? message.text : null}
         />
@@ -448,7 +551,7 @@ function ProfileBrowser({
 }: {
   onClose: () => void;
   onReload: () => void;
-  onVerify: () => void;
+  onVerify: (prepareIsolatedAuth: boolean) => void;
   operation: ProfileOperation | null;
   operationError: string | null;
   profile: Profile;
@@ -463,6 +566,10 @@ function ProfileBrowser({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [prepareIsolatedAuth, setPrepareIsolatedAuth] = useState(false);
+  useEffect(() => {
+    setPrepareIsolatedAuth(false);
+  }, [profile.id, profile.activeSession?.id]);
   const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null);
   const [streamStatus, setStreamStatus] = useState<
     "connecting" | "interrupted" | "live"
@@ -779,6 +886,21 @@ function ProfileBrowser({
             <Keyboard />
             点击画面定位输入焦点，可使用键盘、粘贴、点击和滚轮完成登录。
           </div>
+          {profile.isolatedExecutionAvailable &&
+          profile.executionMode !== "ISOLATED_AUTH" ? (
+            <label>
+              <input
+                type="checkbox"
+                checked={prepareIsolatedAuth}
+                disabled={busy}
+                onChange={(event) =>
+                  setPrepareIsolatedAuth(event.target.checked)
+                }
+              />{" "}
+              验证并发登录：使用 4
+              个独立会话检查兼容性。部分站点可能要求重新登录；未勾选时只保存串行登录状态。
+            </label>
+          ) : null}
           <div className="dp-browser-handoff-actions">
             <Button disabled={busy} onClick={onReload} variant="secondary">
               {operation === "prepare" ? <LoaderCircle /> : <RefreshCw />}
@@ -786,7 +908,7 @@ function ProfileBrowser({
             </Button>
             <Button
               disabled={busy || !frame || streamStatus !== "live"}
-              onClick={onVerify}
+              onClick={() => onVerify(prepareIsolatedAuth)}
             >
               {verifying ? <LoaderCircle /> : <ShieldCheck />}
               {verifying ? "正在验证并保存…" : "验证并保存"}

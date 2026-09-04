@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../database/prisma.service.js";
 import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.js";
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
+import { quarantineSession } from "./session-resource-cleanup.js";
 
 const STALE_PROFILE_VERIFICATION_MS = 2 * 60 * 1_000;
 
@@ -52,27 +53,10 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
       },
     });
     if (expiredSessions.length > 0) {
-      const ids = expiredSessions.map((row) => row.id);
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.updateMany({
-          data: {
-            humanControllerUserId: null,
-            humanControlExpiresAt: null,
-            lastError: {
-              code: "LEASE_EXPIRED",
-              message: "Runtime did not renew the session lease.",
-            },
-            status: "LOST",
-          },
-          where: { id: { in: ids } },
-        }),
-        this.prisma.browserRuntimeSlot.deleteMany({
-          where: { sessionId: { in: ids } },
-        }),
-        this.prisma.browserRuntimeProfileLease.deleteMany({
-          where: { sessionId: { in: ids } },
-        }),
-      ]);
+      await this.prisma.$transaction(async (tx) => {
+        for (const session of expiredSessions)
+          await quarantineSession(tx, session.id, "LEASE_EXPIRED");
+      });
     }
 
     const staleVerificationCutoff = new Date(
@@ -138,7 +122,7 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
 
     const expiredHumanControls =
       await this.prisma.browserRuntimeSession.findMany({
-        select: { id: true },
+        select: { id: true, controlGeneration: true },
         take: 50,
         where: {
           humanControlExpiresAt: { lte: now },
@@ -147,21 +131,23 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
         },
       });
     for (const session of expiredHumanControls) {
-      const result = await this.commands.execute({
-        commandType: "human.release",
-        sessionId: session.id,
-        source: "SYSTEM",
-      });
-      if (result?.status === "SUCCEEDED") {
-        await this.prisma.browserRuntimeSession.update({
-          data: {
-            humanControllerUserId: null,
-            humanControlExpiresAt: null,
-            status: "ACTIVE",
+      await this.prisma.$transaction(async (tx) => {
+        const expired = await tx.browserRuntimeSession.updateMany({
+          data: { controlGeneration: { increment: 1 } },
+          where: {
+            id: session.id,
+            status: "HUMAN_CONTROL",
+            controlGeneration: session.controlGeneration,
+            humanControlExpiresAt: { lte: now },
+            closureVerifiedAt: null,
           },
-          where: { id: session.id },
         });
-      }
+        if (expired.count !== 1) return;
+        // A control TTL is a permit expiry, so the same browser authority must
+        // not be revived by human.release. Heartbeat reconciliation closes LOST
+        // sessions and releases capacity only after browser closure is verified.
+        await quarantineSession(tx, session.id, "HUMAN_CONTROL_EXPIRED");
+      });
     }
   }
 }

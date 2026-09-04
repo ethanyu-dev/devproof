@@ -1,6 +1,8 @@
+import type { TaskCaseExecution, TaskScheduling } from "./task-types";
 import { displayLabel } from "../../../lib/display-text";
 
 interface TaskOutcomeSource {
+  scheduling?: { state: string; reason: string | null };
   executionDisposition: string | null;
   lifecycle: string;
   verdict: string | null;
@@ -49,6 +51,22 @@ export function taskOutcomeDisplay(
       toneStatus: task.lifecycle,
     };
   }
+  if (
+    ["QUEUED", "PREPARING", "RUNNING"].includes(task.lifecycle) &&
+    isSchedulingWait(task.scheduling)
+  ) {
+    return {
+      description: task.scheduling?.reason
+        ? displayLabel(task.scheduling.reason)
+        : null,
+      label:
+        task.scheduling?.state === "RECOVERING"
+          ? "执行恢复中"
+          : displayLabel(task.scheduling?.reason ?? "WAITING"),
+      toneStatus:
+        task.scheduling?.state === "RECOVERING" ? "RUNNING" : "PENDING",
+    };
+  }
   if (task.verdict) {
     return {
       description:
@@ -78,4 +96,45 @@ export function taskOutcomeDisplay(
     label: displayLabel(task.lifecycle),
     toneStatus: task.lifecycle,
   };
+}
+
+export function isSchedulingWait(scheduling?: { state: string } | null) {
+  return ["WAITING", "ADMITTED", "RECOVERING"].includes(
+    scheduling?.state ?? "",
+  );
+}
+
+export function executionSchedulingLabel(execution: TaskCaseExecution) {
+  if (
+    execution.run &&
+    ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(execution.run.lifecycle)
+  )
+    return taskOutcomeDisplay(execution.run).label;
+  if (execution.run?.lifecycle === "WAITING_HUMAN") return "等待人工操作";
+  const scheduling = execution.scheduling;
+  if (scheduling?.state === "RECOVERING") return "执行恢复中";
+  if (isSchedulingWait(scheduling))
+    return displayLabel(scheduling?.reason ?? "WAITING");
+  if (scheduling?.state === "TERMINAL")
+    return displayLabel(scheduling.reason ?? "TERMINAL");
+  return execution.run
+    ? taskOutcomeDisplay(execution.run).label
+    : displayLabel(execution.dispatch.status);
+}
+
+export function schedulingWaitText(
+  scheduling: TaskScheduling | undefined,
+  now = Date.now(),
+) {
+  if (!scheduling || !isSchedulingWait(scheduling)) return null;
+  const since = scheduling.waitingSince
+    ? Date.parse(scheduling.waitingSince)
+    : NaN;
+  const seconds = Number.isFinite(since)
+    ? Math.max(0, Math.floor((now - since) / 1000))
+    : null;
+  const label = displayLabel(scheduling.reason ?? scheduling.state);
+  return seconds === null
+    ? label
+    : `${label} · 已等待 ${seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`}`;
 }

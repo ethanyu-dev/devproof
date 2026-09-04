@@ -7,6 +7,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
+import { Transform, type Readable, type Writable } from "node:stream";
 
 import { resolveSafeAddress } from "./ip-rules.js";
 
@@ -16,6 +17,7 @@ const FORBIDDEN_RESPONSE =
 export interface SsrfProxy {
   readonly server: string;
   setAllowlist(allowlist: ReadonlySet<string>): void;
+  setEnabled(enabled: boolean): void;
   stop(): Promise<void>;
 }
 
@@ -43,27 +45,55 @@ function reject(socket: Socket) {
   socket.end(FORBIDDEN_RESPONSE);
 }
 
+/** Recheck permits for every forwarded chunk, including established TLS/WS tunnels. */
+function forward(
+  source: Readable,
+  destination: Writable,
+  permitted: () => boolean,
+) {
+  const gate = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      if (!permitted())
+        callback(new Error("Browser execution permit was withdrawn."));
+      else callback(null, chunk);
+    },
+  });
+  gate.once("error", () => {
+    source.destroy();
+    destination.destroy();
+  });
+  source.pipe(gate).pipe(destination);
+}
+
 function handleConnect(
   request: IncomingMessage,
   client: Socket,
   head: Buffer,
   allowlist: ReadonlySet<string>,
+  permitted: () => boolean,
+  track: (socket: Socket) => void,
 ) {
   void (async () => {
     const target = parseAuthority(request.url ?? "", 443);
     const address = target
       ? await resolveSafeAddress(target.host, allowlist)
       : null;
-    if (!target || !address) {
+    if (!target || !address || !permitted()) {
       reject(client);
       return;
     }
     const upstream = netConnect(target.port, address, () => {
+      if (!permitted()) {
+        upstream.destroy();
+        client.destroy();
+        return;
+      }
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) upstream.write(head);
-      client.pipe(upstream);
-      upstream.pipe(client);
+      forward(client, upstream, permitted);
+      forward(upstream, client, permitted);
     });
+    track(upstream);
     upstream.on("error", () => client.destroy());
     client.on("error", () => upstream.destroy());
     client.on("close", () => upstream.destroy());
@@ -75,6 +105,8 @@ function handleHttp(
   request: IncomingMessage,
   response: ServerResponse,
   allowlist: ReadonlySet<string>,
+  permitted: () => boolean,
+  track: (socket: Socket) => void,
 ) {
   void (async () => {
     let target: URL;
@@ -84,12 +116,12 @@ function handleHttp(
       response.writeHead(400).end();
       return;
     }
-    if (target.protocol !== "http:") {
+    if (target.protocol !== "http:" || !permitted()) {
       response.writeHead(403).end();
       return;
     }
     const address = await resolveSafeAddress(target.hostname, allowlist);
-    if (!address) {
+    if (!address || !permitted()) {
       response.writeHead(403).end();
       return;
     }
@@ -115,14 +147,18 @@ function handleHttp(
           connection: "close",
         };
         response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
-        upstreamResponse.pipe(response);
+        forward(upstreamResponse, response, permitted);
       },
     );
+    upstream.on("socket", (socket) => {
+      track(socket);
+      if (!permitted()) upstream.destroy();
+    });
     upstream.on("error", () => {
       if (!response.headersSent) response.writeHead(502);
       response.end();
     });
-    request.pipe(upstream);
+    forward(request, upstream, permitted);
   })();
 }
 
@@ -131,6 +167,8 @@ function handleUpgrade(
   client: Socket,
   head: Buffer,
   allowlist: ReadonlySet<string>,
+  permitted: () => boolean,
+  track: (socket: Socket) => void,
 ) {
   void (async () => {
     let target: URL;
@@ -141,7 +179,7 @@ function handleUpgrade(
       return;
     }
     const address = await resolveSafeAddress(target.hostname, allowlist);
-    if (target.protocol !== "http:" || !address) {
+    if (target.protocol !== "http:" || !address || !permitted()) {
       reject(client);
       return;
     }
@@ -149,6 +187,11 @@ function handleUpgrade(
       target.port ? Number(target.port) : 80,
       address,
       () => {
+        if (!permitted()) {
+          upstream.destroy();
+          client.destroy();
+          return;
+        }
         const headers = Object.entries({
           ...request.headers,
           host: target.host,
@@ -160,34 +203,46 @@ function handleUpgrade(
           `${request.method ?? "GET"} ${target.pathname}${target.search} HTTP/${request.httpVersion}\r\n${headers}\r\n\r\n`,
         );
         if (head.length > 0) upstream.write(head);
-        client.pipe(upstream);
-        upstream.pipe(client);
+        forward(client, upstream, permitted);
+        forward(upstream, client, permitted);
       },
     );
+    track(upstream);
     upstream.on("error", () => client.destroy());
     client.on("error", () => upstream.destroy());
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
   })();
 }
 
 export async function startSsrfProxy(
   options: {
     allowlist?: ReadonlySet<string>;
+    isAllowed?: () => boolean;
   } = {},
 ): Promise<SsrfProxy> {
   let allowlist = new Set(options.allowlist ?? []);
   const sockets = new Set<Socket>();
-  const server: Server = createServer((request, response) =>
-    handleHttp(request, response, allowlist),
-  );
-  server.on("connection", (socket) => {
+  let enabled = true;
+  let stopped = false;
+  const permitted = () =>
+    enabled && !stopped && (options.isAllowed?.() ?? true);
+  const track = (socket: Socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
+  };
+  const server: Server = createServer((request, response) =>
+    handleHttp(request, response, allowlist, permitted, track),
+  );
+  server.on("connection", (socket) => {
+    track(socket);
+    if (!permitted()) socket.destroy();
   });
   server.on("connect", (request, socket, head) =>
-    handleConnect(request, socket as Socket, head, allowlist),
+    handleConnect(request, socket as Socket, head, allowlist, permitted, track),
   );
   server.on("upgrade", (request, socket, head) =>
-    handleUpgrade(request, socket as Socket, head, allowlist),
+    handleUpgrade(request, socket as Socket, head, allowlist, permitted, track),
   );
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -205,7 +260,13 @@ export async function startSsrfProxy(
     setAllowlist: (nextAllowlist) => {
       allowlist = new Set(nextAllowlist);
     },
+    setEnabled: (value) => {
+      enabled = value;
+      if (!enabled) for (const socket of sockets) socket.destroy();
+    },
     stop: () => {
+      if (stopped) return Promise.resolve();
+      stopped = true;
       for (const socket of sockets) socket.destroy();
       return new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

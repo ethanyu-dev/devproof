@@ -1,4 +1,25 @@
+import type { ExecutionConcurrencyPolicy } from "@devproof/contracts";
+
+export interface TaskScheduling {
+  state: string;
+  reason: string | null;
+  waitingSince: string | null;
+  evaluatedAt?: string;
+  blockedBy: {
+    resourceType: string;
+    resourceId?: string;
+    taskId?: string;
+    runId?: string;
+    caseExecutionId?: string;
+  } | null;
+  queue?: { scope: string; position: number | null; snapshotAt: string } | null;
+  nextRetryAt?: string | null;
+  reasons?: Record<string, number>;
+}
+
 export interface TaskRunSummary {
+  scheduling?: TaskScheduling;
+  infrastructureRecoveryCount?: number;
   currentAttemptNumber: number;
   evidenceCount: number;
   executionDisposition: string | null;
@@ -10,6 +31,8 @@ export interface TaskRunSummary {
 }
 
 export interface TaskCaseExecution {
+  scheduling?: TaskScheduling;
+  executionPolicy?: ExecutionConcurrencyPolicy | null;
   dispatch: {
     attempts: number;
     lastError: unknown;
@@ -82,6 +105,13 @@ export interface TaskDetail {
   };
   cases: TaskCase[];
   counts: {
+    terminal?: number;
+    queued?: number;
+    recovering?: number;
+    waitingHuman?: number;
+    timedOut?: number;
+    cancelled?: number;
+    dispatchFailed?: number;
     blocked: number;
     failed: number;
     inconclusive: number;
@@ -91,6 +121,8 @@ export interface TaskDetail {
     waiting: number;
   };
   createdAt: string;
+  scheduling?: TaskScheduling;
+  projectedAt?: string | null;
   currentStage: string;
   deadlineAt: string;
   deployments: Array<{
@@ -172,6 +204,7 @@ export type TaskSummary = Pick<
   | "updatedAt"
   | "verdict"
   | "waitingReason"
+  | "scheduling"
 >;
 
 export interface TaskEvent {

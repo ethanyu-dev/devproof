@@ -11,6 +11,7 @@ import {
   type UserBrowserProfileCreateInput,
   type UserBrowserProfilePrepareInput,
   type UserBrowserProfileUpdateInput,
+  type UserBrowserProfileVerifyInput,
 } from "@devproof/contracts";
 import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
 
@@ -24,6 +25,7 @@ import {
   type HumanPreviewEvent,
 } from "../runtime/runtime-human-control-relay.service.js";
 import { BrowserExecutionRunner } from "../verification/browser-execution-runner.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import {
   hostnameMatchesPattern,
   resolveRuntimeRoutingPlan,
@@ -54,6 +56,7 @@ const profileInclude = {
       humanControlExpiresAt: true,
       id: true,
       purpose: true,
+      protocolMinor: true,
       status: true,
     },
     take: 1,
@@ -95,6 +98,17 @@ export class UserBrowserProfilesService {
   }
 
   async create(current: AuthContext, input: UserBrowserProfileCreateInput) {
+    if (
+      input.executionMode === "ISOLATED_AUTH" &&
+      process.env.BROWSER_ISOLATED_AUTH_ENABLED !== "true"
+    )
+      throw new ConflictException(
+        "Isolated authenticated execution is not enabled on this deployment.",
+      );
+    if ((input.executionConcurrency ?? 1) > 4)
+      throw new ConflictException(
+        "This release validates at most four concurrent authenticated sessions.",
+      );
     const verificationHostname = normalizedHostname(input.verificationUrl);
     if (input.runtimeId) {
       await this.requireRuntime(
@@ -116,6 +130,8 @@ export class UserBrowserProfilesService {
             authRole: input.authRole,
             displayName: input.displayName,
             environmentKey: input.environmentKey,
+            executionMode: input.executionMode ?? "SERIAL_PERSISTENT",
+            executionConcurrency: input.executionConcurrency ?? 1,
             ownerUserId: current.user.id,
             runtimeProfileKey: `ubp-${randomUUID().replaceAll("-", "")}`,
             scopeKey,
@@ -392,50 +408,16 @@ export class UserBrowserProfilesService {
     input: UserBrowserProfileUpdateInput,
   ) {
     const profile = await this.owned(current, id);
-    if (input.verificationUrl || input.verificationRules || input.grants) {
-      const [activeRuns, activeSessions, resolvedBindings, deploymentBindings] =
-        await Promise.all([
-          this.prisma.executionRun.count({
-            where: {
-              browserProfileId: id,
-              lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
-            },
-          }),
-          this.prisma.browserRuntimeSession.count({
-            where: {
-              status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
-              userBrowserProfileId: id,
-            },
-          }),
-          this.prisma.taskProfileBinding.count({
-            where: {
-              resolvedProfileId: id,
-              status: "RESOLVED",
-              taskExecution: {
-                lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
-              },
-            },
-          }),
-          this.prisma.taskDeploymentProfileBinding.count({
-            where: {
-              profileId: id,
-              taskExecution: {
-                lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
-              },
-            },
-          }),
-        ]);
-      if (
-        activeRuns ||
-        activeSessions ||
-        resolvedBindings ||
-        deploymentBindings
-      ) {
-        throw new ConflictException(
-          "Profile target and trigger grants cannot change while a non-terminal task is bound to it.",
-        );
-      }
-    }
+    if ((input.executionConcurrency ?? 1) > 4)
+      throw new ConflictException(
+        "This release validates at most four concurrent authenticated sessions.",
+      );
+    const changesExecutionConfiguration =
+      input.verificationUrl !== undefined ||
+      input.verificationRules !== undefined ||
+      input.grants !== undefined ||
+      input.executionMode !== undefined ||
+      input.executionConcurrency !== undefined;
     const verificationUrl = input.verificationUrl ?? profile.verificationUrl;
     const hostname = verificationUrl
       ? normalizedHostname(verificationUrl)
@@ -458,67 +440,199 @@ export class UserBrowserProfilesService {
     }
     let updated: ProfileRow;
     try {
-      updated = await this.prisma.$transaction(async (tx) => {
-        await tx.userBrowserProfile.update({
-          data: {
-            ...(input.displayName ? { displayName: input.displayName } : {}),
-            ...(input.verificationRules
-              ? {
-                  verificationRules: json(input.verificationRules),
-                  verificationRulesVersion: { increment: 1 },
-                }
-              : {}),
-            ...(input.verificationUrl
-              ? { verificationUrl: input.verificationUrl }
-              : {}),
-            ...(hostname
-              ? {
-                  scopeKey: profileScopeKey({
-                    authRole: profile.authRole,
-                    environmentKey: profile.environmentKey,
-                    hostname,
-                  }),
-                }
-              : {}),
-            version: { increment: 1 },
-          },
-          where: { id },
-        });
-        if (grants) {
-          await tx.browserProfileGrant.updateMany({
-            data: { revokedAt: new Date() },
-            where: { profileId: id, revokedAt: null },
+      updated = await this.prisma.$transaction(
+        async (tx) => {
+          await acquireAdvisoryTransactionLock(tx, `browser-profile:${id}`);
+          const lockedProfile = await tx.userBrowserProfile.findFirst({
+            include: profileInclude,
+            where: {
+              id,
+              ownerUserId: current.user.id,
+              teamId: current.team.id,
+            },
           });
-          for (const triggerSource of grants) {
-            await tx.browserProfileGrant.upsert({
-              create: {
-                consentedByUserId: current.user.id,
-                hostnamePattern: hostname!,
-                profileId: id,
-                teamId: current.team.id,
-                triggerSource,
-              },
-              update: {
-                consentedAt: new Date(),
-                consentedByUserId: current.user.id,
-                revokedAt: null,
-              },
+          if (!lockedProfile)
+            throw new NotFoundException("Browser profile was not found.");
+          if (lockedProfile.version !== profile.version) {
+            throw new ConflictException(
+              "The browser profile changed concurrently. Reload it before changing its configuration.",
+            );
+          }
+          if (input.executionMode === "ISOLATED_AUTH") {
+            if (
+              process.env.BROWSER_ISOLATED_AUTH_ENABLED !== "true" ||
+              lockedProfile.status !== "READY" ||
+              !lockedProfile.inactivityExpiresAt ||
+              lockedProfile.inactivityExpiresAt <= new Date() ||
+              !lockedProfile.authSnapshotGeneration ||
+              !lockedProfile.authSnapshotCreatedAt ||
+              !lockedProfile.assignedRuntimeId
+            ) {
+              throw new ConflictException(
+                "Verify a compatible authentication snapshot before enabling isolated execution.",
+              );
+            }
+            const runtime = await tx.browserRuntime.findFirst({
+              select: { id: true },
               where: {
-                profileId_triggerSource_hostnamePattern: {
-                  hostnamePattern: hostname!,
-                  profileId: id,
-                  triggerSource,
-                },
+                id: lockedProfile.assignedRuntimeId,
+                teamId: current.team.id,
+                enabled: true,
+                revokedAt: null,
+                protocolMajor: 1,
+                protocolMinor: { gte: 13 },
               },
             });
+            if (!runtime)
+              throw new ConflictException(
+                "The verified authentication snapshot requires its assigned Browser Runtime with protocol v1.13 or newer.",
+              );
           }
-        }
-        return tx.userBrowserProfile.findUniqueOrThrow({
-          include: profileInclude,
-          where: { id },
-        });
-      });
+          if (changesExecutionConfiguration) {
+            const nonTerminal = {
+              notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"],
+            } as const;
+            const [
+              activeRuns,
+              activeSessions,
+              taskBindings,
+              deploymentBindings,
+            ] = await Promise.all([
+              tx.executionRun.count({
+                where: {
+                  browserProfileId: id,
+                  lifecycle: { notIn: [...nonTerminal.notIn] },
+                },
+              }),
+              tx.browserRuntimeSession.count({
+                where: {
+                  userBrowserProfileId: id,
+                  closureVerifiedAt: null,
+                  // LOST and FAILED do not prove that the browser stopped. Old
+                  // CLOSED rows predate closure verification and are drained.
+                  status: { not: "CLOSED" },
+                },
+              }),
+              tx.taskProfileBinding.count({
+                where: {
+                  OR: [{ resolvedProfileId: id }, { requestedProfileId: id }],
+                  taskExecution: {
+                    lifecycle: { notIn: [...nonTerminal.notIn] },
+                  },
+                },
+              }),
+              tx.taskDeploymentProfileBinding.count({
+                where: {
+                  profileId: id,
+                  taskExecution: {
+                    lifecycle: { notIn: [...nonTerminal.notIn] },
+                  },
+                },
+              }),
+            ]);
+            if (
+              activeRuns ||
+              activeSessions ||
+              taskBindings ||
+              deploymentBindings
+            ) {
+              throw new ConflictException(
+                "Wait for bound tasks to finish and browser sessions to be confirmed closed before changing the login identity configuration.",
+              );
+            }
+          }
+          const changed = await tx.userBrowserProfile.updateMany({
+            data: {
+              ...(input.executionMode
+                ? { executionMode: input.executionMode }
+                : {}),
+              ...(input.executionConcurrency
+                ? { executionConcurrency: input.executionConcurrency }
+                : {}),
+              ...(input.verificationRules || input.verificationUrl
+                ? {
+                    authSnapshotGeneration: null,
+                    authSnapshotCreatedAt: null,
+                    executionMode: "SERIAL_PERSISTENT",
+                  }
+                : {}),
+              ...(input.displayName ? { displayName: input.displayName } : {}),
+              ...(input.verificationRules
+                ? {
+                    verificationRules: json(input.verificationRules),
+                    verificationRulesVersion: { increment: 1 },
+                  }
+                : {}),
+              ...(input.verificationUrl
+                ? { verificationUrl: input.verificationUrl }
+                : {}),
+              ...(hostname
+                ? {
+                    scopeKey: profileScopeKey({
+                      authRole: profile.authRole,
+                      environmentKey: profile.environmentKey,
+                      hostname,
+                    }),
+                  }
+                : {}),
+              version: { increment: 1 },
+            },
+            where: {
+              id,
+              ownerUserId: current.user.id,
+              teamId: current.team.id,
+              version: lockedProfile.version,
+            },
+          });
+          if (changed.count !== 1)
+            throw new ConflictException(
+              "The browser profile changed concurrently. Reload it before changing its configuration.",
+            );
+          if (grants) {
+            await tx.browserProfileGrant.updateMany({
+              data: { revokedAt: new Date() },
+              where: { profileId: id, revokedAt: null },
+            });
+            for (const triggerSource of grants) {
+              await tx.browserProfileGrant.upsert({
+                create: {
+                  consentedByUserId: current.user.id,
+                  hostnamePattern: hostname!,
+                  profileId: id,
+                  teamId: current.team.id,
+                  triggerSource,
+                },
+                update: {
+                  consentedAt: new Date(),
+                  consentedByUserId: current.user.id,
+                  revokedAt: null,
+                },
+                where: {
+                  profileId_triggerSource_hostnamePattern: {
+                    hostnamePattern: hostname!,
+                    profileId: id,
+                    triggerSource,
+                  },
+                },
+              });
+            }
+          }
+          return tx.userBrowserProfile.findUniqueOrThrow({
+            include: profileInclude,
+            where: { id },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
     } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2034"
+      ) {
+        throw new ConflictException(
+          "The browser profile changed concurrently. Reload it before changing its configuration.",
+        );
+      }
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
@@ -680,7 +794,11 @@ export class UserBrowserProfilesService {
     }
   }
 
-  async verify(current: AuthContext, id: string) {
+  async verify(
+    current: AuthContext,
+    id: string,
+    input: UserBrowserProfileVerifyInput = { prepareIsolatedAuth: false },
+  ) {
     const profile = await this.owned(current, id);
     if (profile.status === "VERIFYING") {
       throw new ConflictException(
@@ -700,6 +818,20 @@ export class UserBrowserProfilesService {
     if (!session) {
       throw new ConflictException("Profile preparation session is not active.");
     }
+    const prepareIsolatedAuth =
+      input.prepareIsolatedAuth || profile.executionMode === "ISOLATED_AUTH";
+    if (prepareIsolatedAuth) {
+      if (process.env.BROWSER_ISOLATED_AUTH_ENABLED !== "true") {
+        throw new ConflictException(
+          "Isolated browser execution is not enabled.",
+        );
+      }
+      if ((session.protocolMinor ?? 0) < 13 || !profile.verificationUrl) {
+        throw new ConflictException(
+          "Isolated execution requires a verification URL and Browser Runtime protocol v1.13.",
+        );
+      }
+    }
     const claimedVersion = profile.version + 1;
     const claimed = await this.prisma.userBrowserProfile.updateMany({
       data: {
@@ -715,9 +847,9 @@ export class UserBrowserProfilesService {
       );
     }
     const rules = verificationRules(profile.verificationRules);
-    try {
-      if (rules.automatic && profile.verificationUrl) {
-        await this.sessions.execute(current, session.id, {
+    const verifySourceAuthentication = async (refresh = false) => {
+      if ((refresh || rules.automatic) && profile.verificationUrl) {
+        const navigation = await this.sessions.execute(current, session.id, {
           commandType: "page.navigate",
           payload: {
             url: profile.verificationUrl,
@@ -725,6 +857,14 @@ export class UserBrowserProfilesService {
           },
           timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
         });
+        if (
+          navigation?.status !== "SUCCEEDED" ||
+          commandNumber(navigation.result, "status") >= 400
+        ) {
+          throw new ConflictException(
+            "The verification page could not be refreshed.",
+          );
+        }
       }
       const urlCommand = await this.sessions.execute(current, session.id, {
         commandType: "page.get_url",
@@ -768,6 +908,36 @@ export class UserBrowserProfilesService {
           );
         }
       }
+    };
+    try {
+      await verifySourceAuthentication();
+      let snapshotGeneration: number | null = null;
+      let snapshotError: string | null = null;
+      if (prepareIsolatedAuth && profile.verificationUrl) {
+        try {
+          await this.sessions.publishProfileSnapshot(
+            current,
+            session.id,
+            claimedVersion,
+            {
+              url: profile.verificationUrl,
+              ...(rules.authenticatedSelector
+                ? { authenticatedSelector: rules.authenticatedSelector }
+                : {}),
+              successUrlPatterns: rules.successUrlPatterns,
+              loginUrlPatterns: rules.loginUrlPatterns,
+            },
+          );
+          snapshotGeneration = claimedVersion;
+        } catch (error) {
+          // Cloned contexts can rotate server-side credentials and invalidate the
+          // source. Never preserve READY based on its pre-probe page or cookies.
+          await verifySourceAuthentication(true);
+          if (profile.executionMode === "ISOLATED_AUTH") throw error;
+          snapshotError =
+            "Parallel authentication validation failed. The source login was checked again and remains available for serial execution.";
+        }
+      }
       const closedSession = await this.sessions.close(current, session.id, {
         timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
       });
@@ -784,8 +954,15 @@ export class UserBrowserProfilesService {
             inactivityExpiresAt: new Date(now.getTime() + PROFILE_TTL_MS),
             lastUsedAt: now,
             lastVerifiedAt: now,
+            authSnapshotGeneration: snapshotGeneration,
+            authSnapshotCreatedAt: snapshotGeneration ? now : null,
             status: "READY",
-            verificationError: Prisma.JsonNull,
+            verificationError: snapshotError
+              ? json({
+                  code: "AUTH_SNAPSHOT_INCOMPATIBLE",
+                  message: snapshotError,
+                })
+              : Prisma.JsonNull,
             version: { increment: 1 },
           },
           where: { id, status: "VERIFYING", version: claimedVersion },
@@ -829,6 +1006,8 @@ export class UserBrowserProfilesService {
       await this.prisma.userBrowserProfile.updateMany({
         data: {
           status: "REAUTH_REQUIRED",
+          authSnapshotGeneration: null,
+          authSnapshotCreatedAt: null,
           verificationError: json({
             code: "PROFILE_VERIFICATION_FAILED",
             message: error instanceof Error ? error.message : String(error),
@@ -1347,6 +1526,7 @@ export class UserBrowserProfilesService {
       );
     }
     return {
+      controlGeneration: session.controlGeneration,
       fencingToken: session.fencingToken,
       id: session.id,
       leaseToken: session.leaseToken,
@@ -1397,6 +1577,8 @@ export class UserBrowserProfilesService {
     return {
       ...safe,
       configurationSource: rules.automatic ? "TASK" : "MANUAL",
+      isolatedExecutionAvailable:
+        process.env.BROWSER_ISOLATED_AUTH_ENABLED === "true",
       grants: profile.grants.filter((grant) => !grant.revokedAt),
       inactivityDays: 30,
       activeSession: profile.runtimeSessions[0] ?? null,

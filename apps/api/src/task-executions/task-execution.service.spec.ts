@@ -4,6 +4,7 @@ import {
   executionCounts,
   taskDeadlineElapsed,
   TaskExecutionService,
+  validateCaseDependencyGraph,
 } from "./task-execution.service.js";
 import { resetEnvForTests } from "../config/env.js";
 
@@ -44,7 +45,14 @@ describe("executionCounts", () => {
       failed: 0,
       inconclusive: 0,
       passed: 0,
+      queued: 1,
       running: 1,
+      recovering: 0,
+      waitingHuman: 0,
+      terminal: 1,
+      timedOut: 0,
+      cancelled: 0,
+      dispatchFailed: 0,
       total: 3,
       waiting: 1,
     });
@@ -250,6 +258,197 @@ describe("TaskExecutionService human resume deadlines", () => {
 });
 
 describe("TaskExecutionService dispatch fairness", () => {
+  it("keeps opted-in policy review ahead of Run creation without consuming dispatch attempts", async () => {
+    const candidate = {
+      id: "review-case",
+      taskExecutionId: "task-1",
+      deploymentId: "deployment-1",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      dispatchStatus: "PENDING",
+      dispatchAttempts: 0,
+      scheduling: null,
+      taskExecution: { inputSnapshot: { casePolicyReviewRequired: true } },
+      executionPolicy: { accessMode: "READ_ONLY", provenance: "GENERATED" },
+    };
+    const prisma = {
+      taskCaseExecution: {
+        findMany: vi.fn().mockResolvedValue([{ taskExecutionId: "task-1" }]),
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(candidate)
+          .mockResolvedValue(null),
+        updateMany: vi.fn(),
+      },
+    };
+    const reservations = { acquire: vi.fn() };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      reservations as never,
+      {} as never,
+    );
+    const internals = service as unknown as {
+      recordScheduling: (...args: unknown[]) => Promise<void>;
+      dispatchPending: (limit: number) => Promise<number>;
+    };
+    const record = vi
+      .spyOn(internals, "recordScheduling")
+      .mockResolvedValue(undefined);
+    await internals.dispatchPending(4);
+    expect(record).toHaveBeenCalledWith(
+      candidate,
+      "WAITING",
+      "POLICY_REVIEW",
+      null,
+    );
+    expect(prisma.taskCaseExecution.updateMany).not.toHaveBeenCalled();
+    expect(reservations.acquire).not.toHaveBeenCalled();
+  });
+
+  it("scans past a blocked dependency and does not serialize an isolated identity", async () => {
+    const dependencyId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
+    const now = new Date();
+    const base = {
+      taskExecutionId: "task-1",
+      taskExecution: { inputSnapshot: {} },
+      deploymentId: "deployment-1",
+      createdAt: now,
+      updatedAt: now,
+      dispatchAttempts: 0,
+      dispatchStatus: "PENDING",
+      scheduling: null,
+    };
+    const blocked = {
+      ...base,
+      id: "blocked",
+      executionPolicy: {
+        accessMode: "READ_ONLY",
+        dependsOnCaseIds: [dependencyId],
+      },
+    };
+    const ready = {
+      ...base,
+      id: "ready",
+      executionPolicy: { accessMode: "READ_ONLY" },
+    };
+    const prisma = {
+      taskCaseExecution: {
+        findMany: vi.fn(async (input) =>
+          input.distinct
+            ? [{ taskExecutionId: "task-1" }]
+            : [
+                {
+                  id: "dependency",
+                  taskExecutionId: "task-1",
+                  caseId: dependencyId,
+                  deploymentId: "deployment-1",
+                  executionOrdinal: 1,
+                  runId: "dependency-run",
+                  dispatchStatus: "LINKED",
+                  run: {
+                    lifecycle: "RUNNING",
+                    verdict: null,
+                    executionDisposition: null,
+                  },
+                },
+              ],
+        ),
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(blocked)
+          .mockResolvedValueOnce(ready)
+          .mockResolvedValue(null),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      executionRun: { findFirst: vi.fn() },
+    };
+    const reservations = {
+      acquire: vi.fn().mockResolvedValue({
+        acquired: true,
+        profile: { id: "profile-1", executionMode: "ISOLATED_AUTH" },
+      }),
+    };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      reservations as never,
+      {} as never,
+    );
+    const internals = service as unknown as {
+      recordScheduling: (...args: unknown[]) => Promise<void>;
+      dispatchPending: (limit: number) => Promise<number>;
+    };
+    const record = vi
+      .spyOn(internals, "recordScheduling")
+      .mockResolvedValue(undefined);
+    await internals.dispatchPending(4);
+    expect(record).toHaveBeenCalledWith(
+      blocked,
+      "WAITING",
+      "CASE_DEPENDENCY",
+      expect.objectContaining({ runId: "dependency-run" }),
+    );
+    expect(prisma.taskCaseExecution.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "ready", updatedAt: now }),
+      }),
+    );
+    expect(prisma.executionRun.findFirst).not.toHaveBeenCalled();
+    expect(reservations.acquire).toHaveBeenCalledOnce();
+  });
+
+  it("preserves waiting age when the blocking resource changes", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const tx = {
+      taskCaseExecution: { updateMany },
+      taskExecution: { update: vi.fn() },
+    };
+    const service = new TaskExecutionService(
+      { $transaction: vi.fn((callback) => callback(tx)) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const since = "2026-09-04T01:00:00.000Z";
+    await (
+      service as unknown as {
+        recordScheduling: (...args: unknown[]) => Promise<void>;
+      }
+    ).recordScheduling(
+      {
+        id: "case-1",
+        taskExecutionId: "task-1",
+        updatedAt: new Date(),
+        createdAt: new Date(since),
+        scheduling: {
+          state: "WAITING",
+          reason: "PROFILE_RESERVED",
+          waitingSince: since,
+        },
+      },
+      "WAITING",
+      "DATA_LOCK",
+      null,
+    );
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          scheduling: expect.objectContaining({
+            reason: "DATA_LOCK",
+            waitingSince: since,
+          }),
+        }),
+      }),
+    );
+  });
+
   it("selects Issues distinctly before loading execution candidates", async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const service = new TaskExecutionService(
@@ -276,6 +475,70 @@ describe("TaskExecutionService dispatch fairness", () => {
     expect(findMany).toHaveBeenCalledWith(
       expect.not.objectContaining({ take: expect.anything() }),
     );
+  });
+});
+
+describe("Case execution dependency policy", () => {
+  const first = "285146a8-5230-4b02-832a-5eef19e8dc8a";
+  const second = "385146a8-5230-4b02-832a-5eef19e8dc8a";
+  it("rejects cycles and references outside the deployment", () => {
+    expect(() =>
+      validateCaseDependencyGraph([
+        {
+          caseId: first,
+          executionPolicy: {
+            accessMode: "READ_ONLY",
+            dependsOnCaseIds: [second],
+          },
+        },
+        {
+          caseId: second,
+          executionPolicy: {
+            accessMode: "READ_ONLY",
+            dependsOnCaseIds: [first],
+          },
+        },
+      ]),
+    ).toThrow("cycle");
+    expect(() =>
+      validateCaseDependencyGraph([
+        {
+          caseId: first,
+          executionPolicy: {
+            accessMode: "READ_ONLY",
+            dependsOnCaseIds: [second],
+          },
+        },
+      ]),
+    ).toThrow("belong");
+  });
+
+  it("refuses policy changes once a Run exists", async () => {
+    const tx = {
+      taskCaseExecution: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValue({ runId: "run-1", taskExecution: {} }),
+        updateMany: vi.fn(),
+      },
+    };
+    const service = new TaskExecutionService(
+      { $transaction: vi.fn((callback) => callback(tx)) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    await expect(
+      service.setCaseExecutionPolicy(
+        { team: { id: "team-1" } } as never,
+        "task-1",
+        first,
+        { accessMode: "READ_ONLY" },
+      ),
+    ).rejects.toThrow("unstarted");
+    expect(tx.taskCaseExecution.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -531,6 +794,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
         caseId,
         deploymentId,
         executionOrdinal: 2,
+        executionPolicy: expect.anything(),
         taskExecutionId: taskId,
       },
       select: { deploymentId: true, executionOrdinal: true, id: true },

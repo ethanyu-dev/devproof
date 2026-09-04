@@ -33,6 +33,22 @@ credential-bound pool explicit. During a rolling upgrade the variable may be
 omitted: the Runtime binds to the single pool returned for its credential on
 first registration. A mismatched declaration is rejected.
 
+## Concurrency and recovery upgrade
+
+Apply `20260904103000_runtime_concurrency_recovery` with the existing migration chain. It adds nullable/version-compatible scheduling, ownership and execution-budget fields, Profile isolation settings, and backend resource leases. Keep `BROWSER_ISOLATED_AUTH_ENABLED=false` while updating API/Web, Agent Runtime protocol v2.10, and Browser Runtime 0.2.17 / protocol v1.13. Drain old sessions before restarting Runtime daemons; expired/LOST browsers must be reconciled, not treated as free slots.
+
+After compatible daemons reconnect, set the trusted backend alias registry (`BROWSER_EXECUTION_ENVIRONMENTS_JSON`), enable the isolation feature, and prepare/verify the pilot Profile with the explicit parallel-authentication preparation option. Ordinary serial verification does not run cloned authentication probes. The owner then selects isolated execution and its concurrency limit in Console. Use explicitly reviewed independent readers for the four-slot smoke test. Keep existing nonterminal Tasks on their original mode and deadline policy. Old/direct execution paths participate conservatively in the same business locks.
+
+The same additive migration includes `BrowserExecution.startupRecoveryCount` and `BrowserRuntimeSession.controlGeneration`. An expired, never-claimed startup can be admitted again once after verified closure, preserving its Run budget. Console control changes use their own generation while retaining the running Agent epoch. Update API and Browser Runtime together before enabling the new concurrency flow.
+
+All API replicas must use the same backend alias registry. Drain affected executions before changing aliases, since existing leases retain the namespace under which they were acquired.
+
+The Console Runtime page lists writes whose result is unknown. Operators must verify browser closure and record the observed backend state before releasing those data locks. This action does not replay the interrupted write. Closing a browser or expiring its lease alone is insufficient to resolve a write outcome.
+
+For rollback, stop isolated admission with the feature flag, drain current sessions, and return idle Profiles to serial mode. Keep additive schema changes and any unresolved quarantine records. Do not roll a daemon backward while it still owns sessions requiring v1.13.
+
+Run `node apps/api/scripts/test-execution-concurrency.mjs` for disposable PostgreSQL integration tests. The launcher binds only loopback, applies the complete migration chain to a randomly named test database, and removes its own container on completion; it does not read production environment files.
+
 ## Legacy compatibility
 
 `POST /v2/tasks` is the current entry point. The repository retains:

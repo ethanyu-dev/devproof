@@ -39,6 +39,36 @@ function sensitivePaths(
 
 export const browserProfileModeSchema = z.enum(["PERSISTENT", "EPHEMERAL"]);
 
+// Execution declarations are supplied by an authenticated caller or reviewed
+// configuration. Generated test prose never grants shared-read eligibility.
+export const executionConcurrencyPolicySchema = z
+  .object({
+    accessMode: z.enum(["READ_ONLY", "MUTATING", "UNKNOWN"]),
+    resourceScopes: z
+      .array(
+        z
+          .string()
+          .trim()
+          .min(1)
+          .max(300)
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/u),
+      )
+      .max(50)
+      .optional(),
+    dependsOnCaseIds: z.array(z.string().uuid()).max(100).optional(),
+    provenance: z.string().trim().min(1).max(200).optional(),
+    version: z.number().int().positive().optional(),
+  })
+  .strict();
+export type ExecutionConcurrencyPolicy = z.infer<
+  typeof executionConcurrencyPolicySchema
+>;
+
+export const userBrowserProfileExecutionModeSchema = z.enum([
+  "SERIAL_PERSISTENT",
+  "ISOLATED_AUTH",
+]);
+
 export const runtimeSettingsInputSchema = z.object({
   hitlEnabled: z.boolean(),
 });
@@ -554,6 +584,7 @@ export const runDeadlinePolicySchema = z.discriminatedUnion("mode", [
 
 export const executionRunCreateInputSchema = z
   .object({
+    concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
     businessReferences: z
       .array(runtimeBusinessReferenceSchema)
       .max(100)
@@ -926,6 +957,10 @@ const issueTaskExecutionCreateInputSchema = z.object({
       reasoningEffort: z.string().trim().min(1).max(80).optional(),
     })
     .optional(),
+  caseExecutionPolicies: z
+    .record(z.string().min(1).max(100), executionConcurrencyPolicySchema)
+    .optional(),
+  casePolicyReviewRequired: z.boolean().optional(),
   profilePolicy: taskProfilePolicySchema,
   retryPolicy: taskRetryPolicySchema,
   runDeadlinePolicy: runDeadlinePolicySchema.default(
@@ -1154,6 +1189,7 @@ export const specificationDeploymentTargetInputSchema = z.object({
 
 export const specificationPlaygroundInputSchema = z
   .object({
+    casePolicyReviewRequired: z.boolean().optional(),
     deployments: z.array(taskDeploymentSchema).max(20).default([]),
     issueRef: z.string().trim().min(1).max(500),
     profilePolicy: taskProfilePolicySchema,
@@ -1614,6 +1650,8 @@ const userBrowserProfileVerificationUrlSchema = z
   });
 
 export const userBrowserProfileCreateInputSchema = z.object({
+  executionMode: userBrowserProfileExecutionModeSchema.optional(),
+  executionConcurrency: z.number().int().min(1).max(4).optional(),
   authRole: z.string().trim().min(1).max(100).default("default"),
   displayName: z.string().trim().min(1).max(160),
   environmentKey: z.string().trim().min(1).max(160).default("default"),
@@ -1630,6 +1668,8 @@ export const userBrowserProfileCreateInputSchema = z.object({
 
 export const userBrowserProfileUpdateInputSchema = z
   .object({
+    executionMode: userBrowserProfileExecutionModeSchema.optional(),
+    executionConcurrency: z.number().int().min(1).max(4).optional(),
     displayName: z.string().trim().min(1).max(160).optional(),
     grants: z
       .array(browserProfileTriggerSourceSchema)
@@ -1648,6 +1688,10 @@ export const userBrowserProfilePrepareInputSchema = z.object({
   runtimeId: z.string().uuid().optional(),
   ttlSeconds: z.coerce.number().int().min(60).max(3_600).default(900),
 });
+
+export const userBrowserProfileVerifyInputSchema = z
+  .object({ prepareIsolatedAuth: z.boolean().default(false) })
+  .strict();
 
 export const taskProfileSelectionInputSchema = z.object({
   profilePolicy: taskProfilePolicySchema,
@@ -1681,6 +1725,9 @@ export type UserBrowserProfileUpdateInput = z.infer<
 >;
 export type UserBrowserProfilePrepareInput = z.infer<
   typeof userBrowserProfilePrepareInputSchema
+>;
+export type UserBrowserProfileVerifyInput = z.infer<
+  typeof userBrowserProfileVerifyInputSchema
 >;
 export type TaskProfilePolicy = z.infer<typeof taskProfilePolicySchema>;
 export type TaskProfileSelectionInput = z.infer<

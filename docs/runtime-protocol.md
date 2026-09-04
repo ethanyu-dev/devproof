@@ -26,6 +26,7 @@ The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. B
 | v1.10    | Per-action screenshots and a composed WebM action video                                               |
 | v1.11    | Unique-visible locator selection and structured ambiguity recovery diagnostics                        |
 | v1.12    | Acknowledged, bounded video-finalization failure diagnostics                                          |
+| v1.13    | Local authenticated snapshots, isolated contexts, owner-bound execution permits, and verified closure |
 
 The source of truth for the currently implemented version is `RUNTIME_PROTOCOL` in [`packages/runtime-protocol/src/index.ts`](../packages/runtime-protocol/src/index.ts).
 

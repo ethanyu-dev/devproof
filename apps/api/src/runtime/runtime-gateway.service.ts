@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -9,6 +9,7 @@ import {
   RUNTIME_HEARTBEAT_INTERVAL_MS,
   runtimeClientMessageSchema,
   type ReconcileAction,
+  type RuntimeSessionPermit,
 } from "@devproof/runtime-protocol";
 import WebSocket, { type RawData } from "ws";
 
@@ -20,6 +21,11 @@ import { RuntimeConnectionHub } from "./runtime-connection-hub.service.js";
 import { RuntimeHumanControlRelay } from "./runtime-human-control-relay.service.js";
 import { MetricsService } from "../observability/metrics.service.js";
 import { ObservabilityService } from "../observability/observability.service.js";
+import { sessionExecutionPermit } from "./session-permit.js";
+import {
+  quarantineSession,
+  releaseVerifiedSessionResources,
+} from "./session-resource-cleanup.js";
 
 function hashToken(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -32,18 +38,10 @@ function frameLength(data: RawData) {
   return data.byteLength;
 }
 
-const ACTIVE_STATUSES = [
-  "OPENING",
-  "ACTIVE",
-  "HUMAN_CONTROL",
-  "CLOSING",
-  "LOST",
-] as const;
 const HEARTBEAT_RENEWABLE_STATUSES = [
   "OPENING",
   "ACTIVE",
   "HUMAN_CONTROL",
-  "LOST",
 ] as const;
 
 @Injectable()
@@ -291,6 +289,21 @@ export class RuntimeGatewayService {
         protocolMinor: selectedMinor,
         status: "ONLINE",
         ...(hello.version ? { version: hello.version } : {}),
+        capabilities: [
+          ...new Set([
+            ...(Array.isArray(runtime.capabilities)
+              ? runtime.capabilities
+              : []
+            ).filter(
+              (capability): capability is string =>
+                typeof capability === "string" &&
+                !["auth-snapshot-v1", "session-permits-v1"].includes(
+                  capability,
+                ),
+            ),
+            ...(hello.capabilities ?? []),
+          ]),
+        ],
       },
       where: { id: runtime.id },
     });
@@ -330,313 +343,258 @@ export class RuntimeGatewayService {
   private async reconcile(
     runtimeId: string,
     localSessions: Array<{
+      sessionId: string;
       fencingToken: string;
       leaseToken: string;
       profileKey: string;
       profileMode: "PERSISTENT" | "EPHEMERAL";
-      profileRetention?:
-        | {
-            inactivityTtlSeconds: number;
-            kind: "USER";
-          }
-        | undefined;
-      sessionId: string;
       state: "OPEN" | "HUMAN_CONTROL" | "INTERRUPTED";
+      live?: boolean | undefined;
     }>,
     protocolMinor: number,
   ) {
-    const leaseExpiresAt = new Date(
-      Date.now() + env().RUNTIME_LEASE_SECONDS * 1000,
-    );
-    const serverSessions = await this.prisma.browserRuntimeSession.findMany({
-      include: {
-        userBrowserProfile: {
-          select: { id: true },
-        },
-        verificationRuns: {
-          orderBy: { createdAt: "desc" },
-          select: { requestSnapshot: true },
-          take: 1,
-        },
-      },
-      where: {
-        closedAt: null,
-        runtimeId,
-        status: { in: [...ACTIVE_STATUSES] },
-      },
-    });
-    await this.prisma.browserRuntimeSession.updateMany({
-      data: { protocolMinor },
-      where: { id: { in: serverSessions.map((session) => session.id) } },
-    });
-    const serverById = new Map(serverSessions.map((row) => [row.id, row]));
-    const handledSessionIds = new Set<string>();
     const actions: ReconcileAction[] = [];
-
+    if (protocolMinor < 9) {
+      const incompatible = await this.prisma.browserRuntimeSession.findMany({
+        where: {
+          runtimeId,
+          closedAt: null,
+          userBrowserProfileId: { not: null },
+        },
+      });
+      for (const session of incompatible)
+        if (session.userBrowserProfileId)
+          await this.markUserProfileSessionIncompatible(
+            session.id,
+            session.userBrowserProfileId,
+          );
+    }
+    const seen = new Set(localSessions.map((local) => local.sessionId));
     for (const local of localSessions) {
-      const server = serverById.get(local.sessionId);
-      if (server?.userBrowserProfile && protocolMinor < 9) {
-        handledSessionIds.add(server.id);
-        await this.markUserProfileSessionIncompatible(
-          server.id,
-          server.userBrowserProfile.id,
-        );
-        actions.push({
-          action: "CLOSE_LOCAL",
-          reason:
-            "User Browser Profiles require Runtime protocol v1.9 or newer.",
-          sessionId: local.sessionId,
-        });
-        continue;
-      }
-      const retentionMismatch = server?.userBrowserProfile
-        ? !local.profileRetention
-        : Boolean(local.profileRetention);
+      const session = await this.prisma.browserRuntimeSession.findUnique({
+        where: { id: local.sessionId },
+      });
       if (
-        !server ||
-        server.leaseToken !== local.leaseToken ||
-        server.fencingToken.toString() !== local.fencingToken ||
-        server.profileMode !== local.profileMode ||
-        server.profileKey !== local.profileKey ||
-        retentionMismatch
+        !session ||
+        session.runtimeId !== runtimeId ||
+        session.leaseToken !== local.leaseToken ||
+        session.fencingToken.toString() !== local.fencingToken ||
+        session.profileKey !== local.profileKey ||
+        session.profileMode !== local.profileMode
       ) {
         actions.push({
           action: "CLOSE_LOCAL",
-          reason: "The local session does not own the current server lease.",
           sessionId: local.sessionId,
+          reason: "The local session no longer owns the server lease.",
         });
         continue;
       }
-      if (server.status === "CLOSING") {
-        handledSessionIds.add(server.id);
-        await this.prisma.$transaction([
-          this.prisma.browserRuntimeSession.updateMany({
-            data: { leaseExpiresAt },
-            where: { id: server.id, status: "CLOSING" },
-          }),
-          this.prisma.browserRuntimeSlot.updateMany({
-            data: { expiresAt: leaseExpiresAt },
-            where: {
-              fencingToken: server.fencingToken,
-              leaseToken: server.leaseToken,
-              sessionId: server.id,
-            },
-          }),
-          this.prisma.browserRuntimeProfileLease.updateMany({
-            data: { expiresAt: leaseExpiresAt },
-            where: {
-              fencingToken: server.fencingToken,
-              leaseToken: server.leaseToken,
-              sessionId: server.id,
-            },
-          }),
-        ]);
+      if (session.userBrowserProfileId && protocolMinor < 9) {
         actions.push({
           action: "CLOSE_LOCAL",
-          reason: "The server is waiting for this session to close.",
-          sessionId: server.id,
+          sessionId: session.id,
+          reason:
+            "User browser Profiles require Runtime protocol v1.9 or newer.",
         });
         continue;
       }
-      if (local.state === "INTERRUPTED") {
-        handledSessionIds.add(server.id);
-        if (server.profileMode === "EPHEMERAL") {
-          await this.prisma.$transaction([
-            this.prisma.browserRuntimeSession.update({
-              data: {
-                closedAt: new Date(),
-                lastError: {
-                  code: "RUNTIME_RESTARTED",
-                  message: "An ephemeral session cannot be restored.",
-                },
-                status: "LOST",
-              },
-              where: { id: server.id },
-            }),
-            this.prisma.browserRuntimeSlot.deleteMany({
-              where: { sessionId: server.id },
-            }),
-            this.prisma.browserRuntimeProfileLease.deleteMany({
-              where: { sessionId: server.id },
-            }),
-          ]);
-          actions.push({
-            action: "CLOSE_LOCAL",
-            reason: "An interrupted ephemeral session cannot be restored.",
-            sessionId: server.id,
-          });
-        } else {
-          const rotated = await this.rotateLease(
-            server.id,
-            runtimeId,
-            leaseExpiresAt,
-          );
-          actions.push({
-            action: "RESTORE",
-            allowedOrigins: [],
-            fencingToken: rotated.fencingToken.toString(),
-            leaseExpiresAt: leaseExpiresAt.toISOString(),
-            leaseToken: rotated.leaseToken,
-            profileKey: server.profileKey,
-            profileMode: "PERSISTENT",
-            ...(protocolMinor >= 9 && server.userBrowserProfile
-              ? {
-                  profileRetention: {
-                    inactivityTtlSeconds: 2_592_000 as const,
-                    kind: "USER" as const,
-                  },
-                }
-              : {}),
-            sessionId: server.id,
-          });
-        }
+      if (
+        local.live === false ||
+        (local.live === undefined && local.state === "INTERRUPTED")
+      ) {
+        await this.prisma.$transaction((tx) =>
+          quarantineSession(tx, session.id, "RUNTIME_RESTARTED_UNVERIFIED"),
+        );
+        actions.push({
+          action: "CLOSE_LOCAL",
+          sessionId: session.id,
+          reason:
+            "An interrupted browser requires verified termination before replacement.",
+        });
         continue;
       }
-      handledSessionIds.add(server.id);
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.update({
-          data: {
-            leaseExpiresAt,
-            status:
-              local.state === "HUMAN_CONTROL" ? "HUMAN_CONTROL" : "ACTIVE",
-          },
-          where: { id: server.id },
-        }),
-        this.prisma.browserRuntimeSlot.updateMany({
-          data: { expiresAt: leaseExpiresAt },
-          where: {
-            fencingToken: server.fencingToken,
-            leaseToken: server.leaseToken,
-            sessionId: server.id,
-          },
-        }),
-        this.prisma.browserRuntimeProfileLease.updateMany({
-          data: { expiresAt: leaseExpiresAt },
-          where: {
-            fencingToken: server.fencingToken,
-            leaseToken: server.leaseToken,
-            sessionId: server.id,
-          },
-        }),
-      ]);
+      const renewed = await this.renewSession(runtimeId, local, protocolMinor);
+      if (!renewed) {
+        actions.push({
+          action: "CLOSE_LOCAL",
+          sessionId: session.id,
+          reason: "The browser or executor lease is no longer valid.",
+        });
+        continue;
+      }
       actions.push({
         action: "ADOPT",
-        fencingToken: server.fencingToken.toString(),
-        leaseExpiresAt: leaseExpiresAt.toISOString(),
-        leaseToken: server.leaseToken,
-        sessionId: server.id,
-      });
-    }
-
-    for (const session of serverSessions) {
-      if (handledSessionIds.has(session.id)) {
-        continue;
-      }
-      if (session.userBrowserProfile && protocolMinor < 9) {
-        await this.markUserProfileSessionIncompatible(
-          session.id,
-          session.userBrowserProfile.id,
-        );
-        continue;
-      }
-      if (session.status === "CLOSING") {
-        if (
-          session.updatedAt.getTime() >
-          Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS
-        ) {
-          continue;
-        }
-        await this.prisma.$transaction([
-          this.prisma.browserRuntimeSession.update({
-            data: {
-              closedAt: new Date(),
-              humanControllerUserId: null,
-              humanControlExpiresAt: null,
-              lastError: Prisma.JsonNull,
-              status: "CLOSED",
-            },
-            where: { id: session.id },
-          }),
-          this.prisma.browserRuntimeSlot.deleteMany({
-            where: { sessionId: session.id },
-          }),
-          this.prisma.browserRuntimeProfileLease.deleteMany({
-            where: { sessionId: session.id },
-          }),
-        ]);
-        continue;
-      }
-      if (session.profileMode === "EPHEMERAL") {
-        await this.prisma.$transaction([
-          this.prisma.browserRuntimeSession.update({
-            data: {
-              closedAt: new Date(),
-              lastError: {
-                code: "RUNTIME_RESTARTED",
-                message: "An ephemeral session cannot be restored.",
-              },
-              status: "LOST",
-            },
-            where: { id: session.id },
-          }),
-          this.prisma.browserRuntimeSlot.deleteMany({
-            where: { sessionId: session.id },
-          }),
-          this.prisma.browserRuntimeProfileLease.deleteMany({
-            where: { sessionId: session.id },
-          }),
-        ]);
-        continue;
-      }
-      const rotated = await this.rotateLease(
-        session.id,
-        runtimeId,
-        leaseExpiresAt,
-      );
-      actions.push({
-        action: "RESTORE",
-        allowedOrigins: [],
-        fencingToken: rotated.fencingToken.toString(),
-        leaseExpiresAt: leaseExpiresAt.toISOString(),
-        leaseToken: rotated.leaseToken,
-        profileKey: session.profileKey,
-        profileMode: "PERSISTENT",
-        ...(protocolMinor >= 9 && session.userBrowserProfile
-          ? {
-              profileRetention: {
-                inactivityTtlSeconds: 2_592_000 as const,
-                kind: "USER" as const,
-              },
-            }
-          : {}),
         sessionId: session.id,
+        fencingToken: session.fencingToken.toString(),
+        leaseToken: session.leaseToken,
+        leaseExpiresAt: renewed.expiresAt.toISOString(),
+        ...(renewed.permit ? { permit: renewed.permit } : {}),
       });
     }
+    // Only a live, modern Runtime's inventory may prove a prior close finished.
+    if (protocolMinor >= 13)
+      await this.finalizeMissingClosedSessions(runtimeId, seen);
     return actions;
+  }
+
+  private async renewSession(
+    runtimeId: string,
+    local: { sessionId: string; fencingToken: string; leaseToken: string },
+    protocolMinor?: number,
+  ) {
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + env().RUNTIME_LEASE_SECONDS * 1_000,
+    );
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const session = await tx.browserRuntimeSession.findUnique({
+          include: { slot: true, profileLease: true },
+          where: { id: local.sessionId },
+        });
+        if (
+          !session ||
+          session.runtimeId !== runtimeId ||
+          session.leaseToken !== local.leaseToken ||
+          session.fencingToken.toString() !== local.fencingToken
+        )
+          return null;
+        const intactSlot =
+          session.slot &&
+          session.slot.leaseToken === session.leaseToken &&
+          session.slot.fencingToken === session.fencingToken;
+        const intactProfile =
+          session.profileMode !== "PERSISTENT" ||
+          (session.profileLease &&
+            session.profileLease.leaseToken === session.leaseToken &&
+            session.profileLease.fencingToken === session.fencingToken);
+        if (
+          session.status === "CLOSING" ||
+          session.status === "CLOSED" ||
+          session.closedAt
+        )
+          return null;
+        if (
+          !intactSlot ||
+          !intactProfile ||
+          session.quarantinedAt ||
+          session.leaseExpiresAt <= now ||
+          !HEARTBEAT_RENEWABLE_STATUSES.includes(
+            session.status as (typeof HEARTBEAT_RENEWABLE_STATUSES)[number],
+          )
+        ) {
+          await quarantineSession(tx, session.id, "LEASE_EXPIRED");
+          return null;
+        }
+        const minor = protocolMinor ?? session.protocolMinor;
+        const permit =
+          minor >= 13 || session.ownerTaskId
+            ? await sessionExecutionPermit(
+                tx,
+                { ...session, leaseExpiresAt: expiresAt },
+                now,
+              )
+            : null;
+        if ((minor >= 13 || session.ownerTaskId) && !permit) {
+          await quarantineSession(tx, session.id, "EXECUTOR_LEASE_EXPIRED");
+          return null;
+        }
+        const updated = await tx.browserRuntimeSession.updateMany({
+          data: {
+            leaseExpiresAt: expiresAt,
+            ...(protocolMinor === undefined ? {} : { protocolMinor }),
+            ...(permit
+              ? { executionPermitExpiresAt: new Date(permit.expiresAt) }
+              : {}),
+          },
+          where: {
+            id: session.id,
+            leaseToken: session.leaseToken,
+            fencingToken: session.fencingToken,
+            leaseExpiresAt: { gt: now },
+            status: { in: [...HEARTBEAT_RENEWABLE_STATUSES] },
+            quarantinedAt: null,
+          },
+        });
+        if (updated.count !== 1) return null;
+        await tx.browserRuntimeSlot.updateMany({
+          data: { expiresAt },
+          where: {
+            sessionId: session.id,
+            fencingToken: session.fencingToken,
+            leaseToken: session.leaseToken,
+          },
+        });
+        await tx.browserRuntimeProfileLease.updateMany({
+          data: { expiresAt },
+          where: {
+            sessionId: session.id,
+            fencingToken: session.fencingToken,
+            leaseToken: session.leaseToken,
+          },
+        });
+        return { expiresAt, permit };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return result;
+  }
+
+  private async finalizeMissingClosedSessions(
+    runtimeId: string,
+    localIds: Set<string>,
+  ) {
+    const sessions = await this.prisma.browserRuntimeSession.findMany({
+      where: {
+        runtimeId,
+        protocolMinor: { gte: 13 },
+        closureVerifiedAt: null,
+        status: { in: ["CLOSING", "LOST"] },
+        updatedAt: {
+          lte: new Date(Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS),
+        },
+        ...(localIds.size ? { id: { notIn: [...localIds] } } : {}),
+      },
+      take: 100,
+    });
+    for (const session of sessions) {
+      const error = session.lastError as { code?: string } | null;
+      if (error?.code === "RUNTIME_RESTARTED_UNVERIFIED") continue;
+      await this.prisma.$transaction(async (tx) => {
+        const now = new Date();
+        const closed = await tx.browserRuntimeSession.updateMany({
+          data: {
+            status: "CLOSED",
+            closedAt: now,
+            closureVerifiedAt: now,
+            humanControllerUserId: null,
+            humanControlExpiresAt: null,
+          },
+          where: {
+            id: session.id,
+            fencingToken: session.fencingToken,
+            leaseToken: session.leaseToken,
+            updatedAt: session.updatedAt,
+            status: { in: ["CLOSING", "LOST"] },
+          },
+        });
+        if (closed.count === 1)
+          await releaseVerifiedSessionResources(tx, session.id);
+      });
+    }
   }
 
   private async markUserProfileSessionIncompatible(
     sessionId: string,
     profileId: string,
   ) {
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.update({
-        data: {
-          closedAt: new Date(),
-          lastError: {
-            code: "USER_PROFILE_PROTOCOL_INCOMPATIBLE",
-            message:
-              "User Browser Profiles require Runtime protocol v1.9 or newer.",
-          },
-          status: "LOST",
-        },
-        where: { id: sessionId },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({ where: { sessionId } }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId },
-      }),
-      this.prisma.userBrowserProfile.updateMany({
+    await this.prisma.$transaction(async (tx) => {
+      await quarantineSession(
+        tx,
+        sessionId,
+        "USER_PROFILE_PROTOCOL_INCOMPATIBLE",
+      );
+      await tx.userBrowserProfile.updateMany({
         data: {
           status: "MIGRATION_REQUIRED",
           verificationError: {
@@ -648,56 +606,12 @@ export class RuntimeGatewayService {
         where: {
           id: profileId,
         },
-      }),
-    ]);
+      });
+    });
     this.observability?.log(
       "warn",
       "runtime.user_profile.protocol_incompatible",
       { profileId, sessionId },
-    );
-  }
-
-  private async rotateLease(
-    sessionId: string,
-    runtimeId: string,
-    leaseExpiresAt: Date,
-  ) {
-    return this.prisma.$transaction(
-      async (tx) => {
-        const counter = await tx.browserRuntimeFenceCounter.upsert({
-          create: { runtimeId, value: 1n },
-          update: { value: { increment: 1n } },
-          where: { runtimeId },
-        });
-        const leaseToken = randomUUID();
-        const session = await tx.browserRuntimeSession.update({
-          data: {
-            fencingToken: counter.value,
-            leaseExpiresAt,
-            leaseToken,
-            status: "OPENING",
-          },
-          where: { id: sessionId },
-        });
-        await tx.browserRuntimeSlot.updateMany({
-          data: {
-            expiresAt: leaseExpiresAt,
-            fencingToken: counter.value,
-            leaseToken,
-          },
-          where: { sessionId },
-        });
-        await tx.browserRuntimeProfileLease.updateMany({
-          data: {
-            expiresAt: leaseExpiresAt,
-            fencingToken: counter.value,
-            leaseToken,
-          },
-          where: { sessionId },
-        });
-        return session;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
   }
 
@@ -709,116 +623,32 @@ export class RuntimeGatewayService {
       { type: "runtime.heartbeat" }
     >,
   ) {
-    const leaseExpiresAt = new Date(
-      Date.now() + env().RUNTIME_LEASE_SECONDS * 1000,
-    );
-    const closeSessions = new Set<string>();
+    const closeSessions: string[] = [];
+    const sessionPermits: RuntimeSessionPermit[] = [];
     for (const local of heartbeat.activeSessions) {
-      const renewed = await this.prisma.browserRuntimeSession.updateMany({
-        data: {
-          leaseExpiresAt,
-          status: local.state === "HUMAN_CONTROL" ? "HUMAN_CONTROL" : "ACTIVE",
-        },
-        where: {
-          fencingToken: BigInt(local.fencingToken),
-          id: local.sessionId,
-          leaseToken: local.leaseToken,
-          runtimeId,
-          closedAt: null,
-          status: { in: [...HEARTBEAT_RENEWABLE_STATUSES] },
-        },
-      });
-      if (renewed.count !== 1) {
-        const closing = await this.prisma.browserRuntimeSession.updateMany({
-          data: { leaseExpiresAt },
-          where: {
-            fencingToken: BigInt(local.fencingToken),
-            id: local.sessionId,
-            leaseToken: local.leaseToken,
-            runtimeId,
-            closedAt: null,
-            status: "CLOSING",
-          },
-        });
-        if (closing.count !== 1) {
-          closeSessions.add(local.sessionId);
-          continue;
-        }
-        closeSessions.add(local.sessionId);
-      }
-      await this.prisma.browserRuntimeSlot.updateMany({
-        data: { expiresAt: leaseExpiresAt },
-        where: {
-          fencingToken: BigInt(local.fencingToken),
-          leaseToken: local.leaseToken,
-          sessionId: local.sessionId,
-        },
-      });
-      await this.prisma.browserRuntimeProfileLease.updateMany({
-        data: { expiresAt: leaseExpiresAt },
-        where: {
-          fencingToken: BigInt(local.fencingToken),
-          leaseToken: local.leaseToken,
-          sessionId: local.sessionId,
-        },
-      });
+      const renewed = await this.renewSession(runtimeId, local);
+      if (!renewed) closeSessions.push(local.sessionId);
+      else if (renewed.permit) sessionPermits.push(renewed.permit);
     }
-    const localSessionIds = heartbeat.activeSessions.map(
-      (session) => session.sessionId,
+    await this.finalizeMissingClosedSessions(
+      runtimeId,
+      new Set(heartbeat.activeSessions.map((session) => session.sessionId)),
     );
-    const missingClosingSessions =
-      await this.prisma.browserRuntimeSession.findMany({
-        orderBy: { updatedAt: "asc" },
-        select: { id: true, updatedAt: true },
-        where: {
-          closedAt: null,
-          runtimeId,
-          status: "CLOSING",
-          updatedAt: {
-            lte: new Date(Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS),
-          },
-          ...(localSessionIds.length ? { id: { notIn: localSessionIds } } : {}),
-        },
-      });
-    for (const session of missingClosingSessions) {
-      const closedAt = new Date();
-      await this.prisma.$transaction(async (tx) => {
-        const finalized = await tx.browserRuntimeSession.updateMany({
-          data: {
-            closedAt,
-            humanControllerUserId: null,
-            humanControlExpiresAt: null,
-            lastError: Prisma.JsonNull,
-            status: "CLOSED",
-          },
-          where: {
-            closedAt: null,
-            id: session.id,
-            status: "CLOSING",
-            updatedAt: session.updatedAt,
-          },
-        });
-        if (finalized.count !== 1) return;
-        await tx.browserRuntimeSlot.deleteMany({
-          where: { sessionId: session.id },
-        });
-        await tx.browserRuntimeProfileLease.deleteMany({
-          where: { sessionId: session.id },
-        });
-      });
-    }
     await this.prisma.browserRuntime.update({
-      data: {
-        lastSeenAt: new Date(),
-        status: "ONLINE",
-      },
+      data: { lastSeenAt: new Date(), status: "ONLINE" },
       where: { id: runtimeId },
     });
     await this.redis.markRuntimeOnline(runtimeId);
     socket.send(
       JSON.stringify({
-        closeSessions: [...closeSessions],
-        leaseExpiresAt: leaseExpiresAt.toISOString(),
+        closeSessions,
+        sessionPermits,
+        ...(heartbeat.heartbeatId
+          ? { heartbeatId: heartbeat.heartbeatId }
+          : {}),
+        leaseExpiresAt: new Date(
+          Date.now() + env().RUNTIME_LEASE_SECONDS * 1_000,
+        ).toISOString(),
         serverTime: new Date().toISOString(),
         type: "runtime.heartbeat.ack",
       }),

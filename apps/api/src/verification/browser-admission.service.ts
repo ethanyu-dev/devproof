@@ -1,8 +1,13 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { verificationRequestSchema } from "@devproof/contracts";
 
 import { PrismaService } from "../database/prisma.service.js";
+import {
+  quarantineSession,
+  releaseVerifiedSessionResources,
+} from "../runtime/session-resource-cleanup.js";
 import { BrowserExecutionRunner } from "./browser-execution-runner.service.js";
 import { matchingRuntimeRoutingRule } from "./runtime-routing.js";
 import { ExecutionRunnerUnavailableError } from "./runtime-adapters.js";
@@ -16,6 +21,8 @@ function json(value: unknown): Prisma.InputJsonValue {
 
 @Injectable()
 export class BrowserAdmissionService {
+  private readonly logger = new Logger(BrowserAdmissionService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly browser: BrowserExecutionRunner,
@@ -36,7 +43,13 @@ export class BrowserAdmissionService {
           },
         },
       },
-      orderBy: { createdAt: "asc" },
+      // Rotate readiness evaluation through the complete backlog. Repeated
+      // upstream waits must not consume every candidate in a bounded sweep.
+      // Original createdAt/waitingSince still determine data-writer priority.
+      orderBy: [
+        { nextAdmissionAt: { sort: "asc", nulls: "first" } },
+        { createdAt: "asc" },
+      ],
       where: {
         run: {
           cancelRequestedAt: null,
@@ -87,9 +100,11 @@ export class BrowserAdmissionService {
     const claimed: typeof candidates = [];
     for (const item of ordered) {
       const allocationStartedAt = new Date();
+      const allocationToken = randomUUID();
       const result = await this.prisma.browserExecution.updateMany({
         data: {
           admissionAttempts: { increment: 1 },
+          allocationToken,
           nextAdmissionAt: allocationStartedAt,
           routingKey: item.rule
             ? `runtime:${item.rule.runtimeId}`
@@ -105,7 +120,8 @@ export class BrowserAdmissionService {
           updatedAt: item.execution.updatedAt,
         },
       });
-      if (result.count === 1) claimed.push(item.execution);
+      if (result.count === 1)
+        claimed.push({ ...item.execution, allocationToken });
     }
     const allocations = await Promise.allSettled(
       claimed.map((execution) => this.allocate(execution)),
@@ -117,11 +133,259 @@ export class BrowserAdmissionService {
               claimed[index].id,
               "ADMISSION_ERROR",
               errorMessage(allocation.reason),
+              claimed[index].allocationToken,
             )
           : Promise.resolve(),
       ),
     );
+    // Dispatch unrelated work before waiting for a quarantined browser to close.
+    await this.recoverStartupExecutions(new Date(), Math.min(limit, 8));
     return claimed.length;
+  }
+
+  /** Recover browsers whose bounded startup permit expired before their first claim. */
+  async recoverStartupExecutions(now = new Date(), limit = 8) {
+    const tasks = await this.prisma.agentRuntimeTask.findMany({
+      include: { run: true, attempt: { include: { browserExecution: true } } },
+      orderBy: { createdAt: "asc" },
+      take: limit,
+      where: {
+        status: "PENDING",
+        startedAt: null,
+        fencingToken: 0n,
+        OR: [
+          { recoveryNextAttemptAt: null },
+          { recoveryNextAttemptAt: { lte: now } },
+        ],
+        run: {
+          cancelRequestedAt: null,
+          deadlineAt: { gt: now },
+          lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+        },
+        attempt: {
+          browserExecution: {
+            is: {
+              runtimeSessionId: { not: null },
+              OR: [
+                { status: { not: "WAITING_CAPACITY" } },
+                { runtimeSession: { is: { closureVerifiedAt: null } } },
+              ],
+              runtimeSession: {
+                is: {
+                  ownerTaskId: null,
+                  OR: [
+                    {
+                      status: { notIn: ["ACTIVE", "OPENING", "HUMAN_CONTROL"] },
+                    },
+                    { quarantinedAt: { not: null } },
+                    { closureVerifiedAt: { not: null } },
+                    { leaseExpiresAt: { lte: now } },
+                    {
+                      status: { in: ["ACTIVE", "OPENING"] },
+                      OR: [
+                        { executionPermitExpiresAt: null },
+                        { executionPermitExpiresAt: { lte: now } },
+                      ],
+                    },
+                    {
+                      status: "HUMAN_CONTROL",
+                      OR: [
+                        { humanControlExpiresAt: null },
+                        { humanControlExpiresAt: { lte: now } },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const results = await Promise.allSettled(
+      tasks.map(async (task) => {
+        const execution = task.attempt.browserExecution!;
+        const sessionId = execution.runtimeSessionId!;
+        // This reservation outlives session.close's timeout. A crashed reconciler
+        // can retry closure, but cannot create another browser until closure proof.
+        const retryAt = new Date(now.getTime() + 90_000);
+        const reserved = await this.prisma.$transaction(async (tx) => {
+          // Serialize against claim before invalidating the browser or its permit.
+          const lock = await tx.agentRuntimeTask.updateMany({
+            where: {
+              id: task.id,
+              status: "PENDING",
+              startedAt: null,
+              fencingToken: 0n,
+              OR: [
+                { recoveryNextAttemptAt: null },
+                { recoveryNextAttemptAt: { lte: now } },
+              ],
+            },
+            data: {
+              recoveryStatus: "STARTUP_CLOSING",
+              recoveryNextAttemptAt: retryAt,
+            },
+          });
+          if (lock.count !== 1) return false;
+          const currentExecution = await tx.browserExecution.findUnique({
+            where: { id: execution.id },
+          });
+          const session = await tx.browserRuntimeSession.findUnique({
+            where: { id: sessionId },
+          });
+          const permitExpiresAt =
+            session?.status === "HUMAN_CONTROL"
+              ? session.humanControlExpiresAt
+              : session?.executionPermitExpiresAt;
+          if (
+            currentExecution?.runtimeSessionId !== sessionId ||
+            !session ||
+            session.ownerTaskId ||
+            (["ACTIVE", "OPENING", "HUMAN_CONTROL"].includes(session.status) &&
+              !session.quarantinedAt &&
+              !session.closureVerifiedAt &&
+              session.leaseExpiresAt > now &&
+              permitExpiresAt &&
+              permitExpiresAt > now)
+          ) {
+            await tx.agentRuntimeTask.update({
+              where: { id: task.id },
+              data: { recoveryStatus: null, recoveryNextAttemptAt: null },
+            });
+            return false;
+          }
+          // Console takeover can race the scan without touching the Agent row.
+          // Lock the exact observed permit before quarantine; a renewed human
+          // window or changed binding is re-evaluated by the next sweep.
+          const sessionLock = await tx.browserRuntimeSession.updateMany({
+            where: {
+              id: sessionId,
+              ownerTaskId: null,
+              status: session.status,
+              controlGeneration: session.controlGeneration,
+              executionPermitExpiresAt: session.executionPermitExpiresAt,
+              humanControlExpiresAt: session.humanControlExpiresAt,
+              closureVerifiedAt: session.closureVerifiedAt,
+            },
+            data: { status: session.status },
+          });
+          if (sessionLock.count !== 1) {
+            await tx.agentRuntimeTask.update({
+              where: { id: task.id },
+              data: { recoveryStatus: null, recoveryNextAttemptAt: null },
+            });
+            return false;
+          }
+          await quarantineSession(tx, sessionId, "STARTUP_PERMIT_EXPIRED");
+          await tx.browserExecution.updateMany({
+            where: { id: execution.id, runtimeSessionId: sessionId },
+            data: {
+              status: "LOST",
+              nextAdmissionAt: null,
+              error: {
+                code: "LEASE_RECOVERY",
+                message:
+                  "The unclaimed browser must close before startup recovery.",
+              },
+            },
+          });
+          await tx.taskCaseExecution.updateMany({
+            where: { runId: task.runId },
+            data: {
+              scheduling: {
+                state: "RECOVERING",
+                reason: "LEASE_RECOVERY",
+                waitingSince: (
+                  execution.waitingSince ?? execution.createdAt
+                ).toISOString(),
+                evaluatedAt: now.toISOString(),
+                blockedBy: { resourceType: "SESSION", sessionId },
+                queue: null,
+                nextRetryAt: retryAt.toISOString(),
+              },
+            },
+          });
+          if (task.run.taskExecutionId)
+            await tx.taskExecution.updateMany({
+              where: { id: task.run.taskExecutionId },
+              data: { projectionNeededAt: now },
+            });
+          return true;
+        });
+        if (!reserved) return;
+        await this.browser
+          .releaseForExecutionRun(task.run.teamId, execution.id)
+          .catch(() => undefined);
+        await this.prisma.$transaction(async (tx) => {
+          const session = await tx.browserRuntimeSession.findUnique({
+            where: { id: sessionId },
+          });
+          if (!session?.closureVerifiedAt || session.ownerTaskId) return;
+          const recovered = await tx.agentRuntimeTask.updateMany({
+            where: {
+              id: task.id,
+              status: "PENDING",
+              startedAt: null,
+              fencingToken: 0n,
+              recoveryStatus: "STARTUP_CLOSING",
+              recoveryNextAttemptAt: retryAt,
+            },
+            data: { recoveryStatus: null, recoveryNextAttemptAt: null },
+          });
+          if (recovered.count !== 1) return;
+          await releaseVerifiedSessionResources(tx, sessionId);
+          const changed = await tx.browserExecution.updateMany({
+            where: {
+              id: execution.id,
+              runtimeSessionId: sessionId,
+              run: {
+                cancelRequestedAt: null,
+                deadlineAt: { gt: new Date() },
+                lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+              },
+            },
+            data: {
+              status: "WAITING_CAPACITY",
+              allocationToken: randomUUID(),
+              nextAdmissionAt: new Date(),
+              finishedAt: null,
+              error: {
+                code: "LEASE_RECOVERY",
+                message:
+                  "The expired startup browser is closed; bounded re-admission is ready.",
+              },
+            },
+          });
+          if (changed.count !== 1) return;
+          await tx.runEvent.create({
+            data: {
+              actor: "CONTROL_PLANE",
+              attemptId: task.attemptId,
+              runId: task.runId,
+              teamId: task.run.teamId,
+              taskId: task.id,
+              kind: "browser.startup_recovery.ready",
+              payload: {
+                sessionId,
+                startupRecoveryCount: execution.startupRecoveryCount,
+              },
+            },
+          });
+          if (task.run.taskExecutionId)
+            await tx.taskExecution.updateMany({
+              where: { id: task.run.taskExecutionId },
+              data: { projectionNeededAt: new Date() },
+            });
+        });
+      }),
+    );
+    for (const result of results)
+      if (result.status === "rejected") {
+        this.logger.warn(
+          `Browser startup recovery will retry: ${errorMessage(result.reason)}`,
+        );
+      }
   }
 
   private async recoverLegacyExecutions(now: Date, limit: number) {
@@ -176,6 +440,7 @@ export class BrowserAdmissionService {
   }
 
   private async allocate(execution: {
+    allocationToken: string | null;
     attemptId: string;
     id: string;
     input: Prisma.JsonValue;
@@ -232,10 +497,16 @@ export class BrowserAdmissionService {
         execution.run.teamId,
         execution.id,
         request,
+        execution.allocationToken ?? undefined,
       );
     } catch (error) {
       if (!(error instanceof ExecutionRunnerUnavailableError)) {
-        await this.defer(execution.id, "ADMISSION_ERROR", errorMessage(error));
+        await this.defer(
+          execution.id,
+          "ADMISSION_ERROR",
+          errorMessage(error),
+          execution.allocationToken,
+        );
         return;
       }
       availabilityPolicy =
@@ -244,23 +515,96 @@ export class BrowserAdmissionService {
         await this.fail(execution, error.reason, error.message);
         return;
       }
-      await this.defer(execution.id, error.reason, error.message);
+      await this.defer(
+        execution.id,
+        error.reason,
+        error.message,
+        execution.allocationToken,
+        error.blockedBy,
+      );
     }
   }
 
-  private async defer(id: string, code: string, message: string) {
-    await this.prisma.browserExecution.updateMany({
-      data: {
-        error: json({ code, message }),
-        nextAdmissionAt: new Date(Date.now() + RETRY_DELAY_MS),
-        status: "WAITING_CAPACITY",
-      },
-      where: { id, status: { in: ["ALLOCATING", "WAITING_CAPACITY"] } },
+  private async defer(
+    id: string,
+    code: string,
+    message: string,
+    allocationToken: string | null,
+    blockedBy?: ExecutionRunnerUnavailableError["blockedBy"],
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      const now = new Date();
+      const changed = await tx.browserExecution.updateMany({
+        data: {
+          error: json({ code, message, ...(blockedBy ? { blockedBy } : {}) }),
+          nextAdmissionAt: new Date(now.getTime() + RETRY_DELAY_MS),
+          status: "WAITING_CAPACITY",
+        },
+        where: {
+          id,
+          allocationToken,
+          status: { in: ["ALLOCATING", "WAITING_CAPACITY"] },
+          run: {
+            cancelRequestedAt: null,
+            deadlineAt: { gt: now },
+            lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+          },
+        },
+      });
+      if (changed.count !== 1) return;
+      const execution = await tx.browserExecution.findUnique({
+        where: { id },
+        include: {
+          run: {
+            select: {
+              taskExecutionId: true,
+              taskCaseExecution: { select: { id: true, scheduling: true } },
+            },
+          },
+        },
+      });
+      if (execution?.run.taskExecutionId && execution.run.taskCaseExecution) {
+        const current = record(execution.run.taskCaseExecution.scheduling);
+        const reason =
+          code === "NO_AVAILABLE_SLOT"
+            ? "RUNTIME_CAPACITY"
+            : code === "IDENTITY_CAPACITY"
+              ? "IDENTITY_LIMIT"
+              : code === "NO_MATCHING_RUNNER"
+                ? "RUNTIME_OFFLINE"
+                : code;
+        await tx.taskCaseExecution.update({
+          where: { id: execution.run.taskCaseExecution.id },
+          data: {
+            scheduling: json({
+              state: reason === "LEASE_RECOVERY" ? "RECOVERING" : "WAITING",
+              reason,
+              waitingSince:
+                typeof current.waitingSince === "string"
+                  ? current.waitingSince
+                  : (
+                      execution.waitingSince ?? execution.createdAt
+                    ).toISOString(),
+              evaluatedAt: now.toISOString(),
+              blockedBy: blockedBy ?? null,
+              queue: null,
+              nextRetryAt: new Date(
+                now.getTime() + RETRY_DELAY_MS,
+              ).toISOString(),
+            }),
+          },
+        });
+        await tx.taskExecution.updateMany({
+          where: { id: execution.run.taskExecutionId },
+          data: { projectionNeededAt: now },
+        });
+      }
     });
   }
 
   private async fail(
     execution: {
+      allocationToken: string | null;
       attemptId: string;
       id: string;
       run: { taskExecutionId: string | null; teamId: string };
@@ -271,15 +615,24 @@ export class BrowserAdmissionService {
   ) {
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
-      await tx.browserExecution.update({
+      const changed = await tx.browserExecution.updateMany({
         data: {
           error: json({ code, message }),
           finishedAt: now,
           nextAdmissionAt: null,
           status: "FAILED",
         },
-        where: { id: execution.id },
+        where: {
+          id: execution.id,
+          allocationToken: execution.allocationToken,
+          status: { in: ["ALLOCATING", "WAITING_CAPACITY"] },
+          run: {
+            cancelRequestedAt: null,
+            lifecycle: { in: ["QUEUED", "PREPARING", "RUNNING"] },
+          },
+        },
       });
+      if (changed.count !== 1) return;
       await tx.agentRuntimeTask.updateMany({
         data: {
           error: json({ code, message }),

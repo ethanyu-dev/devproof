@@ -20,7 +20,15 @@ function fixture() {
     },
     browserRuntimeSession: {
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    agentRuntimeTask: { findUnique: vi.fn().mockResolvedValue(null) },
+    browserExecution: { findFirst: vi.fn().mockResolvedValue(null) },
+    executionResourceLease: {
+      count: vi.fn().mockResolvedValue(0),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     browserRuntimeProfileLease: {
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -110,7 +118,7 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
     const accepted = JSON.parse(String(socket.send.mock.calls[0]?.[0]));
     expect(accepted).toMatchObject({
       networkAllowlist: ["test-console.paigod.work"],
-      protocol: { minor: 12 },
+      protocol: { minor: RUNTIME_PROTOCOL.minor },
       type: "runtime.hello.accepted",
     });
   });
@@ -188,7 +196,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
     expect(prisma.browserRuntimeSession.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          closedAt: null,
+          closureVerifiedAt: null,
           status: { in: expect.arrayContaining(["LOST"]) },
         }),
       }),
@@ -219,11 +227,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
       heartbeat,
     );
 
-    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ closedAt: null, id: sessionId }),
-      }),
-    );
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [sessionId],
       type: "runtime.heartbeat.ack",
@@ -233,18 +237,17 @@ describe("RuntimeGatewayService terminal session ownership", () => {
   it("does not reactivate a closing session during reconnect", async () => {
     const { prisma, service } = fixture();
     const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
-    prisma.browserRuntimeSession.findMany.mockResolvedValue([
-      {
-        fencingToken: 7n,
-        id: sessionId,
-        leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
-        profileKey: "profile-key",
-        profileMode: "PERSISTENT",
-        status: "CLOSING",
-        userBrowserProfile: null,
-        verificationRuns: [],
-      },
-    ]);
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue({
+      runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
+      fencingToken: 7n,
+      id: sessionId,
+      leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+      profileKey: "profile-key",
+      profileMode: "PERSISTENT",
+      status: "CLOSING",
+      userBrowserProfile: null,
+      verificationRuns: [],
+    });
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
     const reconcile = Reflect.get(service, "reconcile") as (
       runtimeId: string,
@@ -281,9 +284,13 @@ describe("RuntimeGatewayService terminal session ownership", () => {
   it("preserves CLOSING while asking the Runtime to force-close the session", async () => {
     const { handleHeartbeat, prisma, service, socket } = fixture();
     const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
-    prisma.browserRuntimeSession.updateMany
-      .mockResolvedValueOnce({ count: 0 })
-      .mockResolvedValueOnce({ count: 1 });
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue({
+      id: sessionId,
+      runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
+      fencingToken: 7n,
+      leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+      status: "CLOSING",
+    });
     const heartbeat = runtimeClientMessageSchema.parse({
       activeSessions: [
         {
@@ -305,13 +312,8 @@ describe("RuntimeGatewayService terminal session ownership", () => {
       heartbeat,
     );
 
-    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        data: expect.not.objectContaining({ status: expect.anything() }),
-        where: expect.objectContaining({ id: sessionId, status: "CLOSING" }),
-      }),
-    );
+    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [sessionId],
     });
@@ -322,9 +324,19 @@ describe("RuntimeGatewayService terminal session ownership", () => {
     const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
     const updatedAt = new Date("2026-08-28T01:00:00.000Z");
     prisma.browserRuntimeSession.findMany.mockResolvedValue([
-      { id: sessionId, updatedAt },
+      {
+        id: sessionId,
+        updatedAt,
+        fencingToken: 7n,
+        leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+      },
     ]);
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue({
+      status: "CLOSED",
+      closureVerifiedAt: new Date(),
+      ownerTaskId: null,
+    });
     const heartbeat = runtimeClientMessageSchema.parse({
       activeSessions: [],
       maxConcurrency: 4,
@@ -344,7 +356,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
         data: expect.objectContaining({ status: "CLOSED" }),
         where: expect.objectContaining({
           id: sessionId,
-          status: "CLOSING",
+          status: { in: ["CLOSING", "LOST"] },
           updatedAt,
         }),
       }),
@@ -359,52 +371,23 @@ describe("RuntimeGatewayService terminal session ownership", () => {
 });
 
 describe("RuntimeGatewayService user Profile protocol floor", () => {
-  it("does not restore a user Profile on a Runtime older than protocol v1.9", async () => {
+  it("quarantines incompatible user Profiles without freeing unverified browser resources", async () => {
+    const { prisma, service } = fixture();
     const updateProfile = vi.fn().mockResolvedValue({ count: 1 });
-    const updateSession = vi.fn().mockResolvedValue({});
-    const prisma = {
-      $transaction: vi.fn(async (operations: Array<Promise<unknown>>) =>
-        Promise.all(operations),
-      ),
-      browserRuntimeProfileLease: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      browserRuntimeSession: {
-        findMany: vi.fn().mockResolvedValue([
-          {
-            id: "session-1",
-            profileMode: "PERSISTENT",
-            status: "ACTIVE",
-            userBrowserProfile: {
-              id: "profile-1",
-            },
-          },
-        ]),
-        update: updateSession,
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      browserRuntimeSlot: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
+    Object.assign(prisma, {
       userBrowserProfile: { updateMany: updateProfile },
-    };
-    const service = new RuntimeGatewayService(
-      prisma as never,
-      {} as never,
-      {} as never,
-      {} as never,
-      {} as never,
-    );
+    });
+    prisma.browserRuntimeSession.findMany.mockResolvedValue([
+      { id: "session-1", userBrowserProfileId: "profile-1" },
+    ]);
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
     const reconcile = Reflect.get(service, "reconcile") as (
-      runtimeId: string,
-      localSessions: unknown[],
-      protocolMinor: number,
-    ) => Promise<unknown[]>;
-
+      ...args: unknown[]
+    ) => Promise<unknown>;
     await expect(reconcile.call(service, "runtime-1", [], 7)).resolves.toEqual(
       [],
     );
-    expect(updateSession).toHaveBeenCalledWith(
+    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "LOST",
@@ -417,8 +400,141 @@ describe("RuntimeGatewayService user Profile protocol floor", () => {
     expect(updateProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "MIGRATION_REQUIRED" }),
-        where: expect.objectContaining({ id: "profile-1" }),
       }),
     );
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+function activeSession(overrides: Record<string, unknown> = {}) {
+  const lease = {
+    leaseToken: "b15a5cc9-1fa7-4960-ab84-763db94e24ab",
+    fencingToken: 7n,
+  };
+  return {
+    ...lease,
+    id: "cf5a946c-f906-4df4-9296-1d6482ddaf75",
+    runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
+    status: "ACTIVE",
+    profileMode: "EPHEMERAL",
+    protocolMinor: 13,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    createdAt: new Date(),
+    closedAt: null,
+    quarantinedAt: null,
+    slot: lease,
+    ownerTaskId: null,
+    ...overrides,
+  };
+}
+
+function heartbeatFor(session: ReturnType<typeof activeSession>) {
+  return runtimeClientMessageSchema.parse({
+    type: "runtime.heartbeat",
+    maxConcurrency: 4,
+    sentAt: new Date().toISOString(),
+    activeSessions: [
+      {
+        sessionId: session.id,
+        leaseToken: session.leaseToken,
+        fencingToken: session.fencingToken.toString(),
+        state: "OPEN",
+      },
+    ],
+  });
+}
+
+describe("Runtime Gateway executor permission", () => {
+  it("never resurrects LOST ownership even when its node is online", async () => {
+    const { prisma, handleHeartbeat, service, socket } = fixture();
+    const session = activeSession({
+      status: "LOST",
+      leaseExpiresAt: new Date(Date.now() - 1),
+      slot: null,
+    });
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue(session);
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    await handleHeartbeat.call(
+      service,
+      socket,
+      session.runtimeId,
+      heartbeatFor(session),
+    );
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      closeSessions: [session.id],
+      sessionPermits: [],
+    });
+    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "ACTIVE" }),
+      }),
+    );
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("revokes execution when Agent ownership expires despite healthy Browser heartbeats", async () => {
+    const { prisma, handleHeartbeat, service, socket } = fixture();
+    const session = activeSession({
+      ownerTaskId: "agent-1",
+      ownerFencingToken: 3n,
+    });
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue(session);
+    prisma.agentRuntimeTask.findUnique.mockResolvedValue({
+      id: "agent-1",
+      fencingToken: 3n,
+      status: "RUNNING",
+      leaseExpiresAt: new Date(Date.now() - 1),
+      run: { lifecycle: "RUNNING", deadlineAt: new Date(Date.now() + 60_000) },
+    });
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    await handleHeartbeat.call(
+      service,
+      socket,
+      session.runtimeId,
+      heartbeatFor(session),
+    );
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      closeSessions: [session.id],
+      sessionPermits: [],
+    });
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("caps renewed execution permission by the current Agent epoch and lease", async () => {
+    const { prisma, handleHeartbeat, service, socket } = fixture();
+    const session = activeSession({
+      ownerTaskId: "e7d10322-6a99-49f2-8974-7cb87b407e7f",
+      ownerFencingToken: 3n,
+    });
+    const expiresAt = new Date(Date.now() + 25_000);
+    prisma.browserRuntimeSession.findUnique.mockResolvedValue(session);
+    prisma.agentRuntimeTask.findUnique.mockResolvedValue({
+      id: session.ownerTaskId,
+      fencingToken: 3n,
+      status: "RUNNING",
+      leaseExpiresAt: expiresAt,
+      run: {
+        lifecycle: "RUNNING",
+        cancelRequestedAt: null,
+        deadlineAt: new Date(Date.now() + 60_000),
+      },
+    });
+    prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
+    await handleHeartbeat.call(
+      service,
+      socket,
+      session.runtimeId,
+      heartbeatFor(session),
+    );
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      closeSessions: [],
+      sessionPermits: [
+        {
+          ownerKind: "AGENT",
+          ownerFencingToken: "3",
+          expiresAt: expiresAt.toISOString(),
+        },
+      ],
+    });
   });
 });

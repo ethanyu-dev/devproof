@@ -33,38 +33,51 @@ describe("browser admission queue ordering", () => {
     expect(findMany).toHaveBeenCalledWith(
       expect.not.objectContaining({ take: expect.anything() }),
     );
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [
+          { nextAdmissionAt: { sort: "asc", nulls: "first" } },
+          { createdAt: "asc" },
+        ],
+      }),
+    );
   });
 
   it("records invalid legacy admission input instead of leaving it rejected", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const acquireForExecutionRun = vi.fn();
+    const prisma = {
+      agentRuntimeTask: { findMany: vi.fn().mockResolvedValue([]) },
+      browserExecution: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([
+          {
+            attemptId: "attempt-1",
+            createdAt: new Date("2026-08-26T00:00:00.000Z"),
+            id: "execution-1",
+            input: { profile: { mode: "PERSISTENT" } },
+            nextAdmissionAt: null,
+            run: {
+              deadlineAt: new Date(Date.now() + 60_000),
+              goal: "Verify the deployment",
+              lifecycle: "QUEUED",
+              taskExecutionId: "issue-1",
+              teamId: "team-1",
+            },
+            runId: "run-1",
+            status: "REQUESTED",
+            updatedAt: new Date("2026-08-26T00:00:00.000Z"),
+            waitingSince: null,
+          },
+        ]),
+        updateMany,
+      },
+      runtimeRoutingRule: { findMany: vi.fn().mockResolvedValue([]) },
+    };
     const service = new BrowserAdmissionService(
       {
-        agentRuntimeTask: { findMany: vi.fn().mockResolvedValue([]) },
-        browserExecution: {
-          findMany: vi.fn().mockResolvedValue([
-            {
-              attemptId: "attempt-1",
-              createdAt: new Date("2026-08-26T00:00:00.000Z"),
-              id: "execution-1",
-              input: { profile: { mode: "PERSISTENT" } },
-              nextAdmissionAt: null,
-              run: {
-                deadlineAt: new Date(Date.now() + 60_000),
-                goal: "Verify the deployment",
-                lifecycle: "QUEUED",
-                taskExecutionId: "issue-1",
-                teamId: "team-1",
-              },
-              runId: "run-1",
-              status: "REQUESTED",
-              updatedAt: new Date("2026-08-26T00:00:00.000Z"),
-              waitingSince: null,
-            },
-          ]),
-          updateMany,
-        },
-        runtimeRoutingRule: { findMany: vi.fn().mockResolvedValue([]) },
+        ...prisma,
+        $transaction: async (fn: (tx: typeof prisma) => unknown) => fn(prisma),
       } as never,
       { acquireForExecutionRun } as never,
     );
@@ -87,24 +100,27 @@ describe("browser admission queue ordering", () => {
     const service = new BrowserAdmissionService(
       {
         agentRuntimeTask: {
-          findMany: vi.fn().mockResolvedValue([
-            {
-              attemptId: "attempt-legacy",
-              run: {
-                environmentSnapshot: {
-                  targetUrl: "https://legacy.example.com",
-                },
-                executionPolicy: {
-                  browser: {
-                    availabilityPolicy: "WAIT",
-                    profile: { mode: "EPHEMERAL" },
-                    requiredCapabilities: ["browser"],
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([
+              {
+                attemptId: "attempt-legacy",
+                run: {
+                  environmentSnapshot: {
+                    targetUrl: "https://legacy.example.com",
+                  },
+                  executionPolicy: {
+                    browser: {
+                      availabilityPolicy: "WAIT",
+                      profile: { mode: "EPHEMERAL" },
+                      requiredCapabilities: ["browser"],
+                    },
                   },
                 },
+                runId: "run-legacy",
               },
-              runId: "run-legacy",
-            },
-          ]),
+            ])
+            .mockResolvedValue([]),
         },
         browserExecution: {
           createMany,
