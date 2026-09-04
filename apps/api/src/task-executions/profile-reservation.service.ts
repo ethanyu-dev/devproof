@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import type { CaseSchedulingDecision } from "@devproof/test-domain";
 
 import { PrismaService } from "../database/prisma.service.js";
 import { hostnameMatchesPattern } from "../verification/runtime-routing.js";
@@ -55,6 +56,17 @@ export class ProfileReservationService {
       task?.deploymentProfileBindings?.[0]?.profile ??
       task?.profileBinding?.resolvedProfile;
     if (!task || !profile) return { acquired: true as const, profile: null };
+    const blocked = (
+      reason: string,
+      blockedBy: CaseSchedulingDecision["blockedBy"] = null,
+      queue: CaseSchedulingDecision["queue"] = null,
+    ) => ({
+      acquired: false as const,
+      profile,
+      reason,
+      blockedBy,
+      queue,
+    });
     const now = new Date();
     if (
       task.profileBinding?.status !== "RESOLVED" ||
@@ -63,7 +75,7 @@ export class ProfileReservationService {
         task.lifecycle as (typeof terminalTaskLifecycles)[number],
       )
     ) {
-      return { acquired: false as const, profile };
+      return blocked("AUTH_REQUIRED");
     }
     if (
       !profile.inactivityExpiresAt ||
@@ -75,7 +87,7 @@ export class ProfileReservationService {
         message:
           "The resolved browser profile expired before task dispatch and must be prepared again.",
       });
-      return { acquired: false as const, profile };
+      return blocked("PROFILE_INACTIVITY_EXPIRED");
     }
     const targetHostnames = environmentHostnames(
       task.environmentSnapshot,
@@ -99,7 +111,13 @@ export class ProfileReservationService {
       );
     if (!ownerActive || !grantActive) {
       await this.invalidateBinding(task.id, task.teamId, profile.id);
-      return { acquired: false as const, profile };
+      return blocked("PROFILE_AUTHORIZATION_CHANGED");
+    }
+
+    // Identity is shared only through isolated contexts. Snapshot availability,
+    // identity permits and business locks are decided atomically at admission.
+    if (profile.executionMode === "ISOLATED_AUTH") {
+      return { acquired: true as const, profile };
     }
 
     const current = await this.prisma.browserProfileReservation.upsert({
@@ -122,27 +140,62 @@ export class ProfileReservationService {
       return { acquired: true as const, profile };
     }
     if (!["QUEUED", "EXPIRED"].includes(current.status)) {
-      return { acquired: false as const, profile };
+      return blocked("PROFILE_RESERVED", {
+        resourceType: "PROFILE",
+        resourceId: profile.id,
+      });
     }
     if (current.status === "EXPIRED") {
       await this.prisma.browserProfileReservation.update({
-        data: { queuedAt: now, status: "QUEUED" },
+        data: { status: "QUEUED" },
         where: { id: current.id },
       });
     }
 
     await this.releaseStaleActive(profile.id, now);
     const active = await this.prisma.browserProfileReservation.findFirst({
-      select: { id: true },
+      select: { id: true, taskExecutionId: true },
       where: { profileId: profile.id, status: "ACTIVE" },
     });
-    if (active) return { acquired: false as const, profile };
+    const queuePosition = async (): Promise<
+      CaseSchedulingDecision["queue"]
+    > => ({
+      scope: "PROFILE_TASK",
+      position:
+        1 +
+        (await this.prisma.browserProfileReservation.count({
+          where: {
+            profileId: profile.id,
+            status: "QUEUED",
+            OR: [
+              { queuedAt: { lt: current.queuedAt ?? now } },
+              { queuedAt: current.queuedAt ?? now, id: { lt: current.id } },
+            ],
+          },
+        })),
+      snapshotAt: now.toISOString(),
+    });
+    if (active)
+      return blocked(
+        "PROFILE_RESERVED",
+        {
+          resourceType: "PROFILE",
+          resourceId: profile.id,
+          taskId: active.taskExecutionId,
+        },
+        await queuePosition(),
+      );
     const first = await this.prisma.browserProfileReservation.findFirst({
       orderBy: [{ queuedAt: "asc" }, { id: "asc" }],
       select: { id: true },
       where: { profileId: profile.id, status: "QUEUED" },
     });
-    if (first?.id !== current.id) return { acquired: false as const, profile };
+    if (first?.id !== current.id)
+      return blocked(
+        "PROFILE_RESERVED",
+        { resourceType: "PROFILE", resourceId: profile.id },
+        await queuePosition(),
+      );
 
     const leaseToken = randomUUID();
     try {
@@ -160,13 +213,21 @@ export class ProfileReservationService {
           status: "QUEUED",
         },
       });
-      return { acquired: activated.count === 1, profile };
+      return activated.count === 1
+        ? { acquired: true as const, profile }
+        : blocked("PROFILE_RESERVED", {
+            resourceType: "PROFILE",
+            resourceId: profile.id,
+          });
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         ["P2002", "P2034"].includes(error.code)
       ) {
-        return { acquired: false as const, profile };
+        return blocked("PROFILE_RESERVED", {
+          resourceType: "PROFILE",
+          resourceId: profile.id,
+        });
       }
       throw error;
     }

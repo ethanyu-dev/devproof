@@ -43,6 +43,7 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
+import { RuntimeRecoveryPanel } from "./runtime-recovery-panel";
 
 type Scope =
   | "verification:read"
@@ -74,6 +75,10 @@ interface RuntimeSettings {
 }
 
 interface BrowserPoolCapacity {
+  runtimeWaiting?: number;
+  flexibleRuntimeWaiting?: number;
+  upstreamWaiting?: number;
+  upstreamWaitingByReason?: Record<string, number>;
   availableCapacity: number;
   configuredCapacity: number;
   drainingCapacity: number;
@@ -87,6 +92,8 @@ interface BrowserPoolCapacity {
     occupied: number;
     online: boolean;
     waiting: number;
+    runtimeWaiting?: number;
+    quarantined?: number;
   }>;
   occupiedCapacity: number;
   schedulableCapacity: number;
@@ -986,6 +993,7 @@ export function AccessClient() {
         <>
           {activeSection === "browser" ? (
             <section className="dp-access-module">
+              <RuntimeRecoveryPanel />
               {runtimeMessage ? (
                 <div className="dp-runtime-message">
                   <FormMessage
@@ -1090,9 +1098,30 @@ export function AccessClient() {
                             <small>当前空闲</small>
                           </span>
                           <span>
-                            <b>{browserPool.flexibleWaiting}</b>
-                            <small>灵活队列等待</small>
+                            <b>{browserPool.runtimeWaiting ?? "—"}</b>
+                            <small>槽位等待</small>
                           </span>
+                          <span
+                            title={Object.entries(
+                              browserPool.upstreamWaitingByReason ?? {},
+                            )
+                              .map(
+                                ([reason, count]) =>
+                                  `${displayLabel(reason)} ${count}`,
+                              )
+                              .join(" · ")}
+                          >
+                            <b>{browserPool.upstreamWaiting ?? "—"}</b>
+                            <small>上游等待（身份、数据或依赖）</small>
+                          </span>
+                          {Object.entries(
+                            browserPool.upstreamWaitingByReason ?? {},
+                          ).map(([reason, count]) => (
+                            <span key={reason}>
+                              <b>{count}</b>
+                              <small>{displayLabel(reason)}</small>
+                            </span>
+                          ))}
                         </div>
                       ) : null}
                     </div>
@@ -1161,7 +1190,7 @@ export function AccessClient() {
                                     (node) => node.id === runtime.id,
                                   ) ? (
                                     <small>
-                                      {` · 占用 ${browserPool.nodes.find((node) => node.id === runtime.id)!.occupied} · 空闲 ${browserPool.nodes.find((node) => node.id === runtime.id)!.available} · 固定队列等待 ${browserPool.nodes.find((node) => node.id === runtime.id)!.waiting}`}
+                                      {` · 占用 ${browserPool.nodes.find((node) => node.id === runtime.id)!.occupied} · 空闲 ${browserPool.nodes.find((node) => node.id === runtime.id)!.available} · 槽位等待 ${browserPool.nodes.find((node) => node.id === runtime.id)!.runtimeWaiting ?? browserPool.nodes.find((node) => node.id === runtime.id)!.waiting} · 隔离中 ${browserPool.nodes.find((node) => node.id === runtime.id)!.quarantined ?? 0}`}
                                     </small>
                                   ) : null}
                                 </dd>

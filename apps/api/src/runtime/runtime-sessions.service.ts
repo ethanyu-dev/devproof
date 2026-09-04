@@ -20,6 +20,11 @@ import {
 import type { AuthContext } from "../auth/auth.types.js";
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import {
+  quarantineSession,
+  releaseVerifiedSessionResources,
+} from "./session-resource-cleanup.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import { AuditService } from "../console/audit.service.js";
@@ -103,6 +108,7 @@ export class RuntimeSessionsService {
         ...command,
         error: safeProfileJson(command.error, row.userBrowserProfileId),
         fencingToken: command.fencingToken.toString(),
+        ownerFencingToken: command.ownerFencingToken?.toString() ?? null,
         payload: safeProfileJson(command.payload, row.userBrowserProfileId),
         result: safeProfileJson(command.result, row.userBrowserProfileId),
       })),
@@ -221,6 +227,64 @@ export class RuntimeSessionsService {
       try {
         const session = await this.prisma.$transaction(
           async (tx) => {
+            await acquireAdvisoryTransactionLock(
+              tx,
+              "browser-execution-resources",
+            );
+            if (userProfile) {
+              await acquireAdvisoryTransactionLock(
+                tx,
+                `browser-profile:${userProfile.id}`,
+              );
+              const busy = await tx.browserRuntimeSession.count({
+                where: {
+                  userBrowserProfileId: userProfile.id,
+                  closureVerifiedAt: null,
+                  status: { not: "CLOSED" },
+                },
+              });
+              if (busy)
+                throw new ConflictException(
+                  "The login identity is in use; wait for its sessions to close before maintenance.",
+                );
+            }
+            await acquireAdvisoryTransactionLock(
+              tx,
+              `browser-runtime:${runtime.id}`,
+            );
+            const configured = await tx.browserRuntime.findUniqueOrThrow({
+              where: { id: runtime.id },
+              select: { maxConcurrency: true, enabled: true, revokedAt: true },
+            });
+            if (!configured.enabled || configured.revokedAt)
+              throw new ConflictException(
+                "Browser Runtime was disabled before admission.",
+              );
+            const occupied = await tx.browserRuntimeSlot.count({
+              where: { runtimeId: runtime.id },
+            });
+            if (
+              occupied >= configured.maxConcurrency ||
+              slotNumber >= configured.maxConcurrency
+            )
+              throw new ConflictException(
+                "Browser Runtime has no available slot.",
+              );
+            if (
+              input.purpose === "EXECUTION" &&
+              ((await tx.executionResourceLease.count()) ||
+                (await tx.browserRuntimeSession.count({
+                  where: {
+                    purpose: "EXECUTION",
+                    closureVerifiedAt: null,
+                    status: { not: "CLOSED" },
+                    resourceLeases: { none: {} },
+                  },
+                })))
+            )
+              throw new ConflictException(
+                "A manual execution requires exclusive business access while other executions are running.",
+              );
             const counter = await tx.browserRuntimeFenceCounter.upsert({
               create: { runtimeId: runtime.id, value: 1n },
               update: { value: { increment: 1n } },
@@ -267,6 +331,15 @@ export class RuntimeSessionsService {
                 },
               });
             }
+            if (input.purpose === "EXECUTION")
+              await tx.executionResourceLease.create({
+                data: {
+                  sessionId: created.id,
+                  rootKey: "*",
+                  resourceKey: "",
+                  mode: "WRITE",
+                },
+              });
             return created;
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -339,19 +412,12 @@ export class RuntimeSessionsService {
           : []),
       ]);
     } else {
-      await this.prisma.$transaction([
-        this.prisma.browserRuntimeSession.update({
-          data: {
-            lastError: opened?.error ?? json({ code: "OPEN_FAILED" }),
-            status: "FAILED",
-          },
-          where: { id: sessionId },
-        }),
-        this.prisma.browserRuntimeSlot.deleteMany({ where: { sessionId } }),
-        this.prisma.browserRuntimeProfileLease.deleteMany({
-          where: { sessionId },
-        }),
-      ]);
+      await this.prisma.$transaction((tx) =>
+        quarantineSession(tx, sessionId!, "OPEN_UNCONFIRMED"),
+      );
+      await this.close(current, sessionId, { timeoutSeconds: 15 }).catch(
+        () => undefined,
+      );
     }
     await this.audit.record(
       current,
@@ -402,6 +468,7 @@ export class RuntimeSessionsService {
           ...command,
           error: safeProfileJson(command.error, session.userBrowserProfileId),
           fencingToken: command.fencingToken.toString(),
+          ownerFencingToken: command.ownerFencingToken?.toString() ?? null,
           payload: safeProfileJson(
             command.payload,
             session.userBrowserProfileId,
@@ -409,6 +476,158 @@ export class RuntimeSessionsService {
           result: safeProfileJson(command.result, session.userBrowserProfileId),
         }
       : null;
+  }
+
+  async publishProfileSnapshot(
+    current: AuthContext,
+    sessionId: string,
+    generation: number,
+    verification: {
+      url: string;
+      authenticatedSelector?: string;
+      successUrlPatterns?: string[];
+      loginUrlPatterns?: string[];
+    },
+  ) {
+    const session = await this.ownedSession(current, sessionId);
+    if (
+      session.profileMode !== "PERSISTENT" ||
+      !session.userBrowserProfileId ||
+      session.protocolMinor < 13 ||
+      !["ACTIVE", "HUMAN_CONTROL"].includes(session.status)
+    )
+      throw new ConflictException(
+        "Authentication snapshots require an active Profile preparation session on Runtime protocol v1.13.",
+      );
+    const command = await this.commands.execute({
+      commandType: "profile.snapshot",
+      sessionId,
+      source: "SYSTEM",
+      payload: {
+        profileKey: session.profileKey,
+        generation,
+        verification,
+        probeConcurrency: 4,
+      },
+      timeoutSeconds: 90,
+    });
+    if (command?.status !== "SUCCEEDED")
+      throw new ConflictException({
+        code: "AUTH_SNAPSHOT_INCOMPATIBLE",
+        message:
+          "Independent browser contexts could not reuse this login. Keep serial execution or prepare an account with compatible authentication.",
+      });
+    return command.result;
+  }
+
+  listQuarantines(current: AuthContext) {
+    return this.prisma.browserRuntimeSession.findMany({
+      where: {
+        teamId: current.team.id,
+        resourceLeases: { some: { quarantined: true } },
+      },
+      select: {
+        id: true,
+        closureVerifiedAt: true,
+        quarantinedAt: true,
+        createdAt: true,
+        status: true,
+        browserExecutions: {
+          select: { runId: true, run: { select: { goal: true } } },
+          take: 1,
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+  }
+
+  async resolveWriteOutcome(
+    current: AuthContext,
+    sessionId: string,
+    note: string,
+  ) {
+    await this.ownedSession(current, sessionId);
+    const result = await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+      const session = await tx.browserRuntimeSession.findUniqueOrThrow({
+        where: { id: sessionId },
+        include: { browserExecutions: true },
+      });
+      if (!session.closureVerifiedAt || session.status !== "CLOSED")
+        throw new ConflictException(
+          "Confirm that the previous browser is closed before releasing its data locks.",
+        );
+      const owner = session.ownerTaskId
+        ? await tx.agentRuntimeTask.findUnique({
+            where: { id: session.ownerTaskId },
+            include: { run: true },
+          })
+        : null;
+      if (
+        owner &&
+        (["PENDING", "RUNNING", "WAITING_HUMAN"].includes(owner.status) ||
+          !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+            owner.run.lifecycle,
+          ))
+      )
+        throw new ConflictException(
+          "The previous execution must stop before its write outcome can be resolved.",
+        );
+      if (owner) {
+        if (
+          owner.recoveryStatus !== "WRITE_OUTCOME_UNKNOWN" &&
+          owner.recoveryStatus !== "RESOLVED"
+        )
+          throw new ConflictException(
+            "Wait for lease recovery to determine the previous write outcome before resolving it.",
+          );
+        const resolved = await tx.agentRuntimeTask.updateMany({
+          where: {
+            id: owner.id,
+            status: owner.status,
+            recoveryStatus: owner.recoveryStatus,
+            fencingToken: owner.fencingToken,
+          },
+          data: { recoveryStatus: "RESOLVED", recoveryNextAttemptAt: null },
+        });
+        if (resolved.count !== 1)
+          throw new ConflictException(
+            "The previous execution changed while its outcome was being resolved.",
+          );
+      }
+      const released = await tx.executionResourceLease.deleteMany({
+        where: { sessionId, quarantined: true },
+      });
+      await tx.browserRuntimeSession.updateMany({
+        where: { id: sessionId },
+        data: { quarantinedAt: null },
+      });
+      const execution = session.browserExecutions[0];
+      if (released.count && execution)
+        await tx.runEvent.create({
+          data: {
+            teamId: current.team.id,
+            runId: execution.runId,
+            attemptId: execution.attemptId,
+            actor: "HUMAN",
+            kind: "runtime.write_outcome.reconciled",
+            payload: { note, resolvedByUserId: current.user.id },
+          },
+        });
+      await tx.auditEvent.create({
+        data: {
+          action: "runtime.write_outcome.reconciled",
+          actorUserId: current.user.id,
+          entityId: sessionId,
+          entityType: "browser_runtime_session",
+          metadata: { note, released: released.count },
+          teamId: current.team.id,
+        },
+      });
+      return { released: released.count };
+    });
+    return result;
   }
 
   async cancel(current: AuthContext, sessionId: string, commandId: string) {
@@ -427,6 +646,7 @@ export class RuntimeSessionsService {
       ...cancelled,
       error: safeProfileJson(cancelled.error, session.userBrowserProfileId),
       fencingToken: cancelled.fencingToken.toString(),
+      ownerFencingToken: cancelled.ownerFencingToken?.toString() ?? null,
       payload: safeProfileJson(cancelled.payload, session.userBrowserProfileId),
       result: safeProfileJson(cancelled.result, session.userBrowserProfileId),
     };
@@ -441,7 +661,7 @@ export class RuntimeSessionsService {
     const timeoutSeconds =
       options.timeoutSeconds ?? env().RUNTIME_COMMAND_TIMEOUT_SECONDS;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (["CLOSED", "FAILED", "LOST"].includes(session.status)) {
+      if (session.status === "CLOSED" || session.closureVerifiedAt) {
         return this.detail(current, sessionId);
       }
       if (session.status === "CLOSING") {
@@ -513,6 +733,7 @@ export class RuntimeSessionsService {
       const finalized = await tx.browserRuntimeSession.updateMany({
         data: {
           closedAt,
+          closureVerifiedAt: closedAt,
           humanControllerUserId: null,
           humanControlExpiresAt: null,
           lastError: Prisma.JsonNull,
@@ -521,8 +742,7 @@ export class RuntimeSessionsService {
         where: { id: sessionId, status: "CLOSING" },
       });
       if (finalized.count !== 1) return false;
-      await tx.browserRuntimeSlot.deleteMany({ where: { sessionId } });
-      await tx.browserRuntimeProfileLease.deleteMany({ where: { sessionId } });
+      await releaseVerifiedSessionResources(tx, sessionId);
       if (session.userBrowserProfileId) {
         await tx.userBrowserProfile.updateMany({
           data: {
@@ -632,6 +852,7 @@ export class RuntimeSessionsService {
         const finalized = await tx.browserRuntimeSession.updateMany({
           data: {
             closedAt,
+            closureVerifiedAt: closedAt,
             humanControllerUserId: null,
             humanControlExpiresAt: null,
             lastError: Prisma.JsonNull,
@@ -640,12 +861,7 @@ export class RuntimeSessionsService {
           where: { id: session.id, status: "CLOSING" },
         });
         if (finalized.count !== 1) return false;
-        await tx.browserRuntimeSlot.deleteMany({
-          where: { sessionId: session.id },
-        });
-        await tx.browserRuntimeProfileLease.deleteMany({
-          where: { sessionId: session.id },
-        });
+        await releaseVerifiedSessionResources(tx, session.id);
         return true;
       });
       if (finalized) closedCount += 1;
@@ -675,9 +891,15 @@ export class RuntimeSessionsService {
       data: {
         humanControllerUserId: current.user.id,
         humanControlExpiresAt,
+        controlGeneration: { increment: 1 },
         status: "HUMAN_CONTROL",
       },
-      where: { id: sessionId, status: "ACTIVE" },
+      where: {
+        id: sessionId,
+        status: "ACTIVE",
+        controlGeneration: session.controlGeneration ?? 0,
+        leaseExpiresAt: { gt: new Date() },
+      },
     });
     if (claimed.count !== 1) {
       throw new ConflictException("Runtime session is already controlled.");
@@ -692,13 +914,18 @@ export class RuntimeSessionsService {
       source: "HUMAN",
     });
     if (command?.status !== "SUCCEEDED") {
-      await this.prisma.browserRuntimeSession.update({
+      await this.prisma.browserRuntimeSession.updateMany({
         data: {
           humanControllerUserId: null,
           humanControlExpiresAt: null,
+          controlGeneration: { increment: 1 },
           status: "ACTIVE",
         },
-        where: { id: sessionId },
+        where: {
+          id: sessionId,
+          status: "HUMAN_CONTROL",
+          controlGeneration: (session.controlGeneration ?? 0) + 1,
+        },
       });
       throw new ConflictException("Browser Runtime rejected human control.");
     }
@@ -729,14 +956,37 @@ export class RuntimeSessionsService {
     if (command?.status !== "SUCCEEDED") {
       throw new ConflictException("Browser Runtime rejected control release.");
     }
-    await this.prisma.browserRuntimeSession.update({
+    const released = await this.prisma.browserRuntimeSession.updateMany({
       data: {
         humanControllerUserId: null,
         humanControlExpiresAt: null,
+        controlGeneration: { increment: 1 },
+        // A browser taken over before its first Agent claim needs a bounded
+        // handoff window after release, even if its original startup window elapsed.
+        ...(!session.ownerTaskId
+          ? {
+              executionPermitExpiresAt: new Date(
+                Math.min(
+                  session.leaseExpiresAt.getTime(),
+                  Date.now() + 120_000,
+                ),
+              ),
+            }
+          : {}),
         status: "ACTIVE",
       },
-      where: { id: sessionId },
+      where: {
+        id: sessionId,
+        status: "HUMAN_CONTROL",
+        humanControllerUserId: current.user.id,
+        controlGeneration: session.controlGeneration ?? 0,
+        closureVerifiedAt: null,
+      },
     });
+    if (released.count !== 1)
+      throw new ConflictException(
+        "Browser control changed while it was being released.",
+      );
     await this.audit.record(
       current,
       "runtime.session.human_control.released",
@@ -762,36 +1012,17 @@ export class RuntimeSessionsService {
       select: { sessionId: true },
       where: { expiresAt: { lte: new Date() }, runtimeId },
     });
-    if (expired.length === 0) {
-      return;
-    }
-    const sessionIds = expired.map((row) => row.sessionId);
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.updateMany({
-        data: {
-          lastError: {
-            code: "LEASE_EXPIRED",
-            message: "Runtime session lease expired.",
-          },
-          status: "LOST",
-        },
-        where: {
-          id: { in: sessionIds },
-          status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
-        },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({
-        where: { sessionId: { in: sessionIds } },
-      }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { sessionId: { in: sessionIds } },
-      }),
-    ]);
+    for (const session of expired)
+      await this.prisma.$transaction(async (tx) => {
+        if (!(await releaseVerifiedSessionResources(tx, session.sessionId)))
+          await quarantineSession(tx, session.sessionId, "LEASE_EXPIRED");
+      });
   }
 
   private serializeSession<
     T extends {
       fencingToken: bigint;
+      ownerFencingToken?: bigint | null;
       lastError?: Prisma.JsonValue | null;
       profileKey?: string;
       userBrowserProfileId?: string | null;
@@ -801,10 +1032,15 @@ export class RuntimeSessionsService {
       return {
         ...row,
         fencingToken: row.fencingToken.toString(),
+        ownerFencingToken: row.ownerFencingToken?.toString() ?? null,
         lastError: safeProfileJson(row.lastError, row.userBrowserProfileId),
         profileKey: null,
       };
     }
-    return { ...row, fencingToken: row.fencingToken.toString() };
+    return {
+      ...row,
+      fencingToken: row.fencingToken.toString(),
+      ownerFencingToken: row.ownerFencingToken?.toString() ?? null,
+    };
   }
 }

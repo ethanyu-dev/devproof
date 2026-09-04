@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
 import {
   runtimeOutcomeSchema,
@@ -25,8 +26,10 @@ import {
 import type { RuntimeConfig } from "./config.js";
 import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 import type { PostRunAnalysisExecutor } from "./post-run-analysis.executor.js";
+import { LeaseLostError, LeaseSupervisor } from "./lease-supervisor.js";
 
 export class AgentRuntimeWorker {
+  private readonly eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   private boundPool: RuntimePool | undefined;
   private executor: BrowserVerificationExecutor | undefined;
   private readonly instanceWorkerId: string;
@@ -47,6 +50,7 @@ export class AgentRuntimeWorker {
   }
 
   async run(signal: AbortSignal) {
+    this.eventLoopDelay.enable();
     log("runtime.started", {
       pool: this.boundPool ?? "CREDENTIAL_BOUND",
       workerId: this.instanceWorkerId,
@@ -67,6 +71,7 @@ export class AgentRuntimeWorker {
         }
       }
     } finally {
+      this.eventLoopDelay.disable();
       for (const lane of this.lanes.values()) lane.draining = true;
       await Promise.allSettled(
         [...this.lanes.values()].map((lane) => lane.promise),
@@ -213,23 +218,34 @@ export class AgentRuntimeWorker {
     );
     const abortFromShutdown = () => controller.abort(shutdown.reason);
     shutdown.addEventListener("abort", abortFromShutdown, { once: true });
-    const heartbeat = setInterval(() => {
-      void this.controlPlane
-        .heartbeat(lease)
-        .then((response) => {
-          if (response.deadlineAt) {
-            task.snapshot.deadlineAt = response.deadlineAt;
-            deadline.rearm(response.deadlineAt);
-          }
-          if (response.hardDeadlineAt) {
-            task.snapshot.hardDeadlineAt = response.hardDeadlineAt;
-          }
-          if (response.directive === "CANCEL") {
-            controller.abort(new Error("Run cancellation requested."));
-          }
-        })
-        .catch((error: unknown) => controller.abort(error));
-    }, 15_000);
+    const heartbeat = new LeaseSupervisor({
+      initialLease: task,
+      controller,
+      intervalMs: this.config.DEVPROOF_AGENT_HEARTBEAT_INTERVAL_MS ?? 15_000,
+      timeoutMs: this.config.DEVPROOF_AGENT_HEARTBEAT_TIMEOUT_MS ?? 5_000,
+      safetyMs: this.config.DEVPROOF_AGENT_LEASE_SAFETY_MS ?? 10_000,
+      renew: (signal) => this.controlPlane.heartbeat(lease, signal),
+      terminal: (error) =>
+        error instanceof ControlPlaneError &&
+        error.status < 500 &&
+        error.status !== 429,
+      onDiagnostic: (event, details) =>
+        log(event, {
+          ...details,
+          eventLoopDelayP99Ms: this.eventLoopDelay.percentile(99) / 1_000_000,
+          taskId: task.taskId,
+          workerId,
+        }),
+      onRenewed: (response) => {
+        if (response.deadlineAt) {
+          task.snapshot.deadlineAt = response.deadlineAt;
+          deadline.rearm(response.deadlineAt);
+        }
+        if (response.hardDeadlineAt) {
+          task.snapshot.hardDeadlineAt = response.hardDeadlineAt;
+        }
+      },
+    });
 
     try {
       let outcome: RuntimeOutcome;
@@ -245,6 +261,13 @@ export class AgentRuntimeWorker {
         }
         outcome = await this.executor.execute(task, lease, controller.signal);
       } catch (error) {
+        if (
+          controller.signal.reason instanceof LeaseLostError ||
+          isLeaseConflict(error)
+        ) {
+          log("runtime.task.lease_lost", { taskId: task.taskId, workerId });
+          return;
+        }
         if (controller.signal.aborted && isCancellation(error)) {
           log("runtime.task.cancelled", { taskId: task.taskId });
           return;
@@ -252,6 +275,7 @@ export class AgentRuntimeWorker {
         outcome = classifyFailure(error, task);
       }
 
+      if (controller.signal.reason instanceof LeaseLostError) return;
       try {
         await this.submitOutcomeReliably(lease, outcome);
         log("runtime.task.completed", {
@@ -266,7 +290,7 @@ export class AgentRuntimeWorker {
         });
       }
     } finally {
-      clearInterval(heartbeat);
+      heartbeat.stop();
       deadline.dispose();
       shutdown.removeEventListener("abort", abortFromShutdown);
     }
@@ -519,6 +543,14 @@ export class AgentRuntimeWorker {
     }
     throw lastError;
   }
+}
+
+function isLeaseConflict(error: unknown) {
+  return (
+    error instanceof ControlPlaneError &&
+    error.status === 409 &&
+    /lease|terminal|no longer accepts/iu.test(JSON.stringify(error.body))
+  );
 }
 
 export class RuntimeDeadlineController {

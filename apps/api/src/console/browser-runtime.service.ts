@@ -9,6 +9,7 @@ import {
   RUNTIME_PROTOCOL,
   runtimeCommandMinimumMinor,
 } from "@devproof/runtime-protocol";
+import { readCaseScheduling, caseExecutionPhase } from "@devproof/test-domain";
 
 import type { AuthContext } from "../auth/auth.types.js";
 import { env } from "../config/env.js";
@@ -63,12 +64,27 @@ export class BrowserRuntimeService {
         teamId: current.team.id,
       },
     });
-    const [slotCounts, pinnedWaiting, flexibleWaiting] = await Promise.all([
+    const [
+      slotCounts,
+      pinnedWaiting,
+      flexibleWaiting,
+      waitingExecutions,
+      pendingCases,
+      quarantinedSessions,
+    ] = await Promise.all([
       this.prisma.browserRuntimeSlot.groupBy({
         _count: { _all: true },
         by: ["runtimeId"],
         where: {
-          expiresAt: { gt: now },
+          OR: [
+            { expiresAt: { gt: now } },
+            {
+              session: {
+                quarantinedAt: { not: null },
+                closureVerifiedAt: null,
+              },
+            },
+          ],
           runtimeId: { in: runtimes.map((runtime) => runtime.id) },
         },
       }),
@@ -90,7 +106,113 @@ export class BrowserRuntimeService {
           targetRuntimeId: null,
         },
       }),
+      this.prisma.browserExecution.findMany({
+        select: { runId: true, targetRuntimeId: true, error: true },
+        where: {
+          run: {
+            teamId: current.team.id,
+            lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
+          },
+          status: { in: ["REQUESTED", "WAITING_CAPACITY", "ALLOCATING"] },
+        },
+      }),
+      this.prisma.taskCaseExecution.findMany({
+        select: {
+          taskExecutionId: true,
+          caseId: true,
+          deploymentId: true,
+          executionOrdinal: true,
+          dispatchStatus: true,
+          dispatchAttempts: true,
+          scheduling: true,
+          runId: true,
+          run: {
+            select: {
+              lifecycle: true,
+              executionDisposition: true,
+              verdict: true,
+            },
+          },
+        },
+        where: {
+          taskExecution: {
+            teamId: current.team.id,
+            lifecycle: { in: ["RUNNING", "QUEUED", "WAITING_INPUT"] },
+          },
+        },
+      }),
+      this.prisma.browserRuntimeSession.groupBy({
+        by: ["runtimeId"],
+        _count: { _all: true },
+        where: {
+          teamId: current.team.id,
+          quarantinedAt: { not: null },
+          closureVerifiedAt: null,
+        },
+      }),
     ]);
+    const upstreamWaitingByReason: Record<string, number> = {};
+    const runtimeQueue = new Map<string, number>();
+    let flexibleRuntimeWaiting = 0;
+    const addUpstream = (reason: string) => {
+      upstreamWaitingByReason[reason] =
+        (upstreamWaitingByReason[reason] ?? 0) + 1;
+    };
+    for (const execution of waitingExecutions) {
+      const error =
+        execution.error &&
+        typeof execution.error === "object" &&
+        !Array.isArray(execution.error)
+          ? execution.error
+          : {};
+      const code =
+        typeof error.code === "string" ? error.code : "BROWSER_ADMISSION";
+      if (code === "NO_AVAILABLE_SLOT") {
+        if (execution.targetRuntimeId)
+          runtimeQueue.set(
+            execution.targetRuntimeId,
+            (runtimeQueue.get(execution.targetRuntimeId) ?? 0) + 1,
+          );
+        else flexibleRuntimeWaiting += 1;
+      } else
+        addUpstream(
+          code === "IDENTITY_CAPACITY"
+            ? "IDENTITY_LIMIT"
+            : code === "NO_MATCHING_RUNNER"
+              ? "RUNTIME_OFFLINE"
+              : code,
+        );
+    }
+    const latestPending = new Map<string, (typeof pendingCases)[number]>();
+    for (const item of pendingCases) {
+      const key = `${item.taskExecutionId}:${item.caseId}:${item.deploymentId}`;
+      const previous = latestPending.get(key);
+      if (!previous || previous.executionOrdinal < item.executionOrdinal)
+        latestPending.set(key, item);
+    }
+    const admissionWaitingRunIds = new Set(
+      waitingExecutions.map((item) => item.runId),
+    );
+    for (const item of latestPending.values()) {
+      const scheduling = readCaseScheduling(item.scheduling);
+      if (item.runId) {
+        // An admitted browser already occupies a slot but can still await an
+        // Agent. Deduplicate overlapping admission snapshots by Run identity.
+        if (
+          !admissionWaitingRunIds.has(item.runId) &&
+          scheduling?.state === "ADMITTED" &&
+          scheduling.reason === "AGENT_CAPACITY" &&
+          caseExecutionPhase(item) === "queued"
+        )
+          addUpstream("AGENT_CAPACITY");
+        continue;
+      }
+      if (caseExecutionPhase({ ...item, run: null }) !== "terminal")
+        addUpstream(scheduling?.reason ?? "SCHEDULER_PENDING");
+    }
+    const quarantinedByRuntime = new Map(
+      quarantinedSessions.map((row) => [row.runtimeId, row._count._all]),
+    );
     const occupiedByRuntime = new Map(
       slotCounts.map((row) => [row.runtimeId, row._count._all]),
     );
@@ -115,11 +237,22 @@ export class BrowserRuntimeService {
           name: runtime.name,
           occupied,
           online,
+          quarantined: quarantinedByRuntime.get(runtime.id) ?? 0,
+          runtimeWaiting: runtimeQueue.get(runtime.id) ?? 0,
           waiting: waitingByRuntime.get(runtime.id) ?? 0,
         };
       }),
     );
     return {
+      runtimeWaiting:
+        flexibleRuntimeWaiting +
+        [...runtimeQueue.values()].reduce((total, count) => total + count, 0),
+      flexibleRuntimeWaiting,
+      upstreamWaitingByReason,
+      upstreamWaiting: Object.values(upstreamWaitingByReason).reduce(
+        (total, count) => total + count,
+        0,
+      ),
       availableCapacity: nodes.reduce(
         (total, node) => total + node.available,
         0,

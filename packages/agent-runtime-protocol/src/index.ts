@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 9,
+  minor: 10,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -355,6 +355,8 @@ export const runtimeTaskLeaseSchema = z.object({
   fencingToken: z.string().regex(/^\d+$/u),
   leaseExpiresAt: z.string().datetime(),
   leaseToken: z.string().uuid(),
+  serverTime: z.string().datetime().optional(),
+  leaseDurationMs: z.number().nonnegative().optional(),
   snapshot: runtimeTaskSnapshotSchema,
   taskId: z.string().uuid(),
 });
@@ -436,6 +438,8 @@ export const runtimeTaskHeartbeatOutputSchema = z.object({
   directive: z.enum(["CONTINUE", "CANCEL"]),
   hardDeadlineAt: z.string().datetime().optional(),
   leaseExpiresAt: z.string().datetime(),
+  serverTime: z.string().datetime().optional(),
+  leaseDurationMs: z.number().nonnegative().optional(),
   extension: z
     .object({
       extendedByMs: z.number().int().positive(),
@@ -613,6 +617,15 @@ export const runtimeBrowserAcquireOutputSchema = z.discriminatedUnion(
         "NO_MATCHING_RUNNER",
         "NO_AVAILABLE_SLOT",
         "SESSION_OPEN_FAILED",
+        "DATA_LOCK",
+        "IDENTITY_CAPACITY",
+        "AUTH_REQUIRED",
+        "AUTH_REFRESH",
+        "CASE_DEPENDENCY",
+        "LEASE_RECOVERY",
+        "ADMISSION_STALE",
+        "PROTOCOL_UNSUPPORTED",
+        "AGENT_CAPACITY",
       ]),
       retryAfterMs: z.number().int().min(1).max(60_000),
       status: z.literal("WAITING_CAPACITY"),

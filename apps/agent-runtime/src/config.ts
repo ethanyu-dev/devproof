@@ -19,6 +19,24 @@ const configSchema = z
       .min(100)
       .max(10_000)
       .default(750),
+    DEVPROOF_AGENT_HEARTBEAT_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(30_000)
+      .default(15_000),
+    DEVPROOF_AGENT_HEARTBEAT_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(10_000)
+      .default(5_000),
+    DEVPROOF_AGENT_LEASE_SAFETY_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(20_000)
+      .default(10_000),
     DEVPROOF_AGENT_TOOL_LIMIT: z.coerce
       .number()
       .int()

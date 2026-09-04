@@ -110,6 +110,7 @@ describe("RuntimeSessionsService user Profile isolation", () => {
             {
               error: null,
               fencingToken: 1n,
+              ownerFencingToken: 9007199254740993n,
               payload: {
                 nested: { runtimeProfileKey: "opaque-user-profile" },
                 profileKey: "opaque-user-profile",
@@ -151,6 +152,7 @@ describe("RuntimeSessionsService user Profile isolation", () => {
       "opaque-user-profile",
     );
     expect(detail.commands[0]?.payload).toEqual({ nested: {} });
+    expect(detail.commands[0]?.ownerFencingToken).toBe("9007199254740993");
   });
 });
 
@@ -294,7 +296,16 @@ describe("RuntimeSessionsService lifecycle cleanup", () => {
       browserRuntimeProfileLease: {
         deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      executionResourceLease: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        count: vi.fn().mockResolvedValue(0),
+      },
       browserRuntimeSession: {
+        findUnique: vi.fn().mockResolvedValue({
+          status: "CLOSED",
+          closureVerifiedAt: new Date(),
+          ownerTaskId: null,
+        }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       browserRuntimeSlot: {

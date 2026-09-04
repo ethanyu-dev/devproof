@@ -101,6 +101,8 @@ export function PlaygroundClient() {
   const [taskLoadError, setTaskLoadError] = useState<string | null>(null);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [issueRef, setIssueRef] = useState("");
+  const [casePolicyReviewRequired, setCasePolicyReviewRequired] =
+    useState(false);
   const [profiles, setProfiles] = useState<BrowserProfileOption[]>([]);
   const [profileStrategy, setProfileStrategy] = useState<
     "EPHEMERAL" | "REQUESTER" | "ISSUE_ASSIGNEE" | "EXPLICIT_PROFILE"
@@ -207,6 +209,7 @@ export function PlaygroundClient() {
       mode === "ISSUE_SPEC"
         ? {
             issueRef,
+            casePolicyReviewRequired,
             profilePolicy: {
               onUnavailable: "WAIT_FOR_PROFILE" as const,
               ...(profileStrategy === "EXPLICIT_PROFILE" && profileId
@@ -420,6 +423,20 @@ export function PlaygroundClient() {
                     value={issueRef}
                   />
                 </Field>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={casePolicyReviewRequired}
+                    onChange={(event) =>
+                      setCasePolicyReviewRequired(event.target.checked)
+                    }
+                  />{" "}
+                  生成后核对执行策略
+                  <small style={{ display: "block" }}>
+                    生成 Case
+                    后先等待，在任务详情核对只读、写入及前置依赖后逐项开始执行。
+                  </small>
+                </label>
                 <Field label="验证环境（可选，可添加多个）">
                   <div className="dp-deployment-editor">
                     {specDeployments.map((deployment, index) => (

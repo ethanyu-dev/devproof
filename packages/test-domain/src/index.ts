@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { summarizeCaseScheduling } from "./task-scheduling.js";
+export * from "./task-scheduling.js";
 
 import type {
   ExecutionDisposition,
@@ -137,6 +139,7 @@ export interface TaskExecutionProjectionInput {
   caseExecutions: Array<{
     dispatchAttempts: number;
     dispatchMaxAttempts: number;
+    scheduling?: unknown;
     dispatchStatus:
       "PENDING" | "DISPATCHING" | "LINKED" | "FAILED" | "CANCELLED";
     run: {
@@ -254,7 +257,11 @@ export function projectTaskExecution(
     (run) => !TERMINAL_RUN_LIFECYCLES.has(run.lifecycle),
   );
   if (!caseExecutions.length || dispatchActive || runsActive) {
-    return taskProjection("SPEC_EXECUTION", "RUNNING", "RUNNING", null, null);
+    const scheduling = summarizeCaseScheduling(caseExecutions);
+    return {
+      ...taskProjection("SPEC_EXECUTION", "RUNNING", "RUNNING", null, null),
+      waitingReason: scheduling.reason,
+    };
   }
 
   const fullyLinked = caseExecutions.every(

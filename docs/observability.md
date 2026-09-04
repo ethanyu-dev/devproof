@@ -40,6 +40,27 @@ Deployment examples are in:
 
 Metrics cover HTTP traffic, MCP/HTTP tools, model operations, Task and Stage state, Runtime connectivity and protocol failures, worker health, notification backlog, artifact volume, post-run analysis jobs, and generated improvement work items. If `TOOL_INVOCATION_STALE_SECONDS` changes, update the `DevProofToolInvocationStuck` alert threshold too.
 
+### Execution waiting and recovery
+
+| Metric                                            | Meaning                                                                                                                                                                           |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `devproof_execution_waiting{reason}`              | Latest waiting Case × deployment executions, plus direct Run browser admission waits. Terminal Runs and cancelled/dispatch-exhausted Cases are excluded.                          |
+| `devproof_execution_oldest_wait_seconds{reason}`  | Oldest wait age for each bounded scheduling reason.                                                                                                                               |
+| `devproof_agent_lease_recoveries{status}`         | Retained recovery records by `pending`, `closing`, `retry_scheduled`, `exhausted`, or `write_outcome_unknown`. This is a gauge, not a monotonic retry counter.                    |
+| `devproof_resource_quarantines`                   | Business resource leases kept while interrupted writes need resolution.                                                                                                           |
+| `devproof_resource_quarantine_oldest_seconds`     | Oldest resource quarantine age; legacy rows without a quarantine timestamp use the lease creation time.                                                                           |
+| `devproof_task_projection_pending`                | Tasks with unapplied source changes.                                                                                                                                              |
+| `devproof_task_projection_oldest_pending_seconds` | Age of the oldest currently recorded projection request.                                                                                                                          |
+| `devproof_task_projection_staleness_seconds`      | Age of the oldest saved projection among dirty Tasks; new Tasks use creation time. This also detects stale projections when recurring source updates refresh the dirty timestamp. |
+
+Reason and recovery-status labels use fixed allowlists; unknown values are `other`. Task, Run, Profile, resource, domain, and tenant identifiers stay in logs and trace links. Empty reason/status series disappear on the next collection; use `or vector(0)` where an alert needs an explicit zero.
+
+The Console capacity response keeps historical `nodes[].waiting` (all queued browser admission) for compatibility. `runtimeWaiting` counts only actual Runtime slot shortages, while `upstreamWaitingByReason` covers identity, authentication, data-lock, dependency, and policy-review waits. A Profile-blocked Task can therefore have upstream waiting with a node slot queue of zero. Quarantined, unclosed browser slots remain occupied even after their database TTL passes.
+
+Alert on compatible eligible backlog with idle capacity beyond normal admission/startup time. Identity/data-lock waits identify a workload bottleneck rather than a broken Runtime scheduler. For persistent projection lag, check the task-execution worker and database/CAS contention; a briefly dirty old Task can have high projection staleness until the next successful reconciliation.
+
+For `write_outcome_unknown`, open **接入配置 → 浏览器执行节点 → 等待核对的写操作**, inspect the affected Run and backend state, and record the verified outcome. The release action is available only after closure of the old browser is confirmed; releasing a TTL or restarting a worker is not a substitute for resolving an uncertain write.
+
 ## Structured logs
 
 API, Agent Runtime, and Browser Runtime emit one JSON object per line. Stable fields include `timestamp`, `level`, `service`, and `event`; contextual records may also include `requestId`, `traceId`, `spanId`, `runId`, `toolInvocationId`, `credentialId`, `runtimeId`, `commandId`, and `durationMs`.

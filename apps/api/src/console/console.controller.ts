@@ -26,6 +26,7 @@ import { AuthGuard } from "../auth/auth.guard.js";
 import type { AuthContext } from "../auth/auth.types.js";
 import { CurrentAuth } from "../auth/current-auth.decorator.js";
 import { parseBody } from "../common/validation.js";
+import { z } from "zod";
 import { BrowserRuntimeService } from "./browser-runtime.service.js";
 import { ConsoleService } from "./console.service.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
@@ -223,6 +224,24 @@ export class ConsoleController {
   @Get("runtime-sessions")
   sessions(@CurrentAuth() current: AuthContext) {
     return this.runtimeSessions.list(current);
+  }
+
+  @Get("runtime-quarantines")
+  quarantines(@CurrentAuth() current: AuthContext) {
+    return this.runtimeSessions.listQuarantines(current);
+  }
+
+  @Post("runtime-sessions/:id/resolve-write-outcome")
+  resolveWriteOutcome(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const input = parseBody(
+      z.object({ note: z.string().trim().min(10).max(2000) }).strict(),
+      body,
+    );
+    return this.runtimeSessions.resolveWriteOutcome(current, id, input.note);
   }
 
   @Post("runtime-sessions")

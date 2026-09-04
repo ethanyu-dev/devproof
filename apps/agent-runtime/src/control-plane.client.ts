@@ -49,6 +49,7 @@ export class ControlPlaneClient {
   }
 
   async claim(workerId: string, signal?: AbortSignal) {
+    const started = performance.now();
     const result = await this.request("/internal/v2/runtime/tasks/claim", {
       body: {
         capabilities: ["BROWSER_VERIFICATION"],
@@ -57,7 +58,10 @@ export class ControlPlaneClient {
       },
       ...(signal ? { signal } : {}),
     });
-    return runtimeTaskClaimOutputSchema.parse(result).task;
+    const task = runtimeTaskClaimOutputSchema.parse(result).task;
+    return task
+      ? withConservativeLeaseDuration(task, performance.now() - started)
+      : null;
   }
 
   async claimSpec(workerId: string, signal?: AbortSignal) {
@@ -80,11 +84,15 @@ export class ControlPlaneClient {
   }
 
   async heartbeat(lease: ActiveLease, signal?: AbortSignal) {
+    const started = performance.now();
     const result = await this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/heartbeat`,
       { body: this.identity(lease), ...(signal ? { signal } : {}) },
     );
-    return runtimeTaskHeartbeatOutputSchema.parse(result);
+    return withConservativeLeaseDuration(
+      runtimeTaskHeartbeatOutputSchema.parse(result),
+      performance.now() - started,
+    );
   }
 
   async heartbeatSpec(lease: ActiveLease, signal?: AbortSignal) {
@@ -242,10 +250,14 @@ export class ControlPlaneClient {
   async acquireBrowser(
     lease: ActiveLease,
     execution: RuntimeBrowserAcquireInput["execution"],
+    signal?: AbortSignal,
   ) {
     const result = await this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/browser/acquire`,
-      { body: { ...this.identity(lease), execution } },
+      {
+        body: { ...this.identity(lease), execution },
+        ...(signal ? { signal } : {}),
+      },
     );
     return runtimeBrowserAcquireOutputSchema.parse(result);
   }
@@ -259,6 +271,7 @@ export class ControlPlaneClient {
       `/internal/v2/runtime/tasks/${lease.taskId}/browser/commands`,
       {
         body: { ...this.identity(lease), command },
+        timeoutMs: ((command.timeoutSeconds ?? 30) + 5) * 1_000,
         ...(signal ? { signal } : {}),
       },
     );
@@ -267,7 +280,7 @@ export class ControlPlaneClient {
   async releaseBrowser(lease: ActiveLease) {
     return this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/browser/release`,
-      { body: this.identity(lease) },
+      { body: this.identity(lease), timeoutMs: 65_000 },
     );
   }
 
@@ -338,8 +351,12 @@ export class ControlPlaneClient {
 
   private async request(
     path: string,
-    options: { body: unknown; signal?: AbortSignal },
+    options: { body: unknown; signal?: AbortSignal; timeoutMs?: number },
   ): Promise<unknown> {
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? 30_000);
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, timeout])
+      : timeout;
     const response = await fetch(new URL(path, this.baseUrl), {
       body: JSON.stringify(options.body),
       headers: {
@@ -347,7 +364,7 @@ export class ControlPlaneClient {
         "content-type": "application/json",
       },
       method: "POST",
-      ...(options.signal ? { signal: options.signal } : {}),
+      signal,
     });
     const text = await response.text();
     const body = text ? safeJson(text) : null;
@@ -356,6 +373,25 @@ export class ControlPlaneClient {
     }
     return body;
   }
+}
+
+function withConservativeLeaseDuration<
+  T extends {
+    leaseExpiresAt: string;
+    serverTime?: string | undefined;
+    leaseDurationMs?: number | undefined;
+  },
+>(lease: T, elapsedMs: number): T {
+  if (!lease.serverTime) return lease;
+  return {
+    ...lease,
+    leaseDurationMs: Math.max(
+      0,
+      Date.parse(lease.leaseExpiresAt) -
+        Date.parse(lease.serverTime) -
+        elapsedMs,
+    ),
+  };
 }
 
 export class ControlPlaneError extends Error {

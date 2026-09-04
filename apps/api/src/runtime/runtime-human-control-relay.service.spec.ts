@@ -8,6 +8,7 @@ function fixture() {
   const send = vi.fn().mockResolvedValue(undefined);
   const relay = new RuntimeHumanControlRelay({ send } as never);
   const session = {
+    controlGeneration: 3,
     fencingToken: 7n,
     id: randomUUID(),
     leaseToken: randomUUID(),
@@ -73,6 +74,7 @@ describe("RuntimeHumanControlRelay", () => {
     ]);
     await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
     const dispatch = send.mock.calls[0]?.[1];
+    expect(dispatch.controlGeneration).toBe(3);
 
     relay.acceptInputResult(session.runtimeId, {
       dispatchId: dispatch.dispatchId,

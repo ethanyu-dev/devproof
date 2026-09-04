@@ -10,9 +10,83 @@ import {
   runtimeCommandPayloadSchema,
   runtimeClientMessageSchema,
   runtimeServerMessageSchema,
+  runtimeSessionPermitSchema,
 } from "./index.js";
 
 describe("Runtime protocol", () => {
+  it("preserves an optional nonnegative control generation on execution permits", () => {
+    const permit = {
+      sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+      fencingToken: "1",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      ownerKind: "SYSTEM",
+      expiresAt: "2026-09-04T01:00:00Z",
+    };
+    expect(runtimeSessionPermitSchema.parse(permit)).not.toHaveProperty(
+      "controlGeneration",
+    );
+    expect(
+      runtimeSessionPermitSchema.parse({ ...permit, controlGeneration: 2 }),
+    ).toHaveProperty("controlGeneration", 2);
+    for (const controlGeneration of [-1, 0.5])
+      expect(
+        runtimeSessionPermitSchema.safeParse({ ...permit, controlGeneration })
+          .success,
+      ).toBe(false);
+  });
+
+  it("gates authentication snapshots on protocol 1.13 and keeps them out of Agent tools", () => {
+    expect(runtimeCommandMinimumMinor("profile.snapshot")).toBe(13);
+    expect(
+      runtimeCommandPayloadSchema.safeParse({
+        commandType: "session.open",
+        payload: {
+          profileKey: "run-1",
+          profileMode: "EPHEMERAL",
+          authSnapshot: { profileKey: "source", generation: 7 },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      runtimeCommandPayloadSchema.safeParse({
+        commandType: "session.open",
+        payload: {
+          profileKey: "run-1",
+          profileMode: "PERSISTENT",
+          authSnapshot: { profileKey: "source", generation: 7 },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      runtimeActionCommandInputSchema.safeParse({
+        commandType: "profile.snapshot",
+        payload: { profileKey: "source", generation: 1 },
+      }).success,
+    ).toBe(false);
+    expect(
+      runtimeCommandPayloadSchema.safeParse({
+        commandType: "profile.snapshot",
+        payload: {
+          profileKey: "source",
+          generation: 1,
+          probeConcurrency: 5,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires an executor identity for AGENT execution permits", () => {
+    expect(
+      runtimeSessionPermitSchema.safeParse({
+        sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
+        fencingToken: "1",
+        leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+        ownerKind: "AGENT",
+        expiresAt: "2026-09-04T01:00:00Z",
+      }).success,
+    ).toBe(false);
+  });
+
   it("publishes semantic command guidance in the JSON schema", () => {
     const publicSchema = JSON.stringify(
       z.toJSONSchema(runtimeActionCommandInputSchema),
@@ -56,7 +130,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(12);
+    expect(RUNTIME_PROTOCOL.minor).toBe(13);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");
@@ -469,6 +543,7 @@ describe("Runtime protocol", () => {
 
   it("accepts bounded transient human input without a persisted command", () => {
     const parsed = runtimeServerMessageSchema.parse({
+      controlGeneration: 3,
       dispatchId: "3cb7064e-02f7-4c5a-b4e7-c6009d175ca8",
       events: [
         { button: "left", phase: "down", type: "pointer", x: 0.5, y: 0.5 },
@@ -482,6 +557,7 @@ describe("Runtime protocol", () => {
     });
 
     expect(parsed.type).toBe("human.input.dispatch");
+    expect(parsed).toMatchObject({ controlGeneration: 3 });
   });
 
   it("rejects out-of-bounds human input coordinates", () => {

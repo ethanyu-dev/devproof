@@ -18,6 +18,7 @@ import {
   userBrowserProfileCreateInputSchema,
   userBrowserProfilePrepareInputSchema,
   userBrowserProfileUpdateInputSchema,
+  userBrowserProfileVerifyInputSchema,
 } from "@devproof/contracts";
 
 import { AuthGuard } from "../auth/auth.guard.js";
@@ -78,8 +79,16 @@ export class UserBrowserProfilesController {
   }
 
   @Post(":id/verify")
-  verify(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
-    return this.profiles.verify(current, id);
+  verify(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.profiles.verify(
+      current,
+      id,
+      parseBody(userBrowserProfileVerifyInputSchema, body ?? {}),
+    );
   }
 
   @Post(":id/close")

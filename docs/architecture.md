@@ -93,12 +93,12 @@ Only the API may transition Task or Run state, schedule a retry, or perform term
 ## Browser execution invariants
 
 - One Runtime slot is owned by at most one live Browser Session.
-- One persistent Profile is used by at most one Task at a time across all API instances.
-- A persistent Profile remains affine to the Runtime that stores its browser directory.
+- A serial persistent Profile is used by at most one Task at a time across all API instances. Opt-in isolated execution shares an immutable authentication snapshot across independent browser contexts, bounded by the Profile limit and Runtime slots. The persistent login directory remains exclusive for preparation and refresh.
+- A persistent Profile and its authentication snapshot generations remain affine to the Runtime that stores them. Capacity, identity permits, hierarchical business-data leases and Attempt association are acquired atomically; only reviewed readers share overlapping data scopes. A ready waiting writer prevents later conflicting readers from overtaking it, while upstream auth/dependency/offline waits do not reserve data priority.
 - Session results must match the current session ID, lease token, and fencing token.
 - Resuming a session rotates the lease token and increments the fencing token.
-- Ephemeral Profiles become lost after a Runtime restart; persistent Profiles may be restored.
-- Slots and Profile reservations are released after completion, cancellation, timeout, revocation, or lease expiry.
+- Runtime restart reconciles persisted session descriptors and terminates orphaned browser processes before reporting verified closure. A revoked session cannot resume by heartbeat; safe execution recovery uses a bounded new Attempt.
+- Session expiry revokes permission and quarantines occupied slots/identity permits until browser closure is verified. An uncertain write retains its business-data lock until its outcome is reconciled, even after the browser closes. Completed outcomes release verified-closed resources.
 - Runtime-wide SSRF policy governs navigation, redirects, subresources, and WebSockets. Profile authorization does not replace network policy.
 
 Domain routing evaluates the hostname in `execution.targetUrl`. Exact and `*.` wildcard rules may restrict a task to selected Runtimes. When no rule matches, the API selects from online, capability-compatible Runtimes.

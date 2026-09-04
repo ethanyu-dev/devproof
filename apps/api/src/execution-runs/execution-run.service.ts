@@ -174,9 +174,10 @@ export class ExecutionRunService {
           where: { id: taskExecutionId, teamId: current.team.id },
         })
       : null;
-    const requestedDeadlineAt = new Date(
-      now.getTime() + input.deadlineSeconds * 1_000,
-    );
+    // Queue waiting has its own deadline; execution time starts on first claim.
+    const requestedDeadlineAt =
+      parentTask?.deadlineAt ??
+      new Date(now.getTime() + Math.max(300, input.deadlineSeconds) * 1_000);
     const deadlineAt = new Date(
       Math.min(
         requestedDeadlineAt.getTime(),
@@ -186,14 +187,7 @@ export class ExecutionRunService {
     if (deadlineAt <= now) {
       throw new ConflictException("The parent task deadline has elapsed.");
     }
-    const hardDeadlineAt = new Date(
-      deadlinePolicy.mode === "ADAPTIVE"
-        ? Math.min(
-            deadlineAt.getTime() + deadlinePolicy.maxExtensionSeconds * 1_000,
-            parentTask?.deadlineAt.getTime() ?? Number.POSITIVE_INFINITY,
-          )
-        : deadlineAt.getTime(),
-    );
+    const hardDeadlineAt = deadlineAt;
     const runId = randomUUID();
     const attemptId = randomUUID();
     const taskId = randomUUID();
@@ -209,6 +203,7 @@ export class ExecutionRunService {
       environment: input.environment,
       executionPolicy: {
         browser: input.browserPolicy,
+        concurrency: input.concurrencyPolicy,
         deadline: deadlinePolicy,
         hitl: input.hitlPolicy,
         retryPolicy: input.retryPolicy,
@@ -227,12 +222,22 @@ export class ExecutionRunService {
             criteriaSnapshot: json(input.criteria),
             browserProfileId,
             currentAttemptNumber: 1,
+            concurrencyPolicy: input.concurrencyPolicy
+              ? json(input.concurrencyPolicy)
+              : Prisma.JsonNull,
             deadlineAt,
+            queueDeadlineAt: deadlineAt,
+            executionBudgetSeconds: input.deadlineSeconds,
+            executionMaxExtensionSeconds:
+              deadlinePolicy.mode === "ADAPTIVE"
+                ? deadlinePolicy.maxExtensionSeconds
+                : 0,
             deadlineExtensionCount: 0,
             deadlineExtendedMs: 0,
             environmentSnapshot: json(input.environment),
             executionPolicy: json({
               browser: input.browserPolicy,
+              concurrency: input.concurrencyPolicy,
               businessReferences: input.businessReferences,
               deadline: deadlinePolicy,
               hitl: input.hitlPolicy,
@@ -854,7 +859,12 @@ export class ExecutionRunService {
       });
       if (browserExecution?.runtimeSessionId) {
         await tx.browserRuntimeSession.updateMany({
-          data: { leaseExpiresAt: resumedDeadlineAt },
+          data: {
+            leaseExpiresAt: resumedDeadlineAt,
+            executionPermitExpiresAt: new Date(
+              Math.min(resumedDeadlineAt.getTime(), now.getTime() + 120_000),
+            ),
+          },
           where: {
             id: browserExecution.runtimeSessionId,
             status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL"] },

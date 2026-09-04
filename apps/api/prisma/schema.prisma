@@ -707,41 +707,52 @@ model RuntimeRoutingRule {
 }
 
 model BrowserRuntimeSession {
-  id                    String                       @id @default(uuid()) @db.Uuid
-  teamId                String                       @map("team_id") @db.Uuid
-  runtimeId             String                       @map("runtime_id") @db.Uuid
-  status                RuntimeSessionStatus         @default(OPENING)
-  profileMode           BrowserProfileMode           @map("profile_mode")
-  profileKey            String                       @map("profile_key")
-  userBrowserProfileId  String?                      @map("user_browser_profile_id") @db.Uuid
-  purpose               BrowserRuntimeSessionPurpose @default(EXECUTION)
-  slotNumber            Int                          @map("slot_number")
-  leaseToken            String                       @map("lease_token") @db.Uuid
-  fencingToken          BigInt                       @map("fencing_token")
-  leaseExpiresAt        DateTime                     @map("lease_expires_at") @db.Timestamptz
-  protocolMajor         Int                          @map("protocol_major")
-  protocolMinor         Int                          @map("protocol_minor")
-  humanControllerUserId String?                      @map("human_controller_user_id") @db.Uuid
-  humanControlExpiresAt DateTime?                    @map("human_control_expires_at") @db.Timestamptz
-  lastError             Json?                        @map("last_error")
-  openedAt              DateTime?                    @map("opened_at") @db.Timestamptz
-  closedAt              DateTime?                    @map("closed_at") @db.Timestamptz
-  createdAt             DateTime                     @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt             DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
-  team                  Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  runtime               BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Restrict)
-  humanController       User?                        @relation("RuntimeSessionHumanController", fields: [humanControllerUserId], references: [id], onDelete: SetNull)
-  slot                  BrowserRuntimeSlot?
-  profileLease          BrowserRuntimeProfileLease?
-  commands              BrowserRuntimeCommand[]
-  artifacts             BrowserRuntimeArtifact[]
-  events                BrowserRuntimeEvent[]
-  testRuns              TestRun[]
-  verificationRuns      VerificationRun[]
-  humanControlLease     BrowserHumanControlLease?
-  browserExecutions     BrowserExecution[]
-  userBrowserProfile    UserBrowserProfile?          @relation(fields: [userBrowserProfileId], references: [id], onDelete: SetNull)
+  id                       String                       @id @default(uuid()) @db.Uuid
+  teamId                   String                       @map("team_id") @db.Uuid
+  runtimeId                String                       @map("runtime_id") @db.Uuid
+  status                   RuntimeSessionStatus         @default(OPENING)
+  profileMode              BrowserProfileMode           @map("profile_mode")
+  profileKey               String                       @map("profile_key")
+  userBrowserProfileId     String?                      @map("user_browser_profile_id") @db.Uuid
+  authSnapshotGeneration   Int?                         @map("auth_snapshot_generation")
+  identityPermit           Int?                         @map("identity_permit")
+  ownerTaskId              String?                      @map("owner_task_id") @db.Uuid
+  ownerFencingToken        BigInt?                      @map("owner_fencing_token")
+  controlGeneration        Int                          @default(0) @map("control_generation")
+  executionPermitExpiresAt DateTime?                    @map("execution_permit_expires_at") @db.Timestamptz
+  quarantinedAt            DateTime?                    @map("quarantined_at") @db.Timestamptz
+  closureVerifiedAt        DateTime?                    @map("closure_verified_at") @db.Timestamptz
+  purpose                  BrowserRuntimeSessionPurpose @default(EXECUTION)
+  slotNumber               Int                          @map("slot_number")
+  leaseToken               String                       @map("lease_token") @db.Uuid
+  fencingToken             BigInt                       @map("fencing_token")
+  leaseExpiresAt           DateTime                     @map("lease_expires_at") @db.Timestamptz
+  protocolMajor            Int                          @map("protocol_major")
+  protocolMinor            Int                          @map("protocol_minor")
+  humanControllerUserId    String?                      @map("human_controller_user_id") @db.Uuid
+  humanControlExpiresAt    DateTime?                    @map("human_control_expires_at") @db.Timestamptz
+  lastError                Json?                        @map("last_error")
+  openedAt                 DateTime?                    @map("opened_at") @db.Timestamptz
+  closedAt                 DateTime?                    @map("closed_at") @db.Timestamptz
+  createdAt                DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  team                     Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runtime                  BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Restrict)
+  humanController          User?                        @relation("RuntimeSessionHumanController", fields: [humanControllerUserId], references: [id], onDelete: SetNull)
+  slot                     BrowserRuntimeSlot?
+  profileLease             BrowserRuntimeProfileLease?
+  commands                 BrowserRuntimeCommand[]
+  artifacts                BrowserRuntimeArtifact[]
+  events                   BrowserRuntimeEvent[]
+  testRuns                 TestRun[]
+  verificationRuns         VerificationRun[]
+  humanControlLease        BrowserHumanControlLease?
+  browserExecutions        BrowserExecution[]
+  userBrowserProfile       UserBrowserProfile?          @relation(fields: [userBrowserProfileId], references: [id], onDelete: SetNull)
+  resourceLeases           ExecutionResourceLease[]
 
+  @@unique([userBrowserProfileId, identityPermit])
+  @@index([ownerTaskId, closureVerifiedAt], map: "browser_runtime_session_owner_closure_idx")
   @@index([teamId, createdAt(sort: Desc)])
   @@index([runtimeId, status])
   @@index([leaseExpiresAt])
@@ -798,23 +809,26 @@ model BrowserRuntimeProfileLease {
 }
 
 model BrowserRuntimeCommand {
-  id           String                   @id @default(uuid()) @db.Uuid
-  sessionId    String                   @map("session_id") @db.Uuid
-  commandType  String                   @map("command_type")
-  source       RuntimeCommandSource     @default(CONSOLE)
-  status       RuntimeCommandStatus     @default(PENDING)
-  payload      Json                     @default("{}")
-  result       Json?
-  error        Json?
-  leaseToken   String                   @map("lease_token") @db.Uuid
-  fencingToken BigInt                   @map("fencing_token")
-  deadlineAt   DateTime                 @map("deadline_at") @db.Timestamptz
-  dispatchedAt DateTime?                @map("dispatched_at") @db.Timestamptz
-  completedAt  DateTime?                @map("completed_at") @db.Timestamptz
-  createdAt    DateTime                 @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt    DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
-  session      BrowserRuntimeSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  artifacts    BrowserRuntimeArtifact[]
+  id                   String                   @id @default(uuid()) @db.Uuid
+  sessionId            String                   @map("session_id") @db.Uuid
+  commandType          String                   @map("command_type")
+  source               RuntimeCommandSource     @default(CONSOLE)
+  status               RuntimeCommandStatus     @default(PENDING)
+  payload              Json                     @default("{}")
+  result               Json?
+  error                Json?
+  leaseToken           String                   @map("lease_token") @db.Uuid
+  fencingToken         BigInt                   @map("fencing_token")
+  ownerTaskId          String?                  @map("owner_task_id") @db.Uuid
+  ownerFencingToken    BigInt?                  @map("owner_fencing_token")
+  ownerPermitExpiresAt DateTime?                @map("owner_permit_expires_at") @db.Timestamptz
+  deadlineAt           DateTime                 @map("deadline_at") @db.Timestamptz
+  dispatchedAt         DateTime?                @map("dispatched_at") @db.Timestamptz
+  completedAt          DateTime?                @map("completed_at") @db.Timestamptz
+  createdAt            DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+  session              BrowserRuntimeSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  artifacts            BrowserRuntimeArtifact[]
 
   @@index([sessionId, createdAt])
   @@index([status, deadlineAt])
@@ -1122,48 +1136,54 @@ model VerificationRun {
 /// The v2 aggregate root shared by manual, CI, MCP, and agent-driven tests.
 /// Browser resource lifecycle and product verdict deliberately remain separate.
 model ExecutionRun {
-  id                     String                @id @default(uuid()) @db.Uuid
-  teamId                 String                @map("team_id") @db.Uuid
-  taskExecutionId        String?               @map("task_execution_id") @db.Uuid
-  browserProfileId       String?               @map("browser_profile_id") @db.Uuid
-  sourceKind             String                @default("API") @map("source_kind")
-  sourceId               String?               @map("source_id")
-  idempotencyKey         String                @map("idempotency_key")
-  goal                   String
-  lifecycle              RunLifecycle          @default(QUEUED)
-  executionDisposition   ExecutionDisposition? @map("execution_disposition")
-  verdict                RunProductVerdict?
-  criteriaSnapshot       Json                  @map("criteria_snapshot")
-  environmentSnapshot    Json                  @default("{}") @map("environment_snapshot")
-  executionPolicy        Json                  @default("{}") @map("execution_policy")
-  currentAttemptNumber   Int                   @default(0) @map("current_attempt_number")
-  maxAttempts            Int                   @default(3) @map("max_attempts")
-  traceId                String                @map("trace_id") @db.VarChar(32)
-  initialDeadlineAt      DateTime              @map("initial_deadline_at") @db.Timestamptz
-  deadlineAt             DateTime              @map("deadline_at") @db.Timestamptz
-  hardDeadlineAt         DateTime              @map("hard_deadline_at") @db.Timestamptz
-  deadlineExtensionCount Int                   @default(0) @map("deadline_extension_count")
-  deadlineExtendedMs     Int                   @default(0) @map("deadline_extended_ms")
-  cancelRequestedAt      DateTime?             @map("cancel_requested_at") @db.Timestamptz
-  queuedAt               DateTime              @default(now()) @map("queued_at") @db.Timestamptz
-  startedAt              DateTime?             @map("started_at") @db.Timestamptz
-  finishedAt             DateTime?             @map("finished_at") @db.Timestamptz
-  createdAt              DateTime              @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt              DateTime              @updatedAt @map("updated_at") @db.Timestamptz
-  team                   Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  taskExecution          TaskExecution?        @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
-  browserProfile         UserBrowserProfile?   @relation(fields: [browserProfileId], references: [id], onDelete: SetNull)
-  attempts               RunAttempt[]
-  tasks                  AgentRuntimeTask[]
-  events                 RunEvent[]
-  evidences              RunEvidence[]
-  criterionResults       RunCriterionResult[]
-  interventions          HumanIntervention[]
-  browserExecutions      BrowserExecution[]
-  notificationOutbox     NotificationOutbox[]
-  browserProfileUsages   BrowserProfileUsage[]
-  generatedTestCase      GeneratedTestCase?    @relation("GeneratedCaseExecutionRun")
-  taskCaseExecution      TaskCaseExecution?    @relation("TaskCaseExecutionRun")
+  id                           String                @id @default(uuid()) @db.Uuid
+  teamId                       String                @map("team_id") @db.Uuid
+  taskExecutionId              String?               @map("task_execution_id") @db.Uuid
+  browserProfileId             String?               @map("browser_profile_id") @db.Uuid
+  sourceKind                   String                @default("API") @map("source_kind")
+  sourceId                     String?               @map("source_id")
+  idempotencyKey               String                @map("idempotency_key")
+  goal                         String
+  lifecycle                    RunLifecycle          @default(QUEUED)
+  executionDisposition         ExecutionDisposition? @map("execution_disposition")
+  verdict                      RunProductVerdict?
+  criteriaSnapshot             Json                  @map("criteria_snapshot")
+  environmentSnapshot          Json                  @default("{}") @map("environment_snapshot")
+  executionPolicy              Json                  @default("{}") @map("execution_policy")
+  concurrencyPolicy            Json?                 @map("concurrency_policy")
+  infrastructureRecoveryCount  Int                   @default(0) @map("infrastructure_recovery_count")
+  queueDeadlineAt              DateTime?             @map("queue_deadline_at") @db.Timestamptz
+  executionBudgetStartedAt     DateTime?             @map("execution_budget_started_at") @db.Timestamptz
+  executionBudgetSeconds       Int?                  @map("execution_budget_seconds")
+  executionMaxExtensionSeconds Int?                  @map("execution_max_extension_seconds")
+  currentAttemptNumber         Int                   @default(0) @map("current_attempt_number")
+  maxAttempts                  Int                   @default(3) @map("max_attempts")
+  traceId                      String                @map("trace_id") @db.VarChar(32)
+  initialDeadlineAt            DateTime              @map("initial_deadline_at") @db.Timestamptz
+  deadlineAt                   DateTime              @map("deadline_at") @db.Timestamptz
+  hardDeadlineAt               DateTime              @map("hard_deadline_at") @db.Timestamptz
+  deadlineExtensionCount       Int                   @default(0) @map("deadline_extension_count")
+  deadlineExtendedMs           Int                   @default(0) @map("deadline_extended_ms")
+  cancelRequestedAt            DateTime?             @map("cancel_requested_at") @db.Timestamptz
+  queuedAt                     DateTime              @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt                    DateTime?             @map("started_at") @db.Timestamptz
+  finishedAt                   DateTime?             @map("finished_at") @db.Timestamptz
+  createdAt                    DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                    DateTime              @updatedAt @map("updated_at") @db.Timestamptz
+  team                         Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution                TaskExecution?        @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
+  browserProfile               UserBrowserProfile?   @relation(fields: [browserProfileId], references: [id], onDelete: SetNull)
+  attempts                     RunAttempt[]
+  tasks                        AgentRuntimeTask[]
+  events                       RunEvent[]
+  evidences                    RunEvidence[]
+  criterionResults             RunCriterionResult[]
+  interventions                HumanIntervention[]
+  browserExecutions            BrowserExecution[]
+  notificationOutbox           NotificationOutbox[]
+  browserProfileUsages         BrowserProfileUsage[]
+  generatedTestCase            GeneratedTestCase?    @relation("GeneratedCaseExecutionRun")
+  taskCaseExecution            TaskCaseExecution?    @relation("TaskCaseExecutionRun")
 
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
@@ -1398,6 +1418,8 @@ model TaskCaseExecution {
   dispatchStatus      TaskCaseDispatchStatus @default(PENDING) @map("dispatch_status")
   dispatchAttempts    Int                    @default(0) @map("dispatch_attempts")
   dispatchLastError   Json?                  @map("dispatch_last_error")
+  scheduling          Json?
+  executionPolicy     Json?                  @map("execution_policy")
   dispatchRequestedAt DateTime?              @map("dispatch_requested_at") @db.Timestamptz
   createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz
   updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz
@@ -1589,6 +1611,10 @@ model UserBrowserProfile {
   environmentKey           String                         @default("default") @map("environment_key")
   authRole                 String                         @default("default") @map("auth_role")
   status                   UserBrowserProfileStatus       @default(UNINITIALIZED)
+  executionMode            String                         @default("SERIAL_PERSISTENT") @map("execution_mode")
+  executionConcurrency     Int                            @default(1) @map("execution_concurrency")
+  authSnapshotGeneration   Int?                           @map("auth_snapshot_generation")
+  authSnapshotCreatedAt    DateTime?                      @map("auth_snapshot_created_at") @db.Timestamptz
   verificationUrl          String?                        @map("verification_url")
   verificationRules        Json                           @default("{}") @map("verification_rules")
   verificationRulesVersion Int                            @default(1) @map("verification_rules_version")
@@ -1860,6 +1886,9 @@ model AgentRuntimeTask {
   snapshot                          Json
   result                            Json?
   error                             Json?
+  recoveryStatus                    String?                @map("recovery_status")
+  leaseLostAt                       DateTime?              @map("lease_lost_at") @db.Timestamptz
+  recoveryNextAttemptAt             DateTime?              @map("recovery_next_attempt_at") @db.Timestamptz
   leaseOwner                        String?                @map("lease_owner")
   leaseToken                        String?                @map("lease_token") @db.Uuid
   leaseExpiresAt                    DateTime?              @map("lease_expires_at") @db.Timestamptz
@@ -1889,6 +1918,7 @@ model AgentRuntimeTask {
 
   @@index([status, leaseExpiresAt, createdAt])
   @@index([runId, status])
+  @@index([recoveryStatus, recoveryNextAttemptAt], map: "agent_runtime_task_recovery_due_idx")
   @@map("agent_runtime_tasks")
 }
 
@@ -1989,33 +2019,52 @@ model HumanIntervention {
 }
 
 model BrowserExecution {
-  id                String                 @id @default(uuid()) @db.Uuid
-  runId             String                 @map("run_id") @db.Uuid
-  attemptId         String                 @unique @map("attempt_id") @db.Uuid
-  runtimeSessionId  String?                @map("runtime_session_id") @db.Uuid
-  status            BrowserExecutionStatus @default(REQUESTED)
-  routingKey        String                 @default("pool") @map("routing_key")
-  routingRuleId     String?                @map("routing_rule_id") @db.Uuid
-  targetRuntimeId   String?                @map("target_runtime_id") @db.Uuid
-  admissionAttempts Int                    @default(0) @map("admission_attempts")
-  waitingSince      DateTime?              @map("waiting_since") @db.Timestamptz
-  nextAdmissionAt   DateTime?              @map("next_admission_at") @db.Timestamptz
-  input             Json                   @default("{}")
-  output            Json?
-  error             Json?
-  startedAt         DateTime?              @map("started_at") @db.Timestamptz
-  finishedAt        DateTime?              @map("finished_at") @db.Timestamptz
-  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt         DateTime               @updatedAt @map("updated_at") @db.Timestamptz
-  run               ExecutionRun           @relation(fields: [runId], references: [id], onDelete: Cascade)
-  attempt           RunAttempt             @relation(fields: [attemptId], references: [id], onDelete: Cascade)
-  runtimeSession    BrowserRuntimeSession? @relation(fields: [runtimeSessionId], references: [id], onDelete: SetNull)
+  id                   String                 @id @default(uuid()) @db.Uuid
+  runId                String                 @map("run_id") @db.Uuid
+  attemptId            String                 @unique @map("attempt_id") @db.Uuid
+  runtimeSessionId     String?                @map("runtime_session_id") @db.Uuid
+  status               BrowserExecutionStatus @default(REQUESTED)
+  routingKey           String                 @default("pool") @map("routing_key")
+  routingRuleId        String?                @map("routing_rule_id") @db.Uuid
+  targetRuntimeId      String?                @map("target_runtime_id") @db.Uuid
+  admissionAttempts    Int                    @default(0) @map("admission_attempts")
+  startupRecoveryCount Int                    @default(0) @map("startup_recovery_count")
+  allocationToken      String?                @map("allocation_token") @db.Uuid
+  waitingSince         DateTime?              @map("waiting_since") @db.Timestamptz
+  nextAdmissionAt      DateTime?              @map("next_admission_at") @db.Timestamptz
+  input                Json                   @default("{}")
+  output               Json?
+  error                Json?
+  startedAt            DateTime?              @map("started_at") @db.Timestamptz
+  finishedAt           DateTime?              @map("finished_at") @db.Timestamptz
+  createdAt            DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  run                  ExecutionRun           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt              RunAttempt             @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  runtimeSession       BrowserRuntimeSession? @relation(fields: [runtimeSessionId], references: [id], onDelete: SetNull)
 
   @@index([runId, status])
   @@index([status, nextAdmissionAt, createdAt], map: "browser_executions_status_next_admission_created_at_idx")
   @@index([targetRuntimeId, status])
   @@index([runtimeSessionId])
   @@map("browser_executions")
+}
+
+/// Coordination covers actual shared backend state, across Tasks and Profiles.
+/// Expiration never deletes a lease without verified browser closure.
+model ExecutionResourceLease {
+  id          String                @id @default(uuid()) @db.Uuid
+  sessionId   String                @map("session_id") @db.Uuid
+  rootKey     String                @map("root_key")
+  resourceKey String                @default("") @map("resource_key")
+  mode        String
+  quarantined Boolean               @default(false)
+  createdAt   DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  session     BrowserRuntimeSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, resourceKey])
+  @@index([rootKey, createdAt])
+  @@map("execution_resource_leases")
 }
 
 model VerificationAssertion {

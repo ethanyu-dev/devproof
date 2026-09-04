@@ -117,6 +117,9 @@ export class PlaygroundService {
         idempotencyKey: `playground-issue-task:${input.submissionId}`,
         issueRef: input.issueRef,
         kind: "ISSUE_SPEC",
+        ...(input.casePolicyReviewRequired !== undefined
+          ? { casePolicyReviewRequired: input.casePolicyReviewRequired }
+          : {}),
         profilePolicy: input.profilePolicy,
         deployments: input.deployments,
         ...(input.targetUrl ? { targetUrl: input.targetUrl } : {}),

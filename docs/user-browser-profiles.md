@@ -38,7 +38,19 @@ State normally progresses from `UNINITIALIZED` to `PREPARING` to `READY`. Expire
 
 Every persistent strategy must match the owner, Team, trigger source, target hostname, environment/role scope, grant, and `READY` state. `onUnavailable` may wait, fail, or explicitly fall back to ephemeral state; DevProof never silently downgrades.
 
-Profile resolution does not reserve the browser. The first Case waits in a FIFO reservation queue, and Cases in the same Task use that Profile serially. Completion, cancellation, or timeout releases the reservation.
+Profile resolution does not reserve the browser. `SERIAL_PERSISTENT` retains the FIFO Task reservation and serial Cases. `ISOLATED_AUTH` reuses a verified, immutable local authentication snapshot in a separate browser/context for each Attempt; Task resolution holds no execution permit. Admission atomically acquires node capacity, a Profile concurrency permit, and compatible backend data locks. Browser closure must be verified before physical capacity is released.
+
+## Concurrent execution
+
+Runtime v1.13 and `BROWSER_ISOLATED_AUTH_ENABLED=true` are required. Ordinary serial login verification never starts parallel probes. To opt in, prepare or reopen the login in Console, explicitly select **Validate concurrent login** in the login window, and verify/save. The API equivalent is `POST /console/api/browser-profiles/:id/verify` with `{ "prepareIsolatedAuth": true }`; an empty body preserves serial verification. This prepares a snapshot while the Profile remains serial, so no pre-existing snapshot is needed to begin validation. Once all existing Tasks and sessions have drained, select **Independent concurrent sessions** and a limit of 1–4 in the Profile settings.
+
+The opt-in validation probes four independent authenticated contexts. Some sites rotate server-side credentials when another context authenticates. After a probe failure, DevProof refreshes and verifies the source login again before allowing serial use. An invalid source remains `REAUTH_REQUIRED`, clears old snapshot metadata, and keeps the login window available; only a source that passes the new check may return to serial `READY`. Existing isolated Profiles must pass the probe again on renewal and cannot renew isolated execution while the flag is disabled. Authentication failure does not silently fall back to an unauthenticated session.
+
+Case execution declarations come from explicit request policy or Console review, not generated test prose. `READ_ONLY` work may share data locks; `MUTATING` work locks its declared resource scopes; unknown work locks the backend environment exclusively. Root/collection scopes conflict with their descendants. Set `BROWSER_EXECUTION_ENVIRONMENTS_JSON` for hostname aliases backed by the same server state. Distinct users, Profiles, or Task deployment IDs do not partition those locks.
+
+Issue requests can provide `caseExecutionPolicies` keyed by generated Case ID or one-based position. Set `casePolicyReviewRequired=true` (also available in Playground) to pause after generation and review each Case's access mode, resource scopes, and dependencies before creating its immutable Run. Existing automatic Tasks default to conservative unknown/exclusive behavior.
+
+Snapshots include cookies, localStorage and IndexedDB. SessionStorage, device binding, single-session accounts and refresh-token rotation can make a site incompatible; use serial execution or accounts with genuinely isolated backend data in that case. A Context's changed authentication state is never merged back. Snapshots are immutable generations inside the bound Profile directory, protected by local retention, purge and live-generation pinning.
 
 Profile authorization decides whether a Task may use login state. It does not control browser networking. Runtime-wide SSRF and private-network policy applies to top-level navigation, redirects, subresources, and WebSockets.
 
@@ -87,7 +99,7 @@ The 30-day threshold is fixed. Runtime hosts must use reliable clock synchroniza
 - The Runtime key is absent from all external responses and exported logs.
 - User, Team, issuer, stable external ID, hostname grant, and trigger source are checked together.
 - A Profile remains affine to one Runtime and is never copied between hosts.
-- A Profile is used by one Task at a time.
+- Persistent Profile directories remain exclusive; isolated-auth Tasks share only an immutable local authentication snapshot and receive separate contexts.
 - Disable, delete, expiry, or membership loss blocks new scheduling before physical deletion.
 - Preparation and execution sessions are distinct and auditable.
 

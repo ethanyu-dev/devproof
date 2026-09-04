@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RunTrajectoryRecord } from "@devproof/contracts";
+import type {
+  RunTrajectoryRecord,
+  ExecutionConcurrencyPolicy,
+} from "@devproof/contracts";
 import {
   Activity,
   ChevronDown,
@@ -45,7 +48,12 @@ import {
 } from "./post-run-analysis-view";
 import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
-import { taskOutcomeDisplay, verificationVerdictLabel } from "./task-outcome";
+import {
+  executionSchedulingLabel,
+  schedulingWaitText,
+  taskOutcomeDisplay,
+  verificationVerdictLabel,
+} from "./task-outcome";
 import type {
   TaskCase,
   TaskCaseExecution,
@@ -56,6 +64,7 @@ import type {
   PostRunAnalysisEventPage,
   TaskStage,
   TaskSummary,
+  TaskScheduling,
 } from "./task-types";
 
 const PAGE_SIZE = 10;
@@ -660,12 +669,20 @@ function TaskRow({
           </span>
           <small>
             {displayLabel(displayed.kind)} ·{" "}
-            {displayLabel(displayed.currentStage)} · Case{" "}
-            {displayed.counts.passed +
-              displayed.counts.failed +
-              displayed.counts.inconclusive}
-            /{displayed.counts.total} ·{" "}
-            {new Date(displayed.createdAt).toLocaleString("zh-CN")}
+            {displayLabel(displayed.currentStage)} · 已结束{" "}
+            {displayed.counts.terminal ??
+              displayed.counts.passed +
+                displayed.counts.failed +
+                displayed.counts.inconclusive}
+            /{displayed.counts.total} · 执行 {displayed.counts.running} · 等待{" "}
+            {displayed.counts.waiting}
+            {displayed.counts.recovering
+              ? ` · 恢复 ${displayed.counts.recovering}`
+              : ""}
+            {displayed.counts.timedOut
+              ? ` · 超时 ${displayed.counts.timedOut}`
+              : ""}{" "}
+            · {new Date(displayed.createdAt).toLocaleString("zh-CN")}
           </small>
         </button>
         <div className="dp-task-row-actions">
@@ -796,6 +813,7 @@ function TaskStatusPanel({
     detail.profileBinding?.requestedProfile ??
     detail.profileBinding?.resolvedProfile ??
     null;
+  const profileNeedsInput = detail.profileBinding?.status === "WAITING_INPUT";
   const explicitBoundProfile =
     detail.profileBinding?.strategy === "EXPLICIT_PROFILE"
       ? boundProfile
@@ -821,13 +839,13 @@ function TaskStatusPanel({
   useEffect(() => {
     if (
       detail.waitingReason !== "DEPLOYMENT_TARGET_REQUIRED" &&
-      !detail.waitingReason?.startsWith("PROFILE_")
+      !profileNeedsInput
     )
       return;
     void consoleApi<Array<{ displayName: string; id: string; status: string }>>(
       "/browser-profiles",
     ).then(setProfiles);
-  }, [detail.waitingReason]);
+  }, [detail.waitingReason, profileNeedsInput]);
 
   useEffect(() => {
     const strategy = detail.profileBinding?.strategy;
@@ -1070,8 +1088,7 @@ function TaskStatusPanel({
           </Card>
         ) : null}
 
-        {detail.waitingReason?.startsWith("PROFILE_") &&
-        detail.profileBinding?.requestedProfile ? (
+        {profileNeedsInput && detail.profileBinding?.requestedProfile ? (
           <Card className="dp-task-input-card">
             <div className="dp-section-head">
               <span>
@@ -1112,7 +1129,7 @@ function TaskStatusPanel({
               </div>
             </div>
           </Card>
-        ) : detail.waitingReason?.startsWith("PROFILE_") ? (
+        ) : profileNeedsInput ? (
           <Card className="dp-task-input-card">
             <div className="dp-section-head">
               <span>
@@ -1192,6 +1209,7 @@ function TaskStatusPanel({
                 ))
               : detail.cases.map((testCase) => (
                   <CaseCard
+                    allCases={detail.cases}
                     busy={busy}
                     canRerun={
                       detail.cancelRequestedAt === null &&
@@ -1200,6 +1218,9 @@ function TaskStatusPanel({
                     }
                     key={testCase.id}
                     onRerun={() => void onMutate(`/cases/${testCase.id}/rerun`)}
+                    onSavePolicy={(executionId, policy) =>
+                      onMutate(`/cases/${executionId}/policy`, policy)
+                    }
                     testCase={testCase}
                   />
                 ))}
@@ -2038,14 +2059,21 @@ function SpecificationSnapshot({ detail }: { detail: TaskDetail }) {
 }
 
 function CaseCard({
+  allCases,
   busy,
   canRerun,
   onRerun,
+  onSavePolicy,
   testCase,
 }: {
+  allCases: TaskCase[];
   busy: boolean;
   canRerun: boolean;
   onRerun: () => void;
+  onSavePolicy: (
+    executionId: string,
+    policy: ExecutionConcurrencyPolicy,
+  ) => Promise<unknown>;
   testCase: TaskCase;
 }) {
   const {
@@ -2078,7 +2106,7 @@ function CaseCard({
         </span>
         <Badge tone={tone(status)}>
           {active || pending
-            ? displayLabel(status)
+            ? executionSchedulingLabel(active ?? pending!)
             : (aggregateOutcome?.label ?? displayLabel(status))}
         </Badge>
       </summary>
@@ -2117,7 +2145,20 @@ function CaseCard({
             .join(" → ")}
         </small>
         {testCase.executions.map((item) => (
-          <CaseExecutionLink execution={item} key={item.id} />
+          <div key={item.id}>
+            <CaseExecutionLink execution={item} />
+            {!item.run &&
+            ["PENDING", "FAILED"].includes(item.dispatch.status) &&
+            item.dispatch.attempts < 3 &&
+            canRerun ? (
+              <CasePolicyEditor
+                busy={busy}
+                execution={item}
+                otherCases={allCases.filter((peer) => peer.id !== testCase.id)}
+                onSave={(policy) => onSavePolicy(item.id, policy)}
+              />
+            ) : null}
+          </div>
         ))}
         {rerunnable ? (
           <div className="dp-specification-case-actions">
@@ -2165,30 +2206,43 @@ function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
         <small>
           尝试 {execution.run.currentAttemptNumber}/{execution.run.maxAttempts}{" "}
           · 证据 {execution.run.evidenceCount}
+          {execution.run.infrastructureRecoveryCount
+            ? ` · 失租恢复 ${execution.run.infrastructureRecoveryCount}`
+            : ""}
         </small>
       ) : (
-        <small>派发尝试 {execution.dispatch.attempts}</small>
+        <small>
+          {displayLabel(execution.executionPolicy?.accessMode ?? "UNKNOWN")}
+        </small>
       )}
       <Badge tone={tone(outcome?.toneStatus ?? status)}>
-        {outcome?.label ?? displayLabel(status)}
+        {executionSchedulingLabel(execution)}
       </Badge>
       {execution.run ? <ExternalLink /> : null}
     </>
   );
   if (execution.run) {
     return (
-      <Link
-        className="dp-spec-runtime-row"
-        href={`/console/executions/${execution.run.runId}`}
-      >
-        {content}
-      </Link>
+      <div className="dp-spec-runtime-pending">
+        <Link
+          className="dp-spec-runtime-row"
+          href={`/console/executions/${execution.run.runId}`}
+        >
+          {content}
+        </Link>
+        <SchedulingExplanation scheduling={execution.scheduling} />
+      </div>
     );
   }
   const failure = errorMessage(execution.dispatch.lastError);
   return (
     <div className="dp-spec-runtime-pending">
       <div className="dp-spec-runtime-row">{content}</div>
+      <SchedulingExplanation scheduling={execution.scheduling} />
+      <details>
+        <summary>派发详情</summary>
+        <small>派发尝试 {execution.dispatch.attempts}</small>
+      </details>
       {failure ? (
         <small className="dp-spec-dispatch-error">{failure}</small>
       ) : null}
@@ -2205,6 +2259,136 @@ function latestTaskCaseExecutions(executions: readonly TaskCaseExecution[]) {
     }
   }
   return [...latest.values()];
+}
+
+function SchedulingExplanation({
+  scheduling,
+}: {
+  scheduling: TaskScheduling | undefined;
+}) {
+  const waitText = schedulingWaitText(scheduling);
+  if (!scheduling || !waitText) return null;
+  return (
+    <small className="dp-spec-dispatch-error">
+      {waitText}
+      {scheduling.queue?.position
+        ? ` · 当前队列第 ${scheduling.queue.position} 位`
+        : ""}
+      {scheduling.blockedBy?.runId ? (
+        <>
+          {" "}
+          ·{" "}
+          <Link href={`/console/executions/${scheduling.blockedBy.runId}`}>
+            查看占用执行
+          </Link>
+        </>
+      ) : scheduling.blockedBy?.taskId ? (
+        ` · 占用任务 ${scheduling.blockedBy.taskId.slice(0, 8)}`
+      ) : (
+        ""
+      )}
+      {scheduling.nextRetryAt
+        ? ` · 下次重试 ${new Date(scheduling.nextRetryAt).toLocaleTimeString("zh-CN")}`
+        : ""}
+    </small>
+  );
+}
+
+function CasePolicyEditor({
+  execution,
+  otherCases,
+  busy,
+  onSave,
+}: {
+  execution: TaskCaseExecution;
+  otherCases: TaskCase[];
+  busy: boolean;
+  onSave: (policy: ExecutionConcurrencyPolicy) => Promise<unknown>;
+}) {
+  const [mode, setMode] = useState<ExecutionConcurrencyPolicy["accessMode"]>(
+    execution.executionPolicy?.accessMode ?? "UNKNOWN",
+  );
+  const [scopes, setScopes] = useState(
+    (execution.executionPolicy?.resourceScopes ?? []).join(", "),
+  );
+  const [dependencies, setDependencies] = useState(
+    execution.executionPolicy?.dependsOnCaseIds ?? [],
+  );
+  return (
+    <details className="dp-spec-runtime-policy">
+      <summary>
+        执行策略 ·{" "}
+        {displayLabel(execution.executionPolicy?.accessMode ?? "UNKNOWN")}
+      </summary>
+      <div className="dp-playground-form">
+        <Field
+          label="业务数据访问"
+          description="只有已核对不会修改共享业务数据的 Case 才能共享读并发；未知 Case 按独占执行。"
+        >
+          <Select
+            value={mode}
+            onChange={(event) =>
+              setMode(
+                event.target.value as ExecutionConcurrencyPolicy["accessMode"],
+              )
+            }
+          >
+            <option value="UNKNOWN">尚未核对</option>
+            <option value="READ_ONLY">已核对只读</option>
+            <option value="MUTATING">会修改业务数据</option>
+          </Select>
+        </Field>
+        <Field
+          label="业务资源范围"
+          description="留空保护整个业务环境；可填写配置中的资源路径，多个以逗号分隔。"
+        >
+          <Input
+            value={scopes}
+            onChange={(event) => setScopes(event.target.value)}
+            placeholder="例如 whitelist/model-mapping"
+          />
+        </Field>
+        {otherCases.length ? (
+          <fieldset>
+            <legend>前置 Case（须在同一部署成功完成）</legend>
+            {otherCases.map((peer) => (
+              <label key={peer.id} style={{ display: "block" }}>
+                <input
+                  type="checkbox"
+                  checked={dependencies.includes(peer.id)}
+                  onChange={(event) =>
+                    setDependencies((current) =>
+                      event.target.checked
+                        ? [...current, peer.id]
+                        : current.filter((id) => id !== peer.id),
+                    )
+                  }
+                />{" "}
+                {peer.position + 1}. {peer.name}
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          onClick={() =>
+            void onSave({
+              accessMode: mode,
+              resourceScopes: scopes
+                .split(",")
+                .map((scope) => scope.trim())
+                .filter(Boolean),
+              dependsOnCaseIds: dependencies,
+            })
+          }
+        >
+          保存执行策略
+        </Button>
+      </div>
+    </details>
+  );
 }
 
 function StageCard({
@@ -2235,7 +2419,7 @@ function StageCard({
           {stage.type === "SPEC_ANALYSIS"
             ? "分析 Issue 并生成 Spec Case"
             : stage.type === "PROFILE_RESOLUTION"
-              ? "解析用户、授权域名并预约浏览器身份"
+              ? "解析用户、授权域名和浏览器登录身份"
               : "派发 Case 并聚合执行结果"}
         </b>
         <span>
@@ -2243,7 +2427,13 @@ function StageCard({
           {stage.waitingReason ? ` · ${displayLabel(stage.waitingReason)}` : ""}
         </span>
       </div>
-      <Badge tone={tone(stage.status)}>{displayLabel(stage.status)}</Badge>
+      <Badge tone={tone(stage.status)}>
+        {displayLabel(
+          stage.status === "RUNNING" && stage.waitingReason
+            ? stage.waitingReason
+            : stage.status,
+        )}
+      </Badge>
       {retryable ? (
         <Button disabled={busy} onClick={onRetry} variant="secondary">
           <RotateCcw /> 重试阶段
@@ -2274,6 +2464,9 @@ function RunLinkCard({
           {displayLabel(run.lifecycle)} · 尝试 {run.currentAttemptNumber}/
           {run.maxAttempts} · 证据 {run.evidenceCount} · 人工操作{" "}
           {run.interventionCount}
+          {run.infrastructureRecoveryCount
+            ? ` · 失租恢复 ${run.infrastructureRecoveryCount}`
+            : ""}
         </small>
         <Link href={`/console/executions/${run.runId}`}>
           查看执行详情 <ExternalLink />

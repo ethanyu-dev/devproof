@@ -2,9 +2,56 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 12,
+  minor: 13,
   name: "devproof-browser-runtime",
 } as const;
+export const RUNTIME_SESSION_PERMIT_MINOR = 13;
+export const RUNTIME_CAPABILITIES = [
+  "browser",
+  "auth-snapshot-v1",
+  "session-permits-v1",
+] as const;
+
+export const authSnapshotReferenceSchema = z
+  .object({
+    profileKey: z
+      .string()
+      .min(1)
+      .max(160)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
+    generation: z.number().int().positive().safe(),
+  })
+  .strict();
+
+/** Two owners must remain valid: the browser session and its active executor. */
+export const runtimeSessionPermitSchema = z
+  .object({
+    sessionId: z.string().uuid(),
+    fencingToken: z.string().regex(/^\d+$/u),
+    leaseToken: z.string().uuid(),
+    ownerKind: z.enum(["STARTUP", "AGENT", "HUMAN", "SYSTEM"]),
+    ownerTaskId: z.string().uuid().optional(),
+    ownerFencingToken: z.string().regex(/^\d+$/u).optional(),
+    controlGeneration: z.number().int().nonnegative().optional(),
+    expiresAt: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.ownerKind === "AGENT" &&
+      (!value.ownerTaskId || !value.ownerFencingToken)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "AGENT permits require an executor identity and fencing token.",
+        path: ["ownerTaskId"],
+      });
+    }
+  });
+export type RuntimeSessionPermit = z.infer<typeof runtimeSessionPermitSchema>;
+export type AuthSnapshotReference = z.infer<typeof authSnapshotReferenceSchema>;
+
 export const USER_PROFILE_INACTIVITY_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export const RUNTIME_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -113,6 +160,9 @@ export const userProfileRetentionSchema = z
 
 export const localRuntimeSessionSchema = z
   .object({
+    live: z.boolean().optional(),
+    authSnapshot: authSnapshotReferenceSchema.optional(),
+    permit: runtimeSessionPermitSchema.optional(),
     fencingToken: z.string().regex(/^\d+$/u),
     leaseToken: z.string().uuid(),
     profileKey: z.string().min(1).max(160),
@@ -132,6 +182,7 @@ export const localRuntimeSessionSchema = z
   });
 
 export const runtimeHelloSchema = z.object({
+  capabilities: z.array(z.string().min(1).max(120)).max(32).optional(),
   activeSessions: z.array(localRuntimeSessionSchema).max(64).default([]),
   instanceNonce: z.string().min(16).max(160),
   protocol: runtimeProtocolVersionSchema,
@@ -143,6 +194,7 @@ export const runtimeHelloSchema = z.object({
 });
 
 export const runtimeHeartbeatSchema = z.object({
+  heartbeatId: z.string().uuid().optional(),
   activeSessions: z
     .array(
       z.object({
@@ -166,6 +218,8 @@ export const runtimeArtifactPayloadSchema = z.object({
 });
 
 export const runtimeCommandResultSchema = z.object({
+  ownerTaskId: z.string().uuid().optional(),
+  ownerFencingToken: z.string().regex(/^\d+$/u).optional(),
   artifacts: z.array(runtimeArtifactPayloadSchema).max(8).default([]),
   commandId: z.string().uuid(),
   error: z
@@ -290,6 +344,7 @@ export const runtimeClientMessageSchema = z.discriminatedUnion("type", [
 export const reconcileActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("ADOPT"),
+    permit: runtimeSessionPermitSchema.optional(),
     fencingToken: z.string().regex(/^\d+$/u),
     leaseExpiresAt: z.string().datetime(),
     leaseToken: z.string().uuid(),
@@ -297,6 +352,7 @@ export const reconcileActionSchema = z.discriminatedUnion("action", [
   }),
   z.object({
     action: z.literal("RESTORE"),
+    permit: runtimeSessionPermitSchema.optional(),
     allowedOrigins: z.array(z.string().url().max(2_048)).max(32).default([]),
     fencingToken: z.string().regex(/^\d+$/u),
     leaseExpiresAt: z.string().datetime(),
@@ -343,6 +399,7 @@ export const runtimeCommandTypeSchema = z.enum([
   "session.open",
   "session.close",
   "profile.purge",
+  "profile.snapshot",
   "page.open",
   "page.navigate",
   "page.back",
@@ -393,6 +450,7 @@ export function runtimeCommandMinimumMinor(
     return 7;
   }
   if (commandType === "profile.purge") return 6;
+  if (commandType === "profile.snapshot") return 13;
   if (
     [
       "page.get_text",
@@ -508,7 +566,26 @@ const textTargetPayloadSchema = z
   .strict();
 const frameTargetSchema = runtimeLocatorSchema;
 
+export const authSnapshotVerificationSchema = z
+  .object({
+    url: z.string().url().max(2048),
+    authenticatedSelector: z.string().min(1).max(2000).optional(),
+    successUrlPatterns: z.array(z.string().min(1).max(2048)).max(32).optional(),
+    loginUrlPatterns: z.array(z.string().min(1).max(2048)).max(32).optional(),
+  })
+  .strict();
+export type AuthSnapshotVerification = z.infer<
+  typeof authSnapshotVerificationSchema
+>;
+
 const sessionCommandPayloadVariants = [
+  z.object({
+    commandType: z.literal("profile.snapshot"),
+    payload: authSnapshotReferenceSchema.extend({
+      verification: authSnapshotVerificationSchema.optional(),
+      probeConcurrency: z.number().int().min(1).max(4).optional(),
+    }),
+  }),
   z.object({
     commandType: z.literal("session.open"),
     payload: z
@@ -520,9 +597,18 @@ const sessionCommandPayloadVariants = [
         profileKey: z.string().min(1).max(160),
         profileMode: z.enum(["PERSISTENT", "EPHEMERAL"]),
         profileRetention: userProfileRetentionSchema.optional(),
+        authSnapshot: authSnapshotReferenceSchema.optional(),
       })
       .strict()
       .superRefine((value, context) => {
+        if (value.authSnapshot && value.profileMode !== "EPHEMERAL") {
+          context.addIssue({
+            code: "custom",
+            message:
+              "Authentication snapshots require an isolated EPHEMERAL session.",
+            path: ["authSnapshot"],
+          });
+        }
         if (value.profileRetention && value.profileMode !== "PERSISTENT") {
           context.addIssue({
             code: "custom",
@@ -984,6 +1070,7 @@ type RuntimeActionCommandInputValue = Exclude<
       | "session.open"
       | "session.close"
       | "profile.purge"
+      | "profile.snapshot"
       | "human.takeover"
       | "human.release";
   }
@@ -998,6 +1085,9 @@ export const runtimeActionCommandInputSchema = z
 
 export const runtimeCommandSchema = z
   .object({
+    permit: runtimeSessionPermitSchema.optional(),
+    ownerTaskId: z.string().uuid().optional(),
+    ownerFencingToken: z.string().regex(/^\d+$/u).optional(),
     commandId: z.string().uuid(),
     commandType: runtimeCommandTypeSchema,
     deadlineAt: z.string().datetime(),
@@ -1027,6 +1117,8 @@ export const runtimeCommandCancelSchema = z.object({
 });
 
 export const runtimeHeartbeatAckSchema = z.object({
+  heartbeatId: z.string().uuid().optional(),
+  sessionPermits: z.array(runtimeSessionPermitSchema).max(64).optional(),
   closeSessions: z.array(z.string().uuid()).default([]),
   leaseExpiresAt: z.string().datetime(),
   serverTime: z.string().datetime(),
@@ -1061,6 +1153,7 @@ export const runtimeHumanPreviewUnsubscribeSchema = z.object({
 });
 
 export const runtimeHumanInputDispatchSchema = z.object({
+  controlGeneration: z.number().int().nonnegative().optional(),
   dispatchId: z.string().uuid(),
   events: browserHumanInputEventsSchema,
   fencingToken: z.string().regex(/^\d+$/u),

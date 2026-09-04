@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { BrowserSessionManager } from "./index.js";
+import { BrowserSessionManager, runtimeVersion } from "./index.js";
 
 function composer(result: Promise<unknown>) {
   return {
@@ -151,7 +151,7 @@ describe("step video finalization", () => {
         commandId: expect.any(String),
         durationMs: expect.any(Number),
         frameCount: 1,
-        runtimeVersion: "0.2.16",
+        runtimeVersion,
       }),
     );
     expect(store.removeSession).toHaveBeenCalledOnce();
