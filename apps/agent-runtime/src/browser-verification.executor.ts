@@ -18,6 +18,7 @@ import type {
   ActiveLease,
   ControlPlaneClient,
 } from "./control-plane.client.js";
+import { VerificationProgress } from "./verification-progress.js";
 
 interface ModelFunctionCall {
   arguments: string;
@@ -151,27 +152,48 @@ export class BrowserVerificationExecutor {
     let step = 0;
     const hitlPolicy = readHitlPolicy(task.snapshot.executionPolicy);
     const deadlinePolicy = readDeadlinePolicy(task.snapshot.executionPolicy);
+    const progress = new VerificationProgress();
+    let finalizationDeadline: number | undefined;
+    const beginFinalization = () => {
+      finalizationDeadline ??= performance.now() + 5_000;
+    };
+    const finalizationBudgetMs = () =>
+      Math.max(
+        0,
+        (finalizationDeadline ?? performance.now()) - performance.now(),
+      );
+    const finalize = async (reason: FinalizationReason) => {
+      signal.throwIfAborted();
+      beginFinalization();
+      const outcome = finalizationOutcome({
+        browserCommandCount,
+        criterionResults,
+        evidence,
+        task,
+        reason,
+      });
+      if (finalizationBudgetMs() > 0) {
+        await settleWithin(
+          this.controlPlane.appendEvent(
+            lease,
+            reason === "FINALIZATION_RESERVE_REACHED"
+              ? "executor.deadline.finalized"
+              : "executor.stagnation.finalized",
+            { reason, deadlineAt: task.snapshot.deadlineAt },
+          ),
+          finalizationBudgetMs(),
+        );
+      }
+      signal.throwIfAborted();
+      segmentStatus = "SUCCEEDED";
+      return outcome;
+    };
 
     try {
       for (let callCount = 0; callCount < this.toolLimit;) {
         signal.throwIfAborted();
-        const deadlineOutcome = deadlineFinalizationOutcome({
-          browserCommandCount,
-          criterionResults,
-          deadlineAt: task.snapshot.deadlineAt,
-          evidence,
-          policy: deadlinePolicy,
-          task,
-        });
-        if (deadlineOutcome) {
-          await this.controlPlane
-            .appendEvent(lease, "executor.deadline.finalized", {
-              deadlineAt: task.snapshot.deadlineAt,
-              reason: "FINALIZATION_RESERVE_REACHED",
-            })
-            .catch(() => undefined);
-          segmentStatus = "SUCCEEDED";
-          return deadlineOutcome;
+        if (finalizationDue(task, deadlinePolicy)) {
+          return await finalize("FINALIZATION_RESERVE_REACHED");
         }
         step += 1;
         const modelInputPreview = tracePreview(history);
@@ -180,6 +202,10 @@ export class BrowserVerificationExecutor {
         let selectedModelStartedAt = Date.now();
         let lastModelError: unknown;
         for (const candidate of modelCandidates) {
+          signal.throwIfAborted();
+          if (finalizationDue(task, deadlinePolicy)) {
+            return await finalize("FINALIZATION_RESERVE_REACHED");
+          }
           const modelStartedAt = Date.now();
           await this.appendTraceEvent(lease, {
             kind: "agent.model.started",
@@ -197,29 +223,45 @@ export class BrowserVerificationExecutor {
             deadlinePolicy.mode === "ADAPTIVE"
               ? deadlinePolicy.maxModelCallSeconds * 1_000
               : null,
+            () =>
+              Date.parse(task.snapshot.deadlineAt) -
+              finalizationReserveMs(deadlinePolicy),
           );
           try {
-            response = await this.modelClient(candidate).responses.create(
-              {
-                input: history,
-                model: candidate.modelId,
-                parallel_tool_calls: false,
-                tool_choice: "required",
-                tools: toolDefinitions(hitlPolicy.enabled),
-              },
-              { signal: modelAbort.signal },
+            modelAbort.signal.throwIfAborted();
+            response = await abortable(
+              this.modelClient(candidate).responses.create(
+                {
+                  input: history,
+                  model: candidate.modelId,
+                  parallel_tool_calls: false,
+                  tool_choice: "required",
+                  tools: toolDefinitions(hitlPolicy.enabled),
+                },
+                { signal: modelAbort.signal },
+              ),
+              modelAbort.signal,
             );
+            signal.throwIfAborted();
+            if (finalizationDue(task, deadlinePolicy)) {
+              return await finalize("FINALIZATION_RESERVE_REACHED");
+            }
             selectedModel = candidate;
             selectedModelStartedAt = modelStartedAt;
             lastModelError = undefined;
             break;
           } catch (error) {
+            signal.throwIfAborted();
             const responseError =
               modelAbort.signal.aborted && !signal.aborted
                 ? (modelAbort.signal.reason ?? error)
                 : error;
             lastModelError = responseError;
-            await this.appendTraceEvent(lease, {
+            const reserveReached =
+              modelAbort.signal.reason instanceof
+              FinalizationWindowReachedError;
+            if (reserveReached) beginFinalization();
+            const failedTrace = this.appendTraceEvent(lease, {
               kind: "agent.model.failed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -232,6 +274,11 @@ export class BrowserVerificationExecutor {
                 step,
               },
             });
+            if (reserveReached) {
+              await settleWithin(failedTrace, finalizationBudgetMs());
+              return await finalize("FINALIZATION_RESERVE_REACHED");
+            }
+            await failedTrace;
             if (signal.aborted) throw responseError;
           } finally {
             modelAbort.dispose();
@@ -262,6 +309,7 @@ export class BrowserVerificationExecutor {
         history.push(...response.output);
         const calls = response.output.filter(isFunctionCall);
         if (calls.length === 0) {
+          if (progress.textOnly()) return await finalize("TEXT_ONLY_LOOP");
           history.push({
             role: "user",
             content: "请继续调用一个可用工具。仅返回文本无法完成验证。",
@@ -270,6 +318,10 @@ export class BrowserVerificationExecutor {
         }
 
         for (const call of calls) {
+          signal.throwIfAborted();
+          if (finalizationDue(task, deadlinePolicy)) {
+            return await finalize("FINALIZATION_RESERVE_REACHED");
+          }
           callCount += 1;
           if (callCount > this.toolLimit) break;
           const toolInputPreview = traceToolInput(call.arguments);
@@ -329,6 +381,7 @@ export class BrowserVerificationExecutor {
             },
           });
           browserCommandCount = result.browserCommandCount;
+          signal.throwIfAborted();
           if (result.locatorRecoveryState !== undefined) {
             locatorRecoveryState = result.locatorRecoveryState;
           }
@@ -339,6 +392,23 @@ export class BrowserVerificationExecutor {
               : "SUCCEEDED";
             return result.outcome;
           }
+          if (
+            progress.tool({
+              name: call.name,
+              arguments: call.arguments,
+              output: result.output,
+              criteria: [...criterionResults.values()].map((criterion) => ({
+                criterionId: criterion.criterionId,
+                status: criterion.status,
+                evidenceKinds: [
+                  ...new Set(
+                    criterion.evidenceRefs.map((id) => evidence.get(id)!.kind),
+                  ),
+                ].sort(),
+              })),
+            })
+          )
+            return await finalize("REPEATED_OPERATIONS");
           history.push({
             call_id: call.call_id,
             output: JSON.stringify(result.output),
@@ -363,31 +433,48 @@ export class BrowserVerificationExecutor {
       segmentErrorMessage = traceErrorMessage(error);
       throw error;
     } finally {
-      try {
-        await this.appendTraceEvent(lease, {
-          kind: "agent.segment.completed",
-          payload: {
-            attemptNumber: task.snapshot.attemptNumber,
-            durationMs: Math.max(0, Date.now() - segmentStartedAt),
-            segmentId,
-            status: segmentStatus,
-            ...(segmentErrorMessage
-              ? { errorMessage: segmentErrorMessage }
-              : {}),
-          },
-        });
-      } finally {
+      const segmentCompleted: RuntimeTraceEvent = {
+        kind: "agent.segment.completed",
+        payload: {
+          attemptNumber: task.snapshot.attemptNumber,
+          durationMs: Math.max(0, Date.now() - segmentStartedAt),
+          segmentId,
+          status: segmentStatus,
+          ...(segmentErrorMessage ? { errorMessage: segmentErrorMessage } : {}),
+        },
+      };
+      if (finalizationDeadline !== undefined) {
+        // The result must reach the worker while it can still be submitted.
+        // Closing continues server-side if the bounded RPC wait expires.
+        if (finalizationBudgetMs() > 0) {
+          await settleWithin(
+            this.appendTraceEvent(lease, segmentCompleted),
+            finalizationBudgetMs(),
+          );
+        }
         if (!preserveBrowserForHuman) {
-          await this.controlPlane
-            .releaseBrowser(lease)
-            .catch(async (error: unknown) => {
-              await this.controlPlane
-                .appendEvent(lease, "browser.release.deferred", {
-                  message:
-                    error instanceof Error ? error.message : String(error),
-                })
-                .catch(() => undefined);
-            });
+          await settleWithin(
+            this.controlPlane.releaseBrowser(lease),
+            finalizationBudgetMs(),
+          );
+        }
+        signal.throwIfAborted();
+      } else {
+        try {
+          await this.appendTraceEvent(lease, segmentCompleted);
+        } finally {
+          if (!preserveBrowserForHuman) {
+            await this.controlPlane
+              .releaseBrowser(lease)
+              .catch(async (error: unknown) => {
+                await this.controlPlane
+                  .appendEvent(lease, "browser.release.deferred", {
+                    message:
+                      error instanceof Error ? error.message : String(error),
+                  })
+                  .catch(() => undefined);
+              });
+          }
         }
       }
     }
@@ -1217,33 +1304,74 @@ function readDeadlinePolicy(
   };
 }
 
-function deadlineFinalizationOutcome(input: {
+type FinalizationReason =
+  "FINALIZATION_RESERVE_REACHED" | "REPEATED_OPERATIONS" | "TEXT_ONLY_LOOP";
+
+function finalizationReserveMs(policy: RuntimeDeadlinePolicy) {
+  return policy.mode === "ADAPTIVE"
+    ? policy.finalizationReserveSeconds * 1_000
+    : 15_000;
+}
+
+function finalizationDue(
+  task: RuntimeTaskLease,
+  policy: RuntimeDeadlinePolicy,
+) {
+  return (
+    Date.parse(task.snapshot.deadlineAt) - Date.now() <=
+    finalizationReserveMs(policy)
+  );
+}
+
+function finalizationOutcome(input: {
   browserCommandCount: number;
   criterionResults: Map<string, z.infer<typeof recordCriterionInputSchema>>;
-  deadlineAt: string;
   evidence: Map<string, RuntimeEvidenceRef>;
-  policy: RuntimeDeadlinePolicy;
   task: RuntimeTaskLease;
-}): RuntimeOutcome | null {
-  if (input.policy.mode !== "ADAPTIVE" || input.browserCommandCount === 0) {
-    return null;
-  }
-  const remainingMs = Date.parse(input.deadlineAt) - Date.now();
-  if (remainingMs > input.policy.finalizationReserveSeconds * 1_000) {
-    return null;
-  }
-  const missingRequired = input.task.snapshot.criteria.some(
-    (criterion) =>
-      criterion.required && !input.criterionResults.has(criterion.id),
+  reason: FinalizationReason;
+}): RuntimeOutcome {
+  const reason = {
+    FINALIZATION_RESERVE_REACHED:
+      "已进入截止前收尾窗口，剩余执行时间不足以继续验证。",
+    REPEATED_OPERATIONS:
+      "重复操作持续未产生新的页面观察或验收进展，已停止自动执行。",
+    TEXT_ONLY_LOOP:
+      "模型连续四轮只返回文本，未调用工具继续验证，已停止自动执行。",
+  }[input.reason];
+  const missing = input.task.snapshot.criteria.filter(
+    (criterion) => !input.criterionResults.has(criterion.id),
   );
-  if (missingRequired) return null;
-  const criteria = input.task.snapshot.criteria
-    .map((criterion) => input.criterionResults.get(criterion.id))
-    .filter(
-      (criterion): criterion is z.infer<typeof recordCriterionInputSchema> =>
-        criterion !== undefined,
-    );
-  if (criteria.length === 0) return null;
+  if (input.browserCommandCount === 0) {
+    return runtimeOutcomeSchema.parse({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+      error: {
+        code:
+          input.reason === "FINALIZATION_RESERVE_REACHED"
+            ? "VERIFICATION_BUDGET_EXHAUSTED"
+            : "AGENT_NO_PROGRESS",
+        failureClass: "TOOL_EXECUTION",
+        message: reason,
+        phase: "browser_verification",
+        details: {
+          reason: input.reason,
+          unverifiedCriterionIds: input.task.snapshot.criteria.map(
+            (criterion) => criterion.id,
+          ),
+        },
+      },
+      summary: `${reason}尚未执行浏览器命令，${input.task.snapshot.criteria.length} 条验收标准未验证。`,
+    });
+  }
+  const criteria = input.task.snapshot.criteria.map(
+    (criterion) =>
+      input.criterionResults.get(criterion.id) ?? {
+        criterionId: criterion.id,
+        evidenceRefs: [],
+        status: "INCONCLUSIVE" as const,
+        summary: `${reason}此标准尚未形成可确认的验收结论。`,
+      },
+  );
   const statuses = criteria.map((criterion) => criterion.status);
   const verdict = statuses.includes("FAILED")
     ? "FAILED"
@@ -1251,7 +1379,8 @@ function deadlineFinalizationOutcome(input: {
       ? "INCONCLUSIVE"
       : "PASSED";
   const summary = [
-    "已在执行截止时间前根据记录的验收标准完成验证。",
+    reason,
+    `${missing.length} 条尚未完成的验收标准已标记为 INCONCLUSIVE；已记录的结果与证据保留。`,
     ...criteria.map(
       (criterion) => `${criterion.criterionId}: ${criterion.summary}`,
     ),
@@ -1268,22 +1397,72 @@ function deadlineFinalizationOutcome(input: {
   });
 }
 
-function abortScope(parent: AbortSignal, timeoutMs: number | null) {
+class FinalizationWindowReachedError extends Error {
+  constructor() {
+    super("已进入浏览器验证收尾窗口。");
+  }
+}
+
+function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    operation
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
+  });
+}
+
+async function settleWithin(operation: Promise<unknown>, budgetMs: number) {
+  const settled = operation.catch(() => undefined);
+  if (budgetMs <= 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budgetMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function abortScope(
+  parent: AbortSignal,
+  timeoutMs: number | null,
+  finalizationAt: () => number,
+) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(parent.reason);
   if (parent.aborted) abortFromParent();
   else parent.addEventListener("abort", abortFromParent, { once: true });
-  const timer =
-    timeoutMs === null
-      ? undefined
-      : setTimeout(
-          () =>
-            controller.abort(
-              new Error(`模型响应超过 ${Math.round(timeoutMs / 1_000)} 秒。`),
-            ),
-          timeoutMs,
-        );
-  timer?.unref();
+  const modelDeadline =
+    timeoutMs === null ? Infinity : performance.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (controller.signal.aborted) return;
+    const untilFinalization = finalizationAt() - Date.now();
+    const untilModelDeadline = modelDeadline - performance.now();
+    if (untilFinalization <= 0) {
+      controller.abort(new FinalizationWindowReachedError());
+    } else if (untilModelDeadline <= 0) {
+      controller.abort(
+        new Error(`模型响应超过 ${Math.round(timeoutMs! / 1_000)} 秒。`),
+      );
+    } else {
+      // Heartbeats may extend the Run while a model is pending; re-read the
+      // deadline when the timer fires without exceeding the model-call cap.
+      timer = setTimeout(arm, Math.min(untilFinalization, untilModelDeadline));
+      timer.unref();
+    }
+  };
+  arm();
   return {
     dispose() {
       if (timer) clearTimeout(timer);

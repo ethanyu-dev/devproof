@@ -1499,9 +1499,15 @@ export class AgentRuntimeTaskService {
           activeOperation: null,
           activeOperationKey: null,
           activeOperationStartedAt: null,
-          lastModelCompletedAt: recordedAt,
+          // A failed response is latency telemetry, not progress that can buy
+          // another deadline extension (nor evidence of an earlier success).
+          lastModelCompletedAt:
+            event.kind === "agent.model.completed" ? recordedAt : null,
           lastModelLatencyMs: durationMs,
-          lastModelOperationKey: traceOperationKey(event.payload),
+          lastModelOperationKey:
+            event.kind === "agent.model.completed"
+              ? traceOperationKey(event.payload)
+              : null,
           lastProgressAt: recordedAt,
           modelLatencyEwmaMs,
           modelLatencyMaxMs: Math.max(task.modelLatencyMaxMs, durationMs),

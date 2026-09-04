@@ -381,6 +381,32 @@ function outcome(evidenceRefs: string[]) {
 }
 
 describe("AgentRuntimeTaskService completed evidence validation", () => {
+  it("accepts explicit inconclusive criteria when no acceptance evidence was obtained", () => {
+    const unfinished = {
+      ...outcome([]),
+      criteria: [
+        {
+          criterionId: "expected-1",
+          evidenceRefs: [],
+          status: "INCONCLUSIVE" as const,
+          summary: "验证停滞，尚未取得足以判断此验收项的证据。",
+        },
+      ],
+      verdict: "INCONCLUSIVE" as const,
+    };
+    expect(completedOutcomeEvidenceError(snapshot, unfinished, [])).toBeNull();
+    expect(
+      completedOutcomeEvidenceError(
+        snapshot,
+        { ...unfinished, criteria: [] },
+        [],
+      ),
+    ).toContain("missing required criterion");
+    expect(completedOutcomeEvidenceError(snapshot, outcome([]), [])).toContain(
+      "missing required evidence kinds",
+    );
+  });
+
   it("rejects a passing result missing a required evidence kind", () => {
     expect(
       completedOutcomeEvidenceError(
@@ -628,6 +654,76 @@ function adaptiveState(
 }
 
 describe("adaptive Runtime deadline decisions", () => {
+  it("does not treat a failed model response as recent progress for a deadline extension", async () => {
+    const now = new Date("2026-08-24T01:00:00.000Z");
+    const task = {
+      id: "task-1",
+      attemptId: snapshot.attemptId,
+      runId: snapshot.runId,
+      status: "RUNNING",
+      fencingToken: 1n,
+      leaseOwner: "worker-1",
+      leaseToken: "lease-1",
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+      modelLatencyEwmaMs: 40_000,
+      modelLatencyMaxMs: 50_000,
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+      agentRuntimeTask: {
+        findFirst: vi.fn().mockResolvedValue(task),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      runEvent: {
+        create: vi.fn().mockResolvedValue({ createdAt: now, sequence: 1n }),
+      },
+    };
+    const service = new AgentRuntimeTaskService(
+      {
+        $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
+      } as never,
+      {} as never,
+      {} as never,
+    );
+    await service.appendEvent(snapshot.teamId, task.id, {
+      fencingToken: "1",
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      event: {
+        eventId: "model-failure",
+        occurredAt: now.toISOString(),
+        kind: "agent.model.failed",
+        payload: {
+          attemptNumber: 1,
+          segmentId: "segment-1",
+          step: 5,
+          durationMs: 42_000,
+          errorMessage: "Model request timed out.",
+          inputPreview: {},
+          model: "test-model",
+          provider: "test-provider",
+        },
+      },
+    });
+    const progress = tx.agentRuntimeTask.update.mock.calls[0]![0].data;
+    expect(progress.lastModelLatencyMs).toBe(42_000);
+    expect(progress.lastModelCompletedAt).toBeNull();
+    expect(progress.lastModelOperationKey).toBeNull();
+    expect(
+      decideAdaptiveDeadlineExtension(
+        adaptiveState({
+          activeOperation: progress.activeOperation,
+          activeOperationKey: progress.activeOperationKey,
+          activeOperationStartedAtMs: null,
+          lastModelCompletedAtMs: progress.lastModelCompletedAt,
+          lastModelLatencyMs: progress.lastModelLatencyMs,
+          lastModelOperationKey: progress.lastModelOperationKey,
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("extends a near deadline while a model call is observably slow", () => {
     const extension = decideAdaptiveDeadlineExtension(adaptiveState());
 

@@ -7,6 +7,7 @@ import type {
 
 import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 import { ControlPlaneError } from "./control-plane.client.js";
+import { LeaseLostError } from "./lease-supervisor.js";
 
 const source: RuntimeSpecSourceRef = {
   contentHash: "a".repeat(64),
@@ -60,6 +61,101 @@ function call(name: string, arguments_: unknown, id: string) {
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("does not start an execution whose lease has already been lost", async () => {
+    const controller = new AbortController();
+    const lost = new LeaseLostError();
+    controller.abort(lost);
+    const create = vi.fn();
+    const appendSpecEvent = vi.fn();
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent } as never,
+      10,
+    );
+    await expect(executor.execute(task, lease, controller.signal)).rejects.toBe(
+      lost,
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(appendSpecEvent).not.toHaveBeenCalled();
+  });
+
+  it("cancels an in-flight trace request when ownership expires", async () => {
+    const controller = new AbortController();
+    const create = vi.fn();
+    const appendSpecEvent = vi.fn(
+      (_lease, _kind, _payload, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent } as never,
+      10,
+    );
+    const running = executor.execute(task, lease, controller.signal);
+    const lost = new LeaseLostError();
+    controller.abort(lost);
+    await expect(running).rejects.toBe(lost);
+    expect(appendSpecEvent.mock.calls[0]?.[3]).toBe(controller.signal);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("stops after a source call loses its lease instead of retrying it as a tool failure", async () => {
+    const lost = new ControlPlaneError(409, { code: "RUNTIME_LEASE_LOST" });
+    const controller = new AbortController();
+    const create = vi.fn().mockResolvedValue({
+      id: "response-1",
+      output: [
+        call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
+      ],
+    });
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executeSpecTool = vi.fn().mockRejectedValue(lost);
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent, executeSpecTool } as never,
+      10,
+    );
+    await expect(executor.execute(task, lease, controller.signal)).rejects.toBe(
+      lost,
+    );
+    expect(create).toHaveBeenCalledOnce();
+    expect(executeSpecTool).toHaveBeenCalledOnce();
+    expect(executeSpecTool.mock.calls[0]?.[2]).toBe(controller.signal);
+    expect(appendSpecEvent.mock.calls.at(-1)?.[1]).toBe("agent.tool.started");
+  });
+
+  it("does not start another source call or trace after the active call is aborted", async () => {
+    const controller = new AbortController();
+    const lost = new LeaseLostError();
+    const create = vi.fn().mockResolvedValue({
+      id: "response-1",
+      output: [
+        call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
+        call("knowledge_search", { analysisSummary: "查询知识。" }, "call-2"),
+      ],
+    });
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executeSpecTool = vi.fn().mockImplementation(async () => {
+      controller.abort(lost);
+      throw lost;
+    });
+    const executor = new SpecAnalysisExecutor(
+      () => ({ responses: { create } }) as never,
+      { appendSpecEvent, executeSpecTool } as never,
+      10,
+    );
+    await expect(executor.execute(task, lease, controller.signal)).rejects.toBe(
+      lost,
+    );
+    expect(create).toHaveBeenCalledOnce();
+    expect(executeSpecTool).toHaveBeenCalledOnce();
+    expect(appendSpecEvent.mock.calls.at(-1)?.[1]).toBe("agent.tool.started");
+  });
+
   it("records every analysis, model and tool step and returns a cited Spec", async () => {
     const spec = {
       cases: [

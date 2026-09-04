@@ -1292,13 +1292,6 @@ export class TaskExecutionService {
       where: { id: taskExecutionId },
     });
     if (!task) return null;
-    if (
-      task.kind === "ISSUE_SPEC" &&
-      task.profileBinding &&
-      task.profileBinding.status !== "RESOLVED"
-    ) {
-      return null;
-    }
     const analysis = task.stages.find(
       (stage) => stage.type === "SPEC_ANALYSIS",
     );
@@ -1343,6 +1336,24 @@ export class TaskExecutionService {
     const waitingForHuman = [...issueCases, ...directCases].some(
       (item) => item.run?.lifecycle === "WAITING_HUMAN",
     );
+    const timedOut = taskDeadlineElapsed({
+      deadlineAt: task.deadlineAt,
+      lifecycle: task.lifecycle,
+      now: new Date(),
+      waitingForHuman,
+    });
+    // Profile resolution owns its active wait, but cannot block completion of
+    // a failed/cancelled Spec or the parent deadline before a profile exists.
+    if (
+      task.kind === "ISSUE_SPEC" &&
+      analysis.status === "SUCCEEDED" &&
+      task.profileBinding &&
+      task.profileBinding.status !== "RESOLVED" &&
+      !task.cancelRequestedAt &&
+      !timedOut
+    ) {
+      return null;
+    }
     const projection = projectTaskExecution({
       analysisStatus: analysis.status,
       cancelRequested: Boolean(task.cancelRequestedAt),
@@ -1356,12 +1367,7 @@ export class TaskExecutionService {
         task.kind === "LEGACY_RUN" ||
         task.deployments.length > 0 ||
         typeof environment.targetUrl === "string",
-      timedOut: taskDeadlineElapsed({
-        deadlineAt: task.deadlineAt,
-        lifecycle: task.lifecycle,
-        now: new Date(),
-        waitingForHuman,
-      }),
+      timedOut,
     });
     const now = new Date();
     const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(

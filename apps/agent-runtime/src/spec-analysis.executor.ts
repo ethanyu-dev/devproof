@@ -53,6 +53,7 @@ export class SpecAnalysisExecutor {
     lease: ActiveLease,
     signal: AbortSignal,
   ): Promise<RuntimeSpecAnalysisOutcome> {
+    signal.throwIfAborted();
     const candidates = task.snapshot.modelCandidates;
     const preferredModel = candidates[0]!;
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
@@ -80,9 +81,10 @@ export class SpecAnalysisExecutor {
     let linkedPullRequestCount = 0;
     let segmentStatus: "FAILED" | "SUCCEEDED" = "FAILED";
     let segmentError: string | undefined;
+    let leaseRejected = false;
     let step = 0;
 
-    await this.appendTrace(lease, {
+    await this.appendTrace(lease, signal, {
       kind: "agent.segment.started",
       payload: {
         attemptNumber: task.snapshot.attemptNumber,
@@ -98,6 +100,7 @@ export class SpecAnalysisExecutor {
 
     try {
       for (let callCount = 0; callCount < this.toolLimit;) {
+        signal.throwIfAborted();
         step += 1;
         const inputPreview = modelHistoryPreview(history);
         let response: ModelResponse | null = null;
@@ -106,8 +109,9 @@ export class SpecAnalysisExecutor {
         let lastError: unknown;
 
         for (const candidate of candidates) {
+          signal.throwIfAborted();
           const modelStartedAt = Date.now();
-          await this.appendTrace(lease, {
+          await this.appendTrace(lease, signal, {
             kind: "agent.model.started",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
@@ -134,8 +138,9 @@ export class SpecAnalysisExecutor {
             lastError = undefined;
             break;
           } catch (error) {
+            signal.throwIfAborted();
             lastError = error;
-            await this.appendTrace(lease, {
+            await this.appendTrace(lease, signal, {
               kind: "agent.model.failed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -157,7 +162,7 @@ export class SpecAnalysisExecutor {
             `All configured model providers failed: ${traceError(lastError)}`,
           );
         }
-        await this.appendTrace(lease, {
+        await this.appendTrace(lease, signal, {
           kind: "agent.model.completed",
           payload: {
             attemptNumber: task.snapshot.attemptNumber,
@@ -184,13 +189,14 @@ export class SpecAnalysisExecutor {
         }
 
         for (const call of calls) {
+          signal.throwIfAborted();
           callCount += 1;
           if (callCount > this.toolLimit) break;
           const startedAt = Date.now();
           const parsedArguments = parseArguments(call.arguments);
           const summary = analysisSummary(parsedArguments);
           if (!summary) {
-            await this.appendTrace(lease, {
+            await this.appendTrace(lease, signal, {
               kind: "agent.tool.started",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -203,6 +209,7 @@ export class SpecAnalysisExecutor {
             });
             await this.appendTrace(
               lease,
+              signal,
               toolFailed(
                 task,
                 segmentId,
@@ -220,7 +227,7 @@ export class SpecAnalysisExecutor {
             );
             continue;
           }
-          await this.appendTrace(lease, {
+          await this.appendTrace(lease, signal, {
             kind: "agent.analysis.completed",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
@@ -231,7 +238,7 @@ export class SpecAnalysisExecutor {
               step,
             },
           });
-          await this.appendTrace(lease, {
+          await this.appendTrace(lease, signal, {
             kind: "agent.tool.started",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
@@ -242,12 +249,14 @@ export class SpecAnalysisExecutor {
               step,
             },
           });
+          signal.throwIfAborted();
 
           if (call.name === "finish_spec") {
             const parsed = finishSpecSchema.safeParse(parsedArguments);
             if (!parsed.success) {
               await this.validationFailed(
                 lease,
+                signal,
                 task,
                 segmentId,
                 step,
@@ -256,6 +265,7 @@ export class SpecAnalysisExecutor {
               );
               await this.toolCorrection(
                 lease,
+                signal,
                 task,
                 segmentId,
                 step,
@@ -281,6 +291,7 @@ export class SpecAnalysisExecutor {
             if (validationError) {
               await this.validationFailed(
                 lease,
+                signal,
                 task,
                 segmentId,
                 step,
@@ -289,6 +300,7 @@ export class SpecAnalysisExecutor {
               );
               await this.toolCorrection(
                 lease,
+                signal,
                 task,
                 segmentId,
                 step,
@@ -306,7 +318,7 @@ export class SpecAnalysisExecutor {
             }
             const usedSourceIds = specSourceIds(parsed.data.spec);
             const sourceRefs = usedSourceIds.map((id) => sources.get(id)!);
-            await this.appendTrace(lease, {
+            await this.appendTrace(lease, signal, {
               kind: "agent.tool.completed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -324,7 +336,7 @@ export class SpecAnalysisExecutor {
                 step,
               },
             });
-            await this.appendTrace(lease, {
+            await this.appendTrace(lease, signal, {
               kind: "agent.spec.generated",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -348,6 +360,7 @@ export class SpecAnalysisExecutor {
             const error = `未知的 Spec 分析工具：${call.name}`;
             await this.appendTrace(
               lease,
+              signal,
               toolFailed(task, segmentId, step, call, startedAt, error),
             );
             history.push(toolOutput(call, { accepted: false, error }));
@@ -376,7 +389,7 @@ export class SpecAnalysisExecutor {
                 ? result.pullRequestUrls.length
                 : 0;
             }
-            await this.appendTrace(lease, {
+            await this.appendTrace(lease, signal, {
               kind: "agent.tool.completed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
@@ -395,6 +408,10 @@ export class SpecAnalysisExecutor {
             });
             history.push(toolOutput(call, output.result));
           } catch (error) {
+            signal.throwIfAborted();
+            if (error instanceof ControlPlaneError && error.status === 409) {
+              throw error;
+            }
             const errorMessage = traceError(error);
             const availabilityFailure = isSourceAvailabilityFailure(error);
             const failureCount = availabilityFailure
@@ -414,6 +431,7 @@ export class SpecAnalysisExecutor {
               : errorMessage;
             await this.appendTrace(
               lease,
+              signal,
               toolFailed(task, segmentId, step, call, startedAt, traceMessage),
             );
             if (sourceUnavailable) {
@@ -458,40 +476,50 @@ export class SpecAnalysisExecutor {
         summary: "Agent 未能在工具调用预算内完成 Spec。",
       });
     } catch (error) {
+      leaseRejected =
+        error instanceof ControlPlaneError && error.status === 409;
       segmentError = traceError(error);
       throw error;
     } finally {
-      await this.appendTrace(lease, {
-        kind: "agent.segment.completed",
-        payload: {
-          attemptNumber: task.snapshot.attemptNumber,
-          durationMs: Date.now() - segmentStartedAt,
-          ...(segmentError ? { errorMessage: segmentError } : {}),
-          segmentId,
-          status: segmentStatus,
-        },
-      }).catch(() => undefined);
+      if (!leaseRejected)
+        await this.appendTrace(lease, signal, {
+          kind: "agent.segment.completed",
+          payload: {
+            attemptNumber: task.snapshot.attemptNumber,
+            durationMs: Date.now() - segmentStartedAt,
+            ...(segmentError ? { errorMessage: segmentError } : {}),
+            segmentId,
+            status: segmentStatus,
+          },
+        }).catch(() => undefined);
     }
   }
 
-  private appendTrace(lease: ActiveLease, event: RuntimeTraceEvent) {
+  private async appendTrace(
+    lease: ActiveLease,
+    signal: AbortSignal,
+    event: RuntimeTraceEvent,
+  ) {
+    signal.throwIfAborted();
     const parsed = runtimeTraceEventSchema.parse(event);
     return this.controlPlane.appendSpecEvent(
       lease,
       parsed.kind,
       parsed.payload,
+      signal,
     );
   }
 
   private validationFailed(
     lease: ActiveLease,
+    signal: AbortSignal,
     task: RuntimeSpecAnalysisTaskLease,
     segmentId: string,
     step: number,
     errorMessage: string,
     output: unknown,
   ) {
-    return this.appendTrace(lease, {
+    return this.appendTrace(lease, signal, {
       kind: "agent.spec.validation_failed",
       payload: {
         attemptNumber: task.snapshot.attemptNumber,
@@ -505,6 +533,7 @@ export class SpecAnalysisExecutor {
 
   private toolCorrection(
     lease: ActiveLease,
+    signal: AbortSignal,
     task: RuntimeSpecAnalysisTaskLease,
     segmentId: string,
     step: number,
@@ -512,7 +541,7 @@ export class SpecAnalysisExecutor {
     startedAt: number,
     error: string,
   ) {
-    return this.appendTrace(lease, {
+    return this.appendTrace(lease, signal, {
       kind: "agent.tool.completed",
       payload: {
         attemptNumber: task.snapshot.attemptNumber,

@@ -69,6 +69,34 @@ Index by `service + event`, and keep correlation identifiers searchable. Do not 
 
 Browser Runtime uses a bounded in-memory outbox for `runtime.event`, `command.result`, and `human.input.result` while disconnected. The outbox is limited to 500 messages or 10 MiB and replays in order. Preview frames and heartbeats are intentionally transient. Eviction produces a `runtime.message.dropped` log.
 
+### Runtime convergence events
+
+Spec recovery emits `task.stage.lease_lost` with the old Attempt, owner, fence,
+lease expiry and retry decision. `task.stage.retry_queued` links the old and new
+Attempt IDs; exhausting `analysisMaxAttempts` emits `task.stage.failed` and asks
+the Task coordinator to finish the parent. `task.stage.timed_out` identifies an
+elapsed parent deadline. Correlate these events with Agent logs
+`runtime.lease.renewal_failed`, `runtime.lease.lost` and `runtime.spec.lease_lost`;
+Spec renewal diagnostics include `pool=SPEC_ANALYSIS` and event-loop delay.
+
+Browser `executor.stagnation.finalized` records `REPEATED_OPERATIONS` or
+`TEXT_ONLY_LOOP`. Repetition requires eight repeated operations and at least
+60 seconds without a new page observation or criterion state; 24 repeated
+operations stop even a fast loop. Four consecutive text-only model responses
+also stop. Fresh command IDs, screenshot artifact IDs and snapshot refs do not
+count as progress. New page content and criterion status/evidence-kind changes
+reset the repetition window.
+
+`executor.deadline.finalized` records `FINALIZATION_RESERVE_REACHED`. The model
+call is bounded by the finalization window and observes deadline extensions from
+heartbeats. Forced finalization waits at most five seconds in total for its
+telemetry and browser-release RPCs, leaving time to submit the outcome while
+server-side browser cleanup continues. Final outcomes preserve existing failures/evidence and explicitly
+mark missing criteria `INCONCLUSIVE`; no browser work yields `NOT_RUN`. Model
+failures retain latency telemetry but no longer count as recent model progress
+for deadline extension. Inspect the outcome alongside these events to distinguish
+an unfinished verification from a product failure.
+
 ## Retention
 
 - Task and Run events and evidence are purged according to their configured retention policy.

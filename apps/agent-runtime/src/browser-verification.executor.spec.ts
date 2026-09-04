@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskLease } from "@devproof/agent-runtime-protocol";
 
 import { BrowserVerificationExecutor } from "./browser-verification.executor.js";
+
+afterEach(() => vi.useRealTimers());
 
 const task: RuntimeTaskLease = {
   fencingToken: "4",
@@ -72,6 +74,366 @@ function functionCall(
 function modelFactory(create: ReturnType<typeof vi.fn>) {
   return () => ({ responses: { create } }) as never;
 }
+
+function convergenceHarness(create: ReturnType<typeof vi.fn>) {
+  const controlPlane = {
+    acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
+    appendEvent: vi.fn().mockResolvedValue({}),
+    browserCommand: vi.fn().mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content: "页面加载中" },
+    }),
+    releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
+  };
+  const runTask: RuntimeTaskLease = {
+    ...task,
+    snapshot: {
+      ...task.snapshot,
+      deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+      executionPolicy: {
+        deadline: {
+          mode: "ADAPTIVE",
+          finalizationReserveSeconds: 60,
+          maxModelCallSeconds: 300,
+        },
+      },
+    },
+  };
+  const executor = new BrowserVerificationExecutor(
+    modelFactory(create),
+    controlPlane as never,
+    60,
+  );
+  return { controlPlane, runTask, executor };
+}
+
+describe("browser verification convergence", () => {
+  it("shares a five-second budget across forced-finalization telemetry and a hung release", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn();
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 30_000).toISOString();
+    controlPlane.appendEvent.mockImplementation(async (_lease, kind) => {
+      if (
+        kind === "executor.deadline.finalized" ||
+        kind === "agent.segment.completed"
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      return {};
+    });
+    let rejectRelease: (error: Error) => void = () => {};
+    controlPlane.releaseBrowser.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRelease = reject;
+        }),
+    );
+    let completed = false;
+    const execution = executor
+      .execute(runTask, lease, new AbortController().signal)
+      .then((outcome) => {
+        completed = true;
+        return outcome;
+      });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    expect(completed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await execution).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+    });
+    expect(create).not.toHaveBeenCalled();
+    rejectRelease(new Error("Late close RPC failure"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      controlPlane.appendEvent.mock.calls.some(
+        (call) => call[1] === "browser.release.deferred",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not append more telemetry after a forced-finalization RPC consumes the budget", async () => {
+    vi.useFakeTimers();
+    const { executor, controlPlane, runTask } = convergenceHarness(vi.fn());
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 30_000).toISOString();
+    controlPlane.appendEvent.mockImplementation(async (_lease, kind) => {
+      if (kind === "executor.deadline.finalized") await new Promise(() => {});
+      return {};
+    });
+    controlPlane.releaseBrowser.mockImplementation(() => new Promise(() => {}));
+    const execution = executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await execution).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+    });
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    expect(
+      controlPlane.appendEvent.mock.calls.some(
+        (call) => call[1] === "agent.segment.completed",
+      ),
+    ).toBe(false);
+  });
+
+  it("stops a fast repeated snapshot loop and fills missing criteria without inventing evidence", async () => {
+    let index = 0;
+    const create = vi.fn().mockImplementation(async () => ({
+      id: `response-${++index}`,
+      output: [
+        functionCall(
+          "browser_command",
+          { commandType: "page.snapshot", payload: {} },
+          index,
+        ),
+      ],
+    }));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async () => ({
+      id: `command-${index}`,
+      result: { content: `页面加载中 [ref=e${index}]` },
+      durationMs: index,
+      status: "SUCCEEDED",
+    }));
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(create).toHaveBeenCalledTimes(25);
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      evidence: [],
+      criteria: [
+        {
+          criterionId: "page-visible",
+          status: "INCONCLUSIVE",
+          evidenceRefs: [],
+        },
+      ],
+    });
+    expect(outcome.summary).toContain("重复操作");
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("bounds text-only responses even though they never consume a tool call", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "text",
+      output: [{ type: "message", text: "继续分析" }],
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(create).toHaveBeenCalledTimes(4);
+    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+      error: {
+        code: "AGENT_NO_PROGRESS",
+        details: {
+          reason: "TEXT_ONLY_LOOP",
+          unverifiedCriterionIds: ["page-visible"],
+        },
+      },
+    });
+    expect(outcome.summary).toContain("1 条验收标准未验证");
+  });
+
+  it("finalizes zero recorded criteria when browser work reaches the reserve", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn().mockResolvedValue({
+      id: "browser",
+      output: [
+        functionCall(
+          "browser_command",
+          { commandType: "page.snapshot", payload: {} },
+          1,
+        ),
+      ],
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 60_000);
+      return { status: "SUCCEEDED", result: { content: "页面加载中" } };
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(create).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      evidence: [],
+      criteria: [{ status: "INCONCLUSIVE", evidenceRefs: [] }],
+    });
+    expect(outcome.summary).toContain("剩余执行时间不足");
+  });
+
+  it("preserves a recorded failure and its evidence when other criteria remain unknown", async () => {
+    vi.useFakeTimers();
+    const screenshotId = "11111111-1111-4111-8111-111111111111";
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "browser",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.screenshot", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "criterion",
+        output: [
+          functionCall(
+            "record_criterion",
+            {
+              criterionId: "page-visible",
+              status: "FAILED",
+              summary: "页面缺少所需内容。",
+              evidenceRefs: [`artifact://${screenshotId}`],
+            },
+            2,
+          ),
+        ],
+      });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.criteria = [
+      ...runTask.snapshot.criteria,
+      {
+        id: "footer",
+        description: "页脚可见",
+        required: true,
+        requiredEvidenceKinds: ["SCREENSHOT"],
+      },
+    ];
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      artifacts: [{ id: screenshotId, kind: "SCREENSHOT", metadata: {} }],
+    });
+    controlPlane.appendEvent.mockImplementation(async (_lease, kind) => {
+      if (kind === "agent.tool.completed" && create.mock.calls.length === 2)
+        vi.setSystemTime(Date.now() + 60_000);
+      return {};
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "FAILED",
+      criteria: [
+        {
+          criterionId: "page-visible",
+          status: "FAILED",
+          summary: "页面缺少所需内容。",
+          evidenceRefs: [`artifact://${screenshotId}`],
+        },
+        { criterionId: "footer", status: "INCONCLUSIVE", evidenceRefs: [] },
+      ],
+      evidence: [
+        { externalId: `artifact://${screenshotId}`, kind: "SCREENSHOT" },
+      ],
+    });
+  });
+
+  it("cuts off a hung model at the reserve even if its client ignores abort", async () => {
+    vi.useFakeTimers();
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "browser",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockImplementation(() => new Promise(() => {}));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    const execution = executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]![1].signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const outcome = await execution;
+    expect(create.mock.calls[1]![1].signal.aborted).toBe(true);
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+    });
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "agent.model.failed",
+      expect.objectContaining({
+        errorMessage: expect.stringContaining("收尾窗口"),
+      }),
+    );
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("honors a heartbeat deadline extension while preserving a finalization window", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn().mockImplementation(() => new Promise(() => {}));
+    const { executor, runTask } = convergenceHarness(create);
+    const execution = executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 150_000).toISOString();
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(create.mock.calls[0]![1].signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(await execution).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+    });
+    expect(create.mock.calls[0]![1].signal.aborted).toBe(true);
+  });
+
+  it("lets parent cancellation or lease loss win over model finalization", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn().mockImplementation(() => new Promise(() => {}));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    const controller = new AbortController();
+    const execution = executor.execute(runTask, lease, controller.signal);
+    const reason = new Error("Runtime lease was lost.");
+    const rejected = expect(execution).rejects.toBe(reason);
+    await vi.advanceTimersByTimeAsync(59_999);
+    controller.abort(reason);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(
+      controlPlane.appendEvent.mock.calls.some((call) =>
+        String(call[1]).endsWith(".finalized"),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("Agent Runtime browser verification executor", () => {
   it("removes validation-only formats from non-strict function schemas", async () => {
@@ -276,11 +638,13 @@ describe("Agent Runtime browser verification executor", () => {
   });
 
   it("finalizes recorded criteria without another model call near the deadline", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
     const adaptiveTask: RuntimeTaskLease = {
       ...task,
       snapshot: {
         ...task.snapshot,
-        deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+        deadlineAt: new Date(startedAt + 120_000).toISOString(),
         executionPolicy: {
           deadline: {
             finalizationReserveSeconds: 60,
@@ -306,24 +670,34 @@ describe("Agent Runtime browser verification executor", () => {
           ),
         ],
       })
-      .mockResolvedValueOnce({
-        id: "response-criterion",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "PASSED",
-              summary: "页面已加载。",
-            },
-            2,
-          ),
-        ],
+      .mockImplementationOnce(async () => {
+        // The criterion arrives before the reserved window; finalization is
+        // evaluated on the next iteration, after it has been recorded.
+        vi.setSystemTime(startedAt + 59_999);
+        return {
+          id: "response-criterion",
+          output: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "PASSED",
+                summary: "页面已加载。",
+              },
+              2,
+            ),
+          ],
+        };
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
-      appendEvent: vi.fn().mockResolvedValue({}),
+      appendEvent: vi.fn().mockImplementation(async (_lease, kind) => {
+        if (kind === "agent.tool.completed" && create.mock.calls.length === 2) {
+          vi.setSystemTime(startedAt + 60_000);
+        }
+        return {};
+      }),
       browserCommand: vi.fn().mockResolvedValue({ status: "SUCCEEDED" }),
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
     };

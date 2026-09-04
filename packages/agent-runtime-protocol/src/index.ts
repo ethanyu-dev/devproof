@@ -3,7 +3,7 @@ import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 10,
+  minor: 11,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -228,6 +228,8 @@ export const runtimeSpecAnalysisTaskLeaseSchema = z.object({
   fencingToken: z.string().regex(/^\d+$/u),
   leaseExpiresAt: z.string().datetime(),
   leaseToken: z.string().uuid(),
+  serverTime: z.string().datetime().optional(),
+  leaseDurationMs: z.number().nonnegative().optional(),
   snapshot: runtimeSpecAnalysisTaskSnapshotSchema,
   taskId: z.string().uuid(),
 });

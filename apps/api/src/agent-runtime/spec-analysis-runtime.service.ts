@@ -72,6 +72,10 @@ type LeaseInput = {
   workerId: string;
 };
 
+type AnalysisAttempt = Prisma.TaskStageAttemptGetPayload<{
+  include: { stage: { include: { taskExecution: true } } };
+}>;
+
 @Injectable()
 export class SpecAnalysisRuntimeService {
   constructor(
@@ -103,14 +107,15 @@ export class SpecAnalysisRuntimeService {
 
     for (let collision = 0; collision < 5; collision += 1) {
       const claimed = await this.prisma.$transaction(async (tx) => {
-        const now = new Date();
+        const searchTime = await databaseNow(tx);
         const candidate = await tx.taskStageAttempt.findFirst({
+          include: { stage: { include: { taskExecution: true } } },
           orderBy: { createdAt: "asc" },
           where: {
             stage: {
+              status: { in: ["PENDING", "RUNNING"] },
               taskExecution: {
                 cancelRequestedAt: null,
-                deadlineAt: { gt: now },
                 lifecycle: { in: ["QUEUED", "RUNNING"] },
                 teamId,
               },
@@ -118,11 +123,41 @@ export class SpecAnalysisRuntimeService {
             },
             OR: [
               { status: "PENDING" },
-              { leaseExpiresAt: { lt: now }, status: "RUNNING" },
+              { leaseExpiresAt: { lte: searchTime }, status: "RUNNING" },
             ],
           },
         });
         if (!candidate) return null;
+        // Lock the parent before its children, matching cancellation/projection.
+        // Updating it also invalidates a coordinator's older projection snapshot.
+        if (
+          !(await this.lockActiveTask(
+            tx,
+            candidate.stage.taskExecutionId,
+            teamId,
+          ))
+        ) {
+          return undefined;
+        }
+        const current = await this.findAttempt(tx, teamId, candidate.id);
+        const now = await databaseNow(tx);
+        if (
+          !["PENDING", "RUNNING"].includes(current.stage.status) ||
+          current.stage.currentAttemptNumber !== current.number ||
+          (current.status !== "PENDING" &&
+            (current.status !== "RUNNING" ||
+              !current.leaseExpiresAt ||
+              current.leaseExpiresAt > now))
+        )
+          return undefined;
+        if (current.stage.taskExecution.deadlineAt <= now) {
+          await this.expireAttempt(tx, current, now);
+          return undefined;
+        }
+        if (current.status === "RUNNING") {
+          await this.recoverExpiredAttempt(tx, current, now);
+          return undefined;
+        }
         const leaseToken = randomUUID();
         const leaseExpiresAt = leaseExpiry(now);
         const acquired = await tx.taskStageAttempt.updateMany({
@@ -131,15 +166,12 @@ export class SpecAnalysisRuntimeService {
             leaseExpiresAt,
             leaseOwner: input.workerId,
             leaseToken,
-            startedAt: candidate.startedAt ?? now,
+            startedAt: current.startedAt ?? now,
             status: "RUNNING",
           },
           where: {
-            id: candidate.id,
-            OR: [
-              { status: "PENDING" },
-              { leaseExpiresAt: { lt: now }, status: "RUNNING" },
-            ],
+            id: current.id,
+            status: "PENDING",
           },
         });
         if (acquired.count !== 1) return undefined;
@@ -169,40 +201,49 @@ export class SpecAnalysisRuntimeService {
             "task.stage.started",
             {
               attemptNumber: attempt.number,
+              fencingToken: attempt.fencingToken.toString(),
+              leaseExpiresAt: leaseExpiresAt.toISOString(),
               stage: "SPEC_ANALYSIS",
               stageAttemptId: attempt.id,
+              workerId: input.workerId,
             },
           ),
         });
-        return attempt;
+        return { attempt, serverTime: await databaseNow(tx) };
       });
       if (claimed === undefined) continue;
       if (claimed === null) return { task: null };
+      const { attempt, serverTime } = claimed;
       const createInput = taskExecutionCreateInputSchema.parse(
-        claimed.stage.taskExecution.inputSnapshot,
+        attempt.stage.taskExecution.inputSnapshot,
       );
       if (createInput.kind !== "ISSUE_SPEC") {
         throw new ConflictException("Only Issue tasks support Spec analysis.");
       }
       return {
         task: {
-          fencingToken: claimed.fencingToken.toString(),
-          leaseExpiresAt: claimed.leaseExpiresAt!.toISOString(),
-          leaseToken: claimed.leaseToken!,
+          fencingToken: attempt.fencingToken.toString(),
+          leaseExpiresAt: attempt.leaseExpiresAt!.toISOString(),
+          leaseDurationMs: Math.max(
+            0,
+            attempt.leaseExpiresAt!.getTime() - serverTime.getTime(),
+          ),
+          leaseToken: attempt.leaseToken!,
+          serverTime: serverTime.toISOString(),
           snapshot: {
-            attemptNumber: claimed.number,
-            deadlineAt: claimed.stage.taskExecution.deadlineAt.toISOString(),
+            attemptNumber: attempt.number,
+            deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
             issueRef: createInput.issueRef,
             modelCandidates,
-            stageAttemptId: claimed.id,
+            stageAttemptId: attempt.id,
             ...(createInput.targetUrl
               ? { targetUrl: createInput.targetUrl }
               : {}),
-            taskExecutionId: claimed.stage.taskExecutionId,
+            taskExecutionId: attempt.stage.taskExecutionId,
             teamId,
-            traceId: claimed.stage.taskExecution.traceId,
+            traceId: attempt.stage.taskExecution.traceId,
           },
-          taskId: claimed.id,
+          taskId: attempt.id,
         },
       };
     }
@@ -211,13 +252,13 @@ export class SpecAnalysisRuntimeService {
 
   async heartbeat(teamId: string, attemptId: string, input: LeaseInput) {
     return this.prisma.$transaction(async (tx) => {
-      const attempt = await this.findAttempt(tx, teamId, attemptId);
-      this.requireLease(attempt, input);
-      const now = new Date();
+      const attempt = await this.lockAttempt(tx, teamId, attemptId);
+      const now = await databaseNow(tx);
+      this.requireLease(attempt, input, now);
       const cancelled =
         attempt.stage.taskExecution.cancelRequestedAt !== null ||
         attempt.stage.taskExecution.deadlineAt <= now ||
-        ["CANCELLED", "TIMED_OUT"].includes(
+        ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
           attempt.stage.taskExecution.lifecycle,
         );
       if (cancelled) {
@@ -225,20 +266,38 @@ export class SpecAnalysisRuntimeService {
           deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
           directive: "CANCEL" as const,
           leaseExpiresAt: (attempt.leaseExpiresAt ?? now).toISOString(),
+          leaseDurationMs: Math.max(
+            0,
+            (attempt.leaseExpiresAt ?? now).getTime() - now.getTime(),
+          ),
+          serverTime: now.toISOString(),
         };
       }
       if (attempt.status !== "RUNNING") {
         throw new ConflictException("The Spec analysis attempt is terminal.");
       }
       const leaseExpiresAt = leaseExpiry(now);
-      await tx.taskStageAttempt.update({
+      const renewed = await tx.taskStageAttempt.updateMany({
         data: { leaseExpiresAt },
-        where: { id: attempt.id },
+        where: {
+          ...leaseWhere(attempt.id, input, now),
+          stage: {
+            taskExecution: {
+              cancelRequestedAt: null,
+              deadlineAt: { gt: now },
+              lifecycle: { in: ["QUEUED", "RUNNING"] },
+            },
+          },
+        },
       });
+      if (renewed.count !== 1)
+        throw new ConflictException("The Spec analysis lease is stale.");
       return {
         deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
         directive: "CONTINUE" as const,
         leaseExpiresAt: leaseExpiresAt.toISOString(),
+        leaseDurationMs: leaseExpiresAt.getTime() - now.getTime(),
+        serverTime: now.toISOString(),
       };
     });
   }
@@ -256,8 +315,9 @@ export class SpecAnalysisRuntimeService {
     },
   ) {
     return this.prisma.$transaction(async (tx) => {
-      const attempt = await this.findAttempt(tx, teamId, attemptId);
-      this.requireLease(attempt, input);
+      const attempt = await this.lockAttempt(tx, teamId, attemptId);
+      const now = await databaseNow(tx);
+      this.requireLease(attempt, input, now);
       const trace = runtimeTraceEventSchema.safeParse({
         kind: input.event.kind,
         payload: input.event.payload,
@@ -265,6 +325,23 @@ export class SpecAnalysisRuntimeService {
       if (!trace.success) {
         throw new BadRequestException(trace.error.message);
       }
+      // Hold the Attempt row until its event is committed. Recovery cannot
+      // invalidate this fence between the ownership check and the insert.
+      const owned = await tx.taskStageAttempt.updateMany({
+        data: { updatedAt: now },
+        where: {
+          ...leaseWhere(attemptId, input, now),
+          stage: {
+            taskExecution: {
+              cancelRequestedAt: null,
+              deadlineAt: { gt: now },
+              lifecycle: { in: ["QUEUED", "RUNNING"] },
+            },
+          },
+        },
+      });
+      if (owned.count !== 1)
+        throw new ConflictException("The Spec analysis lease is stale.");
       try {
         const row = await tx.taskExecutionEvent.create({
           data: {
@@ -584,18 +661,33 @@ export class SpecAnalysisRuntimeService {
       env().SPEC_ANALYSIS_MODE === "SHADOW"
         ? compareSpecifications(spec, generateBusinessTestSpec(context))
         : null;
-    const now = new Date();
     return this.prisma.$transaction(async (tx) => {
+      if (
+        !(await this.lockActiveTask(
+          tx,
+          attempt.stage.taskExecutionId,
+          attempt.stage.taskExecution.teamId,
+        ))
+      ) {
+        throw new ConflictException(
+          "The Spec analysis lease is terminal because the task no longer accepts outcomes.",
+        );
+      }
       const locked = await this.findAttempt(
         tx,
         attempt.stage.taskExecution.teamId,
         attempt.id,
       );
-      this.requireLease(locked, {
-        fencingToken: attempt.fencingToken.toString(),
-        leaseToken: attempt.leaseToken!,
-        workerId: attempt.leaseOwner!,
-      });
+      const now = await databaseNow(tx);
+      this.requireLease(
+        locked,
+        {
+          fencingToken: attempt.fencingToken.toString(),
+          leaseToken: attempt.leaseToken!,
+          workerId: attempt.leaseOwner!,
+        },
+        now,
+      );
       requireActiveTask(locked.stage.taskExecution, now);
       const snapshot = await tx.taskSpecificationSnapshot.create({
         data: {
@@ -762,128 +854,290 @@ export class SpecAnalysisRuntimeService {
     completionId: string,
     outcome: Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
   ) {
-    const retry =
-      outcome.kind === "RETRYABLE_FAILURE" &&
-      attempt.number < attempt.stage.maxAttempts;
-    const now = new Date();
     return this.prisma.$transaction(async (tx) => {
+      if (
+        !(await this.lockActiveTask(
+          tx,
+          attempt.stage.taskExecutionId,
+          attempt.stage.taskExecution.teamId,
+        ))
+      ) {
+        throw new ConflictException(
+          "The Spec analysis lease is terminal because the task no longer accepts outcomes.",
+        );
+      }
       const locked = await this.findAttempt(
         tx,
         attempt.stage.taskExecution.teamId,
         attempt.id,
       );
-      this.requireLease(locked, {
+      const now = await databaseNow(tx);
+      const lease = {
         fencingToken: attempt.fencingToken.toString(),
         leaseToken: attempt.leaseToken!,
         workerId: attempt.leaseOwner!,
-      });
-      requireActiveTask(locked.stage.taskExecution, now);
-      const result = {
-        attemptNumber: attempt.number,
-        completionId,
-        nextAttemptScheduled: retry,
-        outcome,
-        stageStatus: retry ? "PENDING" : "FAILED",
       };
-      await tx.taskStageAttempt.update({
-        data: {
-          error: json(outcome.error),
-          finishedAt: now,
-          leaseExpiresAt: null,
-          leaseOwner: null,
-          leaseToken: null,
-          result: json(result),
-          status: "FAILED",
+      this.requireLease(locked, lease, now);
+      requireActiveTask(locked.stage.taskExecution, now);
+      const result = await this.finishFailedAttempt(
+        tx,
+        locked,
+        completionId,
+        outcome,
+        now,
+        {
+          actor: "AGENT_RUNTIME",
+          where: leaseWhere(attempt.id, lease, now),
         },
-        where: { id: attempt.id },
+      );
+      if (!result)
+        throw new ConflictException("The Spec analysis lease is stale.");
+      return result;
+    });
+  }
+
+  private async recoverExpiredAttempt(
+    tx: Prisma.TransactionClient,
+    attempt: AnalysisAttempt,
+    now: Date,
+  ) {
+    const outcome = {
+      error: {
+        code: "RUNTIME_LEASE_LOST",
+        details: {
+          fencingToken: attempt.fencingToken.toString(),
+          leaseExpiresAt: attempt.leaseExpiresAt?.toISOString(),
+          workerId: attempt.leaseOwner,
+        },
+        failureClass: "RUNTIME_LOST",
+        message:
+          "Spec analysis lease expired; retrying requires a new Attempt within the configured budget.",
+        phase: "spec_analysis",
+      },
+      executionDisposition: "RUNTIME_LOST",
+      kind: "RETRYABLE_FAILURE",
+      summary: `第 ${attempt.number} 次 Spec 分析失去租约。`,
+    } satisfies Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>;
+    await this.finishFailedAttempt(tx, attempt, randomUUID(), outcome, now, {
+      actor: "CONTROL_PLANE",
+      where: {
+        fencingToken: attempt.fencingToken,
+        id: attempt.id,
+        leaseExpiresAt: { lte: now },
+        leaseOwner: attempt.leaseOwner,
+        leaseToken: attempt.leaseToken,
+        status: "RUNNING",
+      },
+    });
+  }
+
+  private async finishFailedAttempt(
+    tx: Prisma.TransactionClient,
+    attempt: AnalysisAttempt,
+    completionId: string,
+    outcome: Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
+    now: Date,
+    transition: {
+      actor: "AGENT_RUNTIME" | "CONTROL_PLANE";
+      where: Prisma.TaskStageAttemptWhereInput;
+    },
+  ) {
+    const retry =
+      outcome.kind === "RETRYABLE_FAILURE" &&
+      attempt.number < attempt.stage.maxAttempts;
+    const result = {
+      attemptNumber: attempt.number,
+      completionId,
+      nextAttemptScheduled: retry,
+      outcome,
+      stageStatus: retry ? "PENDING" : "FAILED",
+    };
+    const completed = await tx.taskStageAttempt.updateMany({
+      data: {
+        error: json(outcome.error),
+        fencingToken: { increment: 1 },
+        finishedAt: now,
+        leaseExpiresAt: null,
+        leaseOwner: null,
+        leaseToken: null,
+        result: json(result),
+        status: "FAILED",
+      },
+      where: transition.where,
+    });
+    if (completed.count !== 1) return null;
+    if (transition.actor === "CONTROL_PLANE") {
+      await tx.taskExecutionEvent.create({
+        data: taskEvent(
+          attempt.stage.taskExecution.teamId,
+          attempt.stage.taskExecutionId,
+          transition.actor,
+          "task.stage.lease_lost",
+          {
+            attemptNumber: attempt.number,
+            fencingToken: attempt.fencingToken.toString(),
+            leaseExpiresAt: attempt.leaseExpiresAt?.toISOString(),
+            maxAttempts: attempt.stage.maxAttempts,
+            nextAttemptScheduled: retry,
+            stage: "SPEC_ANALYSIS",
+            stageAttemptId: attempt.id,
+            workerId: attempt.leaseOwner,
+          },
+        ),
       });
-      if (retry) {
-        const nextAttempt = attempt.number + 1;
-        await tx.taskStageAttempt.create({
-          data: {
-            inputSnapshot: attempt.inputSnapshot as Prisma.InputJsonValue,
-            number: nextAttempt,
-            stageId: attempt.stageId,
-          },
-        });
-        await tx.taskExecutionStage.update({
-          data: {
-            currentAttemptNumber: nextAttempt,
-            lastError: json(outcome.error),
-            status: "PENDING",
-          },
-          where: { id: attempt.stageId },
-        });
-        await tx.taskExecution.update({
-          data: { lifecycle: "QUEUED", projectionNeededAt: now },
-          where: { id: attempt.stage.taskExecutionId },
-        });
-        await tx.taskExecutionEvent.create({
-          data: taskEvent(
-            attempt.stage.taskExecution.teamId,
-            attempt.stage.taskExecutionId,
-            "AGENT_RUNTIME",
-            "task.stage.retry_queued",
-            {
-              attemptNumber: nextAttempt,
-              error: outcome.error,
-              stage: "SPEC_ANALYSIS",
-              stageAttemptId: attempt.id,
-            },
-          ),
-        });
-        return {
-          accepted: true,
-          attemptNumber: attempt.number,
-          nextAttemptScheduled: true,
-          stageStatus: "PENDING" as const,
-        };
-      }
+    }
+    if (retry) {
+      const nextAttempt = attempt.number + 1;
+      const created = await tx.taskStageAttempt.create({
+        data: {
+          inputSnapshot: attempt.inputSnapshot as Prisma.InputJsonValue,
+          number: nextAttempt,
+          stageId: attempt.stageId,
+        },
+      });
       await tx.taskExecutionStage.update({
         data: {
-          finishedAt: now,
+          currentAttemptNumber: nextAttempt,
           lastError: json(outcome.error),
-          status: "FAILED",
+          status: "PENDING",
         },
         where: { id: attempt.stageId },
       });
-      await tx.taskExecutionStage.updateMany({
-        data: { finishedAt: now, status: "CANCELLED" },
-        where: {
-          taskExecutionId: attempt.stage.taskExecutionId,
-          type: { in: ["PROFILE_RESOLUTION", "SPEC_EXECUTION"] },
-        },
-      });
       await tx.taskExecution.update({
-        data: {
-          executionDisposition: "NOT_RUN",
-          finishedAt: now,
-          lifecycle: "COMPLETED",
-          projectionNeededAt: null,
-        },
+        data: { lifecycle: "QUEUED", projectionNeededAt: now },
         where: { id: attempt.stage.taskExecutionId },
       });
       await tx.taskExecutionEvent.create({
         data: taskEvent(
           attempt.stage.taskExecution.teamId,
           attempt.stage.taskExecutionId,
-          "AGENT_RUNTIME",
-          "task.stage.failed",
+          transition.actor,
+          "task.stage.retry_queued",
           {
-            attemptNumber: attempt.number,
+            attemptNumber: nextAttempt,
             error: outcome.error,
+            previousStageAttemptId: attempt.id,
             stage: "SPEC_ANALYSIS",
-            stageAttemptId: attempt.id,
+            stageAttemptId: created.id,
           },
         ),
       });
       return {
         accepted: true,
         attemptNumber: attempt.number,
-        nextAttemptScheduled: false,
-        stageStatus: "FAILED" as const,
+        nextAttemptScheduled: true,
+        stageStatus: "PENDING" as const,
       };
+    }
+    await tx.taskExecutionStage.update({
+      data: {
+        finishedAt: now,
+        lastError: json(outcome.error),
+        status: "FAILED",
+      },
+      where: { id: attempt.stageId },
     });
+    await tx.taskExecutionStage.updateMany({
+      data: { finishedAt: now, status: "CANCELLED" },
+      where: {
+        taskExecutionId: attempt.stage.taskExecutionId,
+        type: { in: ["PROFILE_RESOLUTION", "SPEC_EXECUTION"] },
+      },
+    });
+    await tx.taskExecution.update({
+      data: {
+        // The existing coordinator owns parent completion, notifications and
+        // post-run analysis. Leave it a fresh projection after stage failure.
+        projectionNeededAt: now,
+      },
+      where: { id: attempt.stage.taskExecutionId },
+    });
+    await tx.taskExecutionEvent.create({
+      data: taskEvent(
+        attempt.stage.taskExecution.teamId,
+        attempt.stage.taskExecutionId,
+        transition.actor,
+        "task.stage.failed",
+        {
+          attemptNumber: attempt.number,
+          error: outcome.error,
+          stage: "SPEC_ANALYSIS",
+          stageAttemptId: attempt.id,
+        },
+      ),
+    });
+    return {
+      accepted: true,
+      attemptNumber: attempt.number,
+      nextAttemptScheduled: false,
+      stageStatus: "FAILED" as const,
+    };
+  }
+
+  private async expireAttempt(
+    tx: Prisma.TransactionClient,
+    attempt: AnalysisAttempt,
+    now: Date,
+  ) {
+    const error = {
+      code: "SPEC_ANALYSIS_DEADLINE_EXCEEDED",
+      failureClass: "TIMEOUT",
+      message:
+        "The parent task deadline elapsed before Spec analysis completed.",
+      phase: "spec_analysis",
+    };
+    const expired = await tx.taskStageAttempt.updateMany({
+      data: {
+        error: json(error),
+        fencingToken: { increment: 1 },
+        finishedAt: now,
+        leaseExpiresAt: null,
+        leaseOwner: null,
+        leaseToken: null,
+        status: "TIMED_OUT",
+      },
+      where: {
+        fencingToken: attempt.fencingToken,
+        id: attempt.id,
+        status: { in: ["PENDING", "RUNNING"] },
+      },
+    });
+    if (expired.count !== 1) return;
+    await tx.taskExecutionStage.update({
+      data: { finishedAt: now, lastError: json(error), status: "FAILED" },
+      where: { id: attempt.stageId },
+    });
+    await tx.taskExecutionEvent.create({
+      data: taskEvent(
+        attempt.stage.taskExecution.teamId,
+        attempt.stage.taskExecutionId,
+        "CONTROL_PLANE",
+        "task.stage.timed_out",
+        {
+          attemptNumber: attempt.number,
+          error,
+          stage: "SPEC_ANALYSIS",
+          stageAttemptId: attempt.id,
+        },
+      ),
+    });
+  }
+
+  private async lockActiveTask(
+    tx: Prisma.TransactionClient,
+    taskExecutionId: string,
+    teamId: string,
+  ) {
+    const locked = await tx.taskExecution.updateMany({
+      data: { projectionNeededAt: new Date() },
+      where: {
+        cancelRequestedAt: null,
+        id: taskExecutionId,
+        lifecycle: { in: ["QUEUED", "RUNNING"] },
+        teamId,
+      },
+    });
+    return locked.count === 1;
   }
 
   private loadedAttempt() {
@@ -991,6 +1245,28 @@ export class SpecAnalysisRuntimeService {
       });
   }
 
+  private async lockAttempt(
+    tx: Prisma.TransactionClient,
+    teamId: string,
+    attemptId: string,
+  ) {
+    // These short heartbeat/event transactions never lock the parent. Take
+    // the Attempt lock before reading database time, so time spent waiting
+    // behind another transaction cannot revive an already expired lease.
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT attempt.id
+      FROM task_stage_attempts AS attempt
+      JOIN task_execution_stages AS stage ON stage.id = attempt.stage_id
+      JOIN task_executions AS task ON task.id = stage.task_execution_id
+      WHERE attempt.id = ${attemptId}::uuid AND task.team_id = ${teamId}::uuid
+      FOR UPDATE OF attempt
+    `;
+    if (!rows.length) {
+      throw new NotFoundException("Spec analysis attempt was not found.");
+    }
+    return this.findAttempt(tx, teamId, attemptId);
+  }
+
   private requireLease(
     attempt: {
       fencingToken: bigint;
@@ -999,17 +1275,40 @@ export class SpecAnalysisRuntimeService {
       leaseToken: string | null;
     },
     input: LeaseInput,
+    now = new Date(),
   ) {
     if (
       attempt.leaseToken !== input.leaseToken ||
       attempt.leaseOwner !== input.workerId ||
       attempt.fencingToken.toString() !== input.fencingToken ||
       !attempt.leaseExpiresAt ||
-      attempt.leaseExpiresAt <= new Date()
+      attempt.leaseExpiresAt <= now
     ) {
       throw new ConflictException("The Spec analysis lease is stale.");
     }
   }
+}
+
+function leaseWhere(
+  attemptId: string,
+  input: LeaseInput,
+  now: Date,
+): Prisma.TaskStageAttemptWhereInput {
+  return {
+    fencingToken: BigInt(input.fencingToken),
+    id: attemptId,
+    leaseExpiresAt: { gt: now },
+    leaseOwner: input.workerId,
+    leaseToken: input.leaseToken,
+    status: "RUNNING",
+  };
+}
+
+async function databaseNow(tx: Prisma.TransactionClient) {
+  const [row] = await tx.$queryRaw<
+    Array<{ now: Date }>
+  >`SELECT clock_timestamp() AS now`;
+  return row!.now;
 }
 
 function leaseExpiry(now: Date) {
@@ -1074,7 +1373,9 @@ function requireActiveTask(
     task.deadlineAt <= now ||
     ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle)
   ) {
-    throw new ConflictException("The Task no longer accepts Spec outcomes.");
+    throw new ConflictException(
+      "The Spec analysis lease is terminal because the task no longer accepts outcomes.",
+    );
   }
 }
 
