@@ -15,11 +15,31 @@ import {
   runtimeRegistrationOutputSchema,
   runtimeOutcomeSchema,
   runtimeSpecAnalysisOutcomeSchema,
+  runtimeSpecAnalysisTaskLeaseSchema,
   runtimeTaskSnapshotSchema,
   runtimeTraceEventSchema,
 } from "./index.js";
 
 describe("agent runtime protocol", () => {
+  it("keeps Spec lease clock metadata optional during rolling upgrades", () => {
+    const clockFields = runtimeSpecAnalysisTaskLeaseSchema.pick({
+      leaseExpiresAt: true,
+      serverTime: true,
+      leaseDurationMs: true,
+    });
+    const leaseExpiresAt = "2026-09-04T01:01:00.000Z";
+    expect(clockFields.parse({ leaseExpiresAt })).toEqual({ leaseExpiresAt });
+    expect(
+      clockFields.parse({
+        leaseExpiresAt,
+        serverTime: "2026-09-04T01:00:00.000Z",
+        leaseDurationMs: 60_000,
+      }),
+    ).toMatchObject({
+      serverTime: "2026-09-04T01:00:00.000Z",
+      leaseDurationMs: 60_000,
+    });
+  });
   it("uses a generic extension point for custom model providers", () => {
     expect(agentProviderSchema.parse("CUSTOM")).toBe("CUSTOM");
   });

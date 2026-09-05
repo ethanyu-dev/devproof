@@ -309,19 +309,32 @@ export class AgentRuntimeWorker {
     );
     const abortFromShutdown = () => controller.abort(shutdown.reason);
     shutdown.addEventListener("abort", abortFromShutdown, { once: true });
-    const heartbeat = setInterval(() => {
-      void this.controlPlane
-        .heartbeatSpec(lease)
-        .then((response) => {
-          if (response.deadlineAt) deadline.rearm(response.deadlineAt);
-          if (response.directive === "CANCEL") {
-            controller.abort(
-              new Error("Spec analysis cancellation requested."),
-            );
-          }
-        })
-        .catch((error: unknown) => controller.abort(error));
-    }, 15_000);
+    const heartbeat = new LeaseSupervisor({
+      initialLease: task,
+      controller,
+      intervalMs: this.config.DEVPROOF_AGENT_HEARTBEAT_INTERVAL_MS ?? 15_000,
+      timeoutMs: this.config.DEVPROOF_AGENT_HEARTBEAT_TIMEOUT_MS ?? 5_000,
+      safetyMs: this.config.DEVPROOF_AGENT_LEASE_SAFETY_MS ?? 10_000,
+      renew: (signal) => this.controlPlane.heartbeatSpec(lease, signal),
+      terminal: (error) =>
+        error instanceof ControlPlaneError &&
+        error.status < 500 &&
+        error.status !== 429,
+      onDiagnostic: (event, details) =>
+        log(event, {
+          ...details,
+          eventLoopDelayP99Ms: this.eventLoopDelay.percentile(99) / 1_000_000,
+          pool: "SPEC_ANALYSIS",
+          taskId: task.taskId,
+          workerId,
+        }),
+      onRenewed: (response) => {
+        if (response.deadlineAt) {
+          task.snapshot.deadlineAt = response.deadlineAt;
+          deadline.rearm(response.deadlineAt);
+        }
+      },
+    });
 
     try {
       let outcome: RuntimeSpecAnalysisOutcome;
@@ -341,14 +354,22 @@ export class AgentRuntimeWorker {
           controller.signal,
         );
       } catch (error) {
+        if (
+          controller.signal.reason instanceof LeaseLostError ||
+          isLeaseConflict(error)
+        ) {
+          log("runtime.spec.lease_lost", { taskId: task.taskId, workerId });
+          return;
+        }
         if (controller.signal.aborted && isCancellation(error)) {
           log("runtime.spec.cancelled", { taskId: task.taskId });
           return;
         }
         outcome = classifySpecFailure(error, task);
       }
+      if (controller.signal.reason instanceof LeaseLostError) return;
       try {
-        await this.submitSpecOutcomeReliably(lease, outcome);
+        await this.submitSpecOutcomeReliably(lease, outcome, controller.signal);
         log("runtime.spec.completed", {
           kind: outcome.kind,
           taskExecutionId: task.snapshot.taskExecutionId,
@@ -361,7 +382,7 @@ export class AgentRuntimeWorker {
         });
       }
     } finally {
-      clearInterval(heartbeat);
+      heartbeat.stop();
       deadline.dispose();
       shutdown.removeEventListener("abort", abortFromShutdown);
     }
@@ -502,15 +523,18 @@ export class AgentRuntimeWorker {
   private async submitSpecOutcomeReliably(
     lease: ReturnType<typeof activeLease>,
     outcome: RuntimeSpecAnalysisOutcome,
+    signal: AbortSignal,
   ) {
     const completionId = randomUUID();
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      signal.throwIfAborted();
       try {
         return await this.controlPlane.submitSpecOutcome(
           lease,
           outcome,
           completionId,
+          signal,
         );
       } catch (error) {
         lastError = error;

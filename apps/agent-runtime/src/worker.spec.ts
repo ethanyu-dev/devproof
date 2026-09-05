@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   RuntimePostRunAnalysisTaskLease,
+  RuntimeSpecAnalysisTaskLease,
   RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
@@ -12,10 +13,152 @@ import {
   RuntimeDeadlineController,
 } from "./worker.js";
 import { ControlPlaneError } from "./control-plane.client.js";
+import { LeaseLostError } from "./lease-supervisor.js";
 
 const task = {
   snapshot: { attemptNumber: 2 },
 } as RuntimeTaskLease;
+
+describe("Spec Runtime lease ownership", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function setup(heartbeatSpec: ReturnType<typeof vi.fn>) {
+    vi.useFakeTimers();
+    let executionSignal!: AbortSignal;
+    let finish!: () => void;
+    const submitSpecOutcome = vi.fn().mockResolvedValue({ accepted: true });
+    const worker = new AgentRuntimeWorker(
+      { DEVPROOF_AGENT_WORKER_ID: "spec-worker" } as never,
+      { heartbeatSpec, submitSpecOutcome } as never,
+      vi.fn() as never,
+    );
+    const internal = worker as unknown as {
+      specExecutor: { execute: ReturnType<typeof vi.fn> };
+      executeSpecTask(
+        task: RuntimeSpecAnalysisTaskLease,
+        signal: AbortSignal,
+        workerId: string,
+      ): Promise<void>;
+    };
+    internal.specExecutor = {
+      execute: vi.fn((_task, _lease, signal: AbortSignal) => {
+        executionSignal = signal;
+        return new Promise((resolve) => {
+          // A late model result must not be submitted after ownership is lost.
+          finish = () => resolve({ kind: "SPEC_GENERATED" });
+        });
+      }),
+    };
+    const running = internal.executeSpecTask(
+      {
+        fencingToken: "1",
+        leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        leaseDurationMs: 60_000,
+        snapshot: { deadlineAt: new Date(Date.now() + 600_000).toISOString() },
+        taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+      } as RuntimeSpecAnalysisTaskLease,
+      new AbortController().signal,
+      "spec-worker",
+    );
+    return {
+      finish: () => finish(),
+      running,
+      signal: () => executionSignal,
+      submitSpecOutcome,
+    };
+  }
+
+  it("keeps a Spec execution alive through a transient heartbeat failure", async () => {
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network disconnected"))
+      .mockImplementation(async () => ({
+        directive: "CONTINUE",
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        leaseDurationMs: 60_000,
+      }));
+    const state = setup(heartbeat);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(state.signal().aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_250);
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+    expect(heartbeat.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
+    expect(state.signal().aborted).toBe(false);
+    state.finish();
+    await state.running;
+    expect(state.submitSpecOutcome).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds hung renewals and aborts before lease expiry without replaying an outcome", async () => {
+    let activeRequests = 0;
+    let peakRequests = 0;
+    const heartbeat = vi.fn(
+      (_lease, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          peakRequests = Math.max(peakRequests, ++activeRequests);
+          signal.addEventListener(
+            "abort",
+            () => {
+              activeRequests -= 1;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+    const state = setup(heartbeat);
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(peakRequests).toBe(1);
+    expect(heartbeat.mock.calls.length).toBeGreaterThan(1);
+    expect(state.signal().reason).toBeInstanceOf(LeaseLostError);
+    expect(activeRequests).toBe(0);
+    state.finish();
+    await state.running;
+    expect(state.submitSpecOutcome).not.toHaveBeenCalled();
+  });
+
+  it("drops a late completed Spec when the server rejects its owner", async () => {
+    const state = setup(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new ControlPlaneError(409, { code: "RUNTIME_LEASE_LOST" }),
+        ),
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(state.signal().reason).toBeInstanceOf(LeaseLostError);
+    state.finish();
+    await state.running;
+    expect(state.submitSpecOutcome).not.toHaveBeenCalled();
+  });
+
+  it("cancels an in-flight outcome and does not retry it after lease loss", async () => {
+    const state = setup(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new ControlPlaneError(409, { code: "RUNTIME_LEASE_LOST" }),
+        ),
+    );
+    state.submitSpecOutcome.mockImplementation(
+      (_lease, _outcome, _completionId, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    state.finish();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await state.running;
+    expect(state.submitSpecOutcome).toHaveBeenCalledOnce();
+    expect(state.submitSpecOutcome.mock.calls[0]?.[3]).toBe(state.signal());
+    expect(state.signal().reason).toBeInstanceOf(LeaseLostError);
+  });
+});
 
 describe("Agent Runtime failure classification", () => {
   it("classifies provider disconnects without a product verdict", () => {

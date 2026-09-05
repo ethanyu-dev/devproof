@@ -47,3 +47,9 @@ This package is intentionally separate from `@devproof/runtime-protocol`, which
 is the browser data-plane protocol.
 
 Protocol v2.10 adds server lease time/lifetime metadata and structured browser-admission reasons. Agents renew through a single-flight supervisor with bounded RPC timeouts and a monotonic local safety deadline. Browser ownership binds the Agent epoch to the Session fence; a lease loss stops tools and enters bounded recovery through a new Attempt. Possibly completed writes require outcome reconciliation before conflicting work resumes. Existing protocol fields remain wire compatible while workers drain during rollout.
+
+Protocol v2.11 extends optional server lease time/lifetime metadata to Spec
+Analysis claims. Spec workers use the same single-flight lease supervisor and
+abort source tools, trace requests, and outcome submission when ownership is
+lost. The metadata remains optional for rolling upgrades; older control planes
+use the conservative local expiry fallback and older workers can still drain.

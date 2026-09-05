@@ -147,6 +147,149 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
   });
 });
 
+describe("TaskExecutionService Spec completion before profile resolution", () => {
+  function setup(
+    options: {
+      analysisStatus?: string;
+      cancelRequested?: boolean;
+      expired?: boolean;
+    } = {},
+  ) {
+    const task = {
+      cancelRequestedAt: options.cancelRequested ? new Date() : null,
+      caseExecutions: [],
+      deadlineAt: new Date(Date.now() + (options.expired ? -60_000 : 60_000)),
+      deployments: [],
+      environmentSnapshot: {},
+      executionRuns: [],
+      finishedAt: null,
+      id: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
+      kind: "ISSUE_SPEC",
+      lifecycle: "RUNNING",
+      notificationContext: {},
+      postRunAnalysisGeneration: 1,
+      profileBinding: { status: "PENDING" },
+      sourceRef: "ENG-123",
+      specificationSnapshots: [],
+      stages: [
+        {
+          id: "analysis-stage",
+          type: "SPEC_ANALYSIS",
+          status: options.analysisStatus ?? "FAILED",
+        },
+        { id: "execution-stage", type: "SPEC_EXECUTION", status: "CANCELLED" },
+      ],
+      startedAt: new Date(),
+      team: { id: "team-1", name: "Team", slug: "team" },
+      teamId: "team-1",
+      title: "ENG-123",
+      updatedAt: new Date(),
+    };
+    const tx = {
+      notificationOutbox: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      postRunAnalysisJob: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskCaseExecution: {
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      taskExecution: {
+        findUnique: vi.fn().mockResolvedValue(task),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskExecutionEvent: { create: vi.fn().mockResolvedValue({}) },
+      taskExecutionStage: {
+        update: vi.fn().mockResolvedValue({}),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskStageAttempt: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const releasePendingRequests = vi.fn().mockResolvedValue(1);
+    const releaseTask = vi.fn().mockResolvedValue(undefined);
+    const service = new TaskExecutionService(
+      {
+        taskExecution: { findUnique: vi.fn().mockResolvedValue(task) },
+        $transaction: vi
+          .fn()
+          .mockImplementation((operation: (client: typeof tx) => unknown) =>
+            operation(tx),
+          ),
+      } as never,
+      {} as never,
+      {} as never,
+      { releasePendingRequests } as never,
+      { releaseTask } as never,
+      {} as never,
+    );
+    return { service, task, tx, releasePendingRequests, releaseTask };
+  }
+
+  it("completes an exhausted Spec while its profile binding is still pending", async () => {
+    const state = setup();
+    await expect(
+      state.service.projectTask(state.task.id),
+    ).resolves.toMatchObject({
+      executionDisposition: "NOT_RUN",
+      lifecycle: "COMPLETED",
+    });
+    expect(state.tx.taskExecution.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lifecycle: "COMPLETED",
+          projectionNeededAt: null,
+        }),
+        where: { id: state.task.id, updatedAt: state.task.updatedAt },
+      }),
+    );
+    expect(state.tx.taskExecutionEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ kind: "task.completed" }),
+      }),
+    );
+    expect(state.releasePendingRequests).toHaveBeenCalledWith(
+      state.task.id,
+      state.tx,
+    );
+    expect(state.releaseTask).toHaveBeenCalledWith(state.task.id);
+  });
+
+  it.each(["FAILED", "SUCCEEDED"])(
+    "projects a parent deadline while Spec is %s and the profile remains pending",
+    async (analysisStatus) => {
+      const state = setup({ analysisStatus, expired: true });
+      await expect(
+        state.service.projectTask(state.task.id),
+      ).resolves.toMatchObject({ lifecycle: "TIMED_OUT" });
+      expect(state.tx.taskStageAttempt.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            leaseToken: null,
+            status: "TIMED_OUT",
+          }),
+        }),
+      );
+      expect(state.releaseTask).toHaveBeenCalledWith(state.task.id);
+    },
+  );
+
+  it("projects cancellation even after Spec succeeds while profile resolution waits", async () => {
+    const state = setup({ analysisStatus: "SUCCEEDED", cancelRequested: true });
+    await expect(
+      state.service.projectTask(state.task.id),
+    ).resolves.toMatchObject({ lifecycle: "CANCELLED" });
+    expect(state.releaseTask).toHaveBeenCalledWith(state.task.id);
+  });
+
+  it("preserves an active profile wait after Spec succeeds", async () => {
+    const state = setup({ analysisStatus: "SUCCEEDED" });
+    await expect(state.service.projectTask(state.task.id)).resolves.toBeNull();
+    expect(state.tx.taskExecution.updateMany).not.toHaveBeenCalled();
+    expect(state.releasePendingRequests).not.toHaveBeenCalled();
+  });
+});
+
 describe("TaskExecutionService human resume deadlines", () => {
   it("pauses parent task timeout projection while a child Run waits for HITL", () => {
     const now = new Date("2026-08-28T02:00:00.000Z");

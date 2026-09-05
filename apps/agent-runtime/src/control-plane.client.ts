@@ -65,11 +65,15 @@ export class ControlPlaneClient {
   }
 
   async claimSpec(workerId: string, signal?: AbortSignal) {
+    const started = performance.now();
     const result = await this.request("/internal/v2/runtime/spec-tasks/claim", {
       body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
       ...(signal ? { signal } : {}),
     });
-    return runtimeSpecAnalysisClaimOutputSchema.parse(result).task;
+    const task = runtimeSpecAnalysisClaimOutputSchema.parse(result).task;
+    return task
+      ? withConservativeLeaseDuration(task, performance.now() - started)
+      : null;
   }
 
   async claimPostRunAnalysis(workerId: string, signal?: AbortSignal) {
@@ -96,11 +100,15 @@ export class ControlPlaneClient {
   }
 
   async heartbeatSpec(lease: ActiveLease, signal?: AbortSignal) {
+    const started = performance.now();
     const result = await this.request(
       `/internal/v2/runtime/spec-tasks/${lease.taskId}/heartbeat`,
       { body: this.identity(lease), ...(signal ? { signal } : {}) },
     );
-    return runtimeTaskHeartbeatOutputSchema.parse(result);
+    return withConservativeLeaseDuration(
+      runtimeTaskHeartbeatOutputSchema.parse(result),
+      performance.now() - started,
+    );
   }
 
   async heartbeatPostRunAnalysis(lease: ActiveLease, signal?: AbortSignal) {
@@ -133,10 +141,12 @@ export class ControlPlaneClient {
     lease: ActiveLease,
     kind: string,
     payload: Record<string, unknown>,
+    signal?: AbortSignal,
   ) {
     return this.request(
       `/internal/v2/runtime/spec-tasks/${lease.taskId}/events`,
       {
+        ...(signal ? { signal } : {}),
         body: {
           ...this.identity(lease),
           event: {
@@ -307,10 +317,12 @@ export class ControlPlaneClient {
     lease: ActiveLease,
     outcome: RuntimeSpecAnalysisOutcome,
     completionId = randomUUID(),
+    signal?: AbortSignal,
   ) {
     const result = await this.request(
       `/internal/v2/runtime/spec-tasks/${lease.taskId}/outcome`,
       {
+        ...(signal ? { signal } : {}),
         body: {
           ...this.identity(lease),
           completedAt: new Date().toISOString(),

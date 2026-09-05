@@ -49,6 +49,30 @@ For rollback, stop isolated admission with the feature flag, drain current sessi
 
 Run `node apps/api/scripts/test-execution-concurrency.mjs` for disposable PostgreSQL integration tests. The launcher binds only loopback, applies the complete migration chain to a randomly named test database, and removes its own container on completion; it does not read production environment files.
 
+## Spec lease recovery and verification convergence
+
+Deploy API before rolling Agent Runtime workers to protocol v2.11. This update
+adds optional server-relative lease timing to Spec claims; existing workers can
+still claim during the rollout. No database migration or Browser Runtime upgrade
+is required for this change alone.
+
+Expired Spec leases now fail and fence the old Attempt. Recovery creates a new
+Attempt and consumes the existing `analysisMaxAttempts` budget; it never restarts
+the old Attempt. Exhaustion or the parent deadline ends analysis through the
+normal Task coordinator. Agent Runtime uses bounded, single-flight renewal for
+Spec work and stops using a lost lease.
+
+Browser verification stops sustained repetition and text-only loops. At a
+stagnation limit or the deadline's finalization window, executed verifications
+retain recorded results and mark unverified criteria `INCONCLUSIVE`. A task that
+has issued no browser commands finishes as `NOT_RUN`, with the reason and count
+of unverified criteria. These outcomes do not retry the same stalled verification.
+
+Validate the rollout with one Spec lease interruption, a repeated-browser-action
+fixture, and a verification that reaches its finalization window before recording
+any criterion. See [Observability](observability.md#runtime-convergence-events)
+for the events that distinguish these paths.
+
 ## Legacy compatibility
 
 `POST /v2/tasks` is the current entry point. The repository retains:
