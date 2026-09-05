@@ -226,6 +226,92 @@ describe("TaskExecutionService Spec completion before profile resolution", () =>
     return { service, task, tx, releasePendingRequests, releaseTask };
   }
 
+  it.each([-1, 0, 1])(
+    "uses actual child completion time when projecting %i ms from the deadline",
+    async (delta) => {
+      const state = setup({ analysisStatus: "SUCCEEDED", expired: true });
+      Object.assign(state.task, {
+        kind: "DIRECT_RUN",
+        profileBinding: null,
+        executionRuns: [
+          {
+            id: "run-1",
+            lifecycle: "COMPLETED",
+            executionDisposition: "EXECUTED",
+            verdict: "PASSED",
+            finishedAt: new Date(state.task.deadlineAt.getTime() + delta),
+            tasks: [],
+          },
+        ],
+      });
+      state.task.stages[1]!.status = "RUNNING";
+      const projected = await state.service.projectTask(state.task.id);
+      expect(projected?.lifecycle).toBe(delta <= 0 ? "COMPLETED" : "TIMED_OUT");
+      if (delta <= 0) expect(projected?.verdict).toBe("PASSED");
+    },
+  );
+
+  it("preserves a failed verdict when the complete deployment matrix finished before the deadline", async () => {
+    const state = setup({ analysisStatus: "SUCCEEDED", expired: true });
+    Object.assign(state.task, {
+      profileBinding: { status: "RESOLVED" },
+      deployments: [{ id: "deployment-1" }, { id: "deployment-2" }],
+      specificationSnapshots: [{ cases: [{ id: "case-1" }] }],
+      caseExecutions: ["deployment-1", "deployment-2"].map(
+        (deploymentId, index) => ({
+          caseId: "case-1",
+          deploymentId,
+          executionOrdinal: 1,
+          dispatchStatus: "LINKED",
+          dispatchAttempts: 1,
+          run: {
+            id: `run-${index}`,
+            lifecycle: "COMPLETED",
+            executionDisposition: "EXECUTED",
+            verdict: index === 0 ? "PASSED" : "FAILED",
+            finishedAt: new Date(state.task.deadlineAt.getTime() - 1),
+            tasks: [],
+          },
+        }),
+      ),
+    });
+    state.task.stages[1]!.status = "RUNNING";
+    expect(await state.service.projectTask(state.task.id)).toMatchObject({
+      lifecycle: "COMPLETED",
+      verdict: "FAILED",
+    });
+  });
+
+  it("does not excuse a missing deployment case when other children finished on time", async () => {
+    const state = setup({ analysisStatus: "SUCCEEDED", expired: true });
+    Object.assign(state.task, {
+      profileBinding: null,
+      deployments: [{ id: "deployment-1" }, { id: "deployment-2" }],
+      specificationSnapshots: [{ cases: [{ id: "case-1" }] }],
+      caseExecutions: [
+        {
+          caseId: "case-1",
+          deploymentId: "deployment-1",
+          executionOrdinal: 1,
+          dispatchStatus: "LINKED",
+          dispatchAttempts: 1,
+          run: {
+            id: "run-1",
+            lifecycle: "COMPLETED",
+            executionDisposition: "EXECUTED",
+            verdict: "PASSED",
+            finishedAt: new Date(state.task.deadlineAt.getTime() - 1),
+            tasks: [],
+          },
+        },
+      ],
+    });
+    state.task.stages[1]!.status = "RUNNING";
+    expect((await state.service.projectTask(state.task.id))?.lifecycle).toBe(
+      "TIMED_OUT",
+    );
+  });
+
   it("completes an exhausted Spec while its profile binding is still pending", async () => {
     const state = setup();
     await expect(

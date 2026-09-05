@@ -444,6 +444,82 @@ describe("SpecAnalysisRuntimeService", () => {
     });
   });
 
+  it("serves page 16 with the pinned revision and accurate completeness", async () => {
+    const pullRequestUrl = "https://github.com/acme/web/pull/42";
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      taskStageAttempt: {
+        findUnique: vi.fn().mockResolvedValue({
+          ...analysisAttempt(),
+          leaseExpiresAt: new Date(Date.now() + 60_000),
+        }),
+      },
+      taskAnalysisSource: {
+        findFirst: vi.fn().mockResolvedValue({ revision: "head-a" }),
+        findFirstOrThrow: vi.fn().mockResolvedValue({
+          content: {
+            issue: {
+              id: "issue-1",
+              identifier: "ENG-123",
+              title: "Test",
+              description: "Test",
+              url: "https://linear.app/acme/issue/ENG-123",
+            },
+            pullRequestUrls: [pullRequestUrl],
+          },
+        }),
+        aggregate: vi.fn().mockResolvedValue({
+          _count: { _all: 301 },
+          _sum: { byteSize: 10000 },
+        }),
+        create: vi.fn(),
+      },
+    };
+    Object.assign(prisma, {
+      $transaction: async (operation: (tx: unknown) => unknown) =>
+        operation(prisma),
+    });
+    const github = {
+      changedFiles: vi.fn().mockResolvedValue({
+        files: [{ path: "file-301", patch: "change", patchTruncated: false }],
+        revision: "head-a",
+        total: 301,
+        truncated: false,
+      }),
+    };
+    const service = new SpecAnalysisRuntimeService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      github as never,
+      {} as never,
+    );
+    const result = await service.executeTool(teamId, attemptId, {
+      ...identity,
+      callId: "page-16",
+      name: "github_list_changed_files",
+      arguments: {
+        analysisSummary: "Read final page",
+        pullRequestUrl,
+        page: 16,
+      },
+    });
+    expect(github.changedFiles).toHaveBeenCalledWith(
+      teamId,
+      pullRequestUrl,
+      "head-a",
+      { page: 16, perPage: 20 },
+    );
+    expect(result.result).toMatchObject({
+      hasMore: false,
+      page: 16,
+      total: 301,
+      truncated: false,
+      files: [{ path: "file-301" }],
+    });
+    expect(result.sourceRefs).toHaveLength(1);
+  });
+
   it("executes Linear through the control plane and persists an immutable source", async () => {
     const sourceCreate = vi.fn().mockResolvedValue({ id: "source-1" });
     const prisma = {
@@ -472,6 +548,11 @@ describe("SpecAnalysisRuntimeService", () => {
         }),
       },
     };
+    Object.assign(prisma, {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      $transaction: async (operation: (tx: unknown) => unknown) =>
+        operation(prisma),
+    });
     const linearResult = {
       issue: {
         assignee: null,

@@ -39,4 +39,5 @@ jobs:
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm --filter @devproof/api test:concurrency
       - run: pnpm build

@@ -5,6 +5,7 @@ export default defineConfig({
   envDir: false,
   test: {
     include: [
+      "src/edge-cases.integration.ts",
       "src/agent-runtime/spec-lease-recovery.integration.ts",
       "src/verification/execution-concurrency.integration.ts",
       "src/verification/execution-hitl-cleanup.integration.ts",

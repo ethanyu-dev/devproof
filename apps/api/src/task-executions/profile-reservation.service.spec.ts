@@ -80,6 +80,11 @@ describe("ProfileReservationService", () => {
         }),
       },
     };
+    Object.assign(prisma, {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: "locked" }]),
+      $transaction: async (operation: (tx: unknown) => unknown) =>
+        operation(prisma),
+    });
     const service = new ProfileReservationService(prisma as never);
 
     await expect(service.acquire("task-1")).resolves.toMatchObject({
@@ -121,6 +126,11 @@ describe("ProfileReservationService", () => {
         }),
       },
     };
+    Object.assign(prisma, {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: "locked" }]),
+      $transaction: async (operation: (tx: unknown) => unknown) =>
+        operation(prisma),
+    });
     const service = new ProfileReservationService(prisma as never);
 
     await expect(service.acquire("task-2")).resolves.toMatchObject({

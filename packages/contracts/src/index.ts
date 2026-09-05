@@ -1042,7 +1042,7 @@ export const specificationPullRequestContextSchema = z.object({
   body: z.string().max(100_000).default(""),
   changedFiles: z
     .array(z.string().trim().min(1).max(2_000))
-    .max(1_000)
+    .max(3_000)
     .default([]),
   checks: z
     .array(

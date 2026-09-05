@@ -3,11 +3,14 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from "@nestjs/common";
+import type { FastifyReply } from "fastify";
 import { runInterventionResolveInputSchema } from "@devproof/contracts";
 
 import { AuthGuard } from "../auth/auth.guard.js";
@@ -30,6 +33,41 @@ export class ExecutionRunConsoleController {
   @Get(":id")
   detail(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.runs.consoleDetail(asToolContext(current), id);
+  }
+
+  @Get(":id/evidences/:evidenceId/download")
+  async downloadEvidence(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("evidenceId") evidenceId: string,
+    @Res() reply: FastifyReply,
+    @Headers("range") range?: string,
+  ) {
+    const artifact = await this.runs.downloadEvidence(
+      asToolContext(current),
+      id,
+      evidenceId,
+      range,
+    );
+    reply
+      .header("cache-control", "private, no-store")
+      .header("accept-ranges", "bytes")
+      .header("x-content-type-options", "nosniff")
+      .header("content-security-policy", "sandbox; default-src 'none'")
+      .header(
+        "content-disposition",
+        /^(?:image\/(?:png|jpeg|webp|gif)|video\/(?:webm|mp4))$/u.test(
+          artifact.contentType,
+        )
+          ? "inline"
+          : "attachment",
+      )
+      .type(artifact.contentType);
+    if (artifact.contentLength !== undefined)
+      reply.header("content-length", artifact.contentLength);
+    if (artifact.contentRange)
+      reply.code(206).header("content-range", artifact.contentRange);
+    return reply.send(artifact.body);
   }
 
   @Get(":id/events")

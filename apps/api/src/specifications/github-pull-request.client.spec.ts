@@ -61,11 +61,9 @@ describe("GithubPullRequestClient credential fallback", () => {
       "Bearer token-primary",
       "Bearer token-fallback",
     ]);
-    expect(requestTokens.slice(2)).toEqual([
-      "Bearer token-fallback",
-      "Bearer token-fallback",
-      "Bearer token-fallback",
-    ]);
+    expect(requestTokens.slice(2)).toEqual(
+      Array(4).fill("Bearer token-fallback"),
+    );
     expect(result.pullRequest).toMatchObject({
       number: 7,
       repository: "organization-a/core-api",
@@ -126,5 +124,105 @@ describe("GithubPullRequestClient credential fallback", () => {
     expect(requested).toContainEqual(
       expect.stringContaining("/contents/src/refund.ts?ref=abc123"),
     );
+  });
+});
+
+describe("GitHub source boundaries", () => {
+  const url = "https://github.com/acme/web/pull/7";
+  const client = () =>
+    new GithubPullRequestClient({
+      candidatesForRepository: async () => [{ token: "test" }],
+    } as never);
+  it.each([299, 300, 301, 3001])(
+    "reports completeness for %i changed files",
+    async (count) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string) => {
+          if (input.endsWith("/pulls/7"))
+            return Response.json({ head: { sha: "a" }, changed_files: count });
+          const page = Number(new URL(input).searchParams.get("page"));
+          return Response.json(
+            Array.from(
+              { length: Math.max(0, Math.min(100, count - (page - 1) * 100)) },
+              (_, index) => ({
+                filename: `f${(page - 1) * 100 + index}`,
+                patch: "x",
+              }),
+            ),
+          );
+        }),
+      );
+      const result = await client().changedFiles("team", url);
+      expect(result.files).toHaveLength(Math.min(count, 3000));
+      expect(result.total).toBe(count);
+      expect(result.truncated).toBe(count > 3000);
+    },
+  );
+  it("fetches only page 16 when requesting the 301st changed file", async () => {
+    const fetcher = vi.fn(async (input: string) =>
+      input.endsWith("/pulls/7")
+        ? Response.json({ head: { sha: "a" }, changed_files: 301 })
+        : Response.json([{ filename: "file-301", patch: "last change" }]),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await client().changedFiles("team", url, "a", {
+      page: 16,
+      perPage: 20,
+    });
+    expect(result).toMatchObject({
+      files: [{ path: "file-301" }],
+      total: 301,
+      truncated: false,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls[1]![0]).toContain("per_page=20&page=16");
+  });
+
+  it("rejects a force push during mutable diff pagination", async () => {
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        input.endsWith("/pulls/7")
+          ? Response.json({ head: { sha: ++reads === 1 ? "a" : "b" } })
+          : Response.json([]),
+      ),
+    );
+    await expect(client().changedFiles("team", url)).rejects.toMatchObject({
+      code: "SOURCE_REVISION_CHANGED",
+    });
+  });
+  it("rejects a later file read against a different attempt revision", async () => {
+    const fetcher = vi.fn(async () => Response.json({ head: { sha: "b" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(
+      client().readPullRequestFile({
+        teamId: "team",
+        pullRequestUrl: url,
+        path: "a.ts",
+        expectedRevision: "a",
+      }),
+    ).rejects.toMatchObject({ code: "SOURCE_REVISION_CHANGED" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it("marks truncated and omitted patches explicitly", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        input.endsWith("/pulls/7")
+          ? Response.json({ head: { sha: "a" }, changed_files: 2 })
+          : Response.json([
+              { filename: "large", patch: "x".repeat(30001) },
+              { filename: "binary" },
+            ]),
+      ),
+    );
+    const result = await client().changedFiles("team", url);
+    expect(result.files.map((file) => file.patchTruncated)).toEqual([
+      true,
+      true,
+    ]);
+    expect(result.files[0]!.patch).toHaveLength(30000);
   });
 });

@@ -21,6 +21,7 @@ export interface TaskWaitingNotificationInput {
 }
 
 export interface TaskCompletionNotificationInput {
+  generation: number;
   counts: {
     failed: number;
     inconclusive: number;
@@ -109,6 +110,7 @@ export async function enqueueTaskCompletionNotifications(
 ) {
   const feishu = taskNotificationContext(input.notificationContext).feishu;
   const commonPayload = {
+    generation: input.generation,
     counts: input.counts,
     executionDisposition: input.executionDisposition,
     goal: input.title,
@@ -125,7 +127,7 @@ export async function enqueueTaskCompletionNotifications(
   if (input.enableFeishu) {
     deliveries.push({
       channel: "FEISHU",
-      dedupeKey: `task:${input.taskExecutionId}:completed:feishu`,
+      dedupeKey: `task:${input.taskExecutionId}:completed:${input.generation}:feishu`,
       eventType: "task.completed",
       payload: json({
         ...commonPayload,
@@ -143,7 +145,7 @@ export async function enqueueTaskCompletionNotifications(
   if (input.enableGithub && input.primaryPullRequestUrl) {
     deliveries.push({
       channel: "GITHUB",
-      dedupeKey: `task:${input.taskExecutionId}:completed:github`,
+      dedupeKey: `task:${input.taskExecutionId}:completed:${input.generation}:github`,
       eventType: "task.completed",
       payload: json({
         ...commonPayload,

@@ -18,6 +18,7 @@ describe("task waiting notifications", () => {
 
     await expect(
       enqueueTaskCompletionNotifications(tx as never, {
+        generation: 1,
         counts: { failed: 0, inconclusive: 0, passed: 3, total: 3 },
         enableFeishu: true,
         enableGithub: true,
@@ -39,16 +40,64 @@ describe("task waiting notifications", () => {
       data: expect.arrayContaining([
         expect.objectContaining({
           channel: "FEISHU",
-          dedupeKey: "task:task-1:completed:feishu",
+          dedupeKey: "task:task-1:completed:1:feishu",
         }),
         expect.objectContaining({
           channel: "GITHUB",
-          dedupeKey: "task:task-1:completed:github",
+          dedupeKey: "task:task-1:completed:1:github",
         }),
       ]),
       skipDuplicates: true,
     });
     expect(tx.taskExecutionEvent.create).toHaveBeenCalledOnce();
+  });
+
+  it("deduplicates a generation but delivers a changed verdict after rerun", async () => {
+    const rows = new Map<string, any>();
+    const tx = {
+      notificationOutbox: {
+        createMany: vi.fn(async ({ data }: any) => {
+          let count = 0;
+          for (const row of data)
+            if (!rows.has(row.dedupeKey)) {
+              rows.set(row.dedupeKey, row);
+              count++;
+            }
+          return { count };
+        }),
+      },
+      taskExecutionEvent: { create: vi.fn() },
+    };
+    const input = {
+      generation: 1,
+      counts: { failed: 1, inconclusive: 0, passed: 0, total: 1 },
+      enableFeishu: true,
+      enableGithub: true,
+      primaryPullRequestUrl: "https://github.com/acme/web/pull/1",
+      executionDisposition: "EXECUTED",
+      lifecycle: "COMPLETED",
+      notificationContext: {},
+      taskExecutionId: "task-1",
+      teamId: "team-1",
+      title: "task",
+      verdict: "FAILED",
+    };
+    expect(await enqueueTaskCompletionNotifications(tx as never, input)).toBe(
+      2,
+    );
+    expect(await enqueueTaskCompletionNotifications(tx as never, input)).toBe(
+      0,
+    );
+    expect(
+      await enqueueTaskCompletionNotifications(tx as never, {
+        ...input,
+        generation: 2,
+        verdict: "PASSED",
+      }),
+    ).toBe(2);
+    expect(
+      [...rows.values()].slice(2).map((row) => row.payload.verdict),
+    ).toEqual(["PASSED", "PASSED"]);
   });
 
   it("creates one deduplicated Feishu delivery and an audit event", async () => {

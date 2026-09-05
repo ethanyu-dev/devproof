@@ -492,6 +492,7 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
     messageId: string,
     dedupeKey: string,
     card: FeishuTaskCard,
+    signal?: AbortSignal,
   ) {
     const result = await this.requestMessageApi(
       `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
@@ -501,6 +502,7 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         uuid: dedupeKey,
       },
       "POST",
+      signal,
     );
     const cardMessageId = asRecord(result.data).message_id;
     if (typeof cardMessageId !== "string" || !cardMessageId) {
@@ -509,11 +511,16 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
     return cardMessageId;
   }
 
-  async updateCardMessage(messageId: string, card: FeishuTaskCard) {
+  async updateCardMessage(
+    messageId: string,
+    card: FeishuTaskCard,
+    signal?: AbortSignal,
+  ) {
     await this.requestMessageApi(
       `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
       { content: JSON.stringify(card) },
       "PATCH",
+      signal,
     );
   }
 
@@ -521,8 +528,9 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
     url: string,
     body: Record<string, unknown>,
     method: "PATCH" | "POST",
+    signal?: AbortSignal,
   ) {
-    const token = await this.tenantAccessToken();
+    const token = await this.tenantAccessToken(signal);
     const response = await fetch(url, {
       body: JSON.stringify(body),
       headers: {
@@ -530,7 +538,9 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         "content-type": "application/json; charset=utf-8",
       },
       method,
-      signal: AbortSignal.timeout(10_000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+        : AbortSignal.timeout(10_000),
     });
     const result = asRecord(await response.json().catch(() => ({})));
     if (!response.ok || Number(result.code) !== 0) {
@@ -541,7 +551,7 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
-  private async tenantAccessToken() {
+  private async tenantAccessToken(signal?: AbortSignal) {
     if (this.accessToken && this.accessToken.expiresAt > Date.now() + 60_000) {
       return this.accessToken.value;
     }
@@ -554,7 +564,9 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         }),
         headers: { "content-type": "application/json; charset=utf-8" },
         method: "POST",
-        signal: AbortSignal.timeout(10_000),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+          : AbortSignal.timeout(10_000),
       },
     );
     const token = tokenResponseSchema.parse(await response.json());
