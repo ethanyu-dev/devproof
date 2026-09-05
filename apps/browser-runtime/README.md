@@ -56,6 +56,23 @@ Runtime capacity and the exact private-network host allowlist are managed per re
 
 ## Evidence
 
+Protocol v1.14 negotiates `closure-evidence-v1` explicitly on each connection.
+Recovery close commands bind a persisted server challenge to the session lease,
+fence, and optional launch identity. The Runtime durably revokes the session,
+closes its browser and process scope, then fsyncs a closure tombstone before
+returning proof. The `closure/` directory under `DEVPROOF_RUNTIME_HOME` retains
+tombstones and an acknowledged command-result outbox; do not delete it as a
+queue-unblocking measure. A new challenge can reuse a same-host tombstone after
+reconnect or daemon restart. Host identity comes from the OS boot and process
+namespace, while daemon identity lasts for the process, independent of reconnects.
+
+Unknown legacy descriptors, copied state from another host, interrupted launches
+without complete process identity, and unidentified process-group survivors
+require operator recovery. Empty inventories and scanning an empty UUID marker
+do not produce closure proof. Video finalization occurs after physical closure
+in a separate, denied-network renderer with a 30-second budget; video or
+diagnostic failure does not undo the saved closure proof.
+
 Browser Runtime protocol v1.10 captures a screenshot after each successful navigation or interaction and composes the frames into a WebM action video when a Session closes. Screenshots and video are returned as Runtime Artifacts; API uploads them to the configured S3-compatible object store.
 
 Protocol v1.11 adds structured locator recovery diagnostics. When a selector matches multiple elements, Runtime automatically accepts a unique visible candidate; otherwise it returns bounded candidate details and instructs the Agent to resnapshot and retarget without guessing.

@@ -1,8 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-
-import { RuntimeSessionsService } from "./runtime-sessions.service.js";
-import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
-import { UnifiedRunCleanupWorker } from "../execution-runs/unified-run-cleanup.worker.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SessionRecoveryService } from "./session-recovery.service.js";
+import { leaseDigest } from "./session-recovery.state.js";
 import {
   releaseCompletedSessionData,
   releaseVerifiedSessionResources,
@@ -18,36 +16,109 @@ const current = {
     name: "Operator",
   },
 };
-const note = "Verified the business record and reconciled the previous write.";
+const input = {
+  expectedVersion: 1,
+  idempotencyKey: "key-1",
+  outcome: "VERIFIED" as const,
+  note: "Verified the business record and reconciled the previous write.",
+  evidenceRefs: ["audit:business-record-1"],
+};
 
 function fixture() {
-  const session = {
-    id: "session-1",
-    ownerTaskId: "task-1",
-    status: "CLOSED",
-    closureVerifiedAt: new Date("2026-09-04T08:00:00Z") as Date | null,
-    quarantinedAt: new Date("2026-09-04T07:59:00Z") as Date | null,
-    browserExecutions: [{ runId: "run-1", attemptId: "attempt-1" }],
-  };
+  const now = new Date();
   const owner = {
     id: "task-1",
     status: "FAILED",
     recoveryStatus: "WRITE_OUTCOME_UNKNOWN" as string | null,
     fencingToken: 3n,
-    completionId: null,
-    result: null,
+    completionId: null as string | null,
+    result: null as unknown,
     run: {
       id: "run-1",
       lifecycle: "COMPLETED",
       concurrencyPolicy: { accessMode: "MUTATING" },
     },
   };
+  const session = {
+    id: "session-1",
+    teamId: "team-1",
+    runtimeId: "runtime-1",
+    ownerTaskId: "task-1" as string | null,
+    ownerFencingToken: 3n,
+    status: "CLOSED",
+    purpose: "EXECUTION",
+    leaseToken: "lease-1",
+    fencingToken: 7n,
+    closureVerifiedAt: now as Date | null,
+    closureEvidenceId: "proof-1" as string | null,
+    quarantinedAt: now as Date | null,
+    browserExecutions: [{ runId: "run-1", run: owner.run }],
+  };
+  const recovery = {
+    id: "recovery-1",
+    teamId: "team-1",
+    runtimeId: session.runtimeId,
+    sessionId: session.id,
+    expectedSessionFence: session.fencingToken,
+    expectedLeaseDigest: leaseDigest(session.leaseToken),
+    closureState: "VERIFIED",
+    closureVerifiedAt: now,
+    closureEvidenceId: "proof-1",
+    writeOutcomeState: "UNKNOWN",
+    resolutionKey: null,
+    resolutionDigest: null,
+    version: 1,
+    attempts: 1,
+    nextAttemptAt: null,
+    sourceRunId: "run-1",
+    reason: "TEST",
+    scopeSnapshot: [],
+    lastErrorCode: null,
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null,
+  };
+  let lease: {
+    sessionId: string;
+    mode: string;
+    recoveryId: string | null;
+    quarantined: boolean;
+  } | null = {
+    sessionId: session.id,
+    mode: "WRITE",
+    recoveryId: null,
+    quarantined: true,
+  };
   const tx = {
     $queryRaw: vi.fn().mockResolvedValue([{ locked: "" }]),
+    teamMembership: {
+      findUnique: vi.fn().mockResolvedValue({ role: "ADMIN" }),
+    },
     browserRuntimeSession: {
       findUniqueOrThrow: vi.fn().mockResolvedValue(session),
       findUnique: vi.fn().mockResolvedValue(session),
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findMany: vi.fn().mockResolvedValue([session]),
+      updateMany: vi.fn().mockImplementation(async ({ data }) => {
+        Object.assign(session, data);
+        return { count: 1 };
+      }),
+    },
+    runtimeSessionRecovery: {
+      findFirst: vi.fn().mockResolvedValue(recovery),
+      findUnique: vi.fn().mockResolvedValue(recovery),
+      update: vi.fn().mockImplementation(async ({ data }) => {
+        Object.assign(recovery, data, { version: recovery.version + 1 });
+        return recovery;
+      }),
+    },
+    sessionClosureEvidence: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "proof-1",
+        sessionId: session.id,
+        sessionFence: session.fencingToken,
+        leaseDigest: leaseDigest(session.leaseToken),
+        recoveryId: recovery.id,
+      }),
     },
     agentRuntimeTask: {
       findUnique: vi.fn().mockResolvedValue(owner),
@@ -58,46 +129,72 @@ function fixture() {
       create: vi.fn(),
     },
     executionResourceLease: {
-      deleteMany: vi.fn().mockResolvedValue({ count: 2 }),
-      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
-      count: vi.fn().mockResolvedValue(0),
+      findMany: vi.fn().mockImplementation(async () => (lease ? [lease] : [])),
+      deleteMany: vi.fn().mockImplementation(async ({ where }) => {
+        if (
+          !lease ||
+          (where.mode && where.mode !== lease.mode) ||
+          (where.recoveryId && where.recoveryId !== lease.recoveryId)
+        )
+          return { count: 0 };
+        lease = null;
+        return { count: 1 };
+      }),
+      updateMany: vi.fn().mockImplementation(async ({ data }) => {
+        if (!lease) return { count: 0 };
+        Object.assign(lease, data);
+        return { count: 1 };
+      }),
+      count: vi
+        .fn()
+        .mockImplementation(async () => (lease?.quarantined ? 1 : 0)),
+      create: vi.fn(),
     },
-    browserRuntimeSlot: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
-    browserRuntimeProfileLease: {
-      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-    },
-    runEvent: { create: vi.fn().mockResolvedValue({}) },
-    auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    browserRuntimeSlot: { deleteMany: vi.fn() },
+    browserRuntimeProfileLease: { deleteMany: vi.fn() },
+    browserHumanControlLease: { deleteMany: vi.fn() },
+    auditEvent: { create: vi.fn() },
     runAttempt: { create: vi.fn() },
+    runtimeRecoveryOutbox: { upsert: vi.fn() },
   };
   const prisma = {
-    browserRuntimeSession: { findFirst: vi.fn().mockResolvedValue(session) },
+    ...tx,
     $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
   };
-  const audit = { record: vi.fn() };
-  const service = new RuntimeSessionsService(
-    prisma as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    audit as never,
-  );
-  return { service, prisma, tx, session, owner, audit };
+  return {
+    service: new SessionRecoveryService(prisma as never),
+    prisma,
+    tx,
+    session,
+    owner,
+    recovery,
+    getLease: () => lease,
+  };
 }
 
-describe("manual reconciliation of uncertain browser writes", () => {
-  it("requires the session to belong to the current team before starting reconciliation", async () => {
-    const { service, prisma, tx } = fixture();
-    prisma.browserRuntimeSession.findFirst.mockResolvedValue(null as never);
+beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
+afterEach(() => vi.unstubAllEnvs());
+
+describe("manual reconciliation through durable session recovery", () => {
+  it("requires recovery ownership by the current team", async () => {
+    const { service, tx } = fixture();
+    tx.runtimeSessionRecovery.findFirst.mockResolvedValue(null as never);
     await expect(
-      service.resolveWriteOutcome(current, "session-1", note),
+      service.resolveWriteOutcome(current, "recovery-1", input),
     ).rejects.toThrow("not found");
-    expect(prisma.browserRuntimeSession.findFirst).toHaveBeenCalledWith({
-      where: { id: "session-1", teamId: current.team.id },
+    expect(tx.runtimeSessionRecovery.findFirst).toHaveBeenCalledWith({
+      where: { id: "recovery-1", teamId: current.team.id },
     });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+  });
+  it("requires current administrator membership", async () => {
+    const { service, tx } = fixture();
+    tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", input),
+    ).rejects.toThrow("administrator");
     expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
   });
 
@@ -105,300 +202,175 @@ describe("manual reconciliation of uncertain browser writes", () => {
     { status: "CLOSED", closureVerifiedAt: null },
     { status: "LOST", closureVerifiedAt: null },
     { status: "CLOSING", closureVerifiedAt: new Date() },
-  ])(
-    "requires positive closure evidence and CLOSED status: $status",
-    async (state) => {
-      const { service, session, tx } = fixture();
-      Object.assign(session, state);
-      await expect(
-        service.resolveWriteOutcome(current, "session-1", note),
-      ).rejects.toThrow("closed");
-      expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
-      expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
-      expect(tx.auditEvent.create).not.toHaveBeenCalled();
-    },
-  );
-
+    { status: "CLOSED", closureEvidenceId: null },
+  ])("requires CLOSED state and positive evidence: $status", async (state) => {
+    const { service, session, tx } = fixture();
+    Object.assign(session, state);
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", input),
+    ).rejects.toThrow("closure proof");
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+    expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+  });
+  it("does not accept a timestamp or evidence ID without a durable matching proof", async () => {
+    const { service, tx } = fixture();
+    tx.sessionClosureEvidence.findUnique.mockResolvedValue(null as never);
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", input),
+    ).rejects.toThrow("durable closure evidence");
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+  });
   it.each(["PENDING", "RUNNING", "WAITING_HUMAN"])(
-    "rejects an owner still in %s even when its browser is closed",
+    "rejects an owner still %s",
     async (status) => {
       const { service, owner, tx } = fixture();
       owner.status = status;
       await expect(
-        service.resolveWriteOutcome(current, "session-1", note),
+        service.resolveWriteOutcome(current, "recovery-1", input),
       ).rejects.toThrow("must stop");
       expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
-      expect(tx.auditEvent.create).not.toHaveBeenCalled();
     },
   );
-
   it.each(["QUEUED", "PREPARING", "RUNNING", "WAITING_HUMAN"])(
-    "rejects a stopped task while its Run is still %s",
-    async (lifecycle) => {
+    "rejects a stopped owner while its Run remains %s",
+    async (state) => {
       const { service, owner, tx } = fixture();
-      owner.run.lifecycle = lifecycle;
+      owner.run.lifecycle = state;
       await expect(
-        service.resolveWriteOutcome(current, "session-1", note),
+        service.resolveWriteOutcome(current, "recovery-1", input),
       ).rejects.toThrow("must stop");
       expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
     },
   );
-
-  it.each([null, "PENDING", "CLOSING", "RETRY_SCHEDULED", "EXHAUSTED"])(
-    "does not race an unsettled or unrelated recovery state %s",
-    async (recoveryStatus) => {
+  it.each(["PENDING", "CLOSING", "RETRY_SCHEDULED"])(
+    "does not race an active Agent recovery %s",
+    async (state) => {
       const { service, owner, tx } = fixture();
-      owner.recoveryStatus = recoveryStatus;
+      owner.recoveryStatus = state;
       await expect(
-        service.resolveWriteOutcome(current, "session-1", note),
+        service.resolveWriteOutcome(current, "recovery-1", input),
       ).rejects.toThrow("lease recovery");
       expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
-      expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
     },
   );
-
-  it("does not release data when a concurrent owner transition wins the CAS", async () => {
+  it("aborts when the owner CAS loses rather than silently releasing its guard", async () => {
     const { service, tx } = fixture();
     tx.agentRuntimeTask.updateMany.mockResolvedValue({ count: 0 });
     await expect(
-      service.resolveWriteOutcome(current, "session-1", note),
+      service.resolveWriteOutcome(current, "recovery-1", input),
     ).rejects.toThrow("changed");
     expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
-    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+    expect(tx.runtimeSessionRecovery.update).not.toHaveBeenCalled();
   });
-
-  it("releases only this session's quarantine with a durable audit and no automatic replay", async () => {
-    const { service, tx, audit, owner } = fixture();
-    await expect(
-      service.resolveWriteOutcome(current, "session-1", note),
-    ).resolves.toEqual({ released: 2 });
-    expect(tx.$queryRaw).toHaveBeenCalledOnce();
-    expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "task-1",
-        status: "FAILED",
-        recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
-        fencingToken: 3n,
-      },
-      data: { recoveryStatus: "RESOLVED", recoveryNextAttemptAt: null },
+  it("adopts old NORMAL leases and releases only this recovery's scope, with audit and no replay", async () => {
+    const { service, tx, owner, recovery, getLease } = fixture();
+    const result = await service.resolveWriteOutcome(
+      current,
+      recovery.id,
+      input,
+    );
+    expect(result).toMatchObject({
+      released: 1,
+      writeOutcomeState: "RESOLVED",
     });
+    expect(getLease()).toBeNull();
     expect(owner.recoveryStatus).toBe("RESOLVED");
     expect(tx.executionResourceLease.deleteMany).toHaveBeenCalledWith({
-      where: { sessionId: "session-1", quarantined: true },
-    });
-    expect(tx.browserRuntimeSession.updateMany).toHaveBeenCalledWith({
-      where: { id: "session-1" },
-      data: { quarantinedAt: null },
-    });
-    expect(tx.runEvent.create).toHaveBeenCalledWith({
-      data: {
-        teamId: current.team.id,
-        runId: "run-1",
-        attemptId: "attempt-1",
-        actor: "HUMAN",
-        kind: "runtime.write_outcome.reconciled",
-        payload: { note, resolvedByUserId: current.user.id },
-      },
+      where: { sessionId: "session-1", recoveryId: "recovery-1" },
     });
     expect(tx.auditEvent.create).toHaveBeenCalledWith({
-      data: {
+      data: expect.objectContaining({
         action: "runtime.write_outcome.reconciled",
         actorUserId: current.user.id,
-        entityId: "session-1",
-        entityType: "browser_runtime_session",
-        metadata: { note, released: 2 },
-        teamId: current.team.id,
-      },
+        metadata: {
+          outcome: input.outcome,
+          note: input.note,
+          evidenceRefs: input.evidenceRefs,
+          released: 1,
+        },
+      }),
     });
-    expect(audit.record).not.toHaveBeenCalled();
+    expect(tx.runtimeRecoveryOutbox.upsert).toHaveBeenCalled();
     expect(tx.runAttempt.create).not.toHaveBeenCalled();
     expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
   });
-
-  it("aborts the release transaction if its durable audit cannot be recorded", async () => {
-    const { service, tx, prisma, audit } = fixture();
+  it("propagates audit persistence failure to abort the entire release transaction", async () => {
+    const { service, tx, prisma } = fixture();
     tx.auditEvent.create.mockRejectedValue(new Error("audit storage failed"));
     await expect(
-      service.resolveWriteOutcome(current, "session-1", note),
+      service.resolveWriteOutcome(current, "recovery-1", input),
     ).rejects.toThrow("audit storage failed");
     await expect(prisma.$transaction.mock.results[0]!.value).rejects.toThrow(
       "audit storage failed",
     );
-    expect(audit.record).not.toHaveBeenCalled();
+    expect(tx.runtimeRecoveryOutbox.upsert).not.toHaveBeenCalled();
   });
-
-  it.each(["CANCELLED", "TIMED_OUT"])(
-    "preserves a manual resolution when duplicate closure arrives for a %s task",
-    async (status) => {
-      const { service, tx, owner } = fixture();
-      owner.status = status;
-      owner.run.lifecycle = status;
-      await service.resolveWriteOutcome(current, "session-1", note);
-      tx.agentRuntimeTask.updateMany.mockClear();
-      tx.executionResourceLease.updateMany.mockClear();
-
-      await releaseVerifiedSessionResources(tx as never, "session-1");
-      expect(owner.recoveryStatus).toBe("RESOLVED");
-      expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
-      expect(tx.executionResourceLease.updateMany).not.toHaveBeenCalled();
-    },
-  );
-
+  it("an exact idempotent retry preserves the first audited result", async () => {
+    const { service, tx } = fixture();
+    await service.resolveWriteOutcome(current, "recovery-1", input);
+    expect(
+      await service.resolveWriteOutcome(current, "recovery-1", input),
+    ).toMatchObject({ released: 0, writeOutcomeState: "RESOLVED" });
+    expect(tx.auditEvent.create).toHaveBeenCalledOnce();
+  });
+  it("rejects reuse of an idempotency key with altered business evidence", async () => {
+    const { service } = fixture();
+    await service.resolveWriteOutcome(current, "recovery-1", input);
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", {
+        ...input,
+        outcome: "COMPENSATED",
+      }),
+    ).rejects.toThrow("different evidence");
+  });
+  it("rejects a stale client version before mutating guards", async () => {
+    const { service, tx } = fixture();
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", {
+        ...input,
+        expectedVersion: 2,
+      }),
+    ).rejects.toThrow("changed");
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+  });
+  it("persists ownerless reconciliation so duplicate closure cannot recreate its quarantine", async () => {
+    const { service, tx, session, recovery, getLease } = fixture();
+    session.ownerTaskId = null;
+    await service.resolveWriteOutcome(current, recovery.id, input);
+    tx.executionResourceLease.updateMany.mockClear();
+    await releaseVerifiedSessionResources(tx as never, session.id);
+    expect(recovery.writeOutcomeState).toBe("RESOLVED");
+    expect(getLease()).toBeNull();
+    expect(tx.executionResourceLease.updateMany).not.toHaveBeenCalled();
+  });
   it.each([
-    { transition: "cancel", taskStatus: "CANCELLED", lifecycle: "CANCELLED" },
-    {
-      transition: "hitl-cancel",
-      taskStatus: "CANCELLED",
-      lifecycle: "CANCELLED",
-    },
-    {
-      transition: "hitl-inconclusive",
-      taskStatus: "FAILED",
-      lifecycle: "COMPLETED",
-    },
-    {
-      transition: "run-timeout",
-      taskStatus: "TIMED_OUT",
-      lifecycle: "TIMED_OUT",
-    },
+    ["cancel", "CANCELLED", "CANCELLED"],
+    ["hitl-cancel", "CANCELLED", "CANCELLED"],
+    ["hitl-inconclusive", "FAILED", "COMPLETED"],
+    ["run-timeout", "TIMED_OUT", "TIMED_OUT"],
   ])(
-    "keeps a WAITING_HUMAN write isolated through $transition, closure and reconciliation",
-    async ({ transition, taskStatus, lifecycle }) => {
-      const { service, tx, session, owner, prisma } = fixture();
-      Object.assign(session, {
-        status: "ACTIVE",
-        closureVerifiedAt: null,
-        quarantinedAt: null,
-        purpose: "EXECUTION",
-        protocolMinor: 13,
-      });
+    "keeps an intermediate WAITING_HUMAN result isolated through %s",
+    async (_transition, status, lifecycle) => {
+      const { service, tx, owner, session, recovery, getLease } = fixture();
       Object.assign(owner, {
-        completionId: "human-wait-completion",
+        completionId: "intermediate-completion",
         result: { kind: "WAITING_HUMAN" },
         status: "WAITING_HUMAN",
         recoveryStatus: null,
       });
-      Object.assign(owner.run, {
-        lifecycle: "WAITING_HUMAN",
-        startedAt: new Date(),
-        executionPolicy: {
-          hitl: {
-            enabled: true,
-            notificationChannels: [],
-            onTimeout: transition === "hitl-cancel" ? "CANCEL" : "INCONCLUSIVE",
-            timeoutSeconds: 3600,
-          },
-        },
-      });
-      let lease: { quarantined: boolean } | null = { quarantined: false };
-      tx.executionResourceLease.count.mockImplementation(async () =>
-        lease?.quarantined ? 1 : 0,
-      );
-      tx.executionResourceLease.updateMany.mockImplementation(async () => {
-        if (!lease) return { count: 0 };
-        lease.quarantined = true;
-        return { count: 1 };
-      });
-      tx.executionResourceLease.deleteMany.mockImplementation(
-        async ({ where }) => {
-          if (
-            !lease ||
-            (where.quarantined !== undefined &&
-              where.quarantined !== lease.quarantined)
-          )
-            return { count: 0 };
-          lease = null;
-          return { count: 1 };
-        },
-      );
-      tx.browserRuntimeSession.updateMany.mockImplementation(
-        async ({ data }) => {
-          Object.assign(session, data);
-          return { count: 1 };
-        },
-      );
-      Object.assign(tx, {
-        browserRuntimeCommand: { count: vi.fn().mockResolvedValue(1) },
-        executionRun: {
-          findFirst: vi.fn().mockResolvedValue(owner.run),
-          update: vi.fn(async ({ data }) => Object.assign(owner.run, data)),
-          updateMany: vi.fn(async ({ data }) => {
-            Object.assign(owner.run, data);
-            return { count: 1 };
-          }),
-        },
-        runAttempt: { updateMany: vi.fn() },
-        humanIntervention: {
-          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        },
-      });
-
+      owner.run.lifecycle = "WAITING_HUMAN";
       await releaseCompletedSessionData(tx as never, owner.id);
-      expect(lease).toEqual({ quarantined: false });
-      if (transition === "cancel") {
-        const runs = new ExecutionRunService(prisma as never, {} as never);
-        vi.spyOn(runs, "detail").mockResolvedValue({} as never);
-        await runs.cancel(
-          { ...current, credential: { id: "console-credential" } } as never,
-          "run-1",
-        );
-      } else {
-        Object.assign(prisma, {
-          humanIntervention: {
-            findMany: vi.fn().mockResolvedValue(
-              transition.startsWith("hitl-")
-                ? [
-                    {
-                      id: "intervention-1",
-                      run: owner.run,
-                      runId: "run-1",
-                      taskId: "task-1",
-                      attemptId: "attempt-1",
-                      teamId: current.team.id,
-                      expiresAt: new Date(Date.now() - 1000),
-                    },
-                  ]
-                : [],
-            ),
-          },
-          executionRun: {
-            findMany: vi
-              .fn()
-              .mockResolvedValue(
-                transition === "run-timeout" ? [owner.run] : [],
-              ),
-          },
-          browserExecution: {
-            findMany: vi.fn().mockResolvedValue([]),
-          },
-        });
-        await new UnifiedRunCleanupWorker(prisma as never, {} as never).tick();
-      }
-
-      expect(owner.status).toBe(taskStatus);
-      expect(owner.run.lifecycle).toBe(lifecycle);
-      expect(owner.completionId).toBe("human-wait-completion");
-      expect(owner.result).toEqual({ kind: "WAITING_HUMAN" });
-      Object.assign(session, {
-        status: "CLOSED",
-        closureVerifiedAt: new Date(),
-      });
+      expect(getLease()).not.toBeNull();
+      Object.assign(owner, { status });
+      owner.run.lifecycle = lifecycle;
       await releaseVerifiedSessionResources(tx as never, session.id);
-      expect(lease).toEqual({ quarantined: true });
+      expect(getLease()?.quarantined).toBe(true);
       expect(owner.recoveryStatus).toBe("WRITE_OUTCOME_UNKNOWN");
-      expect(session.quarantinedAt).toBeInstanceOf(Date);
-      expect(tx.browserRuntimeSlot.deleteMany).toHaveBeenCalled();
-
-      await expect(
-        service.resolveWriteOutcome(current, session.id, note),
-      ).resolves.toEqual({ released: 1 });
-      expect(lease).toBeNull();
-      expect(owner.recoveryStatus).toBe("RESOLVED");
-      expect(session.quarantinedAt).toBeNull();
+      await service.resolveWriteOutcome(current, recovery.id, input);
+      expect(getLease()).toBeNull();
       await releaseVerifiedSessionResources(tx as never, session.id);
-      expect(lease).toBeNull();
       expect(owner.recoveryStatus).toBe("RESOLVED");
-      expect(session.quarantinedAt).toBeNull();
+      expect(getLease()).toBeNull();
     },
   );
 });

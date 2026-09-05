@@ -1,6 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import {
+  ConflictException,
+  Injectable,
+  Optional,
+  UnauthorizedException,
+} from "@nestjs/common";
 import type {
   RuntimeConfigurationInput,
   RuntimePairInput,
@@ -16,6 +21,9 @@ import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import { RuntimeConnectionHub } from "../runtime/runtime-connection-hub.service.js";
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { AuditService } from "./audit.service.js";
 
 function hashToken(value: string): string {
@@ -29,6 +37,7 @@ export class BrowserRuntimeService {
     private readonly audit: AuditService,
     private readonly redis: RedisService,
     private readonly hub: RuntimeConnectionHub,
+    @Optional() private readonly recovery?: SessionRecoveryService,
   ) {}
 
   async list(current: AuthContext) {
@@ -39,6 +48,7 @@ export class BrowserRuntimeService {
     return Promise.all(
       rows.map(async (row) => ({
         ...row,
+        connectionGeneration: row.connectionGeneration.toString(),
         status:
           row.status === "REVOKED"
             ? "REVOKED"
@@ -335,6 +345,7 @@ export class BrowserRuntimeService {
     }
     return {
       ...runtime,
+      connectionGeneration: runtime.connectionGeneration.toString(),
       status: online ? "ONLINE" : "OFFLINE",
       tokenHash: undefined,
     };
@@ -343,6 +354,7 @@ export class BrowserRuntimeService {
   async pair(input: RuntimePairInput) {
     const runtimeToken = randomBytes(32).toString("base64url");
     const runtime = await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       const pairing = await tx.browserRuntimePairingToken.findUnique({
         where: { tokenHash: hashToken(input.pairingToken) },
       });
@@ -355,6 +367,20 @@ export class BrowserRuntimeService {
           "Pairing token is invalid, expired, or already used.",
         );
       }
+
+      const existing = await tx.browserRuntime.findUnique({
+        where: {
+          teamId_instanceKey: {
+            teamId: pairing.teamId,
+            instanceKey: input.instanceKey,
+          },
+        },
+        select: { id: true, drainState: true },
+      });
+      if (existing && existing.drainState !== "NONE")
+        throw new ConflictException(
+          "A Runtime frozen for drain cannot be paired or re-enabled.",
+        );
 
       const claimed = await tx.browserRuntimePairingToken.updateMany({
         data: { usedAt: new Date() },
@@ -415,38 +441,64 @@ export class BrowserRuntimeService {
   }
 
   async revoke(current: AuthContext, id: string) {
-    const result = await this.prisma.browserRuntime.updateMany({
-      data: {
-        enabled: false,
-        gatewayInstanceId: null,
-        revokedAt: new Date(),
-        status: "REVOKED",
-      },
-      where: { id, teamId: current.team.id },
-    });
-    if (result.count !== 1) {
-      throw new UnauthorizedException("Browser Runtime was not found.");
-    }
-    this.hub.close(id, 4003, "Runtime credential was revoked.");
-    await this.prisma.$transaction([
-      this.prisma.browserRuntimeSession.updateMany({
+    const sessions = await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+      const now = new Date();
+      const result = await tx.browserRuntime.updateMany({
         data: {
+          enabled: false,
+          gatewayInstanceId: null,
+          revokedAt: now,
+          status: "REVOKED",
+        },
+        where: { id, teamId: current.team.id },
+      });
+      if (result.count !== 1)
+        throw new UnauthorizedException("Browser Runtime was not found.");
+      const unverified = {
+        runtimeId: id,
+        closureVerifiedAt: null,
+        status: { not: "CLOSED" as const },
+      };
+      // Revoking a credential removes authority, not proof that its browsers
+      // exited. Late revoke callbacks must never overwrite a verified epoch.
+      await tx.browserRuntimeSession.updateMany({
+        where: unverified,
+        data: {
+          status: "LOST",
+          executionPermitExpiresAt: now,
+          humanControlExpiresAt: null,
+          humanControllerUserId: null,
           lastError: {
             code: "RUNTIME_REVOKED",
-            message: "Runtime credential was revoked.",
+            message:
+              "Runtime credential was revoked; browser closure remains unverified.",
           },
-          status: "LOST",
         },
-        where: {
-          runtimeId: id,
-          status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
-        },
-      }),
-      this.prisma.browserRuntimeSlot.deleteMany({ where: { runtimeId: id } }),
-      this.prisma.browserRuntimeProfileLease.deleteMany({
-        where: { runtimeId: id },
-      }),
-    ]);
+      });
+      await tx.browserRuntimeSession.updateMany({
+        where: { ...unverified, quarantinedAt: null },
+        data: { quarantinedAt: now },
+      });
+      await tx.executionResourceLease.updateMany({
+        where: { session: unverified, mode: "WRITE" },
+        data: { quarantined: true },
+      });
+      return recoveryEnabled()
+        ? tx.browserRuntimeSession.findMany({
+            where: unverified,
+            select: { id: true },
+          })
+        : [];
+    });
+    this.hub.close(id, 4003, "Runtime credential was revoked.");
     await this.audit.record(current, "runtime.revoked", "browser_runtime", id);
+    // Requests own separate transactions and are replayed by periodic discovery
+    // if the process stops here. Keep guard materialization behind the rollout barrier.
+    if (recoveryEnabled())
+      for (const session of sessions)
+        await this.recovery?.request(session.id, "RUNTIME_REVOKED", {
+          explicitClose: true,
+        });
   }
 }

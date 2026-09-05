@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
+import { leaseDigest } from "../runtime/session-recovery.state.js";
 
 import {
   AgentRuntimeTaskService,
@@ -42,16 +43,96 @@ const snapshot = runtimeTaskSnapshotSchema.parse({
 
 describe("Agent Runtime ownership and recovery", () => {
   it.each([
-    { potentialWrites: 0, casCount: 1, expected: "RETRY_SCHEDULED" },
-    { potentialWrites: 1, casCount: 1, expected: "WRITE_OUTCOME_UNKNOWN" },
-    { potentialWrites: 0, casCount: 0, expected: "RACE_LOST" },
+    {
+      name: "proven no-write epoch",
+      potentialWrites: 0,
+      writeState: "NO_WRITE_VERIFIED",
+      casCount: 1,
+      proved: true,
+      expected: "RETRY_SCHEDULED",
+    },
+    {
+      name: "empty audit is still unknown",
+      potentialWrites: 0,
+      writeState: "UNKNOWN",
+      casCount: 1,
+      proved: true,
+      expected: "WRITE_OUTCOME_UNKNOWN",
+    },
+    {
+      name: "known potential write",
+      potentialWrites: 1,
+      writeState: "UNKNOWN",
+      casCount: 1,
+      proved: true,
+      expected: "WRITE_OUTCOME_UNKNOWN",
+    },
+    {
+      name: "manual outcome resolves writes",
+      potentialWrites: 2,
+      writeState: "RESOLVED",
+      casCount: 1,
+      proved: true,
+      expected: "RETRY_SCHEDULED",
+    },
+    {
+      name: "legacy missing assessment",
+      potentialWrites: 0,
+      writeState: null,
+      casCount: 1,
+      proved: true,
+      expected: "WRITE_OUTCOME_UNKNOWN",
+    },
+    {
+      name: "read-only policy cannot override unknown assessment",
+      potentialWrites: 0,
+      writeState: "UNKNOWN",
+      accessMode: "READ_ONLY",
+      casCount: 1,
+      proved: true,
+      expected: "WRITE_OUTCOME_UNKNOWN",
+    },
+    {
+      name: "closure timestamp without proof",
+      potentialWrites: 0,
+      writeState: "NOT_APPLICABLE",
+      casCount: 1,
+      proved: false,
+      expected: "CLOSING",
+    },
+    {
+      name: "bare CLOSED status without closure timestamp",
+      potentialWrites: 0,
+      writeState: "NOT_APPLICABLE",
+      timestampMissing: true,
+      casCount: 1,
+      proved: false,
+      expected: "CLOSING",
+    },
+    {
+      name: "another recovery won CAS",
+      potentialWrites: 0,
+      writeState: "NO_WRITE_VERIFIED",
+      casCount: 0,
+      proved: true,
+      expected: "RACE_LOST",
+    },
   ])(
-    "recovers a reserved writer without trapping its new Attempt behind old data locks: $expected",
-    async ({ potentialWrites, casCount, expected }) => {
+    "uses independent closure and write evidence: $name",
+    async ({
+      potentialWrites,
+      writeState,
+      casCount,
+      proved,
+      expected,
+      accessMode,
+      timestampMissing,
+    }) => {
       const deadlineAt = new Date(Date.now() + 120_000);
       const task = {
         id: "task-1",
         status: "FAILED",
+        fencingToken: 2n,
         recoveryStatus: "CLOSING",
         attemptId: snapshot.attemptId,
         runId: snapshot.runId,
@@ -84,11 +165,29 @@ describe("Agent Runtime ownership and recovery", () => {
           cancelRequestedAt: null,
           infrastructureRecoveryCount: 0,
           maxAttempts: 3,
-          concurrencyPolicy: { accessMode: "MUTATING" },
+          concurrencyPolicy: { accessMode: accessMode ?? "MUTATING" },
         },
       };
-      const session = { status: "CLOSED", closureVerifiedAt: new Date() };
+      const session = {
+        id: "session-1",
+        status: "CLOSED",
+        closureVerifiedAt: timestampMissing ? null : new Date(),
+        closureEvidenceId: proved ? "proof-1" : null,
+        fencingToken: 4n,
+        leaseToken: "browser-lease",
+        ownerTaskId: null,
+      };
+      const recovery = writeState
+        ? {
+            id: "recovery-1",
+            writeOutcomeState: writeState,
+            closureState: proved ? "VERIFIED" : "CLOSING",
+            closureVerifiedAt: session.closureVerifiedAt,
+            closureEvidenceId: session.closureEvidenceId,
+          }
+        : null;
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         agentRuntimeTask: {
           findFirst: vi.fn().mockResolvedValue(task),
           updateMany: vi.fn().mockResolvedValue({ count: casCount }),
@@ -101,7 +200,29 @@ describe("Agent Runtime ownership and recovery", () => {
         browserRuntimeCommand: {
           count: vi.fn().mockResolvedValue(potentialWrites),
         },
+        runtimeSessionRecovery: {
+          findUnique: vi.fn().mockResolvedValue(recovery),
+        },
+        sessionClosureEvidence: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "proof-1",
+            sessionId: "session-1",
+            sessionFence: session.fencingToken,
+            leaseDigest: leaseDigest(session.leaseToken),
+            recoveryId: "recovery-1",
+          }),
+        },
+        browserRuntimeSlot: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        browserRuntimeProfileLease: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        browserHumanControlLease: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         executionResourceLease: {
+          count: vi.fn().mockResolvedValue(0),
           deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
           updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
@@ -115,6 +236,7 @@ describe("Agent Runtime ownership and recovery", () => {
       };
       const prisma = {
         agentRuntimeTask: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
           findMany: vi
             .fn()
             .mockResolvedValueOnce([])
@@ -125,6 +247,9 @@ describe("Agent Runtime ownership and recovery", () => {
         },
         browserRuntimeSession: {
           findUnique: vi.fn().mockResolvedValue(session),
+        },
+        runtimeSessionRecovery: {
+          findUnique: vi.fn().mockResolvedValue(recovery),
         },
         executionResourceLease: {
           updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -140,10 +265,16 @@ describe("Agent Runtime ownership and recovery", () => {
         browser as never,
       );
       await service.recoverExpiredLeases();
-      expect(
-        tx.browserRuntimeCommand.count.mock.calls[0]![0].where,
-      ).not.toHaveProperty("source");
+      expect(tx.browserRuntimeCommand.count).not.toHaveBeenCalled();
+      expect(prisma.browserRuntimeCommand.count).not.toHaveBeenCalled();
       if (expected === "RETRY_SCHEDULED") {
+        expect(tx.browserRuntimeSlot.deleteMany).toHaveBeenCalledWith({
+          where: {
+            sessionId: session.id,
+            fencingToken: session.fencingToken,
+            leaseToken: session.leaseToken,
+          },
+        });
         expect(tx.executionResourceLease.deleteMany).toHaveBeenCalledWith({
           where: { sessionId: "session-1" },
         });
@@ -162,6 +293,7 @@ describe("Agent Runtime ownership and recovery", () => {
           tx.executionResourceLease.deleteMany.mock.invocationCallOrder[0],
         ).toBeLessThan(tx.agentRuntimeTask.create.mock.invocationCallOrder[0]!);
       } else {
+        expect(tx.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
         expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
         expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
       }
@@ -171,99 +303,251 @@ describe("Agent Runtime ownership and recovery", () => {
             data: expect.objectContaining({ recoveryStatus: expected }),
           }),
         );
+      if (expected === "CLOSING") {
+        expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+        expect(prisma.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ recoveryStatus: "CLOSING" }),
+          }),
+        );
+      } else {
+        expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+          tx.agentRuntimeTask.findFirst.mock.invocationCallOrder[0]!,
+        );
+      }
     },
   );
 
-  it("does not retry a failed write whose browser response may have been lost", async () => {
-    const now = new Date();
-    const task = {
-      id: "task-1",
-      attemptId: snapshot.attemptId,
-      runId: snapshot.runId,
-      snapshot,
-      status: "RUNNING",
-      completionId: null,
-      leaseOwner: "worker-1",
-      leaseToken: "token-1",
-      fencingToken: 2n,
-      leaseExpiresAt: new Date(now.getTime() + 60_000),
-      attempt: { number: 1 },
-      run: {
-        lifecycle: "RUNNING",
-        cancelRequestedAt: null,
-        taskExecutionId: null,
-        currentAttemptNumber: 1,
-        concurrencyPolicy: { accessMode: "MUTATING" },
-        executionPolicy: {
-          retryPolicy: { maxAttempts: 3, retryOn: ["PROVIDER"] },
-          deadline: { mode: "FIXED" },
+  it.each([
+    {
+      name: "UNKNOWN overrides empty current audit",
+      recoveryState: "UNKNOWN",
+      audited: true,
+      potentialWrites: 0,
+      blocked: true,
+      retry: false,
+    },
+    {
+      name: "UNASSESSED overrides empty current audit",
+      recoveryState: "UNASSESSED",
+      audited: true,
+      potentialWrites: 0,
+      blocked: true,
+      retry: false,
+    },
+    {
+      name: "legacy empty audit cannot prove no writes",
+      recoveryState: null,
+      audited: false,
+      potentialWrites: 0,
+      blocked: true,
+      retry: false,
+    },
+    {
+      name: "new audited no-write owner may retry",
+      recoveryState: null,
+      audited: true,
+      potentialWrites: 0,
+      blocked: false,
+      retry: true,
+    },
+    {
+      name: "new audited fatal outcome stays fatal",
+      recoveryState: null,
+      audited: true,
+      potentialWrites: 0,
+      fatal: true,
+      blocked: false,
+      retry: false,
+    },
+    {
+      name: "a lost write response cannot retry",
+      recoveryState: null,
+      audited: true,
+      potentialWrites: 1,
+      blocked: true,
+      retry: false,
+    },
+    {
+      name: "READ_ONLY cannot override UNKNOWN",
+      recoveryState: "UNKNOWN",
+      audited: true,
+      potentialWrites: 0,
+      accessMode: "READ_ONLY",
+      blocked: true,
+      retry: false,
+    },
+  ])(
+    "classifies current-owner failure safely: $name",
+    async ({
+      recoveryState,
+      audited,
+      potentialWrites,
+      blocked,
+      retry,
+      fatal,
+      accessMode,
+    }) => {
+      const now = new Date();
+      const task = {
+        id: "task-1",
+        attemptId: snapshot.attemptId,
+        runId: snapshot.runId,
+        capability: "browser.verification",
+        provider: "GENERIC",
+        snapshot: {
+          ...snapshot,
+          executionPolicy: {
+            retryPolicy: { maxAttempts: 3, retryOn: ["PROVIDER"] },
+            browser: {
+              availabilityPolicy: "WAIT",
+              profile: { mode: "EPHEMERAL" },
+              requiredCapabilities: ["browser"],
+            },
+          },
         },
-      },
-    };
-    const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
-      agentRuntimeTask: {
-        findFirst: vi.fn().mockResolvedValue(task),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        update: vi.fn().mockResolvedValue({}),
-        findUnique: vi.fn().mockResolvedValue({
-          completionId: "completion-1",
-          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
-        }),
-        create: vi.fn(),
-      },
-      browserRuntimeCommand: { count: vi.fn().mockResolvedValue(1) },
-      executionResourceLease: {
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        deleteMany: vi.fn(),
-      },
-      runAttempt: { update: vi.fn().mockResolvedValue({}) },
-      executionRun: { update: vi.fn().mockResolvedValue({}) },
-      runEvent: { create: vi.fn().mockResolvedValue({}) },
-    };
-    const prisma = {
-      $transaction: vi.fn((fn: (tx: unknown) => unknown) => fn(tx)),
-    };
-    const service = new AgentRuntimeTaskService(prisma as never, {} as never);
-    const result = await service.submitOutcome(snapshot.teamId, task.id, {
-      workerId: "worker-1",
-      leaseToken: "token-1",
-      fencingToken: "2",
-      completionId: "completion-1",
-      completedAt: now.toISOString(),
-      outcome: {
-        kind: "RETRYABLE_FAILURE",
-        executionDisposition: "PROVIDER_ERROR",
-        error: {
-          code: "PROVIDER_DISCONNECTED",
-          failureClass: "PROVIDER",
-          message: "response lost",
-          phase: "browser_verification",
-          details: {},
+        status: "RUNNING",
+        completionId: null,
+        leaseOwner: "worker-1",
+        leaseToken: "token-1",
+        fencingToken: 2n,
+        leaseExpiresAt: new Date(now.getTime() + 60_000),
+        attempt: { number: 1 },
+        run: {
+          lifecycle: "RUNNING",
+          cancelRequestedAt: null,
+          taskExecutionId: null,
+          currentAttemptNumber: 1,
+          deadlineAt: new Date(now.getTime() + 120_000),
+          hardDeadlineAt: new Date(now.getTime() + 120_000),
+          concurrencyPolicy: { accessMode: accessMode ?? "MUTATING" },
+          executionPolicy: {
+            retryPolicy: { maxAttempts: 3, retryOn: ["PROVIDER"] },
+            deadline: { mode: "FIXED" },
+          },
         },
-        summary: "execution interrupted",
-      },
-    });
-    expect(result.nextAttemptScheduled).toBe(false);
-    expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
-    expect(tx.executionRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          lifecycle: "COMPLETED",
-          verdict: null,
-          executionDisposition: "BLOCKED",
-        }),
-      }),
-    );
-    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
-        }),
-      }),
-    );
-    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
-  });
+      };
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+        agentRuntimeTask: {
+          findFirst: vi.fn().mockResolvedValue(task),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findUnique: vi.fn().mockResolvedValue({
+            completionId: "completion-1",
+            recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+          }),
+          create: vi.fn(),
+        },
+        browserRuntimeSession: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "session-1",
+            leaseToken: "session-lease",
+            fencingToken: 4n,
+            launchIdentity: audited ? { version: 1, id: "launch-id" } : null,
+            launchIdentityVersion: audited ? 1 : null,
+            launchHostInstanceId: audited ? "host-id" : null,
+            launchConnectionGeneration: audited ? 1n : null,
+            ownerTaskId: task.id,
+            ownerFencingToken: task.fencingToken,
+          }),
+        },
+        runtimeSessionRecovery: {
+          findUnique: vi
+            .fn()
+            .mockResolvedValue(
+              recoveryState ? { writeOutcomeState: recoveryState } : null,
+            ),
+        },
+        browserRuntimeCommand: {
+          findFirst: vi
+            .fn()
+            .mockResolvedValue(audited ? { id: "open-command" } : null),
+          count: vi.fn().mockResolvedValue(potentialWrites),
+        },
+        executionResourceLease: {
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          deleteMany: vi.fn(),
+        },
+        runAttempt: {
+          update: vi.fn().mockResolvedValue({}),
+          create: vi.fn().mockResolvedValue({}),
+        },
+        browserExecution: { create: vi.fn().mockResolvedValue({}) },
+        executionRun: { update: vi.fn().mockResolvedValue({}) },
+        runEvent: { create: vi.fn().mockResolvedValue({}) },
+      };
+      const prisma = {
+        $transaction: vi.fn((fn: (tx: unknown) => unknown) => fn(tx)),
+      };
+      const service = new AgentRuntimeTaskService(prisma as never, {} as never);
+      const result = await service.submitOutcome(snapshot.teamId, task.id, {
+        workerId: "worker-1",
+        leaseToken: "token-1",
+        fencingToken: "2",
+        completionId: "completion-1",
+        completedAt: now.toISOString(),
+        outcome: {
+          kind: fatal ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
+          executionDisposition: "PROVIDER_ERROR",
+          error: {
+            code: "PROVIDER_DISCONNECTED",
+            failureClass: "PROVIDER",
+            message: "response lost",
+            phase: "browser_verification",
+            details: {},
+          },
+          summary: "execution interrupted",
+        },
+      });
+      expect(result.nextAttemptScheduled).toBe(retry);
+      if (retry) expect(tx.agentRuntimeTask.create).toHaveBeenCalledOnce();
+      else expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
+      if (blocked) {
+        expect(tx.executionRun.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              lifecycle: "COMPLETED",
+              verdict: null,
+              executionDisposition: "BLOCKED",
+            }),
+          }),
+        );
+        expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+            }),
+          }),
+        );
+      } else {
+        expect(
+          tx.agentRuntimeTask.update.mock.calls[0]![0].data,
+        ).not.toHaveProperty("recoveryStatus");
+        expect(tx.executionRun.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              executionDisposition: retry ? null : "PROVIDER_ERROR",
+            }),
+          }),
+        );
+      }
+      if (recoveryState || !audited)
+        expect(tx.browserRuntimeCommand.count).not.toHaveBeenCalled();
+      else
+        expect(tx.browserRuntimeCommand.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              source: "SYSTEM",
+              commandType: "session.open",
+              status: "SUCCEEDED",
+              payload: { path: ["launchIdentityId"], equals: "launch-id" },
+            }),
+          }),
+        );
+      expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not acknowledge renewal when another owner wins after the lease read", async () => {
     const now = new Date();
@@ -311,6 +595,83 @@ describe("Agent Runtime ownership and recovery", () => {
       }),
     );
     expect(tx.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.agentRuntimeTask.findFirst.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("revokes an expired owner under the resource lock without changing an already-proven browser", async () => {
+    const now = new Date();
+    const task = {
+      id: "task-1",
+      attemptId: snapshot.attemptId,
+      runId: snapshot.runId,
+      fencingToken: 2n,
+      leaseOwner: "worker-1",
+      attempt: { browserExecution: { runtimeSessionId: "session-1" } },
+      run: { teamId: snapshot.teamId, taskExecutionId: null },
+    };
+    const proof = {
+      closureVerifiedAt: now,
+      closureEvidenceId: "proof-1",
+      status: "CLOSED",
+      executionPermitExpiresAt: now,
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentRuntimeTask: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      browserRuntimeSession: {
+        updateMany: vi.fn().mockImplementation(async ({ where, data }) => {
+          if (
+            where.closureVerifiedAt === null &&
+            proof.closureVerifiedAt !== null
+          )
+            return { count: 0 };
+          Object.assign(proof, data);
+          return { count: 1 };
+        }),
+      },
+      runAttempt: { update: vi.fn().mockResolvedValue({}) },
+      runEvent: { create: vi.fn().mockResolvedValue({}) },
+      taskCaseExecution: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    const service = new AgentRuntimeTaskService(
+      {
+        agentRuntimeTask: {
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([task])
+            .mockResolvedValueOnce([]),
+        },
+        $transaction: vi.fn(
+          (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+        ),
+      } as never,
+      {} as never,
+      { releaseForExecutionRun: vi.fn() } as never,
+    );
+    await service.recoverExpiredLeases();
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.agentRuntimeTask.updateMany.mock.invocationCallOrder[0]!,
+    );
+    expect(tx.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          ownerTaskId: task.id,
+          ownerFencingToken: task.fencingToken,
+          closureVerifiedAt: null,
+          status: { not: "CLOSED" },
+        }),
+      }),
+    );
+    expect(proof).toEqual({
+      closureVerifiedAt: now,
+      closureEvidenceId: "proof-1",
+      status: "CLOSED",
+      executionPermitExpiresAt: now,
+    });
   });
 
   it("uses a new bounded Attempt only after closure and never replays uncertain writes", () => {
@@ -563,6 +924,9 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       "BROWSER_EXECUTION",
     );
     expect(result.task?.snapshot.modelCandidates).toEqual(modelCandidates);
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.agentRuntimeTask.findFirst.mock.invocationCallOrder[0]!,
+    );
   });
 });
 

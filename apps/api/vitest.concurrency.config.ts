@@ -7,6 +7,7 @@ export default defineConfig({
     include: [
       "src/edge-cases.integration.ts",
       "src/agent-runtime/spec-lease-recovery.integration.ts",
+      "src/runtime/session-recovery-concurrency.integration.ts",
       "src/verification/execution-concurrency.integration.ts",
       "src/verification/execution-hitl-cleanup.integration.ts",
     ],

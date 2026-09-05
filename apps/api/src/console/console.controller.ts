@@ -238,10 +238,25 @@ export class ConsoleController {
     @Body() body: unknown,
   ) {
     const input = parseBody(
-      z.object({ note: z.string().trim().min(10).max(2000) }).strict(),
+      z
+        .object({
+          note: z.string().trim().min(10).max(2000),
+          expectedVersion: z.number().int().positive().optional(),
+          idempotencyKey: z.string().min(1).max(200).optional(),
+          outcome: z.enum(["NO_WRITE", "VERIFIED", "COMPENSATED"]).optional(),
+          evidenceRefs: z.array(z.string().max(2000)).max(20).optional(),
+        })
+        .strict(),
       body,
     );
-    return this.runtimeSessions.resolveWriteOutcome(current, id, input.note);
+    return this.runtimeSessions.resolveWriteOutcome(current, id, input.note, {
+      ...(input.expectedVersion === undefined
+        ? {}
+        : { expectedVersion: input.expectedVersion }),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.outcome ? { outcome: input.outcome } : {}),
+      ...(input.evidenceRefs ? { evidenceRefs: input.evidenceRefs } : {}),
+    });
   }
 
   @Post("runtime-sessions")

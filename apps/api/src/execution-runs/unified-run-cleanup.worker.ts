@@ -7,6 +7,7 @@ import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { BrowserExecutionRunner } from "../verification/browser-execution-runner.service.js";
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
 
 function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -22,6 +23,7 @@ export class UnifiedRunCleanupWorker implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly browser: BrowserExecutionRunner,
     @Optional() private readonly monitor?: WorkerMonitorService,
+    @Optional() private readonly recovery?: SessionRecoveryService,
   ) {}
 
   onModuleInit() {
@@ -54,16 +56,39 @@ export class UnifiedRunCleanupWorker implements OnModuleInit, OnModuleDestroy {
               "HUMAN_CONTROL",
               "RELEASING",
               "FAILED",
+              "LOST",
+              "ALLOCATING",
             ],
           },
           run: { lifecycle: { in: ["COMPLETED", "CANCELLED", "TIMED_OUT"] } },
         },
       });
+      let failures = 0;
       for (const execution of executions) {
-        await this.browser
-          .releaseForExecutionRun(execution.run.teamId, execution.id)
-          .catch(() => undefined);
+        try {
+          if (execution.runtimeSessionId) {
+            if (env().RUNTIME_SESSION_RECOVERY_ENABLED)
+              await this.recovery?.request(
+                execution.runtimeSessionId,
+                "RUN_TERMINATED",
+                { sourceRunId: execution.runId },
+              );
+          } else
+            await this.browser.releaseForExecutionRun(
+              execution.run.teamId,
+              execution.id,
+            );
+        } catch (error) {
+          failures += 1;
+          this.logger.warn(
+            `Run cleanup deferred (${execution.id}): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
+      if (failures)
+        throw new Error(
+          `${failures} browser execution cleanup requests failed.`,
+        );
     } finally {
       this.running = false;
     }

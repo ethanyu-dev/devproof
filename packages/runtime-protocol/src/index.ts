@@ -2,15 +2,56 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 13,
+  minor: 14,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
+export const RUNTIME_CLOSURE_EVIDENCE_MINOR = 14;
+export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
 export const RUNTIME_CAPABILITIES = [
   "browser",
   "auth-snapshot-v1",
   "session-permits-v1",
+  RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
 ] as const;
+
+export const runtimeClosureRecoverySchema = z
+  .object({
+    recoveryId: z.string().uuid(),
+    requestId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    expectedLeaseToken: z.string().uuid(),
+    expectedFencingToken: z.string().regex(/^\d+$/u),
+    expectedLaunchIdentity: z.string().min(1).max(160).optional(),
+  })
+  .strict();
+export type RuntimeClosureRecovery = z.infer<
+  typeof runtimeClosureRecoverySchema
+>;
+
+/** A challenge-bound proof; an empty inventory or expired lease is not proof. */
+export const runtimeClosureEvidenceSchema = z
+  .object({
+    evidenceId: z.string().uuid(),
+    recoveryId: z.string().uuid(),
+    requestId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    leaseToken: z.string().uuid(),
+    fencingToken: z.string().regex(/^\d+$/u),
+    hostInstanceId: z.string().min(16).max(160),
+    daemonInstanceId: z.string().uuid(),
+    launchIdentityVersion: z.literal(1),
+    method: z.enum([
+      "LIVE_SESSION_TERMINATED",
+      "IDENTIFIED_PROCESS_SET_TERMINATED",
+    ]),
+    networkRevoked: z.literal(true),
+    closureCompletedAt: z.string().datetime(),
+  })
+  .strict();
+export type RuntimeClosureEvidence = z.infer<
+  typeof runtimeClosureEvidenceSchema
+>;
 
 export const authSnapshotReferenceSchema = z
   .object({
@@ -183,6 +224,8 @@ export const localRuntimeSessionSchema = z
 
 export const runtimeHelloSchema = z.object({
   capabilities: z.array(z.string().min(1).max(120)).max(32).optional(),
+  hostInstanceId: z.string().min(16).max(160).optional(),
+  daemonInstanceId: z.string().uuid().optional(),
   activeSessions: z.array(localRuntimeSessionSchema).max(64).default([]),
   instanceNonce: z.string().min(16).max(160),
   protocol: runtimeProtocolVersionSchema,
@@ -370,6 +413,7 @@ export const reconcileActionSchema = z.discriminatedUnion("action", [
 ]);
 
 export const runtimeHelloAcceptedSchema = z.object({
+  capabilities: z.array(z.string().min(1).max(120)).max(32).default([]),
   heartbeatIntervalMs: z.number().int().positive(),
   networkAllowlist: runtimeNetworkAllowlistSchema.default([]),
   protocol: runtimeProtocolVersionSchema,
@@ -596,6 +640,7 @@ const sessionCommandPayloadVariants = [
           .default([]),
         profileKey: z.string().min(1).max(160),
         profileMode: z.enum(["PERSISTENT", "EPHEMERAL"]),
+        launchIdentityId: z.string().uuid().optional(),
         profileRetention: userProfileRetentionSchema.optional(),
         authSnapshot: authSnapshotReferenceSchema.optional(),
       })
@@ -620,7 +665,9 @@ const sessionCommandPayloadVariants = [
   }),
   z.object({
     commandType: z.literal("session.close"),
-    payload: emptyPayloadSchema,
+    payload: z
+      .object({ recovery: runtimeClosureRecoverySchema.optional() })
+      .strict(),
   }),
   z.object({
     commandType: z.literal("profile.purge"),

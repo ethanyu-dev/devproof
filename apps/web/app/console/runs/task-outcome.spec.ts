@@ -108,3 +108,18 @@ describe("task outcome dimension labels", () => {
     expect(verificationVerdictLabel(null)).toBe("尚无验证判定");
   });
 });
+
+it("explains the recovery behind a queued identity holder", () => {
+  expect(
+    schedulingWaitText({
+      state: "WAITING",
+      reason: "PROFILE_SESSION_BUSY",
+      waitingSince: null,
+      blockedBy: {
+        resourceType: "PROFILE",
+        rootReason: "LEASE_RECOVERY",
+        recoveryId: "recovery-1",
+      },
+    }),
+  ).toContain("前一个执行正在等待会话恢复");
+});

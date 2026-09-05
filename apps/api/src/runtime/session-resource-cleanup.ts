@@ -1,31 +1,32 @@
-import type { Prisma } from "@prisma/client";
-import { potentialWriteCommandWhere } from "./session-write-audit.js";
+import type { BrowserRuntimeSession, Prisma } from "@prisma/client";
+import {
+  leaseDigest,
+  writeSettled,
+  refreshRecoveryWriteOutcome,
+} from "./session-recovery.state.js";
 
-function hasConfirmedBrowserOutcome(task: {
+export function hasConfirmedBrowserOutcome(task: {
   completionId: string | null;
   status: string;
   result: unknown;
 }) {
-  // completionId also acknowledges WAITING_HUMAN. Only a final verification
-  // outcome certifies the business result; cancellation/expiry preserve that
-  // intermediate completion and must not accidentally treat it as success.
-  return (
-    Boolean(task.completionId) &&
+  return Boolean(
+    task.completionId &&
     task.status === "SUCCEEDED" &&
+    task.result &&
     typeof task.result === "object" &&
-    task.result !== null &&
     "kind" in task.result &&
-    task.result.kind === "VERIFICATION_COMPLETED"
+    task.result.kind === "VERIFICATION_COMPLETED",
   );
 }
 
-/** A timeout is evidence of uncertainty, not evidence of browser termination. */
+/** Expiration cannot establish termination. Closed epochs are an absorbing state. */
 export async function quarantineSession(
   tx: Prisma.TransactionClient,
   sessionId: string,
   code: string,
 ) {
-  const result = await tx.browserRuntimeSession.updateMany({
+  const changed = await tx.browserRuntimeSession.updateMany({
     where: {
       id: sessionId,
       closureVerifiedAt: null,
@@ -39,139 +40,147 @@ export async function quarantineSession(
       lastError: {
         code,
         message:
-          "Browser closure is not yet verified; execution resources remain reserved.",
+          "Browser closure is not verified; execution resources remain reserved.",
       },
     },
   });
-  if (result.count === 1) {
+  if (changed.count === 1) {
     await tx.browserRuntimeSession.updateMany({
       where: { id: sessionId, quarantinedAt: null, closureVerifiedAt: null },
       data: { quarantinedAt: new Date() },
     });
-    // Physical expiry/failed closure cannot establish the outcome of an in-flight write.
     await tx.executionResourceLease.updateMany({
       where: { sessionId, mode: "WRITE" },
       data: { quarantined: true },
     });
   }
-  return result;
+  return changed;
 }
 
-/** Call inside the transaction which verifies closure of the matching epoch. */
+async function verifiedRecovery(
+  tx: Prisma.TransactionClient,
+  session: BrowserRuntimeSession,
+) {
+  if (
+    session.status !== "CLOSED" ||
+    !session.closureVerifiedAt ||
+    !session.closureEvidenceId
+  )
+    return null;
+  const evidence = await tx.sessionClosureEvidence.findUnique({
+    where: { id: session.closureEvidenceId },
+  });
+  if (
+    !evidence ||
+    evidence.sessionId !== session.id ||
+    evidence.sessionFence !== session.fencingToken ||
+    evidence.leaseDigest !== leaseDigest(session.leaseToken)
+  )
+    return null;
+  const recovery = await tx.runtimeSessionRecovery.findUnique({
+    where: {
+      sessionId_expectedSessionFence: {
+        sessionId: session.id,
+        expectedSessionFence: session.fencingToken,
+      },
+    },
+  });
+  return recovery &&
+    recovery.id === evidence.recoveryId &&
+    recovery.closureState === "VERIFIED" &&
+    recovery.closureEvidenceId === evidence.id &&
+    recovery.closureVerifiedAt
+    ? recovery
+    : null;
+}
+
+/** The caller holds the shared resource lock and has already persisted closure evidence. */
 export async function releaseVerifiedSessionResources(
   tx: Prisma.TransactionClient,
   sessionId: string,
 ) {
   const session = await tx.browserRuntimeSession.findUnique({
     where: { id: sessionId },
-    select: {
-      closureVerifiedAt: true,
-      status: true,
-      ownerTaskId: true,
-      quarantinedAt: true,
-      purpose: true,
-      protocolMinor: true,
-      browserExecutions: { select: { id: true }, take: 1 },
-    },
   });
-  if (!session || (!session.closureVerifiedAt && session.status !== "CLOSED"))
-    return false;
-  await tx.browserRuntimeSlot.deleteMany({ where: { sessionId } });
-  await tx.browserRuntimeProfileLease.deleteMany({ where: { sessionId } });
+  if (!session) return false;
+  const recovery = await verifiedRecovery(tx, session);
+  if (!recovery) return false;
+  const epoch = {
+    sessionId,
+    leaseToken: session.leaseToken,
+    fencingToken: session.fencingToken,
+  };
+  await tx.browserRuntimeSlot.deleteMany({ where: epoch });
+  await tx.browserRuntimeProfileLease.deleteMany({ where: epoch });
+  await tx.browserHumanControlLease.deleteMany({ where: { sessionId } });
   const owner = session.ownerTaskId
     ? await tx.agentRuntimeTask.findUnique({
-        include: { run: true },
         where: { id: session.ownerTaskId },
+        include: { run: true },
       })
     : null;
-  const awaitingWriteOutcome =
-    owner &&
-    !hasConfirmedBrowserOutcome(owner) &&
-    owner.recoveryStatus !== "RESOLVED" &&
-    (owner.run.concurrencyPolicy as { accessMode?: string } | null)
-      ?.accessMode !== "READ_ONLY";
-  let verifiedEmptyExecution = false;
-  if (
-    session.purpose === "EXECUTION" &&
-    (!session.ownerTaskId || awaitingWriteOutcome)
-  ) {
-    const potentialWrites = await tx.browserRuntimeCommand.count({
-      where: { sessionId, ...potentialWriteCommandWhere },
+  const settled = writeSettled(recovery.writeOutcomeState);
+  if (settled) {
+    await tx.executionResourceLease.deleteMany({ where: { sessionId } });
+  } else {
+    await tx.executionResourceLease.updateMany({
+      where: { sessionId, mode: "WRITE" },
+      data: { quarantined: true },
     });
-    verifiedEmptyExecution =
-      session.protocolMinor >= 13 &&
-      session.browserExecutions.length > 0 &&
-      potentialWrites === 0;
-    if (!session.ownerTaskId && !verifiedEmptyExecution) {
-      // A manual execution has no Agent outcome to certify its possible writes.
-      await tx.executionResourceLease.updateMany({
-        where: { sessionId, mode: "WRITE" },
-        data: { quarantined: true },
+    await tx.executionResourceLease.deleteMany({
+      where: { sessionId, mode: "READ", origin: "NORMAL" },
+    });
+    if (
+      owner &&
+      session.ownerFencingToken !== null &&
+      owner.fencingToken === session.ownerFencingToken &&
+      ["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(
+        owner.status,
+      ) &&
+      owner.recoveryStatus !== "RESOLVED"
+    ) {
+      await tx.agentRuntimeTask.updateMany({
+        where: {
+          id: owner.id,
+          status: owner.status,
+          fencingToken: owner.fencingToken,
+          recoveryStatus: owner.recoveryStatus,
+        },
+        data: {
+          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+          recoveryNextAttemptAt: null,
+        },
       });
     }
   }
-  if (
-    awaitingWriteOutcome &&
-    !verifiedEmptyExecution &&
-    ["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(owner.status) &&
-    !["PENDING", "CLOSING", "RETRY_SCHEDULED"].includes(
-      owner.recoveryStatus ?? "",
-    )
-  ) {
-    const changed = await tx.agentRuntimeTask.updateMany({
-      where: {
-        id: session.ownerTaskId!,
-        status: owner.status,
-        recoveryStatus: owner.recoveryStatus,
-      },
-      data: {
-        recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
-        recoveryNextAttemptAt: null,
-      },
-    });
-    // Reconciliation changes the owner first. A delayed close must lose this
-    // CAS instead of recreating data quarantine after an operator resolved it.
-    if (changed.count === 1)
-      await tx.executionResourceLease.updateMany({
-        where: { sessionId, mode: "WRITE" },
-        data: { quarantined: true },
-      });
-  }
-  if (verifiedEmptyExecution)
-    await tx.executionResourceLease.deleteMany({ where: { sessionId } });
-  else if (!awaitingWriteOutcome)
-    await tx.executionResourceLease.deleteMany({
-      where: { sessionId, quarantined: false },
-    });
-  const unresolvedWrites = await tx.executionResourceLease.count({
+  const remaining = await tx.executionResourceLease.count({
     where: { sessionId, quarantined: true },
   });
   await tx.browserRuntimeSession.updateMany({
-    where: { id: sessionId },
+    where: {
+      id: sessionId,
+      fencingToken: session.fencingToken,
+      leaseToken: session.leaseToken,
+      closureVerifiedAt: { not: null },
+    },
     data: {
       identityPermit: null,
-      closureVerifiedAt: session.closureVerifiedAt ?? new Date(),
+      executionPermitExpiresAt: new Date(),
+      humanControllerUserId: null,
+      humanControlExpiresAt: null,
       quarantinedAt:
-        unresolvedWrites > 0 ? (session.quarantinedAt ?? new Date()) : null,
+        remaining > 0 ? (session.quarantinedAt ?? new Date()) : null,
     },
   });
   return true;
 }
 
-/** A successful outcome can release a verified-closed session's deferred data lock. */
+/** A final trusted business outcome may complete a previously closed recovery. */
 export async function releaseCompletedSessionData(
   tx: Prisma.TransactionClient,
   taskId: string,
 ) {
-  const task = await tx.agentRuntimeTask.findUnique({
-    select: {
-      completionId: true,
-      recoveryStatus: true,
-      result: true,
-      status: true,
-    },
-    where: { id: taskId },
-  });
+  const task = await tx.agentRuntimeTask.findUnique({ where: { id: taskId } });
   if (
     !task ||
     !hasConfirmedBrowserOutcome(task) ||
@@ -179,14 +188,22 @@ export async function releaseCompletedSessionData(
   )
     return;
   const sessions = await tx.browserRuntimeSession.findMany({
-    select: { id: true },
-    where: { ownerTaskId: taskId, closureVerifiedAt: { not: null } },
+    where: {
+      ownerTaskId: taskId,
+      ownerFencingToken: task.fencingToken,
+      closureVerifiedAt: { not: null },
+      closureEvidenceId: { not: null },
+    },
   });
-  if (sessions.length)
-    await tx.executionResourceLease.deleteMany({
-      where: {
-        sessionId: { in: sessions.map((session) => session.id) },
-        quarantined: false,
-      },
-    });
+  for (const session of sessions) {
+    if (
+      session.ownerTaskId !== taskId ||
+      session.ownerFencingToken !== task.fencingToken
+    )
+      continue;
+    const recovery = await verifiedRecovery(tx, session);
+    if (!recovery) continue;
+    await refreshRecoveryWriteOutcome(tx, session, recovery);
+    await releaseVerifiedSessionResources(tx, session.id);
+  }
 }

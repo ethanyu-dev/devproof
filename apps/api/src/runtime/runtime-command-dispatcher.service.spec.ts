@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.js";
 
+const context = {
+  runtimeId: "runtime-1",
+  connectionId: "connection-1",
+  connectionGeneration: 2n,
+  negotiatedMinor: 14,
+  capabilities: new Set(["closure-evidence-v1"]),
+};
 const sessionId = "11bb7c5c-cd52-4ae7-8759-6e4e1391357d";
 const leaseToken = "70844616-602c-475b-95f6-393015b82ed1";
 
@@ -36,11 +43,15 @@ function videoFailureEvent() {
 
 function fixture(persistedCount: number) {
   const prisma = {
+    browserRuntime: {
+      findFirst: vi.fn().mockResolvedValue({ id: context.runtimeId }),
+    },
     browserRuntimeEvent: {
       createMany: vi.fn().mockResolvedValue({ count: persistedCount }),
     },
     browserRuntimeSession: {
       findUnique: vi.fn().mockResolvedValue({
+        runtimeId: context.runtimeId,
         fencingToken: BigInt(7),
         leaseToken,
       }),
@@ -65,7 +76,7 @@ describe("RuntimeCommandDispatcher video diagnostics", () => {
   it("persists one diagnostic and records bounded failure metrics", async () => {
     const { dispatcher, metrics, observability, prisma } = fixture(1);
 
-    await dispatcher.acceptEvent(videoFailureEvent());
+    await dispatcher.acceptEvent(videoFailureEvent(), context);
 
     expect(prisma.browserRuntimeEvent.createMany).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -114,7 +125,7 @@ describe("RuntimeCommandDispatcher video diagnostics", () => {
   it("does not count an acknowledged event again after redelivery", async () => {
     const { dispatcher, metrics, observability } = fixture(0);
 
-    await dispatcher.acceptEvent(videoFailureEvent());
+    await dispatcher.acceptEvent(videoFailureEvent(), context);
 
     expect(metrics.increment).not.toHaveBeenCalled();
     expect(metrics.observe).not.toHaveBeenCalled();

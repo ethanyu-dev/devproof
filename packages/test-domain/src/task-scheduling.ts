@@ -9,6 +9,9 @@ export interface CaseSchedulingDecision {
   blockedBy: {
     resourceType: string;
     resourceId?: string;
+    rootReason?: string;
+    recoveryId?: string;
+    recoveryPhase?: string;
     taskId?: string;
     caseExecutionId?: string;
     runId?: string;

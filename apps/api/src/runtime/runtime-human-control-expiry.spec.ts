@@ -40,6 +40,7 @@ function fixture() {
     return { count: 1 };
   });
   const prisma = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     browserRuntimeSession: {
       findMany: vi
         .fn()

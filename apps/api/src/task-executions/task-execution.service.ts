@@ -515,7 +515,7 @@ export class TaskExecutionService {
     await this.prisma.$transaction(
       async (tx) => {
         const candidate = await tx.taskCaseExecution.findFirst({
-          include: { taskExecution: true },
+          include: { taskExecution: true, testCase: true },
           where: {
             id: executionId,
             taskExecutionId: taskId,
@@ -537,24 +537,31 @@ export class TaskExecutionService {
             "Only an unstarted Case can change its execution policy.",
           );
         }
-        const peers = latestCaseExecutions(
-          await tx.taskCaseExecution.findMany({
-            where: {
-              taskExecutionId: taskId,
-              deploymentId: candidate.deploymentId,
-            },
-          }),
-        );
-        if (!peers.some((peer) => peer.id === candidate.id))
+        const executions = await tx.taskCaseExecution.findMany({
+          where: {
+            taskExecutionId: taskId,
+            deploymentId: candidate.deploymentId,
+            testCase: { snapshotId: candidate.testCase.snapshotId },
+          },
+        });
+        if (
+          !latestCaseExecutions(executions).some(
+            (peer) => peer.id === candidate.id,
+          )
+        )
           throw new ConflictException(
             "Only the latest execution can change its policy.",
           );
         validateCaseDependencyGraph(
-          peers.map((peer) => ({
-            caseId: peer.caseId,
-            executionPolicy:
-              peer.id === candidate.id ? policy : peer.executionPolicy,
-          })),
+          executions
+            .filter(
+              (peer) => peer.executionOrdinal === candidate.executionOrdinal,
+            )
+            .map((peer) => ({
+              caseId: peer.caseId,
+              executionPolicy:
+                peer.id === candidate.id ? policy : peer.executionPolicy,
+            })),
         );
         const changed = await tx.taskCaseExecution.updateMany({
           data: {
@@ -784,6 +791,7 @@ export class TaskExecutionService {
         caseExecutions: {
           include: {
             run: { select: { executionDisposition: true, lifecycle: true } },
+            testCase: true,
           },
         },
         stages: true,
@@ -900,11 +908,43 @@ export class TaskExecutionService {
             },
           },
         });
+        for (const item of retryCases) {
+          const policy = executionConcurrencyPolicySchema.safeParse(
+            item.executionPolicy,
+          );
+          const dependencies = policy.success
+            ? (policy.data.dependsOnCaseIds ?? [])
+            : [];
+          if (
+            dependencies.some(
+              (caseId) =>
+                !retryCases.some(
+                  (peer) =>
+                    peer.caseId === caseId &&
+                    peer.deploymentId === item.deploymentId &&
+                    peer.executionOrdinal === item.executionOrdinal &&
+                    peer.testCase.snapshotId === item.testCase.snapshotId,
+                ) &&
+                !task.caseExecutions.some(
+                  (peer) =>
+                    peer.caseId === caseId &&
+                    peer.deploymentId === item.deploymentId &&
+                    peer.executionOrdinal === item.executionOrdinal + 1 &&
+                    peer.testCase.snapshotId === item.testCase.snapshotId,
+                ),
+            )
+          ) {
+            throw new ConflictException(
+              "Retrying this stage requires all Case dependencies in the same execution round; create a new task or rerun the prerequisites first.",
+            );
+          }
+        }
         await tx.taskCaseExecution.createMany({
           data: retryCases.map((item) => ({
             caseId: item.caseId,
             deploymentId: item.deploymentId,
             executionOrdinal: item.executionOrdinal + 1,
+            dispatchOrder: item.dispatchOrder ?? item.testCase.position,
             executionPolicy: item.executionPolicy ?? Prisma.JsonNull,
             taskExecutionId: id,
           })),
@@ -962,7 +1002,7 @@ export class TaskExecutionService {
         const task = await tx.taskExecution.findFirst({
           include: {
             caseExecutions: {
-              include: { run: { select: { lifecycle: true } } },
+              include: { run: { select: { lifecycle: true } }, testCase: true },
               orderBy: { executionOrdinal: "desc" },
               where: { caseId, ...(deploymentId ? { deploymentId } : {}) },
             },
@@ -1017,6 +1057,36 @@ export class TaskExecutionService {
             "The task does not have a Spec execution stage.",
           );
         }
+        for (const latest of latestExecutions) {
+          const policy = executionConcurrencyPolicySchema.safeParse(
+            latest.executionPolicy,
+          );
+          const dependencies = policy.success
+            ? (policy.data.dependsOnCaseIds ?? [])
+            : [];
+          if (dependencies.length) {
+            const peers = await tx.taskCaseExecution.findMany({
+              select: { caseId: true },
+              where: {
+                taskExecutionId: task.id,
+                deploymentId: latest.deploymentId,
+                executionOrdinal: latest.executionOrdinal + 1,
+                testCase: { snapshotId: latest.testCase.snapshotId },
+                caseId: { in: dependencies },
+              },
+            });
+            if (
+              dependencies.some(
+                (dependency) =>
+                  !peers.some((peer) => peer.caseId === dependency),
+              )
+            ) {
+              throw new ConflictException(
+                "Rerun the prerequisite Cases in the same execution round before rerunning this Case.",
+              );
+            }
+          }
+        }
         const nextExecutions = await Promise.all(
           latestExecutions.map((latest) =>
             tx.taskCaseExecution.create({
@@ -1024,6 +1094,7 @@ export class TaskExecutionService {
                 caseId,
                 deploymentId: latest.deploymentId,
                 executionOrdinal: latest.executionOrdinal + 1,
+                dispatchOrder: latest.dispatchOrder ?? latest.testCase.position,
                 executionPolicy: latest.executionPolicy ?? Prisma.JsonNull,
                 taskExecutionId: task.id,
               },
@@ -2466,7 +2537,12 @@ export class TaskExecutionService {
       const currentTaskExecutionId = issueQueue.shift()!;
       const candidate = await this.prisma.taskCaseExecution.findFirst({
         include: dispatchCandidateInclude,
-        orderBy: { createdAt: "asc" },
+        orderBy: [
+          { executionOrdinal: "asc" },
+          { dispatchOrder: { sort: "asc", nulls: "last" } },
+          { createdAt: "asc" },
+          { id: "asc" },
+        ],
         where: {
           AND: [
             where,
@@ -2509,6 +2585,8 @@ export class TaskExecutionService {
             where: {
               taskExecutionId: candidate.taskExecutionId,
               deploymentId: candidate.deploymentId,
+              executionOrdinal: candidate.executionOrdinal,
+              testCase: { snapshotId: candidate.testCase.snapshotId },
               caseId: { in: dependencies },
             },
           }),
@@ -2573,13 +2651,25 @@ export class TaskExecutionService {
         reservation.profile.executionMode !== "ISOLATED_AUTH"
       ) {
         const activeRun = await this.prisma.executionRun.findFirst({
-          select: { id: true, taskExecutionId: true },
+          select: {
+            id: true,
+            taskExecutionId: true,
+            browserExecutions: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { error: true },
+            },
+          },
           where: {
             browserProfileId: reservation.profile.id,
+            teamId: candidate.taskExecution.teamId,
             lifecycle: { notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"] },
           },
         });
         if (activeRun) {
+          const rootBlocker = profileRootBlocker(
+            activeRun.browserExecutions?.[0]?.error,
+          );
           await this.recordScheduling(
             candidate,
             "WAITING",
@@ -2588,6 +2678,7 @@ export class TaskExecutionService {
               resourceType: "PROFILE",
               resourceId: reservation.profile.id,
               runId: activeRun.id,
+              ...rootBlocker,
               ...(activeRun.taskExecutionId
                 ? { taskId: activeRun.taskExecutionId }
                 : {}),
@@ -3075,7 +3166,7 @@ function newSchedulingDecision(
   };
 }
 
-function caseExecutionMatrix(
+export function caseExecutionMatrix(
   taskId: string,
   cases: readonly { id: string; position?: number }[],
   deployments: readonly { id: string }[],
@@ -3105,6 +3196,9 @@ function caseExecutionMatrix(
   validateCaseDependencyGraph(casePolicies);
   return taskDeploymentMatrix(taskId, cases, deployments).map((row) => ({
     ...row,
+    dispatchOrder:
+      cases.find((testCase) => testCase.id === row.caseId)?.position ??
+      cases.findIndex((testCase) => testCase.id === row.caseId),
     executionPolicy: json(
       casePolicies.find((policy) => policy.caseId === row.caseId)!
         .executionPolicy,
@@ -3700,7 +3794,7 @@ function normalizeTargetUrl(value: string) {
   }
 }
 
-function record(value: Prisma.JsonValue): Record<string, unknown> {
+function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
@@ -3730,4 +3824,25 @@ function uniqueConstraint(error: unknown) {
     "code" in error &&
     error.code === "P2002"
   );
+}
+
+/** Forward only explicit safe scheduling metadata, never arbitrary upstream errors. */
+export function profileRootBlocker(error: unknown) {
+  const value = record(error);
+  if (
+    !["LEASE_RECOVERY", "DATA_LOCK", "WRITE_OUTCOME_UNKNOWN"].includes(
+      String(value.code),
+    )
+  )
+    return {};
+  const blocker = record(value.blockedBy);
+  return {
+    rootReason: String(value.code),
+    ...(typeof blocker.recoveryId === "string"
+      ? { recoveryId: blocker.recoveryId }
+      : {}),
+    ...(typeof blocker.recoveryPhase === "string"
+      ? { recoveryPhase: blocker.recoveryPhase }
+      : {}),
+  };
 }

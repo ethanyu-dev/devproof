@@ -133,7 +133,17 @@ export function schedulingWaitText(
   const seconds = Number.isFinite(since)
     ? Math.max(0, Math.floor((now - since) / 1000))
     : null;
-  const label = displayLabel(scheduling.reason ?? scheduling.state);
+  const rootWait = (
+    {
+      LEASE_RECOVERY: "会话恢复",
+      DATA_LOCK: "业务数据访问",
+      WRITE_OUTCOME_UNKNOWN: "业务结果核实",
+    } as Record<string, string>
+  )[scheduling.blockedBy?.rootReason ?? ""];
+  const label =
+    scheduling.reason === "PROFILE_SESSION_BUSY" && rootWait
+      ? `等待当前身份：前一个执行正在等待${rootWait}`
+      : displayLabel(scheduling.reason ?? scheduling.state);
   return seconds === null
     ? label
     : `${label} · 已等待 ${seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`}`;

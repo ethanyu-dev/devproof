@@ -13,17 +13,17 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../config/env.js", () => ({
   env: () => ({
     RUNTIME_LEASE_SECONDS: 90,
+    RUNTIME_SESSION_RECOVERY_ENABLED: true,
     AGENT_RUNTIME_TASK_LEASE_SECONDS: 90,
   }),
 }));
 
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { SessionClosureService } from "../runtime/session-closure.service.js";
 import { BrowserExecutionRunner } from "./browser-execution-runner.service.js";
 import { BrowserAdmissionService } from "./browser-admission.service.js";
 import { AgentRuntimeTaskService } from "../agent-runtime/agent-runtime-task.service.js";
-import {
-  quarantineSession,
-  releaseVerifiedSessionResources,
-} from "../runtime/session-resource-cleanup.js";
+import { quarantineSession } from "../runtime/session-resource-cleanup.js";
 
 const connectionString = process.env.DEVPROOF_CONCURRENCY_TEST_DATABASE_URL;
 if (!connectionString)
@@ -43,16 +43,17 @@ if (
 const db = new PrismaClient({
   adapter: new PrismaPg({ connectionString, max: 20 }),
 });
-const commands = {
-  execute: vi
-    .fn()
-    .mockResolvedValue({ status: "SUCCEEDED", artifacts: [], error: null }),
-};
+const previousRecoveryEnabled = process.env.RUNTIME_SESSION_RECOVERY_ENABLED;
+const recoveries = new SessionRecoveryService(db as never);
+const closures = new SessionClosureService(db as never);
+const commands = { execute: vi.fn(verifiedCommand) };
 const runner = new BrowserExecutionRunner(
   db as never,
   { isRuntimeOnline: async () => true } as never,
   commands as never,
   {} as never,
+  recoveries,
+  closures,
 );
 const targetUrl = "https://test-duo.paigod.work/product-ops";
 let teamId: string;
@@ -65,16 +66,21 @@ let profiles: Array<{
 let sequence = 0;
 
 afterAll(async () => {
+  await db.$executeRawUnsafe(
+    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations" CASCADE',
+  );
   await db.$disconnect();
+  if (previousRecoveryEnabled === undefined)
+    delete process.env.RUNTIME_SESSION_RECOVERY_ENABLED;
+  else process.env.RUNTIME_SESSION_RECOVERY_ENABLED = previousRecoveryEnabled;
 });
 beforeEach(async () => {
+  process.env.RUNTIME_SESSION_RECOVERY_ENABLED = "true";
   await db.$executeRawUnsafe(
-    'TRUNCATE TABLE "teams", "users" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations", "teams", "users" RESTART IDENTITY CASCADE',
   );
   sequence = 0;
-  commands.execute
-    .mockReset()
-    .mockResolvedValue({ status: "SUCCEEDED", artifacts: [], error: null });
+  commands.execute.mockReset().mockImplementation(verifiedCommand);
   const team = await db.team.create({
     data: {
       slug: randomUUID(),
@@ -92,9 +98,18 @@ beforeEach(async () => {
       tokenHint: "test",
       status: "ONLINE",
       protocolMajor: 1,
-      protocolMinor: 13,
+      protocolMinor: 14,
+      connectionId: randomUUID(),
+      connectionGeneration: 1n,
+      hostInstanceId: "integration-host",
+      daemonInstanceId: "integration-daemon",
       maxConcurrency: 4,
-      capabilities: ["browser", "auth-snapshot-v1", "session-permits-v1"],
+      capabilities: [
+        "browser",
+        "auth-snapshot-v1",
+        "session-permits-v1",
+        "closure-evidence-v1",
+      ],
     },
   });
   runtimeId = runtime.id;
@@ -131,6 +146,63 @@ beforeEach(async () => {
     );
   }
 });
+
+async function verifiedClose(
+  sessionId: string,
+  commandId: string = randomUUID(),
+) {
+  const stored = await db.browserRuntimeCommand.findUnique({
+    where: { id: commandId },
+  });
+  const recoveryPayload = stored?.payload as {
+    recovery?: { recoveryId: string; requestId: string };
+  } | null;
+  const request =
+    recoveryPayload?.recovery ??
+    (await recoveries.prepareClose(sessionId, commandId));
+  const session = await db.browserRuntimeSession.findUniqueOrThrow({
+    where: { id: sessionId },
+    include: { runtime: true },
+  });
+  const runtime = session.runtime;
+  await closures.acceptRuntimeEvidence(
+    {
+      runtimeId: runtime.id,
+      connectionId: runtime.connectionId!,
+      connectionGeneration: runtime.connectionGeneration,
+      negotiatedMinor: 14,
+      capabilities: new Set(["closure-evidence-v1"]),
+      hostInstanceId: runtime.hostInstanceId!,
+      daemonInstanceId: runtime.daemonInstanceId!,
+    },
+    {
+      evidenceId: randomUUID(),
+      recoveryId: request.recoveryId,
+      requestId: request.requestId,
+      sessionId,
+      leaseToken: session.leaseToken,
+      fencingToken: session.fencingToken.toString(),
+      hostInstanceId: runtime.hostInstanceId!,
+      daemonInstanceId: runtime.daemonInstanceId!,
+      launchIdentityVersion: 1,
+      method: "LIVE_SESSION_TERMINATED",
+      networkRevoked: true,
+      closureCompletedAt: new Date().toISOString(),
+    },
+  );
+  return request.requestId;
+}
+async function verifiedCommand(input: {
+  commandType: string;
+  sessionId: string;
+  commandId?: string;
+}) {
+  const id =
+    input.commandType === "session.close"
+      ? await verifiedClose(input.sessionId, input.commandId)
+      : randomUUID();
+  return { id, status: "SUCCEEDED", artifacts: [], error: null };
+}
 
 async function execution(
   accessMode: "READ_ONLY" | "MUTATING" | "UNKNOWN",
@@ -272,22 +344,27 @@ describe("PostgreSQL browser admission transactions", () => {
     "rejects a late open ACK after the Session became %s",
     async (status) => {
       const work = await execution("READ_ONLY");
+      let lastUsedBeforeAck: Date | null = null;
       commands.execute.mockImplementationOnce(
         async ({ sessionId }: { sessionId: string }) => {
-          await db.$transaction(async (tx) => {
-            await tx.browserRuntimeSession.update({
+          if (status === "CLOSED") {
+            await verifiedClose(sessionId);
+            lastUsedBeforeAck = (
+              await db.userBrowserProfile.findUniqueOrThrow({
+                where: { id: profiles[0]!.id },
+              })
+            ).lastUsedAt;
+          } else
+            await db.browserRuntimeSession.update({
               where: { id: sessionId },
-              data: {
-                status,
-                ...(status === "CLOSED"
-                  ? { closureVerifiedAt: new Date() }
-                  : {}),
-              },
+              data: { status },
             });
-            if (status === "CLOSED")
-              await releaseVerifiedSessionResources(tx, sessionId);
-          });
-          return { status: "SUCCEEDED", artifacts: [], error: null };
+          return {
+            id: randomUUID(),
+            status: "SUCCEEDED",
+            artifacts: [],
+            error: null,
+          };
         },
       );
       await expect(work.acquire()).rejects.toMatchObject({
@@ -297,7 +374,10 @@ describe("PostgreSQL browser admission transactions", () => {
         await db.browserExecution.findUniqueOrThrow({
           where: { id: work.row.id },
         }),
-      ).toMatchObject({ status: "ALLOCATING", startedAt: null });
+      ).toMatchObject({
+        status: "ALLOCATING",
+        startedAt: null,
+      });
       expect(await db.browserRuntimeSession.findFirstOrThrow()).toMatchObject({
         status,
         openedAt: null,
@@ -316,7 +396,7 @@ describe("PostgreSQL browser admission transactions", () => {
             where: { id: profiles[0]!.id },
           })
         ).lastUsedAt,
-      ).toBeNull();
+      ).toEqual(lastUsedBeforeAck);
       if (status === "CLOSED")
         expect(await db.browserRuntimeSlot.count()).toBe(0);
     },
@@ -329,7 +409,12 @@ describe("PostgreSQL browser admission transactions", () => {
         where: { id: work.row.id },
         data: { allocationToken: randomUUID() },
       });
-      return { status: "SUCCEEDED", artifacts: [], error: null };
+      return {
+        id: randomUUID(),
+        status: "SUCCEEDED",
+        artifacts: [],
+        error: null,
+      };
     });
     await expect(work.acquire()).rejects.toMatchObject({
       reason: "ADMISSION_STALE",
@@ -471,13 +556,7 @@ describe("PostgreSQL browser admission transactions", () => {
     await expect(laterRead.acquire()).rejects.toMatchObject({
       reason: "DATA_LOCK",
     });
-    await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      await tx.browserRuntimeSession.update({
-        where: { id: lease.leaseId },
-        data: { status: "CLOSED", closureVerifiedAt: new Date() },
-      });
-      await releaseVerifiedSessionResources(tx, lease.leaseId);
-    });
+    await verifiedClose(lease.leaseId);
     expect(await db.browserRuntimeSlot.count()).toBe(0);
     expect(await db.executionResourceLease.count()).toBe(0);
     expect(
@@ -499,13 +578,7 @@ describe("PostgreSQL browser admission transactions", () => {
     await db.$transaction((tx: Prisma.TransactionClient) =>
       quarantineSession(tx, lease.leaseId, "INTEGRATION_LOST"),
     );
-    await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      await tx.browserRuntimeSession.update({
-        where: { id: lease.leaseId },
-        data: { status: "CLOSED", closureVerifiedAt: new Date() },
-      });
-      await releaseVerifiedSessionResources(tx, lease.leaseId);
-    });
+    await verifiedClose(lease.leaseId);
     expect(await db.browserRuntimeSlot.count()).toBe(0);
     expect(await db.executionResourceLease.findMany()).toMatchObject([
       { quarantined: true, mode: "WRITE" },
@@ -516,12 +589,17 @@ describe("PostgreSQL browser admission transactions", () => {
     });
   });
 
-  it("reclaims reserved write resources after a confirmed open failure without a dispatched write", async () => {
+  it("retains unknown write protection after an open failure even when physical closure is verified", async () => {
     const writer = await execution("MUTATING", 0, ["llm-policy"]);
     commands.execute.mockImplementationOnce(
       async ({ sessionId }: { sessionId: string }) => {
         await recordTimedOutCommand(sessionId, "session.open");
-        return { status: "TIMED_OUT", artifacts: [], error: null };
+        return {
+          id: randomUUID(),
+          status: "TIMED_OUT",
+          artifacts: [],
+          error: null,
+        };
       },
     );
     await expect(writer.acquire()).rejects.toMatchObject({
@@ -537,16 +615,18 @@ describe("PostgreSQL browser admission transactions", () => {
     expect(await db.browserRuntimeSession.findFirstOrThrow()).toMatchObject({
       status: "CLOSED",
       identityPermit: null,
-      quarantinedAt: null,
+      quarantinedAt: expect.any(Date),
       closureVerifiedAt: expect.any(Date),
     });
-    expect(await db.executionResourceLease.count()).toBe(0);
-    expect(await db.browserRuntimeSlot.count()).toBe(0);
-    const retry = await writer.acquire();
     expect(await db.executionResourceLease.findMany()).toMatchObject([
-      { sessionId: retry.leaseId, mode: "WRITE", quarantined: false },
+      { mode: "WRITE", quarantined: true },
     ]);
-    expect(await db.browserRuntimeSlot.count()).toBe(1);
+    expect(await db.browserRuntimeSlot.count()).toBe(0);
+    const nextReader = await execution("READ_ONLY", 1, ["llm-policy"]);
+    await expect(nextReader.acquire()).rejects.toMatchObject({
+      reason: "LEASE_RECOVERY",
+    });
+    expect(await db.browserRuntimeSlot.count()).toBe(0);
   });
 });
 
@@ -760,21 +840,19 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
 
   it("does not close a replacement browser when an older recovery scan becomes stale", async () => {
     const fixture = await unclaimedExecution();
-    await db.$transaction(async (tx) => {
-      await tx.browserRuntimeSession.update({
-        where: { id: fixture.lease.leaseId },
-        data: { status: "CLOSED", closureVerifiedAt: new Date() },
-      });
-      await releaseVerifiedSessionResources(tx, fixture.lease.leaseId);
-    });
+    await verifiedClose(fixture.lease.leaseId);
     let replacementSessionId: string | undefined;
     const racing = db.$extends({
       query: {
         agentRuntimeTask: {
-          async updateMany({ args, query }) {
+          async findMany({ args, query }) {
+            // A different allocator wins after the scanner's read, before it
+            // enters the shared resource transaction. Do not create a nested
+            // allocator while holding the scanner's transaction lock.
+            const observed = await query(args);
             if (
               !replacementSessionId &&
-              args.data.recoveryStatus === "STARTUP_CLOSING"
+              observed.some((row) => row.id === fixture.task.id)
             ) {
               await db.browserExecution.update({
                 where: { id: fixture.row.id },
@@ -782,7 +860,7 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
               });
               replacementSessionId = (await fixture.acquire()).leaseId;
             }
-            return query(args);
+            return observed;
           },
         },
       },
@@ -861,13 +939,10 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
       where: { id: fixture.row.id },
       data: { status: "REQUESTED" },
     });
-    commands.execute.mockImplementation(
-      async (input: { commandType: string }) => ({
-        status:
-          input.commandType === "session.open" ? "TIMED_OUT" : "SUCCEEDED",
-        artifacts: [],
-        error: null,
-      }),
+    commands.execute.mockImplementation(async (input) =>
+      input.commandType === "session.open"
+        ? { id: randomUUID(), status: "TIMED_OUT", artifacts: [], error: null }
+        : verifiedCommand(input),
     );
     const admission = new BrowserAdmissionService(db as never, runner);
     for (let index = 0; index < 4; index++) {
@@ -907,15 +982,13 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
     const closeCompleted = new Promise<void>((resolve) => {
       completeClose = resolve;
     });
-    commands.execute.mockImplementation(
-      async (input: { commandType: string }) => {
-        if (input.commandType === "session.close") {
-          notifyClosing();
-          await closeCompleted;
-        }
-        return { status: "SUCCEEDED", artifacts: [], error: null };
-      },
-    );
+    commands.execute.mockImplementation(async (input) => {
+      if (input.commandType === "session.close") {
+        notifyClosing();
+        await closeCompleted;
+      }
+      return verifiedCommand(input);
+    });
     const reconciliation = new BrowserAdmissionService(
       db as never,
       runner,
@@ -938,6 +1011,7 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
     const healthy = await unclaimedExecution();
     await expireStartup(expired.lease.leaseId);
     commands.execute.mockResolvedValueOnce({
+      id: randomUUID(),
       status: "TIMED_OUT",
       artifacts: [],
       error: null,
@@ -1008,14 +1082,10 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
       teamId,
       claimInput,
     );
-    await db.$transaction(async (tx) => {
-      await quarantineSession(tx, fixture.lease.leaseId, "TEST_CLAIMED_LOST");
-      await tx.browserRuntimeSession.update({
-        where: { id: fixture.lease.leaseId },
-        data: { status: "CLOSED", closureVerifiedAt: new Date() },
-      });
-      await releaseVerifiedSessionResources(tx, fixture.lease.leaseId);
-    });
+    await db.$transaction((tx) =>
+      quarantineSession(tx, fixture.lease.leaseId, "TEST_CLAIMED_LOST"),
+    );
+    await verifiedClose(fixture.lease.leaseId);
     await new BrowserAdmissionService(
       db as never,
       runner,

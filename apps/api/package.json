@@ -15,7 +15,8 @@
     "test:concurrency": "node scripts/test-execution-concurrency.mjs",
     "test:data-smoke": "node scripts/test-data-smoke.mjs",
     "test:verification-smoke": "node scripts/verification-smoke.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:redis-presence": "node scripts/test-runtime-presence.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1089.0",

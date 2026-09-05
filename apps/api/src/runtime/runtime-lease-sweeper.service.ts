@@ -3,6 +3,8 @@ import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../database/prisma.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import { env } from "../config/env.js";
 import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.js";
 import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { quarantineSession } from "./session-resource-cleanup.js";
@@ -21,6 +23,7 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
+    if (!env().BACKGROUND_WORKERS_ENABLED) return;
     this.monitor?.register("runtime-lease-sweeper", 10_000);
     this.timer = setInterval(() => this.trigger(), 10_000);
     this.timer.unref();
@@ -54,8 +57,20 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
     });
     if (expiredSessions.length > 0) {
       await this.prisma.$transaction(async (tx) => {
-        for (const session of expiredSessions)
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+        for (const session of expiredSessions) {
+          const expired = await tx.browserRuntimeSession.updateMany({
+            where: {
+              id: session.id,
+              leaseExpiresAt: { lte: now },
+              closureVerifiedAt: null,
+              status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
+            },
+            data: { status: "LOST" },
+          });
+          if (expired.count !== 1) continue;
           await quarantineSession(tx, session.id, "LEASE_EXPIRED");
+        }
       });
     }
 
@@ -132,6 +147,7 @@ export class RuntimeLeaseSweeper implements OnModuleInit, OnModuleDestroy {
       });
     for (const session of expiredHumanControls) {
       await this.prisma.$transaction(async (tx) => {
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
         const expired = await tx.browserRuntimeSession.updateMany({
           data: { controlGeneration: { increment: 1 } },
           where: {

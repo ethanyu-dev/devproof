@@ -2,13 +2,32 @@ import {
   RUNTIME_PROTOCOL,
   runtimeClientMessageSchema,
 } from "@devproof/runtime-protocol";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { resetEnvForTests } from "../config/env.js";
 
 import { RuntimeGatewayService } from "./runtime-gateway.service.js";
+import type { AuthenticatedRuntimeContext } from "./session-closure.types.js";
+const context: AuthenticatedRuntimeContext = {
+  runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
+  connectionId: "connection-1",
+  connectionGeneration: 2n,
+  negotiatedMinor: 14,
+  capabilities: new Set(["closure-evidence-v1"]),
+};
+beforeEach(() => {
+  vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true");
+  resetEnvForTests();
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  resetEnvForTests();
+});
 
 function fixture() {
   const prisma = {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([{ id: context.runtimeId }]),
     browserRuntime: {
       findFirst: vi.fn().mockResolvedValue({
         enabled: true,
@@ -16,7 +35,8 @@ function fixture() {
         networkAllowlist: ["test-console.paigod.work"],
         revokedAt: null,
       }),
-      update: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({ connectionGeneration: 2n }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     browserRuntimeSession: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -51,24 +71,39 @@ function fixture() {
     markRuntimeOnline: vi.fn().mockResolvedValue(undefined),
   };
   const hub = { register: vi.fn() };
+  const recovery = {
+    request: vi.fn().mockResolvedValue({}),
+    wakeRuntime: vi.fn(),
+  };
   const service = new RuntimeGatewayService(
     prisma as never,
     redis as never,
     hub as never,
     {} as never,
     {} as never,
+    undefined,
+    undefined,
+    recovery as never,
   );
-  const socket = { send: vi.fn() };
+  const socket = { send: vi.fn(), close: vi.fn() };
   const handleHello = Reflect.get(service, "handleHello") as (
     socket: typeof socket,
     hello: ReturnType<typeof runtimeClientMessageSchema.parse>,
-  ) => Promise<string | undefined>;
+  ) => Promise<AuthenticatedRuntimeContext | undefined>;
   const handleHeartbeat = Reflect.get(service, "handleHeartbeat") as (
     socket: typeof socket,
-    runtimeId: string,
+    context: AuthenticatedRuntimeContext,
     heartbeat: ReturnType<typeof runtimeClientMessageSchema.parse>,
   ) => Promise<void>;
-  return { handleHeartbeat, handleHello, hub, prisma, service, socket };
+  return {
+    handleHeartbeat,
+    handleHello,
+    hub,
+    prisma,
+    recovery,
+    service,
+    socket,
+  };
 }
 
 function hello(
@@ -172,14 +207,9 @@ describe("RuntimeGatewayService capacity ownership", () => {
       type: "runtime.heartbeat",
     });
 
-    await handleHeartbeat.call(
-      service,
-      socket,
-      "6f090d88-8987-487f-8338-1a734beab6a6",
-      heartbeat,
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeat);
 
-    const update = prisma.browserRuntime.update.mock.calls[0]?.[0] as {
+    const update = prisma.browserRuntime.updateMany.mock.calls[0]?.[0] as {
       data: Record<string, unknown>;
     };
     expect(update.data).not.toHaveProperty("maxConcurrency");
@@ -220,12 +250,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
       type: "runtime.heartbeat",
     });
 
-    await handleHeartbeat.call(
-      service,
-      socket,
-      "6f090d88-8987-487f-8338-1a734beab6a6",
-      heartbeat,
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeat);
 
     expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
@@ -250,7 +275,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
     });
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
     const reconcile = Reflect.get(service, "reconcile") as (
-      runtimeId: string,
+      context: AuthenticatedRuntimeContext,
       sessions: Array<Record<string, unknown>>,
       protocolMinor: number,
     ) => Promise<Array<Record<string, unknown>>>;
@@ -305,12 +330,7 @@ describe("RuntimeGatewayService terminal session ownership", () => {
       type: "runtime.heartbeat",
     });
 
-    await handleHeartbeat.call(
-      service,
-      socket,
-      "6f090d88-8987-487f-8338-1a734beab6a6",
-      heartbeat,
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeat);
 
     expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
     expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
@@ -319,8 +339,8 @@ describe("RuntimeGatewayService terminal session ownership", () => {
     });
   });
 
-  it("releases leases only after a closing session disappears from heartbeats", async () => {
-    const { handleHeartbeat, prisma, service, socket } = fixture();
+  it("requests proof without releasing resources when a session disappears from inventory", async () => {
+    const { handleHeartbeat, prisma, recovery, service, socket } = fixture();
     const sessionId = "cf5a946c-f906-4df4-9296-1d6482ddaf75";
     const updatedAt = new Date("2026-08-28T01:00:00.000Z");
     prisma.browserRuntimeSession.findMany.mockResolvedValue([
@@ -344,29 +364,15 @@ describe("RuntimeGatewayService terminal session ownership", () => {
       type: "runtime.heartbeat",
     });
 
-    await handleHeartbeat.call(
-      service,
-      socket,
-      "6f090d88-8987-487f-8338-1a734beab6a6",
-      heartbeat,
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeat);
 
-    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: "CLOSED" }),
-        where: expect.objectContaining({
-          id: sessionId,
-          status: { in: ["CLOSING", "LOST"] },
-          updatedAt,
-        }),
-      }),
+    expect(recovery.request).toHaveBeenCalledWith(
+      sessionId,
+      "RUNTIME_INVENTORY_MISSING",
     );
-    expect(prisma.browserRuntimeSlot.deleteMany).toHaveBeenCalledWith({
-      where: { sessionId },
-    });
-    expect(prisma.browserRuntimeProfileLease.deleteMany).toHaveBeenCalledWith({
-      where: { sessionId },
-    });
+    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.browserRuntimeProfileLease.deleteMany).not.toHaveBeenCalled();
   });
 });
 
@@ -454,12 +460,7 @@ describe("Runtime Gateway executor permission", () => {
     });
     prisma.browserRuntimeSession.findUnique.mockResolvedValue(session);
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
-    await handleHeartbeat.call(
-      service,
-      socket,
-      session.runtimeId,
-      heartbeatFor(session),
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeatFor(session));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [session.id],
       sessionPermits: [],
@@ -487,12 +488,7 @@ describe("Runtime Gateway executor permission", () => {
       run: { lifecycle: "RUNNING", deadlineAt: new Date(Date.now() + 60_000) },
     });
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
-    await handleHeartbeat.call(
-      service,
-      socket,
-      session.runtimeId,
-      heartbeatFor(session),
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeatFor(session));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [session.id],
       sessionPermits: [],
@@ -520,12 +516,7 @@ describe("Runtime Gateway executor permission", () => {
       },
     });
     prisma.browserRuntimeSession.updateMany.mockResolvedValue({ count: 1 });
-    await handleHeartbeat.call(
-      service,
-      socket,
-      session.runtimeId,
-      heartbeatFor(session),
-    );
+    await handleHeartbeat.call(service, socket, context, heartbeatFor(session));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       closeSessions: [],
       sessionPermits: [
@@ -536,5 +527,58 @@ describe("Runtime Gateway executor permission", () => {
         },
       ],
     });
+  });
+});
+
+describe("Runtime handshake fencing", () => {
+  it("rejects a Runtime disabled between authentication and generation registration", async () => {
+    const { handleHello, prisma, hub, service, socket } = fixture();
+    prisma.browserRuntime.findFirst
+      .mockResolvedValueOnce({
+        id: context.runtimeId,
+        enabled: true,
+        revokedAt: null,
+      } as never)
+      .mockResolvedValueOnce(null as never);
+    await expect(
+      handleHello.call(service, socket, hello()),
+    ).resolves.toBeUndefined();
+    expect(prisma.browserRuntime.update).not.toHaveBeenCalled();
+    expect(hub.register).not.toHaveBeenCalled();
+    expect(socket.close).toHaveBeenCalledWith(
+      4003,
+      expect.stringContaining("disabled or drained"),
+    );
+  });
+  it("does not inherit closure capability from a previous connection", async () => {
+    const { handleHello, prisma, service, socket } = fixture();
+    prisma.browserRuntime.findFirst.mockResolvedValue({
+      id: context.runtimeId,
+      enabled: true,
+      revokedAt: null,
+      capabilities: ["browser", "closure-evidence-v1"],
+    } as never);
+    const accepted = await handleHello.call(
+      service,
+      socket,
+      hello("0.2.16", 12),
+    );
+    expect(accepted?.capabilities.has("closure-evidence-v1")).toBe(false);
+    expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ capabilities: ["browser"] }),
+      }),
+    );
+  });
+  it("wakes recoveries after a new capable connection authenticates", async () => {
+    const { handleHello, recovery, service, socket } = fixture();
+    const greeting = runtimeClientMessageSchema.parse({
+      ...hello(),
+      capabilities: ["closure-evidence-v1"],
+      hostInstanceId: "host-instance-0000001",
+      daemonInstanceId: "c7f9b873-b1e0-4b05-94a6-a1d96682305c",
+    });
+    await handleHello.call(service, socket, greeting);
+    expect(recovery.wakeRuntime).toHaveBeenCalledWith(context.runtimeId);
   });
 });
