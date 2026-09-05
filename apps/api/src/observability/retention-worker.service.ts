@@ -9,6 +9,10 @@ import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD } from "../post-run-analysis/task-log-bundle.service.js";
+import {
+  leaseDigest,
+  writeSettled,
+} from "../runtime/session-recovery.state.js";
 import { WorkerMonitorService } from "./worker-monitor.service.js";
 
 const INTERVAL_MS = 60 * 60 * 1_000;
@@ -18,6 +22,7 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RetentionWorker.name);
   private timer?: NodeJS.Timeout;
   private running = false;
+  private runtimeRetentionCursor: string | undefined;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -186,47 +191,111 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
       Date.now() - env().RUNTIME_DATA_RETENTION_DAYS * 86_400_000,
     );
     const sessions = await this.prisma.browserRuntimeSession.findMany({
-      include: {
+      select: { id: true },
+      take: 20,
+      orderBy: { id: "asc" },
+      where: {
+        ...(this.runtimeRetentionCursor
+          ? { id: { gt: this.runtimeRetentionCursor } }
+          : {}),
+        closedAt: { lte: cutoff },
+        status: "CLOSED",
+        closureVerifiedAt: { not: null },
+        closureEvidenceId: { not: null },
+        identityPermit: null,
+        slot: null,
+        profileLease: null,
+        humanControlLease: null,
+        resourceLeases: { none: {} },
+        verificationRuns: { every: { purgedAt: { not: null } } },
         artifacts: {
-          select: {
-            storageKey: true,
-            testRunArtifacts: { select: { id: true }, take: 1 },
-            runEvidences: { select: { id: true }, take: 1 },
+          some: {
+            testRunArtifacts: { none: {} },
+            verificationArtifacts: { none: {} },
+            runEvidences: { none: {} },
           },
         },
       },
-      take: 20,
-      where: {
-        closedAt: { lte: cutoff },
-        status: { in: ["CLOSED", "FAILED", "LOST"] },
-        verificationRuns: { every: { purgedAt: { not: null } } },
-        resourceLeases: { none: {} },
-        artifacts: { none: { runEvidences: { some: {} } } },
-      },
     });
     const failures: unknown[] = [];
-    for (const session of sessions) {
+    for (const candidate of sessions) {
       try {
         await this.serializable(async (tx) => {
+          // Recovery can materialize guards after the initial scan. Share its lock
+          // order and re-read all eligibility checks while holding the session row.
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
           const locked = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT session."id"
-          FROM "browser_runtime_sessions" AS session
-          WHERE session."id" = ${session.id}::uuid
-            AND session."closed_at" <= ${cutoff}
-            AND session."status" IN ('CLOSED', 'FAILED', 'LOST')
-            AND NOT EXISTS (
-              SELECT 1
-              FROM "verification_runs" AS run
-              WHERE run."runtime_session_id" = session."id"
-                AND run."purged_at" IS NULL
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM "execution_resource_leases" AS lease
-              WHERE lease."session_id" = session."id"
-            )
-          FOR UPDATE OF session
+          SELECT "id" FROM "browser_runtime_sessions"
+          WHERE "id" = ${candidate.id}::uuid FOR UPDATE
         `;
           if (locked.length === 0) return;
+          const session = await tx.browserRuntimeSession.findUnique({
+            where: { id: candidate.id },
+            include: {
+              slot: true,
+              profileLease: true,
+              humanControlLease: true,
+              _count: {
+                select: {
+                  resourceLeases: true,
+                  verificationRuns: { where: { purgedAt: null } },
+                },
+              },
+            },
+          });
+          if (
+            !session ||
+            session.status !== "CLOSED" ||
+            !session.closedAt ||
+            session.closedAt > cutoff ||
+            !session.closureVerifiedAt ||
+            !session.closureEvidenceId ||
+            session.identityPermit !== null ||
+            session.slot ||
+            session.profileLease ||
+            session.humanControlLease ||
+            session._count.resourceLeases > 0 ||
+            session._count.verificationRuns > 0
+          )
+            return;
+          const evidence = await tx.sessionClosureEvidence.findUnique({
+            where: { id: session.closureEvidenceId },
+          });
+          const digest = leaseDigest(session.leaseToken);
+          if (
+            !evidence ||
+            evidence.sessionId !== session.id ||
+            evidence.runtimeId !== session.runtimeId ||
+            evidence.sessionFence !== session.fencingToken ||
+            evidence.leaseDigest !== digest ||
+            !evidence.serverVerifiedAt
+          )
+            return;
+          const recoveries = await tx.runtimeSessionRecovery.findMany({
+            where: { sessionId: session.id },
+          });
+          const recovery = recoveries.find(
+            (row) => row.id === evidence.recoveryId,
+          );
+          if (
+            !recovery ||
+            recovery.expectedSessionFence !== session.fencingToken ||
+            recovery.expectedLeaseDigest !== digest ||
+            recovery.runtimeId !== session.runtimeId ||
+            recovery.closureEvidenceId !== evidence.id ||
+            recoveries.some(
+              (row) =>
+                row.closureState !== "VERIFIED" ||
+                !row.closureEvidenceId ||
+                !row.closureVerifiedAt ||
+                !row.resolvedAt ||
+                !writeSettled(row.writeOutcomeState),
+            )
+          )
+            return;
           await tx.$queryRaw`
           SELECT "id"
           FROM "browser_runtime_artifacts"
@@ -234,28 +303,32 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
           FOR UPDATE
         `;
           const artifacts = await tx.browserRuntimeArtifact.findMany({
-            select: {
-              storageKey: true,
-              testRunArtifacts: { select: { id: true }, take: 1 },
-              runEvidences: { select: { id: true }, take: 1 },
+            select: { id: true, storageKey: true },
+            where: {
+              sessionId: session.id,
+              testRunArtifacts: { none: {} },
+              verificationArtifacts: { none: {} },
+              runEvidences: { none: {} },
             },
-            where: { sessionId: session.id },
           });
-          // Locking the artifact rows also fences concurrent evidence attachments.
-          if (artifacts.some((artifact) => artifact.runEvidences.length > 0))
-            return;
           await this.enqueueObjectDeletions(
             tx,
-            artifacts
-              .filter((artifact) => artifact.testRunArtifacts.length === 0)
-              .map((artifact) => artifact.storageKey),
+            artifacts.map((artifact) => artifact.storageKey),
           );
-          await tx.browserRuntimeSession.delete({ where: { id: session.id } });
+          // Recovery/evidence/outbox are retained audit records without FKs. Keep
+          // their session and command metadata so detail remains readable. Never
+          // cascade-delete a session as a substitute for verified resource release.
+          await tx.browserRuntimeArtifact.deleteMany({
+            where: { id: { in: artifacts.map((artifact) => artifact.id) } },
+          });
         });
       } catch (error) {
         failures.push(error);
       }
+      // Retained or failed candidates must not starve later resolved sessions.
+      this.runtimeRetentionCursor = candidate.id;
     }
+    if (sessions.length < 20) this.runtimeRetentionCursor = undefined;
     if (failures.length)
       throw new AggregateError(failures, "Runtime retention failed");
   }

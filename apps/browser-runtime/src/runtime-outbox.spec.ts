@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
-import { RUNTIME_MAX_FRAME_BYTES } from "@devproof/runtime-protocol";
+import {
+  RUNTIME_MAX_FRAME_BYTES,
+  runtimeClosureEvidenceSchema,
+} from "@devproof/runtime-protocol";
 import { fitRuntimeMessage, RuntimeClient } from "./index.js";
 
 function clientWithSocket(send: (value: string) => void) {
@@ -17,6 +21,7 @@ function clientWithSocket(send: (value: string) => void) {
     "http://proxy",
   );
   const internal = client as unknown as {
+    connectionReady: boolean;
     deliveryAcknowledgements: boolean;
     enqueueOutbox(
       message: unknown,
@@ -46,6 +51,7 @@ function clientWithSocket(send: (value: string) => void) {
     socket: { readyState: number; send(value: string): void };
   };
   internal.deliveryAcknowledgements = true;
+  internal.connectionReady = true;
   internal.socket = { readyState: 1, send };
   return internal;
 }
@@ -177,11 +183,25 @@ describe("encoded artifact delivery limits", () => {
     );
     expect(client.outbox).toHaveLength(0);
   });
-  it("preserves closure and video while explicitly reporting oversized bundles", () => {
+  it("preserves closure evidence and video while explicitly reporting oversized bundles", () => {
+    const closureEvidence = runtimeClosureEvidenceSchema.parse({
+      evidenceId: randomUUID(),
+      recoveryId: randomUUID(),
+      requestId: randomUUID(),
+      sessionId: randomUUID(),
+      leaseToken: randomUUID(),
+      fencingToken: "9007199254740993",
+      hostInstanceId: "a".repeat(64),
+      daemonInstanceId: randomUUID(),
+      launchIdentityVersion: 1,
+      method: "LIVE_SESSION_TERMINATED",
+      networkRevoked: true,
+      closureCompletedAt: new Date().toISOString(),
+    });
     const output: any = fitRuntimeMessage({
       type: "command.result",
       ok: true,
-      result: { closed: true },
+      result: { closed: true, closureEvidence },
       artifacts: [
         {
           kind: "SCREENSHOT",
@@ -197,6 +217,9 @@ describe("encoded artifact delivery limits", () => {
       closed: true,
       artifactDeliveryWarning: "ARTIFACT_BUNDLE_EXCEEDS_FRAME_LIMIT",
     });
+    expect(
+      runtimeClosureEvidenceSchema.parse(output.result.closureEvidence),
+    ).toEqual(closureEvidence);
     expect(output.artifacts.map((artifact: any) => artifact.kind)).toEqual([
       "VIDEO",
     ]);

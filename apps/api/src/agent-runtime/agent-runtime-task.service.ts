@@ -34,8 +34,15 @@ import { AgentModelConfigurationService } from "../console/agent-model-configura
 import { PrismaService } from "../database/prisma.service.js";
 import { BrowserExecutionRunner } from "../verification/browser-execution-runner.service.js";
 import { RuntimeCommandDispatcher } from "../runtime/runtime-command-dispatcher.service.js";
-import { releaseCompletedSessionData } from "../runtime/session-resource-cleanup.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import {
+  releaseCompletedSessionData,
+  releaseVerifiedSessionResources,
+} from "../runtime/session-resource-cleanup.js";
 import { potentialWriteCommandWhere } from "../runtime/session-write-audit.js";
+import { writeSettled } from "../runtime/session-recovery.state.js";
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
 
 const MODEL_CONFIGURATION_PROTOCOL_MINOR = 2;
 
@@ -219,6 +226,7 @@ export class AgentRuntimeTaskService {
     private readonly agentModels: AgentModelConfigurationService,
     @Optional() private readonly browser?: BrowserExecutionRunner,
     @Optional() private readonly commands?: RuntimeCommandDispatcher,
+    @Optional() private readonly sessionRecovery?: SessionRecoveryService,
   ) {}
 
   onModuleInit() {
@@ -253,6 +261,10 @@ export class AgentRuntimeTaskService {
       });
       for (const task of expired) {
         await this.prisma.$transaction(async (tx) => {
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
           const claimed = await tx.agentRuntimeTask.updateMany({
             data: {
               status: "FAILED",
@@ -291,7 +303,13 @@ export class AgentRuntimeTaskService {
           if (task.attempt.browserExecution?.runtimeSessionId) {
             await tx.browserRuntimeSession.updateMany({
               data: { executionPermitExpiresAt: now, quarantinedAt: now },
-              where: { id: task.attempt.browserExecution.runtimeSessionId },
+              where: {
+                id: task.attempt.browserExecution.runtimeSessionId,
+                ownerTaskId: task.id,
+                ownerFencingToken: task.fencingToken,
+                closureVerifiedAt: null,
+                status: { not: "CLOSED" },
+              },
             });
           }
           await tx.runEvent.create({
@@ -343,25 +361,12 @@ export class AgentRuntimeTaskService {
       });
       for (const task of recoveries) {
         const execution = task.attempt.browserExecution;
-        const policy = task.run.concurrencyPolicy as {
-          accessMode?: string;
-        } | null;
-        const commandCount = execution?.runtimeSessionId
-          ? await this.prisma.browserRuntimeCommand.count({
-              where: {
-                sessionId: execution.runtimeSessionId,
-                ...potentialWriteCommandWhere,
-              },
-            })
-          : 0;
-        const unknownWrite =
-          policy?.accessMode !== "READ_ONLY" && commandCount > 0;
-        if (unknownWrite && execution?.runtimeSessionId) {
-          await this.prisma.executionResourceLease.updateMany({
-            data: { quarantined: true },
-            where: { sessionId: execution.runtimeSessionId },
-          });
-        }
+        if (execution?.runtimeSessionId && recoveryEnabled())
+          await this.sessionRecovery?.request(
+            execution.runtimeSessionId,
+            "AGENT_LEASE_LOST",
+            { explicitClose: true },
+          );
         if (this.commands && execution?.runtimeSessionId) {
           const pending = await this.prisma.browserRuntimeCommand.findMany({
             select: { id: true },
@@ -390,10 +395,24 @@ export class AgentRuntimeTaskService {
               where: { id: execution.runtimeSessionId },
             })
           : null;
-        const closed =
-          !session ||
-          Boolean(session.closureVerifiedAt) ||
-          session.status === "CLOSED";
+        const closed = Boolean(
+          session?.closureVerifiedAt && session.closureEvidenceId,
+        );
+        const recovery = session
+          ? await this.prisma.runtimeSessionRecovery.findUnique({
+              where: {
+                sessionId_expectedSessionFence: {
+                  sessionId: session.id,
+                  expectedSessionFence: session.fencingToken,
+                },
+              },
+            })
+          : null;
+        // Command history can be incomplete, particularly for legacy sessions.
+        // Only the independent, durable write assessment authorizes a replay.
+        const unknownWrite = !writeSettled(
+          recovery?.writeOutcomeState ?? "UNKNOWN",
+        );
         const expiredRun =
           task.run.deadlineAt <= new Date() ||
           task.run.cancelRequestedAt ||
@@ -413,30 +432,33 @@ export class AgentRuntimeTaskService {
         }
         await this.prisma.$transaction(
           async (tx) => {
+            await acquireAdvisoryTransactionLock(
+              tx,
+              "browser-execution-resources",
+            );
             const current = await this.findTask(tx, task.run.teamId, task.id);
             const currentSession = execution?.runtimeSessionId
               ? await tx.browserRuntimeSession.findUnique({
                   where: { id: execution.runtimeSessionId },
                 })
               : null;
-            const verifiedClosed =
-              !execution?.runtimeSessionId ||
-              Boolean(
-                currentSession &&
-                (currentSession.closureVerifiedAt ||
-                  currentSession.status === "CLOSED"),
-              );
-            const potentialWrites = execution?.runtimeSessionId
-              ? await tx.browserRuntimeCommand.count({
+            const verifiedClosed = Boolean(
+              currentSession?.closureVerifiedAt &&
+              currentSession.closureEvidenceId,
+            );
+            const currentRecovery = currentSession
+              ? await tx.runtimeSessionRecovery.findUnique({
                   where: {
-                    sessionId: execution.runtimeSessionId,
-                    ...potentialWriteCommandWhere,
+                    sessionId_expectedSessionFence: {
+                      sessionId: currentSession.id,
+                      expectedSessionFence: currentSession.fencingToken,
+                    },
                   },
                 })
-              : 0;
-            const recoveryUnknownWrite =
-              (current.run.concurrencyPolicy as { accessMode?: string } | null)
-                ?.accessMode !== "READ_ONLY" && potentialWrites > 0;
+              : null;
+            const recoveryUnknownWrite = !writeSettled(
+              currentRecovery?.writeOutcomeState ?? "UNKNOWN",
+            );
             const decision = leaseRecoveryDecision({
               closed: verifiedClosed,
               unknownWrite: recoveryUnknownWrite,
@@ -471,6 +493,7 @@ export class AgentRuntimeTaskService {
               },
               where: {
                 id: task.id,
+                fencingToken: current.fencingToken,
                 recoveryStatus: { in: ["PENDING", "CLOSING"] },
               },
             });
@@ -478,18 +501,24 @@ export class AgentRuntimeTaskService {
             if (execution?.runtimeSessionId) {
               if (recoveryUnknownWrite) {
                 await tx.executionResourceLease.updateMany({
-                  where: { sessionId: execution.runtimeSessionId },
+                  where: {
+                    sessionId: execution.runtimeSessionId,
+                    mode: "WRITE",
+                  },
                   data: { quarantined: true },
                 });
-              } else if (verifiedClosed && potentialWrites === 0) {
-                // Closure plus complete command audit proves this reserved writer never ran.
-                await tx.executionResourceLease.deleteMany({
-                  where: { sessionId: execution.runtimeSessionId },
-                });
-                await tx.browserRuntimeSession.updateMany({
-                  where: { id: execution.runtimeSessionId },
-                  data: { quarantinedAt: null },
-                });
+              } else if (
+                verifiedClosed &&
+                writeSettled(currentRecovery!.writeOutcomeState)
+              ) {
+                const released = await releaseVerifiedSessionResources(
+                  tx,
+                  execution.runtimeSessionId,
+                );
+                if (!released)
+                  throw new ConflictException(
+                    "The session has no matching durable closure proof; its recovery cannot be replayed.",
+                  );
               }
             }
             if (decision === "RETRY_SCHEDULED") {
@@ -583,6 +612,10 @@ export class AgentRuntimeTaskService {
       const claimed = await this.prisma
         .$transaction(
           async (tx) => {
+            await acquireAdvisoryTransactionLock(
+              tx,
+              "browser-execution-resources",
+            );
             const now = await databaseNow(tx);
             const candidate = await tx.agentRuntimeTask.findFirst({
               orderBy: { createdAt: "asc" },
@@ -811,6 +844,7 @@ export class AgentRuntimeTaskService {
     input: { fencingToken: string; leaseToken: string; workerId: string },
   ) {
     return this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       const task = await this.findTask(tx, teamId, taskId);
       const now = await databaseNow(tx);
       this.requireLease(task, input, now);
@@ -851,6 +885,7 @@ export class AgentRuntimeTaskService {
           ownerFencingToken: task.fencingToken,
           status: "ACTIVE",
           quarantinedAt: null,
+          closureVerifiedAt: null,
         },
       });
       const policy = retryPolicySchema.parse(task.run.executionPolicy).deadline;
@@ -1038,6 +1073,7 @@ export class AgentRuntimeTaskService {
   ) {
     return this.prisma.$transaction(
       async (tx) => {
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
         const task = await this.findTask(tx, teamId, taskId);
         if (task.completionId) {
           if (task.completionId !== input.completionId) {
@@ -1060,20 +1096,68 @@ export class AgentRuntimeTaskService {
         let outcome = input.outcome;
         let writeOutcomeUnknown = false;
         if (
-          (outcome.kind === "RETRYABLE_FAILURE" ||
-            outcome.kind === "FATAL_FAILURE") &&
-          (task.run.concurrencyPolicy as { accessMode?: string } | null)
-            ?.accessMode !== "READ_ONLY"
+          outcome.kind === "RETRYABLE_FAILURE" ||
+          outcome.kind === "FATAL_FAILURE"
         ) {
-          const writes = await tx.browserRuntimeCommand.count({
+          const session = await tx.browserRuntimeSession.findFirst({
             where: {
-              session: {
-                browserExecutions: { some: { attemptId: task.attemptId } },
-              },
-              ...potentialWriteCommandWhere,
+              browserExecutions: { some: { attemptId: task.attemptId } },
             },
           });
-          if (writes > 0) {
+          const recovery = session
+            ? await tx.runtimeSessionRecovery.findUnique({
+                where: {
+                  sessionId_expectedSessionFence: {
+                    sessionId: session.id,
+                    expectedSessionFence: session.fencingToken,
+                  },
+                },
+              })
+            : null;
+          let uncertain = recovery
+            ? !writeSettled(recovery.writeOutcomeState)
+            : true;
+          if (!recovery && session) {
+            const identity = session.launchIdentity;
+            const launchId =
+              identity &&
+              typeof identity === "object" &&
+              !Array.isArray(identity) &&
+              identity.version === 1 &&
+              typeof identity.id === "string"
+                ? identity.id
+                : null;
+            const auditedOwner =
+              launchId &&
+              session.launchIdentityVersion === 1 &&
+              session.launchHostInstanceId &&
+              session.launchConnectionGeneration !== null &&
+              session.ownerTaskId === task.id &&
+              session.ownerFencingToken === task.fencingToken;
+            const launch = auditedOwner
+              ? await tx.browserRuntimeCommand.findFirst({
+                  where: {
+                    sessionId: session.id,
+                    commandType: "session.open",
+                    source: "SYSTEM",
+                    status: "SUCCEEDED",
+                    leaseToken: session.leaseToken,
+                    fencingToken: session.fencingToken,
+                    payload: { path: ["launchIdentityId"], equals: launchId },
+                  },
+                  select: { id: true },
+                })
+              : null;
+            if (launch) {
+              // Empty command history is meaningful only for this audited new
+              // launch and its still-authenticated owner, never for legacy recovery.
+              const writes = await tx.browserRuntimeCommand.count({
+                where: { sessionId: session.id, ...potentialWriteCommandWhere },
+              });
+              uncertain = writes > 0;
+            }
+          }
+          if (uncertain) {
             writeOutcomeUnknown = true;
             outcome = {
               kind: "FATAL_FAILURE",

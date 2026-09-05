@@ -14,6 +14,7 @@ vi.mock("./config/env.js", () => ({
 
 import { ProfileReservationService } from "./task-executions/profile-reservation.service.js";
 import { RetentionWorker } from "./observability/retention-worker.service.js";
+import { leaseDigest } from "./runtime/session-recovery.state.js";
 import { RuntimeCommandDispatcher } from "./runtime/runtime-command-dispatcher.service.js";
 import { NotificationOutboxWorker } from "./verification/notification-outbox-worker.service.js";
 import { SpecAnalysisRuntimeService } from "./agent-runtime/spec-analysis-runtime.service.js";
@@ -90,6 +91,23 @@ async function session(expired = false) {
   });
 }
 async function command() {
+  const runtime = await db.browserRuntime.update({
+    where: { id: runtimeId },
+    data: {
+      connectionId: randomUUID(),
+      connectionGeneration: { increment: 1 },
+      enabled: true,
+      status: "ONLINE",
+      revokedAt: null,
+    },
+  });
+  const context = {
+    runtimeId,
+    connectionId: runtime.connectionId!,
+    connectionGeneration: runtime.connectionGeneration,
+    negotiatedMinor: 13,
+    capabilities: new Set<string>(),
+  };
   const owner = await session();
   const row = await db.browserRuntimeCommand.create({
     data: {
@@ -103,6 +121,7 @@ async function command() {
   });
   return {
     row,
+    context,
     result: {
       type: "command.result" as const,
       commandId: row.id,
@@ -248,10 +267,72 @@ describe("durable edge cases", () => {
     expect((await service.acquire(a.id)).acquired).toBe(true);
   });
 
-  it("retains v2 evidence and quarantined leases while collecting an unreferenced session", async () => {
+  it("purges only proved, unreferenced artifacts while retaining session audits, v2 evidence and quarantine", async () => {
     const evidenceSession = await session(true),
       quarantined = await session(true),
-      orphan = await session(true);
+      orphan = await session(true),
+      legacy = await session(true);
+    const proofIds: string[] = [];
+    const recoveryIds: string[] = [];
+    for (const owner of [evidenceSession, quarantined, orphan]) {
+      const proofId = randomUUID();
+      const recovery = await db.runtimeSessionRecovery.create({
+        data: {
+          teamId,
+          runtimeId,
+          sessionId: owner.id,
+          expectedSessionFence: owner.fencingToken,
+          expectedLeaseDigest: leaseDigest(owner.leaseToken),
+          reason: "RETENTION_FIXTURE",
+          observedProtocolMajor: 1,
+          observedProtocolMinor: 14,
+          closureState: "VERIFIED",
+          closureEvidenceId: proofId,
+          closureVerifiedAt: old,
+          writeOutcomeState: "CONFIRMED",
+          resolvedAt: old,
+          nextAttemptAt: null,
+        },
+      });
+      await db.sessionClosureEvidence.create({
+        data: {
+          id: proofId,
+          evidenceId: randomUUID(),
+          recoveryId: recovery.id,
+          requestId: randomUUID(),
+          sessionId: owner.id,
+          sessionFence: owner.fencingToken,
+          leaseDigest: leaseDigest(owner.leaseToken),
+          runtimeId,
+          method: "LIVE_SESSION_TERMINATED",
+          capabilityVersion: "closure-evidence-v1",
+          summary: {},
+          serverVerifiedAt: old,
+        },
+      });
+      await db.browserRuntimeSession.update({
+        where: { id: owner.id },
+        data: { closureEvidenceId: proofId, closureVerifiedAt: old },
+      });
+      proofIds.push(proofId);
+      recoveryIds.push(recovery.id);
+    }
+    for (const [owner, storageKey] of [
+      [orphan, "orphan"],
+      [quarantined, "quarantined"],
+      [legacy, "legacy"],
+    ] as const) {
+      await db.browserRuntimeArtifact.create({
+        data: {
+          sessionId: owner.id,
+          storageKey,
+          kind: "SCREENSHOT",
+          contentType: "image/png",
+          byteSize: 5,
+          sha256: "hash",
+        },
+      });
+    }
     await db.executionResourceLease.create({
       data: {
         sessionId: quarantined.id,
@@ -296,27 +377,53 @@ describe("durable edge cases", () => {
       },
     });
     await retention().sweep();
-    expect(await db.browserRuntimeSession.count()).toBe(2);
+    expect(await db.browserRuntimeSession.count()).toBe(4);
     expect(
-      await db.browserRuntimeSession.findUnique({ where: { id: orphan.id } }),
+      await db.browserRuntimeArtifact.findUnique({
+        where: { storageKey: "orphan" },
+      }),
     ).toBeNull();
+    expect(
+      await db.runtimeSessionRecovery.count({
+        where: { id: { in: recoveryIds } },
+      }),
+    ).toBe(3);
+    expect(
+      await db.sessionClosureEvidence.count({
+        where: { id: { in: proofIds } },
+      }),
+    ).toBe(3);
     expect(
       (await db.runEvidence.findUniqueOrThrow({ where: { id: evidence.id } }))
         .runtimeArtifactId,
     ).toBe(artifact.id);
     expect(await db.executionResourceLease.count()).toBe(1);
-    expect(storage.delete).not.toHaveBeenCalled();
-    // Retention becomes possible once the owning evidence is explicitly removed.
+    expect(storage.delete).toHaveBeenCalledExactlyOnceWith("orphan");
+    expect(
+      await db.browserRuntimeArtifact.findUnique({
+        where: { storageKey: "quarantined" },
+      }),
+    ).not.toBeNull();
+    expect(
+      await db.browserRuntimeArtifact.findUnique({
+        where: { storageKey: "legacy" },
+      }),
+    ).not.toBeNull();
+    // Only the artifact becomes collectable after its owning evidence is removed.
     await db.runEvidence.delete({ where: { id: evidence.id } });
     await retention().sweep();
-    expect(await db.browserRuntimeArtifact.count()).toBe(0);
+    expect(await db.browserRuntimeArtifact.count()).toBe(2);
+    expect(await db.browserRuntimeSession.count()).toBe(4);
+    expect(await db.executionResourceLease.count()).toBe(1);
     expect(storage.delete).toHaveBeenCalledWith("evidence");
+    expect(storage.delete).not.toHaveBeenCalledWith("quarantined");
+    expect(storage.delete).not.toHaveBeenCalledWith("legacy");
   });
 
   it.each(["lost-cas", "partial-upload", "expired-intent"])(
     "reclaims uploads after %s",
     async (failure) => {
-      const { row, result } = await command();
+      const { row, result, context } = await command();
       storage.put.mockImplementationOnce(async (key, _type, body) => {
         expect(
           await db.objectStorageDeletionTask.count({
@@ -343,7 +450,7 @@ describe("durable edge cases", () => {
         {} as never,
         storage as never,
       );
-      await expect(dispatcher.acceptResult(result)).rejects.toThrow();
+      await expect(dispatcher.acceptResult(result, context)).rejects.toThrow();
       expect(await db.browserRuntimeArtifact.count()).toBe(0);
       expect(await db.objectStorageDeletionTask.count()).toBe(1);
       await db.objectStorageDeletionTask.updateMany({
@@ -356,7 +463,7 @@ describe("durable edge cases", () => {
   );
 
   it("reclaims an entire batch when the second artifact upload fails", async () => {
-    const { result } = await command();
+    const { result, context } = await command();
     result.artifacts.push({ ...result.artifacts[0]! });
     storage.put
       .mockImplementationOnce(async (key, _type, body) => {
@@ -372,7 +479,7 @@ describe("durable edge cases", () => {
         db as never,
         {} as never,
         storage as never,
-      ).acceptResult(result),
+      ).acceptResult(result, context),
     ).rejects.toThrow("second upload");
     expect(await db.browserRuntimeArtifact.count()).toBe(0);
     expect(await db.objectStorageDeletionTask.count()).toBe(2);
@@ -384,17 +491,60 @@ describe("durable edge cases", () => {
   });
 
   it("publishes an uploaded artifact and consumes its cleanup intent atomically", async () => {
-    const { result } = await command();
+    const { result, context } = await command();
     await new RuntimeCommandDispatcher(
       db as never,
       {} as never,
       storage as never,
-    ).acceptResult(result);
+    ).acceptResult(result, context);
     expect(await db.browserRuntimeArtifact.count()).toBe(1);
     expect(await db.objectStorageDeletionTask.count()).toBe(0);
     await retention().sweep();
     expect(objects.size).toBe(1);
   });
+
+  it.each(["reconnected", "revoked"])(
+    "keeps upload cleanup intent when the Runtime is %s before publication",
+    async (change) => {
+      const { row, result, context } = await command();
+      storage.put.mockImplementationOnce(async (key, _type, body) => {
+        objects.set(key, body);
+        await db.browserRuntime.update({
+          where: { id: runtimeId },
+          data:
+            change === "reconnected"
+              ? {
+                  connectionId: randomUUID(),
+                  connectionGeneration: { increment: 1 },
+                }
+              : { enabled: false, revokedAt: new Date() },
+        });
+        return { byteSize: body.length, sha256: "test" };
+      });
+
+      await new RuntimeCommandDispatcher(
+        db as never,
+        {} as never,
+        storage as never,
+      ).acceptResult(result, context);
+
+      expect(
+        (
+          await db.browserRuntimeCommand.findUniqueOrThrow({
+            where: { id: row.id },
+          })
+        ).status,
+      ).toBe("DISPATCHED");
+      expect(await db.browserRuntimeArtifact.count()).toBe(0);
+      expect(await db.objectStorageDeletionTask.count()).toBe(1);
+      await db.objectStorageDeletionTask.updateMany({
+        data: { nextAttemptAt: old },
+      });
+      await retention().sweep();
+      expect(objects.size).toBe(0);
+      expect(await db.objectStorageDeletionTask.count()).toBe(0);
+    },
+  );
 
   it.each([false, true])(
     "fences a stale notifier's late result (failure=%s)",

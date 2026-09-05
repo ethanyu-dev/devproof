@@ -63,6 +63,9 @@ export class ExecutionRunnerUnavailableError extends Error {
       taskId?: string;
       runId?: string;
       sessionId?: string;
+      recoveryId?: string;
+      recoveryPhase?: string;
+      rootReason?: string;
     },
   ) {
     super(message);

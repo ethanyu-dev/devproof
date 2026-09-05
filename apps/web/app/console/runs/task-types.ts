@@ -8,6 +8,9 @@ export interface TaskScheduling {
   blockedBy: {
     resourceType: string;
     resourceId?: string;
+    rootReason?: string;
+    recoveryId?: string;
+    recoveryPhase?: string;
     taskId?: string;
     runId?: string;
     caseExecutionId?: string;

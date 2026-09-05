@@ -27,11 +27,13 @@ export type RuntimeBusEvent =
       kind: "DELIVER";
       message: unknown;
       runtimeId: string;
+      connectionGeneration?: string;
     }
   | {
       exceptInstanceId: string;
       kind: "DISCONNECT_OLDER_GATEWAYS";
       runtimeId: string;
+      connectionGeneration?: string;
     };
 
 @Injectable()
@@ -81,29 +83,44 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     await this.publisher.publish(DELIVERY_CHANNEL, JSON.stringify(delivery));
   }
 
-  async disconnectOlderGateways(runtimeId: string) {
+  async disconnectOlderGateways(
+    runtimeId: string,
+    connectionGeneration: bigint,
+  ) {
     await this.publishRuntimeDelivery({
       exceptInstanceId: this.instanceId,
       kind: "DISCONNECT_OLDER_GATEWAYS",
       runtimeId,
+      connectionGeneration: connectionGeneration.toString(),
     });
   }
 
-  async markRuntimeOnline(runtimeId: string) {
-    await this.publisher.set(
+  async markRuntimeOnline(runtimeId: string, connectionGeneration: bigint) {
+    // Decimal generations are compared without Lua floating-point truncation.
+    await this.publisher.eval(
+      `local previous = redis.call('GET', KEYS[1])
+       if previous then
+         local old = string.match(previous, '^([0-9]+):')
+         if old and (#old > #ARGV[1] or (#old == #ARGV[1] and old > ARGV[1])) then return 0 end
+       end
+       redis.call('SET', KEYS[1], ARGV[1] .. ':' .. ARGV[2], 'EX', ARGV[3])
+       return 1`,
+      1,
       "devproof:runtime:presence:" + runtimeId,
+      connectionGeneration.toString(),
       this.instanceId,
-      "EX",
       Math.max(env().RUNTIME_LEASE_SECONDS, 45),
     );
   }
 
-  async removeRuntimePresence(runtimeId: string) {
+  async removeRuntimePresence(runtimeId: string, connectionGeneration: bigint) {
     const key = "devproof:runtime:presence:" + runtimeId;
-    const owner = await this.publisher.get(key);
-    if (owner === this.instanceId) {
-      await this.publisher.del(key);
-    }
+    await this.publisher.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+      1,
+      key,
+      `${connectionGeneration}:${this.instanceId}`,
+    );
   }
 
   async isRuntimeOnline(runtimeId: string) {

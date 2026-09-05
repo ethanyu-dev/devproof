@@ -1,8 +1,11 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { verificationRequestSchema } from "@devproof/contracts";
 
+import { env } from "../config/env.js";
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { PrismaService } from "../database/prisma.service.js";
 import {
   quarantineSession,
@@ -26,6 +29,7 @@ export class BrowserAdmissionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly browser: BrowserExecutionRunner,
+    @Optional() private readonly recovery?: SessionRecoveryService,
   ) {}
 
   async reconcile(limit = 100) {
@@ -210,6 +214,10 @@ export class BrowserAdmissionService {
         // can retry closure, but cannot create another browser until closure proof.
         const retryAt = new Date(now.getTime() + 90_000);
         const reserved = await this.prisma.$transaction(async (tx) => {
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
           // Serialize against claim before invalidating the browser or its permit.
           const lock = await tx.agentRuntimeTask.updateMany({
             where: {
@@ -318,10 +326,19 @@ export class BrowserAdmissionService {
           .releaseForExecutionRun(task.run.teamId, execution.id)
           .catch(() => undefined);
         await this.prisma.$transaction(async (tx) => {
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
           const session = await tx.browserRuntimeSession.findUnique({
             where: { id: sessionId },
           });
-          if (!session?.closureVerifiedAt || session.ownerTaskId) return;
+          if (
+            !session?.closureVerifiedAt ||
+            !session.closureEvidenceId ||
+            session.ownerTaskId
+          )
+            return;
           const recovered = await tx.agentRuntimeTask.updateMany({
             where: {
               id: task.id,
@@ -515,12 +532,45 @@ export class BrowserAdmissionService {
         await this.fail(execution, error.reason, error.message);
         return;
       }
+      let reason = error.reason;
+      let message = error.message;
+      let blockedBy = error.blockedBy;
+      if (
+        blockedBy?.sessionId &&
+        this.recovery &&
+        env().RUNTIME_SESSION_RECOVERY_ENABLED &&
+        ["DATA_LOCK", "LEASE_RECOVERY"].includes(reason)
+      ) {
+        try {
+          const recovery = await this.recovery.request(
+            blockedBy.sessionId,
+            "ADMISSION_BLOCKED",
+          );
+          if (recovery.closureState !== "OBSERVED" && !recovery.resolvedAt) {
+            reason = "LEASE_RECOVERY";
+            message =
+              recovery.closureState === "VERIFIED"
+                ? "The previous browser is closed; its business write outcome still needs review."
+                : "The previous browser requires verified session recovery before this execution can start.";
+            blockedBy = {
+              ...blockedBy,
+              recoveryId: recovery.id,
+              recoveryPhase: recovery.closureState,
+              rootReason: error.reason,
+            };
+          }
+        } catch (cause) {
+          this.logger.warn(
+            `Could not record browser recovery for admission ${execution.id}: ${errorMessage(cause)}`,
+          );
+        }
+      }
       await this.defer(
         execution.id,
-        error.reason,
-        error.message,
+        reason,
+        message,
         execution.allocationToken,
-        error.blockedBy,
+        blockedBy,
       );
     }
   }
@@ -533,11 +583,34 @@ export class BrowserAdmissionService {
     blockedBy?: ExecutionRunnerUnavailableError["blockedBy"],
   ) {
     await this.prisma.$transaction(async (tx) => {
+      if (blockedBy?.recoveryId)
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       const now = new Date();
+      const attempts =
+        code === "LEASE_RECOVERY"
+          ? await tx.browserExecution.findUnique({
+              where: { id },
+              select: { admissionAttempts: true },
+            })
+          : null;
+      const recovery = blockedBy?.recoveryId
+        ? await tx.runtimeSessionRecovery.findUnique({
+            where: { id: blockedBy.recoveryId },
+            select: { resolvedAt: true },
+          })
+        : null;
+      const retryDelayMs = recovery?.resolvedAt
+        ? 0
+        : code === "LEASE_RECOVERY"
+          ? [5_000, 15_000, 30_000, 60_000][
+              Math.min(3, Math.max(0, (attempts?.admissionAttempts ?? 1) - 1))
+            ]!
+          : RETRY_DELAY_MS;
       const changed = await tx.browserExecution.updateMany({
         data: {
           error: json({ code, message, ...(blockedBy ? { blockedBy } : {}) }),
-          nextAdmissionAt: new Date(now.getTime() + RETRY_DELAY_MS),
+          blockingRecoveryId: blockedBy?.recoveryId ?? null,
+          nextAdmissionAt: new Date(now.getTime() + retryDelayMs),
           status: "WAITING_CAPACITY",
         },
         where: {
@@ -588,9 +661,7 @@ export class BrowserAdmissionService {
               evaluatedAt: now.toISOString(),
               blockedBy: blockedBy ?? null,
               queue: null,
-              nextRetryAt: new Date(
-                now.getTime() + RETRY_DELAY_MS,
-              ).toISOString(),
+              nextRetryAt: new Date(now.getTime() + retryDelayMs).toISOString(),
             }),
           },
         });

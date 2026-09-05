@@ -124,6 +124,9 @@ export class ExecutionAdmissionBlocked extends ExecutionRunnerUnavailableError {
       taskId?: string;
       runId?: string;
       sessionId?: string;
+      recoveryId?: string;
+      recoveryPhase?: string;
+      rootReason?: string;
     },
   ) {
     super(reason, message, "WAIT", blockedBy);

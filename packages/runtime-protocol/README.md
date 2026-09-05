@@ -1,5 +1,24 @@
 # @devproof/runtime-protocol
 
+Protocol v1.14 adds the explicitly negotiated `closure-evidence-v1` capability.
+Hello carries OS-derived `hostInstanceId` and process-lifetime `daemonInstanceId`;
+accepted hello returns only capabilities negotiated on that connection.
+`session.close.payload.recovery` binds `recoveryId`, persistent `requestId`,
+`sessionId`, `expectedLeaseToken`, `expectedFencingToken`, and optional string
+`expectedLaunchIdentity`. A successful recovery close returns validated
+`result.closureEvidence` with the same challenge and epoch, host/daemon identity,
+launch identity version 1, a verified termination method, `networkRevoked: true`,
+and the physical closure time. A legacy empty close payload remains valid.
+Closure evidence is independent of video success and normal business-command
+deadlines. Inventories, lease expiry and legacy interruption booleans are not
+closure evidence. Replaying a persisted tombstone requires a new authenticated
+challenge on the same host; a new daemon does not blindly replay an old daemon's
+outbox proof.
+New API dispatches persist a `session.open.payload.launchIdentityId` UUID before
+launch; the Runtime binds its durable launch scope to that ID. An open result
+lost during reconnect therefore does not lose the server's expected launch
+identity. This field is sent only when closure evidence was negotiated.
+
 Versioned wire contract between the DevProof Runtime Gateway and independently released Browser Runtime.
 
 Protocol compatibility follows semantic rules:

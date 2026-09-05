@@ -2287,6 +2287,17 @@ function SchedulingExplanation({
       ) : (
         ""
       )}
+      {scheduling.blockedBy?.recoveryId ? (
+        <>
+          {" "}
+          ·{" "}
+          <Link
+            href={`/console/access#recovery-${scheduling.blockedBy.recoveryId}`}
+          >
+            查看会话恢复
+          </Link>
+        </>
+      ) : null}
       {scheduling.nextRetryAt
         ? ` · 下次重试 ${new Date(scheduling.nextRetryAt).toLocaleTimeString("zh-CN")}`
         : ""}

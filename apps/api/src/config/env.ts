@@ -9,6 +9,10 @@ const envSchema = z
   .object({
     API_PORT: z.coerce.number().int().positive().default(4433),
     API_PUBLIC_URL: z.string().url().default("http://localhost:4433"),
+    RUNTIME_SESSION_RECOVERY_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     AGENT_RESUME_WEBHOOK_SECRET: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(32).optional(),

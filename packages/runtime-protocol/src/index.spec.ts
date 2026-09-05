@@ -11,9 +11,64 @@ import {
   runtimeClientMessageSchema,
   runtimeServerMessageSchema,
   runtimeSessionPermitSchema,
+  runtimeClosureEvidenceSchema,
 } from "./index.js";
 
 describe("Runtime protocol", () => {
+  it("validates an explicit recovery challenge while keeping legacy close payloads compatible", () => {
+    const recovery = {
+      recoveryId: "11111111-1111-4111-8111-111111111111",
+      requestId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      expectedLeaseToken: "44444444-4444-4444-8444-444444444444",
+      expectedFencingToken: "7",
+    };
+    expect(
+      runtimeCommandPayloadSchema.parse({
+        commandType: "session.close",
+        payload: {},
+      }).payload,
+    ).toEqual({});
+    expect(
+      runtimeCommandPayloadSchema.parse({
+        commandType: "session.close",
+        payload: { recovery },
+      }).payload,
+    ).toEqual({ recovery });
+    expect(
+      runtimeCommandPayloadSchema.safeParse({
+        commandType: "session.close",
+        payload: { recovery: { ...recovery, expectedFencingToken: "stale" } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires actual network revocation and a recognized closure method", () => {
+    const proof = {
+      evidenceId: "11111111-1111-4111-8111-111111111111",
+      recoveryId: "22222222-2222-4222-8222-222222222222",
+      requestId: "33333333-3333-4333-8333-333333333333",
+      sessionId: "44444444-4444-4444-8444-444444444444",
+      leaseToken: "55555555-5555-4555-8555-555555555555",
+      fencingToken: "1",
+      hostInstanceId: "host-identity-for-boot",
+      daemonInstanceId: "66666666-6666-4666-8666-666666666666",
+      launchIdentityVersion: 1,
+      method: "LIVE_SESSION_TERMINATED",
+      networkRevoked: true,
+      closureCompletedAt: "2026-09-05T01:00:00.000Z",
+    };
+    expect(runtimeClosureEvidenceSchema.parse(proof)).toEqual(proof);
+    for (const invalid of [
+      { networkRevoked: false },
+      { method: "EMPTY_INVENTORY" },
+      { launchIdentityVersion: 0 },
+    ])
+      expect(
+        runtimeClosureEvidenceSchema.safeParse({ ...proof, ...invalid })
+          .success,
+      ).toBe(false);
+  });
   it("preserves an optional nonnegative control generation on execution permits", () => {
     const permit = {
       sessionId: "11bb7c5c-cd52-4ae7-8759-6e4e1391357d",
@@ -130,7 +185,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(13);
+    expect(RUNTIME_PROTOCOL.minor).toBe(14);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");

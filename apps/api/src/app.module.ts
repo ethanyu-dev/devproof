@@ -1,4 +1,9 @@
 import { Module } from "@nestjs/common";
+import { SessionRecoveryService } from "./runtime/session-recovery.service.js";
+import { SessionClosureService } from "./runtime/session-closure.service.js";
+import { SessionRecoveryWorker } from "./runtime/session-recovery.worker.js";
+import { RuntimeDrainService } from "./runtime/runtime-drain.service.js";
+import { RuntimeRecoveryController } from "./runtime/runtime-recovery.controller.js";
 import { APP_INTERCEPTOR } from "@nestjs/core";
 
 import { AgentRuntimeTaskController } from "./agent-runtime/agent-runtime-task.controller.js";
@@ -109,6 +114,7 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     ObservabilityController,
     PlaygroundController,
     RuntimeController,
+    RuntimeRecoveryController,
     TestDataController,
     ToolCredentialsController,
     ExecutionRunnerController,
@@ -172,6 +178,10 @@ import { VerificationMcpService } from "./verification/mcp.service.js";
     RuntimeLeaseSweeper,
     RuntimeRoutingService,
     RuntimeSessionsService,
+    SessionRecoveryService,
+    SessionClosureService,
+    SessionRecoveryWorker,
+    RuntimeDrainService,
     TaskExecutionService,
     TaskProfileResolverService,
     ProfileReservationService,

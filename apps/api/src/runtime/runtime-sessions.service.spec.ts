@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { resetEnvForTests } from "../config/env.js";
 
 import { RuntimeSessionsService } from "./runtime-sessions.service.js";
 
@@ -106,6 +108,7 @@ describe("RuntimeSessionsService user Profile isolation", () => {
       browserRuntimeSession: {
         findFirst: vi.fn().mockResolvedValue({
           artifacts: [],
+          launchConnectionGeneration: 9007199254740993n,
           commands: [
             {
               error: null,
@@ -148,6 +151,8 @@ describe("RuntimeSessionsService user Profile isolation", () => {
     const detail = await sessions.detail(current, "session-1");
 
     expect(detail.profileKey).toBeNull();
+    expect(detail.launchConnectionGeneration).toBe("9007199254740993");
+    expect(() => JSON.stringify(detail)).not.toThrow();
     expect(JSON.stringify(detail.commands)).not.toContain(
       "opaque-user-profile",
     );
@@ -157,215 +162,136 @@ describe("RuntimeSessionsService user Profile isolation", () => {
 });
 
 describe("RuntimeSessionsService lifecycle cleanup", () => {
-  it("waits for an already-closing session instead of dispatching another close", async () => {
-    const finalSession = {
+  beforeEach(() => {
+    vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true");
+    resetEnvForTests();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetEnvForTests();
+  });
+  const current = {
+    sessionId: "cookie",
+    team: { id: "team-1", name: "Team", slug: "team" },
+    user: {
+      id: "user-1",
+      name: "User",
+      email: "user@example.com",
+      avatarUrl: null,
+    },
+  };
+  function fixture(verified = false) {
+    const session = {
+      id: "session-1",
+      status: verified ? "CLOSED" : "CLOSING",
+      fencingToken: 1n,
+      leaseToken: "lease-1",
       artifacts: [],
       commands: [],
       events: [],
-      fencingToken: 1n,
-      id: "session-1",
       profileKey: null,
-      runtime: { id: "runtime-1", name: "Runtime", status: "ONLINE" },
-      status: "CLOSED",
       userBrowserProfileId: "profile-1",
+      runtime: { id: "runtime-1", name: "Runtime", status: "ONLINE" },
+      closureVerifiedAt: verified ? new Date() : null,
+      closureEvidenceId: verified ? "proof-1" : null,
     };
     const prisma = {
       browserRuntimeSession: {
-        findFirst: vi
-          .fn()
-          .mockResolvedValueOnce({
-            id: "session-1",
-            status: "CLOSING",
-            userBrowserProfileId: "profile-1",
-          })
-          .mockResolvedValueOnce(finalSession),
-        findUnique: vi.fn().mockResolvedValue({ status: "CLOSED" }),
+        findFirst: vi.fn().mockResolvedValue(session),
+        findUnique: vi.fn().mockResolvedValue(session),
+        findMany: vi.fn().mockResolvedValue([session]),
         updateMany: vi.fn(),
       },
-    };
-    const commands = { execute: vi.fn() };
-    const sessions = new RuntimeSessionsService(
-      prisma as never,
-      {} as never,
-      commands as never,
-      { signedDownloadUrl: vi.fn() } as never,
-      {} as never,
-    );
-
-    await expect(
-      sessions.close(
-        {
-          sessionId: "session-cookie",
-          team: { id: "team-1", name: "Team", slug: "team" },
-          user: {
-            avatarUrl: null,
-            email: "user@example.com",
-            id: "user-1",
-            name: "User",
-          },
-        },
-        "session-1",
-        { timeoutSeconds: 1 },
-      ),
-    ).resolves.toMatchObject({ id: "session-1", status: "CLOSED" });
-    expect(commands.execute).not.toHaveBeenCalled();
-    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("keeps the lease while a Runtime close command remains unconfirmed", async () => {
-    const finalSession = {
-      artifacts: [],
-      commands: [],
-      events: [],
-      fencingToken: 1n,
-      id: "session-1",
-      profileKey: null,
-      runtime: { id: "runtime-1", name: "Runtime", status: "OFFLINE" },
-      status: "CLOSING",
-      userBrowserProfileId: "profile-1",
-    };
-    const prisma = {
-      browserRuntimeProfileLease: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      browserRuntimeSession: {
-        findFirst: vi
-          .fn()
-          .mockResolvedValueOnce({
-            id: "session-1",
-            status: "HUMAN_CONTROL",
-            userBrowserProfileId: "profile-1",
-          })
-          .mockResolvedValueOnce(finalSession),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      browserRuntimeSlot: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      userBrowserProfile: {
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
+      browserRuntimeSlot: { deleteMany: vi.fn() },
+      browserRuntimeProfileLease: { deleteMany: vi.fn() },
     };
     const commands = {
-      execute: vi.fn().mockRejectedValue(new Error("runtime offline")),
+      execute: vi
+        .fn()
+        .mockResolvedValue({ id: "command-1", status: "SUCCEEDED" }),
     };
-    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const closure = { recordFailure: vi.fn().mockResolvedValue(undefined) };
+    const audit = { record: vi.fn() };
     const sessions = new RuntimeSessionsService(
       prisma as never,
       {} as never,
       commands as never,
       {} as never,
       audit as never,
+      {} as never,
+      closure as never,
     );
-
+    return { sessions, prisma, commands, closure, audit, session };
+  }
+  it("routes an already-closing session through durable command reuse without manufacturing proof", async () => {
+    const { sessions, prisma, commands, closure } = fixture();
     await expect(
-      sessions.close(
-        {
-          sessionId: "session-cookie",
-          team: { id: "team-1", name: "Team", slug: "team" },
-          user: {
-            avatarUrl: null,
-            email: "user@example.com",
-            id: "user-1",
-            name: "User",
-          },
-        },
-        "session-1",
-        { timeoutSeconds: 15 },
-      ),
-    ).resolves.toMatchObject({ id: "session-1", status: "CLOSING" });
-
+      sessions.close(current, "session-1", { timeoutSeconds: 1 }),
+    ).resolves.toMatchObject({ status: "CLOSING" });
     expect(commands.execute).toHaveBeenCalledWith({
       commandType: "session.close",
       sessionId: "session-1",
       source: "SYSTEM",
-      timeoutSeconds: 15,
+      timeoutSeconds: 1,
     });
-    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
-    expect(prisma.browserRuntimeProfileLease.deleteMany).not.toHaveBeenCalled();
-    expect(audit.record).toHaveBeenCalledWith(
-      expect.anything(),
-      "runtime.session.close_pending",
-      "browser_runtime_session",
-      "session-1",
-    );
-  });
-
-  it("closes abandoned preparation sessions and releases their leases", async () => {
-    const transactionClient = {
-      browserRuntimeProfileLease: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      executionResourceLease: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-        count: vi.fn().mockResolvedValue(0),
-      },
-      browserRuntimeSession: {
-        findUnique: vi.fn().mockResolvedValue({
-          status: "CLOSED",
-          closureVerifiedAt: new Date(),
-          ownerTaskId: null,
-        }),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      browserRuntimeSlot: {
-        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-    };
-    const prisma = {
-      $transaction: vi.fn(
-        async (operation: (tx: typeof transactionClient) => unknown) =>
-          operation(transactionClient),
-      ),
-      browserRuntimeProfileLease: transactionClient.browserRuntimeProfileLease,
-      browserRuntimeSession: {
-        findMany: vi
-          .fn()
-          .mockResolvedValue([{ id: "session-1", status: "ACTIVE" }]),
-        updateMany: transactionClient.browserRuntimeSession.updateMany,
-      },
-      browserRuntimeSlot: transactionClient.browserRuntimeSlot,
-    };
-    const commands = {
-      execute: vi.fn().mockResolvedValue({ status: "SUCCEEDED" }),
-    };
-    const sessions = new RuntimeSessionsService(
-      prisma as never,
-      {} as never,
-      commands as never,
-      {} as never,
-      {} as never,
-    );
-
-    await expect(sessions.closeIdleProfileSessions("profile-1")).resolves.toBe(
-      1,
-    );
-
-    expect(prisma.browserRuntimeSession.findMany).toHaveBeenCalledWith({
-      where: {
-        purpose: {
-          in: ["PROFILE_PREPARATION", "PROFILE_VERIFICATION"],
-        },
-        status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL", "CLOSING"] },
-        userBrowserProfileId: "profile-1",
-      },
-    });
-    expect(commands.execute).toHaveBeenCalledWith({
-      commandType: "session.close",
-      sessionId: "session-1",
-      source: "SYSTEM",
-    });
-    expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+    expect(closure.recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: "CLOSED" }),
-        where: { id: "session-1", status: "CLOSING" },
+        requestId: "command-1",
+        errorCode: "CLOSURE_UNVERIFIED",
       }),
     );
-    expect(prisma.browserRuntimeSlot.deleteMany).toHaveBeenCalledWith({
-      where: { sessionId: "session-1" },
+    expect(prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.browserRuntimeProfileLease.deleteMany).not.toHaveBeenCalled();
+  });
+  it("keeps leases when a close RPC fails and records a retryable failure", async () => {
+    const { sessions, prisma, commands, closure } = fixture();
+    commands.execute.mockRejectedValue(new Error("offline"));
+    await expect(sessions.close(current, "session-1")).resolves.toMatchObject({
+      status: "CLOSING",
     });
-    expect(prisma.browserRuntimeProfileLease.deleteMany).toHaveBeenCalledWith({
-      where: { sessionId: "session-1" },
+    expect(closure.recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedFencingToken: "1",
+        expectedLeaseToken: "lease-1",
+        errorCode: "CLOSE_FAILED",
+      }),
+    );
+    expect(prisma.browserRuntimeSlot.deleteMany).not.toHaveBeenCalled();
+  });
+  it("returns a proven closure without resending or regressing it", async () => {
+    const { sessions, commands, closure } = fixture(true);
+    await expect(sessions.close(current, "session-1")).resolves.toMatchObject({
+      status: "CLOSED",
     });
+    expect(commands.execute).not.toHaveBeenCalled();
+    expect(closure.recordFailure).not.toHaveBeenCalled();
+  });
+  it("includes LOST and FAILED preparation sessions and counts only proven closures", async () => {
+    const { sessions, prisma } = fixture();
+    await expect(sessions.closeIdleProfileSessions("profile-1")).resolves.toBe(
+      0,
+    );
+    expect(prisma.browserRuntimeSession.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: expect.arrayContaining(["LOST", "FAILED"]) },
+          userBrowserProfileId: "profile-1",
+        }),
+      }),
+    );
+    const proven = fixture(true);
+    await expect(
+      proven.sessions.closeIdleProfileSessions("profile-1"),
+    ).resolves.toBe(1);
+  });
+  it("enforces the rollout barrier on explicit close", async () => {
+    vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "false");
+    resetEnvForTests();
+    const { sessions, commands } = fixture();
+    await expect(sessions.close(current, "session-1")).rejects.toThrow(
+      "paused",
+    );
+    expect(commands.execute).not.toHaveBeenCalled();
   });
 });

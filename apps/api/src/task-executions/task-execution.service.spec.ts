@@ -5,6 +5,8 @@ import {
   taskDeadlineElapsed,
   TaskExecutionService,
   validateCaseDependencyGraph,
+  caseExecutionMatrix,
+  profileRootBlocker,
 } from "./task-execution.service.js";
 import { resetEnvForTests } from "../config/env.js";
 
@@ -544,6 +546,8 @@ describe("TaskExecutionService dispatch fairness", () => {
       taskExecutionId: "task-1",
       taskExecution: { inputSnapshot: {} },
       deploymentId: "deployment-1",
+      executionOrdinal: 1,
+      testCase: { snapshotId: "snapshot-1" },
       createdAt: now,
       updatedAt: now,
       dispatchAttempts: 0,
@@ -629,6 +633,27 @@ describe("TaskExecutionService dispatch fairness", () => {
     );
     expect(prisma.executionRun.findFirst).not.toHaveBeenCalled();
     expect(reservations.acquire).toHaveBeenCalledOnce();
+    expect(prisma.taskCaseExecution.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [
+          { executionOrdinal: "asc" },
+          { dispatchOrder: { sort: "asc", nulls: "last" } },
+          { createdAt: "asc" },
+          { id: "asc" },
+        ],
+      }),
+    );
+    expect(prisma.taskCaseExecution.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          taskExecutionId: "task-1",
+          deploymentId: "deployment-1",
+          executionOrdinal: 1,
+          testCase: { snapshotId: "snapshot-1" },
+          caseId: { in: [dependencyId] },
+        },
+      }),
+    );
   });
 
   it("preserves waiting age when the blocking resource changes", async () => {
@@ -740,6 +765,49 @@ describe("Case execution dependency policy", () => {
         },
       ]),
     ).toThrow("belong");
+  });
+
+  it("cannot edit a superseded unstarted execution by limiting validation to its old round", async () => {
+    const candidate = {
+      id: "old",
+      caseId: first,
+      deploymentId: "deployment",
+      executionOrdinal: 1,
+      runId: null,
+      dispatchStatus: "PENDING",
+      dispatchAttempts: 0,
+      taskExecution: { lifecycle: "RUNNING" },
+      testCase: { snapshotId: "snapshot" },
+    };
+    const tx = {
+      taskCaseExecution: {
+        findFirst: vi.fn().mockResolvedValue(candidate),
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            candidate,
+            { ...candidate, id: "new", executionOrdinal: 2 },
+          ]),
+        updateMany: vi.fn(),
+      },
+    };
+    const service = new TaskExecutionService(
+      { $transaction: vi.fn((operation) => operation(tx)) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    await expect(
+      service.setCaseExecutionPolicy(
+        { team: { id: "team" } } as never,
+        "task",
+        "old",
+        { accessMode: "READ_ONLY" },
+      ),
+    ).rejects.toThrow("latest execution");
+    expect(tx.taskCaseExecution.updateMany).not.toHaveBeenCalled();
   });
 
   it("refuses policy changes once a Run exists", async () => {
@@ -955,6 +1023,60 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
     team: { id: "6f090d88-8987-487f-8338-1a734beab6a6", name: "Team" },
   } as never;
 
+  it("rejects a dependent Case rerun when its prerequisites have no execution in the new round", async () => {
+    const dependencyId = "485146a8-5230-4b02-832a-5eef19e8dc8a";
+    const tx = {
+      taskExecution: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: taskId,
+          kind: "ISSUE_SPEC",
+          cancelRequestedAt: null,
+          deadlineAt: new Date(Date.now() + 60_000),
+          stages: [{ id: "stage", type: "SPEC_EXECUTION" }],
+          caseExecutions: [
+            {
+              caseId,
+              deploymentId,
+              executionOrdinal: 1,
+              run: { lifecycle: "COMPLETED" },
+              testCase: { snapshotId: "snapshot-1", position: 1 },
+              executionPolicy: {
+                accessMode: "READ_ONLY",
+                dependsOnCaseIds: [dependencyId],
+              },
+            },
+          ],
+        }),
+      },
+      taskCaseExecution: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn(),
+      },
+    };
+    const service = new TaskExecutionService(
+      { $transaction: vi.fn((operation) => operation(tx)) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    await expect(service.rerunCase(current, taskId, caseId)).rejects.toThrow(
+      "prerequisite Cases",
+    );
+    expect(tx.taskCaseExecution.findMany).toHaveBeenCalledWith({
+      select: { caseId: true },
+      where: {
+        taskExecutionId: taskId,
+        deploymentId,
+        executionOrdinal: 2,
+        testCase: { snapshotId: "snapshot-1" },
+        caseId: { in: [dependencyId] },
+      },
+    });
+    expect(tx.taskCaseExecution.create).not.toHaveBeenCalled();
+  });
+
   it("queues the next execution ordinal while preserving the completed Runtime", async () => {
     const taskExecutionFindFirst = vi.fn().mockResolvedValue({
       cancelRequestedAt: null,
@@ -964,6 +1086,8 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
           deploymentId,
           executionOrdinal: 1,
           id: previousExecutionId,
+          dispatchOrder: 0,
+          testCase: { position: 0 },
           run: { lifecycle: "COMPLETED" },
         },
       ],
@@ -1023,6 +1147,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
         caseId,
         deploymentId,
         executionOrdinal: 2,
+        dispatchOrder: 0,
         executionPolicy: expect.anything(),
         taskExecutionId: taskId,
       },
@@ -1554,5 +1679,51 @@ describe("TaskExecutionService log export", () => {
 
     expect(exported).toEqual(bundle);
     expect(build).toHaveBeenCalledWith("team-1", taskId);
+  });
+});
+
+describe("stable Case dispatch snapshots", () => {
+  it("keeps generated Case order independently for every deployment", () => {
+    const matrix = caseExecutionMatrix(
+      "task",
+      [
+        { id: "case-b", position: 0 },
+        { id: "case-a", position: 1 },
+      ],
+      [{ id: "deployment-a" }, { id: "deployment-b" }],
+      {},
+    );
+    expect(
+      matrix.map(({ caseId, deploymentId, dispatchOrder }) => [
+        caseId,
+        deploymentId,
+        dispatchOrder,
+      ]),
+    ).toEqual([
+      ["case-b", "deployment-a", 0],
+      ["case-b", "deployment-b", 0],
+      ["case-a", "deployment-a", 1],
+      ["case-a", "deployment-b", 1],
+    ]);
+  });
+  it("forwards recovery links and the root reason without exposing arbitrary errors", () => {
+    expect(
+      profileRootBlocker({
+        code: "LEASE_RECOVERY",
+        message: "private detail",
+        blockedBy: {
+          recoveryId: "recovery-1",
+          recoveryPhase: "WAITING_RUNTIME",
+          sessionId: "private-session",
+        },
+      }),
+    ).toEqual({
+      rootReason: "LEASE_RECOVERY",
+      recoveryId: "recovery-1",
+      recoveryPhase: "WAITING_RUNTIME",
+    });
+    expect(
+      profileRootBlocker({ code: "SECRET_ERROR", message: "private detail" }),
+    ).toEqual({});
   });
 });

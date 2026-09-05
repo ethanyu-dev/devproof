@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -22,10 +22,10 @@ import { RuntimeHumanControlRelay } from "./runtime-human-control-relay.service.
 import { MetricsService } from "../observability/metrics.service.js";
 import { ObservabilityService } from "../observability/observability.service.js";
 import { sessionExecutionPermit } from "./session-permit.js";
-import {
-  quarantineSession,
-  releaseVerifiedSessionResources,
-} from "./session-resource-cleanup.js";
+import { quarantineSession } from "./session-resource-cleanup.js";
+
+import { SessionRecoveryService } from "./session-recovery.service.js";
+import type { AuthenticatedRuntimeContext } from "./session-closure.types.js";
 
 function hashToken(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -56,10 +56,12 @@ export class RuntimeGatewayService {
     private readonly humanControl: RuntimeHumanControlRelay,
     @Optional() private readonly metrics?: MetricsService,
     @Optional() private readonly observability?: ObservabilityService,
+    @Optional() private readonly recovery?: SessionRecoveryService,
   ) {}
 
   accept(socket: WebSocket) {
     let runtimeId: string | undefined;
+    let context: AuthenticatedRuntimeContext | undefined;
     let deliveryAcknowledgements = false;
     let queue = Promise.resolve();
     const preauthTimer = setTimeout(() => {
@@ -124,11 +126,22 @@ export class RuntimeGatewayService {
               );
               return;
             }
-            runtimeId = await this.handleHello(socket, message);
+            context = await this.handleHello(socket, message);
+            runtimeId = context?.runtimeId;
             if (runtimeId) {
               deliveryAcknowledgements = message.protocol.minor >= 3;
               clearTimeout(preauthTimer);
             }
+            return;
+          }
+          if (!context || !(await this.isCurrentConnection(context))) {
+            this.closeObserved(
+              socket,
+              4001,
+              "stale_connection",
+              "A newer Runtime connection replaced this one.",
+              { runtimeId },
+            );
             return;
           }
           if (message.type === "runtime.hello") {
@@ -142,21 +155,21 @@ export class RuntimeGatewayService {
               },
             );
           } else if (message.type === "runtime.heartbeat") {
-            await this.handleHeartbeat(socket, runtimeId, message);
+            await this.handleHeartbeat(socket, context, message);
           } else if (message.type === "command.result") {
-            await this.commands.acceptResult(message);
+            await this.commands.acceptResult(message, context);
             if (deliveryAcknowledgements) {
               await this.acknowledgeDelivery(
-                runtimeId,
+                context,
                 message.commandId,
                 message.type,
               );
             }
           } else if (message.type === "runtime.event") {
-            await this.commands.acceptEvent(message);
+            await this.commands.acceptEvent(message, context);
             if (deliveryAcknowledgements) {
               await this.acknowledgeDelivery(
-                runtimeId,
+                context,
                 message.eventId,
                 message.type,
               );
@@ -165,7 +178,7 @@ export class RuntimeGatewayService {
             await this.handleProfileLifecycle(runtimeId, message);
             if (deliveryAcknowledgements) {
               await this.acknowledgeDelivery(
-                runtimeId,
+                context,
                 message.eventId,
                 message.type,
               );
@@ -176,7 +189,7 @@ export class RuntimeGatewayService {
             this.humanControl.acceptInputResult(runtimeId, message);
             if (deliveryAcknowledgements) {
               await this.acknowledgeDelivery(
-                runtimeId,
+                context,
                 message.dispatchId,
                 message.type,
               );
@@ -211,14 +224,15 @@ export class RuntimeGatewayService {
         this.observability?.log("info", "runtime.gateway.disconnected", {
           runtimeId,
         });
-        this.humanControl.runtimeDisconnected(runtimeId);
-        this.hub.unregister(runtimeId, socket);
+        if (this.hub.unregister(runtimeId, socket))
+          this.humanControl.runtimeDisconnected(runtimeId);
         void this.prisma.browserRuntime
           .updateMany({
             data: { gatewayInstanceId: null, status: "OFFLINE" },
             where: {
-              enabled: true,
               gatewayInstanceId: this.redis.instanceId,
+              connectionId: context?.connectionId ?? "",
+              connectionGeneration: context?.connectionGeneration ?? -1n,
               id: runtimeId,
               revokedAt: null,
               status: { not: "REVOKED" },
@@ -280,36 +294,87 @@ export class RuntimeGatewayService {
       hello.protocol.minor,
       RUNTIME_PROTOCOL.minor,
     );
-    await this.prisma.browserRuntime.update({
-      data: {
-        connectedAt: new Date(),
-        gatewayInstanceId: this.redis.instanceId,
-        lastSeenAt: new Date(),
-        protocolMajor: RUNTIME_PROTOCOL.major,
-        protocolMinor: selectedMinor,
-        status: "ONLINE",
-        ...(hello.version ? { version: hello.version } : {}),
-        capabilities: [
-          ...new Set([
-            ...(Array.isArray(runtime.capabilities)
-              ? runtime.capabilities
-              : []
-            ).filter(
-              (capability): capability is string =>
-                typeof capability === "string" &&
-                !["auth-snapshot-v1", "session-permits-v1"].includes(
-                  capability,
-                ),
-            ),
-            ...(hello.capabilities ?? []),
-          ]),
-        ],
-      },
-      where: { id: runtime.id },
+    const connectionId = randomUUID();
+    const capabilities = (hello.capabilities ?? []).filter((value) =>
+      value === "closure-evidence-v1"
+        ? selectedMinor >= 14
+        : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
+          selectedMinor >= 13,
+    );
+    const connected = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM browser_runtimes WHERE id = ${runtime.id}::uuid FOR UPDATE`;
+      const current = await tx.browserRuntime.findFirst({
+        where: {
+          id: runtime.id,
+          tokenHash: hashToken(hello.runtimeToken),
+          enabled: true,
+          revokedAt: null,
+          drainState: "NONE",
+        },
+      });
+      if (!current) return null;
+      return tx.browserRuntime.update({
+        data: {
+          connectionId,
+          connectionGeneration: { increment: 1 },
+          hostInstanceId: hello.hostInstanceId ?? null,
+          daemonInstanceId: hello.daemonInstanceId ?? null,
+          connectedAt: new Date(),
+          gatewayInstanceId: this.redis.instanceId,
+          lastSeenAt: new Date(),
+          protocolMajor: RUNTIME_PROTOCOL.major,
+          protocolMinor: selectedMinor,
+          status: "ONLINE",
+          ...(hello.version ? { version: hello.version } : {}),
+          capabilities: [
+            ...new Set([
+              ...(Array.isArray(runtime.capabilities)
+                ? runtime.capabilities
+                : []
+              ).filter(
+                (capability): capability is string =>
+                  typeof capability === "string" &&
+                  ![
+                    "auth-snapshot-v1",
+                    "session-permits-v1",
+                    "closure-evidence-v1",
+                  ].includes(capability),
+              ),
+              ...capabilities,
+            ]),
+          ],
+        },
+        where: { id: runtime.id },
+      });
     });
-    this.hub.register(runtime.id, socket);
-    await this.redis.disconnectOlderGateways(runtime.id);
-    await this.redis.markRuntimeOnline(runtime.id);
+    if (!connected) {
+      this.reject(
+        socket,
+        "RUNTIME_DISABLED",
+        "Runtime was disabled or drained during its handshake.",
+      );
+      return undefined;
+    }
+    const context: AuthenticatedRuntimeContext = {
+      runtimeId: runtime.id,
+      connectionId,
+      connectionGeneration: connected.connectionGeneration,
+      negotiatedMinor: selectedMinor,
+      capabilities: new Set(capabilities),
+      ...(hello.hostInstanceId ? { hostInstanceId: hello.hostInstanceId } : {}),
+      ...(hello.daemonInstanceId
+        ? { daemonInstanceId: hello.daemonInstanceId }
+        : {}),
+    };
+    this.hub.register(runtime.id, socket, context.connectionGeneration);
+    await this.redis.disconnectOlderGateways(
+      runtime.id,
+      context.connectionGeneration,
+    );
+    await this.redis.markRuntimeOnline(
+      runtime.id,
+      context.connectionGeneration,
+    );
     this.metrics?.increment(
       "devproof_runtime_gateway_connections_total",
       "Accepted Browser Runtime gateway connections.",
@@ -325,9 +390,11 @@ export class RuntimeGatewayService {
       runtime.id,
       hello.activeSessions,
       selectedMinor,
+      context,
     );
     socket.send(
       JSON.stringify({
+        capabilities,
         heartbeatIntervalMs: RUNTIME_HEARTBEAT_INTERVAL_MS,
         networkAllowlist:
           selectedMinor >= 4 ? (runtime.networkAllowlist ?? []) : [],
@@ -337,7 +404,27 @@ export class RuntimeGatewayService {
         type: "runtime.hello.accepted",
       }),
     );
-    return runtime.id;
+    if (
+      env().RUNTIME_SESSION_RECOVERY_ENABLED &&
+      capabilities.includes("closure-evidence-v1")
+    )
+      await this.recovery?.wakeRuntime(runtime.id);
+    return context;
+  }
+
+  private async isCurrentConnection(context: AuthenticatedRuntimeContext) {
+    return Boolean(
+      await this.prisma.browserRuntime.findFirst({
+        where: {
+          id: context.runtimeId,
+          connectionId: context.connectionId,
+          connectionGeneration: context.connectionGeneration,
+          enabled: true,
+          revokedAt: null,
+        },
+        select: { id: true },
+      }),
+    );
   }
 
   private async reconcile(
@@ -352,6 +439,7 @@ export class RuntimeGatewayService {
       live?: boolean | undefined;
     }>,
     protocolMinor: number,
+    context?: AuthenticatedRuntimeContext,
   ) {
     const actions: ReconcileAction[] = [];
     if (protocolMinor < 9) {
@@ -413,7 +501,12 @@ export class RuntimeGatewayService {
         });
         continue;
       }
-      const renewed = await this.renewSession(runtimeId, local, protocolMinor);
+      const renewed = await this.renewSession(
+        runtimeId,
+        local,
+        protocolMinor,
+        context,
+      );
       if (!renewed) {
         actions.push({
           action: "CLOSE_LOCAL",
@@ -431,9 +524,8 @@ export class RuntimeGatewayService {
         ...(renewed.permit ? { permit: renewed.permit } : {}),
       });
     }
-    // Only a live, modern Runtime's inventory may prove a prior close finished.
-    if (protocolMinor >= 13)
-      await this.finalizeMissingClosedSessions(runtimeId, seen);
+    // Inventory absence schedules verification; it is not itself closure proof.
+    await this.finalizeMissingClosedSessions(runtimeId, seen);
     return actions;
   }
 
@@ -441,6 +533,7 @@ export class RuntimeGatewayService {
     runtimeId: string,
     local: { sessionId: string; fencingToken: string; leaseToken: string },
     protocolMinor?: number,
+    context?: AuthenticatedRuntimeContext,
   ) {
     const now = new Date();
     const expiresAt = new Date(
@@ -448,6 +541,15 @@ export class RuntimeGatewayService {
     );
     const result = await this.prisma.$transaction(
       async (tx) => {
+        if (context) {
+          const current = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT id FROM browser_runtimes WHERE id = ${runtimeId}::uuid
+              AND connection_id = ${context.connectionId}::uuid
+              AND connection_generation = ${context.connectionGeneration}
+              AND enabled = true AND revoked_at IS NULL FOR UPDATE
+          `);
+          if (!current.length) return null;
+        }
         const session = await tx.browserRuntimeSession.findUnique({
           include: { slot: true, profileLease: true },
           where: { id: local.sessionId },
@@ -544,12 +646,12 @@ export class RuntimeGatewayService {
     runtimeId: string,
     localIds: Set<string>,
   ) {
+    if (!env().RUNTIME_SESSION_RECOVERY_ENABLED) return;
     const sessions = await this.prisma.browserRuntimeSession.findMany({
       where: {
         runtimeId,
-        protocolMinor: { gte: 13 },
         closureVerifiedAt: null,
-        status: { in: ["CLOSING", "LOST"] },
+        status: { in: ["CLOSING", "LOST", "FAILED"] },
         updatedAt: {
           lte: new Date(Date.now() - RUNTIME_HEARTBEAT_INTERVAL_MS),
         },
@@ -557,31 +659,8 @@ export class RuntimeGatewayService {
       },
       take: 100,
     });
-    for (const session of sessions) {
-      const error = session.lastError as { code?: string } | null;
-      if (error?.code === "RUNTIME_RESTARTED_UNVERIFIED") continue;
-      await this.prisma.$transaction(async (tx) => {
-        const now = new Date();
-        const closed = await tx.browserRuntimeSession.updateMany({
-          data: {
-            status: "CLOSED",
-            closedAt: now,
-            closureVerifiedAt: now,
-            humanControllerUserId: null,
-            humanControlExpiresAt: null,
-          },
-          where: {
-            id: session.id,
-            fencingToken: session.fencingToken,
-            leaseToken: session.leaseToken,
-            updatedAt: session.updatedAt,
-            status: { in: ["CLOSING", "LOST"] },
-          },
-        });
-        if (closed.count === 1)
-          await releaseVerifiedSessionResources(tx, session.id);
-      });
-    }
+    for (const session of sessions)
+      await this.recovery?.request(session.id, "RUNTIME_INVENTORY_MISSING");
   }
 
   private async markUserProfileSessionIncompatible(
@@ -617,28 +696,42 @@ export class RuntimeGatewayService {
 
   private async handleHeartbeat(
     socket: WebSocket,
-    runtimeId: string,
+    context: AuthenticatedRuntimeContext,
     heartbeat: Extract<
       ReturnType<typeof runtimeClientMessageSchema.parse>,
       { type: "runtime.heartbeat" }
     >,
   ) {
+    const runtimeId = context.runtimeId;
     const closeSessions: string[] = [];
     const sessionPermits: RuntimeSessionPermit[] = [];
     for (const local of heartbeat.activeSessions) {
-      const renewed = await this.renewSession(runtimeId, local);
-      if (!renewed) closeSessions.push(local.sessionId);
-      else if (renewed.permit) sessionPermits.push(renewed.permit);
+      const renewed = await this.renewSession(
+        runtimeId,
+        local,
+        undefined,
+        context,
+      );
+      if (!renewed) {
+        closeSessions.push(local.sessionId);
+      } else if (renewed.permit) sessionPermits.push(renewed.permit);
     }
     await this.finalizeMissingClosedSessions(
       runtimeId,
       new Set(heartbeat.activeSessions.map((session) => session.sessionId)),
     );
-    await this.prisma.browserRuntime.update({
+    const updated = await this.prisma.browserRuntime.updateMany({
       data: { lastSeenAt: new Date(), status: "ONLINE" },
-      where: { id: runtimeId },
+      where: {
+        id: runtimeId,
+        connectionId: context.connectionId,
+        connectionGeneration: context.connectionGeneration,
+        enabled: true,
+        revokedAt: null,
+      },
     });
-    await this.redis.markRuntimeOnline(runtimeId);
+    if (updated.count !== 1) return;
+    await this.redis.markRuntimeOnline(runtimeId, context.connectionGeneration);
     socket.send(
       JSON.stringify({
         closeSessions,
@@ -792,7 +885,7 @@ export class RuntimeGatewayService {
   }
 
   private acknowledgeDelivery(
-    runtimeId: string,
+    context: AuthenticatedRuntimeContext,
     messageId: string,
     messageType:
       | "command.result"
@@ -800,10 +893,14 @@ export class RuntimeGatewayService {
       | "runtime.event"
       | "profile.lifecycle",
   ) {
-    return this.hub.send(runtimeId, {
-      messageId,
-      messageType,
-      type: "runtime.delivery.ack",
-    });
+    return this.hub.send(
+      context.runtimeId,
+      {
+        messageId,
+        messageType,
+        type: "runtime.delivery.ack",
+      },
+      context.connectionGeneration,
+    );
   }
 }

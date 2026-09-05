@@ -42,3 +42,32 @@ describe("RuntimeLeaseSweeper", () => {
     );
   });
 });
+
+it("does not quarantine a session renewed after the expired-session scan", async () => {
+  const prisma = {
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    browserRuntimeSession: {
+      findMany: vi
+        .fn()
+        .mockResolvedValueOnce([{ id: "session-1" }])
+        .mockResolvedValue([]),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    browserRuntimeCommand: { findMany: vi.fn().mockResolvedValue([]) },
+    userBrowserProfile: { updateMany: vi.fn() },
+    executionResourceLease: { updateMany: vi.fn() },
+  };
+  prisma.$transaction.mockImplementation((operation) => operation(prisma));
+  await new RuntimeLeaseSweeper(prisma as never, {} as never).sweep();
+  expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledOnce();
+  expect(prisma.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: expect.objectContaining({
+        leaseExpiresAt: { lte: expect.any(Date) },
+        closureVerifiedAt: null,
+      }),
+    }),
+  );
+  expect(prisma.executionResourceLease.updateMany).not.toHaveBeenCalled();
+});

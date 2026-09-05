@@ -5,9 +5,15 @@ import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../config/env.js", () => ({
-  env: () => ({ RUNTIME_LEASE_SECONDS: 90 }),
+  env: () => ({
+    RUNTIME_LEASE_SECONDS: 90,
+    RUNTIME_SESSION_RECOVERY_ENABLED: true,
+  }),
 }));
 
+import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { SessionClosureService } from "../runtime/session-closure.service.js";
+import { SessionRecoveryWorker } from "../runtime/session-recovery.worker.js";
 import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { UnifiedRunCleanupWorker } from "../execution-runs/unified-run-cleanup.worker.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
@@ -28,35 +34,115 @@ if (
   );
 
 const db = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
-const commands = {
-  execute: vi.fn().mockResolvedValue({
-    status: "SUCCEEDED",
-    artifacts: [],
-    error: null,
-  }),
-};
+const previousRecoveryEnabled = process.env.RUNTIME_SESSION_RECOVERY_ENABLED;
+const recoveries = new SessionRecoveryService(db as never);
+const closures = new SessionClosureService(db as never);
+const commands = { execute: vi.fn(verifiedCommand) };
 const runner = new BrowserExecutionRunner(
   db as never,
   {} as never,
   commands as never,
   {} as never,
+  recoveries,
+  closures,
 );
-const cleanup = new UnifiedRunCleanupWorker(db as never, runner);
+const cleanup = new UnifiedRunCleanupWorker(
+  db as never,
+  runner,
+  undefined,
+  recoveries,
+);
+const recoveryWorker = new SessionRecoveryWorker(
+  db as never,
+  recoveries,
+  closures,
+  commands as never,
+);
 const sessions = new RuntimeSessionsService(
   db as never,
   {} as never,
   {} as never,
   {} as never,
   {} as never,
+  recoveries,
+  closures,
 );
 
 beforeEach(async () => {
+  process.env.RUNTIME_SESSION_RECOVERY_ENABLED = "true";
   await db.$executeRawUnsafe(
-    'TRUNCATE TABLE "teams", "users" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations", "teams", "users" RESTART IDENTITY CASCADE',
   );
   commands.execute.mockClear();
 });
-afterAll(async () => db.$disconnect());
+afterAll(async () => {
+  await db.$executeRawUnsafe(
+    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations" CASCADE',
+  );
+  await db.$disconnect();
+  if (previousRecoveryEnabled === undefined)
+    delete process.env.RUNTIME_SESSION_RECOVERY_ENABLED;
+  else process.env.RUNTIME_SESSION_RECOVERY_ENABLED = previousRecoveryEnabled;
+});
+
+async function verifiedCommand(input: {
+  commandType: string;
+  sessionId: string;
+  commandId?: string;
+}) {
+  if (input.commandType !== "session.close")
+    throw new Error("The cleanup fixture must not execute business commands.");
+  const stored = input.commandId
+    ? await db.browserRuntimeCommand.findUnique({
+        where: { id: input.commandId },
+      })
+    : null;
+  const recoveryPayload = stored?.payload as {
+    recovery?: { recoveryId: string; requestId: string };
+  } | null;
+  const request =
+    recoveryPayload?.recovery ??
+    (await recoveries.prepareClose(
+      input.sessionId,
+      input.commandId ?? randomUUID(),
+    ));
+  const session = await db.browserRuntimeSession.findUniqueOrThrow({
+    where: { id: input.sessionId },
+    include: { runtime: true },
+  });
+  const runtime = session.runtime;
+  await closures.acceptRuntimeEvidence(
+    {
+      runtimeId: runtime.id,
+      connectionId: runtime.connectionId!,
+      connectionGeneration: runtime.connectionGeneration,
+      negotiatedMinor: 14,
+      capabilities: new Set(["closure-evidence-v1"]),
+      hostInstanceId: runtime.hostInstanceId!,
+      daemonInstanceId: runtime.daemonInstanceId!,
+    },
+    {
+      evidenceId: randomUUID(),
+      recoveryId: request.recoveryId,
+      requestId: request.requestId,
+      sessionId: session.id,
+      leaseToken: session.leaseToken,
+      fencingToken: session.fencingToken.toString(),
+      hostInstanceId: runtime.hostInstanceId!,
+      daemonInstanceId: runtime.daemonInstanceId!,
+      launchIdentityVersion: 1,
+      method: "LIVE_SESSION_TERMINATED",
+      networkRevoked: true,
+      closureCompletedAt: new Date().toISOString(),
+    },
+  );
+  return {
+    id: request.requestId,
+    status: "SUCCEEDED",
+    artifacts: [],
+    error: null,
+  };
+}
 
 async function waitingHumanFixture(transition: string) {
   const team = await db.team.create({
@@ -67,7 +153,10 @@ async function waitingHumanFixture(transition: string) {
     },
   });
   const user = await db.user.create({
-    data: { name: "Operator", memberships: { create: { teamId: team.id } } },
+    data: {
+      name: "Operator",
+      memberships: { create: { teamId: team.id, role: "ADMIN" } },
+    },
   });
   const deadline = new Date(
     Date.now() + (transition === "run-timeout" ? -1000 : 600_000),
@@ -121,7 +210,13 @@ async function waitingHumanFixture(transition: string) {
       tokenHash: randomUUID(),
       tokenHint: "test",
       protocolMajor: 1,
-      protocolMinor: 13,
+      protocolMinor: 14,
+      status: "ONLINE",
+      capabilities: ["closure-evidence-v1"],
+      connectionId: randomUUID(),
+      connectionGeneration: 1n,
+      hostInstanceId: "hitl-original-host",
+      daemonInstanceId: "hitl-original-daemon",
       maxConcurrency: 4,
     },
   });
@@ -212,7 +307,7 @@ async function waitingHumanFixture(transition: string) {
 }
 
 describe("PostgreSQL uncertain writes after human intervention", () => {
-  it("retries resource cleanup after a verified close committed but the cleanup transaction failed", async () => {
+  it("rolls back proof and resource release together on a transient database failure, then retries the same command", async () => {
     const { run, task, session, current } = await waitingHumanFixture("cancel");
     await new ExecutionRunService(db as never, {} as never).cancel(
       {
@@ -225,45 +320,69 @@ describe("PostgreSQL uncertain writes after human intervention", () => {
       },
       run.id,
     );
-    const transaction = db.$transaction.bind(db);
-    const transactions = vi
-      .spyOn(db, "$transaction")
-      .mockImplementationOnce((input) => transaction(input))
-      .mockRejectedValueOnce(
-        new Error("transient cleanup transaction failure"),
-      );
+    await cleanup.tick();
+    // Fault injection occurs inside real PostgreSQL, after the proof insert but before slot removal.
+    await db.$executeRawUnsafe(
+      `CREATE FUNCTION fixture_cleanup_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture transient cleanup failure'; END $$`,
+    );
+    await db.$executeRawUnsafe(
+      `CREATE TRIGGER fixture_cleanup_failure BEFORE DELETE ON browser_runtime_slots FOR EACH ROW EXECUTE FUNCTION fixture_cleanup_failure()`,
+    );
     try {
-      await cleanup.tick();
+      await recoveryWorker.tick();
       expect(
         await db.browserRuntimeSession.findUniqueOrThrow({
           where: { id: session.id },
         }),
       ).toMatchObject({
-        status: "CLOSED",
-        closureVerifiedAt: expect.any(Date),
+        status: "LOST",
+        closureVerifiedAt: null,
+        closureEvidenceId: null,
       });
-      expect(await db.browserExecution.findFirstOrThrow()).toMatchObject({
-        status: "RELEASING",
-      });
+      expect(await db.sessionClosureEvidence.count()).toBe(0);
       expect(await db.browserRuntimeSlot.count()).toBe(1);
-
-      await cleanup.tick();
-      expect(commands.execute).toHaveBeenCalledOnce();
-      expect(await db.browserRuntimeSlot.count()).toBe(0);
-      expect(await db.browserExecution.findFirstOrThrow()).toMatchObject({
-        status: "RELEASED",
-      });
-      expect(
-        await db.agentRuntimeTask.findUniqueOrThrow({ where: { id: task.id } }),
-      ).toMatchObject({
-        recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
-      });
       expect(await db.executionResourceLease.findFirstOrThrow()).toMatchObject({
         quarantined: true,
       });
     } finally {
-      transactions.mockRestore();
+      await db.$executeRawUnsafe(
+        "DROP TRIGGER fixture_cleanup_failure ON browser_runtime_slots",
+      );
+      await db.$executeRawUnsafe("DROP FUNCTION fixture_cleanup_failure()");
     }
+    // The pending RPC keeps its Runtime permit until the prior owner expires.
+    expect(
+      await db.runtimeRecoveryPermit.count({
+        where: { runtimeId: session.runtimeId },
+      }),
+    ).toBe(1);
+    await db.$transaction([
+      db.runtimeSessionRecovery.updateMany({
+        where: { sessionId: session.id },
+        data: { nextAttemptAt: new Date(0), claimExpiresAt: new Date(0) },
+      }),
+      db.runtimeRecoveryPermit.updateMany({
+        where: { runtimeId: session.runtimeId },
+        data: { claimExpiresAt: new Date(0) },
+      }),
+    ]);
+    await recoveryWorker.tick();
+    expect(commands.execute).toHaveBeenCalledTimes(2);
+    expect(
+      await db.browserRuntimeCommand.count({
+        where: { sessionId: session.id, commandType: "session.close" },
+      }),
+    ).toBe(1);
+    expect(await db.browserRuntimeSlot.count()).toBe(0);
+    expect(await db.browserExecution.findFirstOrThrow()).toMatchObject({
+      status: "RELEASED",
+    });
+    expect(
+      await db.agentRuntimeTask.findUniqueOrThrow({ where: { id: task.id } }),
+    ).toMatchObject({ recoveryStatus: "WRITE_OUTCOME_UNKNOWN" });
+    expect(await db.executionResourceLease.findFirstOrThrow()).toMatchObject({
+      quarantined: true,
+    });
   });
 
   it.each([
@@ -301,9 +420,10 @@ describe("PostgreSQL uncertain writes after human intervention", () => {
           run.id,
         );
 
-      // The real cleanup worker performs the terminal transition and consumes the
-      // mocked browser's verified close ACK through BrowserExecutionRunner.
+      // Cleanup enqueues durable recovery; the worker sends a challenge and this
+      // fixture responds through the actual authenticated proof transaction.
       await cleanup.tick();
+      await recoveryWorker.tick();
       expect(commands.execute).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionId: session.id,
@@ -327,13 +447,22 @@ describe("PostgreSQL uncertain writes after human intervention", () => {
       });
       expect(await db.browserRuntimeSlot.count()).toBe(0);
 
+      const recovery = await db.runtimeSessionRecovery.findFirstOrThrow({
+        where: { sessionId: session.id },
+      });
       await expect(
         sessions.resolveWriteOutcome(
           current,
           session.id,
           "Operator checked the model record and reconciled the pending write.",
+          {
+            expectedVersion: recovery.version,
+            idempotencyKey: randomUUID(),
+            outcome: "VERIFIED",
+            evidenceRefs: ["fixture://hitl-business-audit"],
+          },
         ),
-      ).resolves.toEqual({ released: 1 });
+      ).resolves.toMatchObject({ released: 1 });
       await db.$transaction((tx) =>
         releaseVerifiedSessionResources(tx, session.id),
       );

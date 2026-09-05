@@ -667,6 +667,12 @@ model BrowserRuntime {
   protocolMajor        Int?                         @map("protocol_major")
   protocolMinor        Int?                         @map("protocol_minor")
   gatewayInstanceId    String?                      @map("gateway_instance_id")
+  connectionGeneration BigInt                       @default(0) @map("connection_generation")
+  connectionId         String?                      @map("connection_id") @db.Uuid
+  hostInstanceId       String?                      @map("host_instance_id")
+  daemonInstanceId     String?                      @map("daemon_instance_id")
+  drainState           String                       @default("NONE") @map("drain_state")
+  drainGeneration      Int                          @default(0) @map("drain_generation")
   enabled              Boolean                      @default(true)
   lastSeenAt           DateTime?                    @map("last_seen_at") @db.Timestamptz
   connectedAt          DateTime?                    @map("connected_at") @db.Timestamptz
@@ -722,6 +728,11 @@ model BrowserRuntimeSession {
   executionPermitExpiresAt DateTime?                    @map("execution_permit_expires_at") @db.Timestamptz
   quarantinedAt            DateTime?                    @map("quarantined_at") @db.Timestamptz
   closureVerifiedAt        DateTime?                    @map("closure_verified_at") @db.Timestamptz
+  closureEvidenceId        String?                      @map("closure_evidence_id") @db.Uuid
+  launchIdentityVersion    Int?                         @map("launch_identity_version")
+  launchIdentity           Json?                        @map("launch_identity")
+  launchHostInstanceId     String?                      @map("launch_host_instance_id")
+  launchConnectionGeneration BigInt?                    @map("launch_connection_generation")
   purpose                  BrowserRuntimeSessionPurpose @default(EXECUTION)
   slotNumber               Int                          @map("slot_number")
   leaseToken               String                       @map("lease_token") @db.Uuid
@@ -1415,6 +1426,7 @@ model TaskCaseExecution {
   deploymentId        String                 @map("deployment_id") @db.Uuid
   executionOrdinal    Int                    @default(1) @map("execution_ordinal")
   runId               String?                @unique @map("run_id") @db.Uuid
+  dispatchOrder       Int?                   @map("dispatch_order")
   dispatchStatus      TaskCaseDispatchStatus @default(PENDING) @map("dispatch_status")
   dispatchAttempts    Int                    @default(0) @map("dispatch_attempts")
   dispatchLastError   Json?                  @map("dispatch_last_error")
@@ -2028,6 +2040,7 @@ model BrowserExecution {
   routingRuleId        String?                @map("routing_rule_id") @db.Uuid
   targetRuntimeId      String?                @map("target_runtime_id") @db.Uuid
   admissionAttempts    Int                    @default(0) @map("admission_attempts")
+  blockingRecoveryId   String?                @map("blocking_recovery_id") @db.Uuid
   startupRecoveryCount Int                    @default(0) @map("startup_recovery_count")
   allocationToken      String?                @map("allocation_token") @db.Uuid
   waitingSince         DateTime?              @map("waiting_since") @db.Timestamptz
@@ -2047,6 +2060,7 @@ model BrowserExecution {
   @@index([status, nextAdmissionAt, createdAt], map: "browser_executions_status_next_admission_created_at_idx")
   @@index([targetRuntimeId, status])
   @@index([runtimeSessionId])
+  @@index([blockingRecoveryId])
   @@map("browser_executions")
 }
 
@@ -2059,11 +2073,15 @@ model ExecutionResourceLease {
   resourceKey String                @default("") @map("resource_key")
   mode        String
   quarantined Boolean               @default(false)
+  recoveryId  String?               @map("recovery_id") @db.Uuid
+  origin      String                @default("NORMAL")
+  guardReason String?               @map("guard_reason")
   createdAt   DateTime              @default(now()) @map("created_at") @db.Timestamptz
   session     BrowserRuntimeSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
 
   @@unique([sessionId, resourceKey])
   @@index([rootKey, createdAt])
+  @@index([recoveryId])
   @@map("execution_resource_leases")
 }
 
@@ -2284,4 +2302,129 @@ model AuditEvent {
 
   @@index([teamId, createdAt(sort: Desc)])
   @@map("audit_events")
+}
+
+
+/// Durable workflow state, independently tracking physical closure and business outcome.
+model RuntimeSessionRecovery {
+  id                      String    @id @default(uuid()) @db.Uuid
+  teamId                  String    @map("team_id") @db.Uuid
+  runtimeId               String    @map("runtime_id") @db.Uuid
+  sessionId               String    @map("session_id") @db.Uuid
+  expectedSessionFence    BigInt    @map("expected_session_fence")
+  expectedLeaseDigest     String    @map("expected_lease_digest")
+  reason                  String
+  sourceRunId             String?   @map("source_run_id") @db.Uuid
+  observedProtocolMajor   Int       @map("observed_protocol_major")
+  observedProtocolMinor   Int       @map("observed_protocol_minor")
+  closureState            String    @default("REQUESTED") @map("closure_state")
+  closureEvidenceId       String?   @map("closure_evidence_id") @db.Uuid
+  closureVerifiedAt       DateTime? @map("closure_verified_at") @db.Timestamptz
+  writeOutcomeState       String    @default("UNASSESSED") @map("write_outcome_state")
+  outcomeEvidenceRefs      Json      @default("[]") @map("outcome_evidence_refs")
+  resolvedBy              String?   @map("resolved_by") @db.Uuid
+  resolutionNote          String?   @map("resolution_note")
+  resolutionOutcome       String?   @map("resolution_outcome")
+  resolutionKey           String?   @map("resolution_key")
+  resolutionDigest        String?   @map("resolution_digest")
+  writeResolvedAt         DateTime? @map("write_resolved_at") @db.Timestamptz
+  scopeSnapshot           Json      @default("[]") @map("scope_snapshot")
+  scopeProvenance         String    @default("UNKNOWN") @map("scope_provenance")
+  aliasRegistryVersion    String?   @map("alias_registry_version")
+  attempts                Int       @default(0)
+  nextAttemptAt           DateTime? @default(now()) @map("next_attempt_at") @db.Timestamptz
+  lastErrorCode           String?   @map("last_error_code")
+  lastErrorAt             DateTime? @map("last_error_at") @db.Timestamptz
+  activeCommandId         String?   @map("active_command_id") @db.Uuid
+  claimToken              String?   @map("claim_token") @db.Uuid
+  claimExpiresAt          DateTime? @map("claim_expires_at") @db.Timestamptz
+  claimVersion            Int       @default(0) @map("claim_version")
+  version                 Int       @default(1)
+  resolvedAt              DateTime? @map("resolved_at") @db.Timestamptz
+  discoveredAt            DateTime  @default(now()) @map("discovered_at") @db.Timestamptz
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([sessionId, expectedSessionFence])
+  @@index([closureState, nextAttemptAt, id])
+  @@index([runtimeId, closureState])
+  @@index([teamId, resolvedAt, updatedAt, id])
+  @@index([claimExpiresAt])
+  @@map("runtime_session_recoveries")
+}
+
+model SessionClosureEvidence {
+  id                       String   @id @default(uuid()) @db.Uuid
+  evidenceId               String   @unique @map("evidence_id") @db.Uuid
+  recoveryId               String   @map("recovery_id") @db.Uuid
+  requestId                String   @map("request_id") @db.Uuid
+  sessionId                String   @map("session_id") @db.Uuid
+  sessionFence             BigInt   @map("session_fence")
+  leaseDigest              String   @map("lease_digest")
+  runtimeId                String   @map("runtime_id") @db.Uuid
+  connectionGeneration     BigInt?  @map("connection_generation")
+  hostInstanceId           String?  @map("host_instance_id")
+  daemonInstanceId         String?  @map("daemon_instance_id")
+  launchIdentityVersion    Int?     @map("launch_identity_version")
+  method                   String
+  capabilityVersion        String   @map("capability_version")
+  summary                  Json
+  serverVerifiedAt         DateTime @default(now()) @map("server_verified_at") @db.Timestamptz
+  actorId                  String?  @map("actor_id") @db.Uuid
+  auditRef                 String?  @map("audit_ref")
+
+  @@index([requestId])
+  @@index([recoveryId, serverVerifiedAt])
+  @@map("session_closure_evidence")
+}
+
+model RuntimeRecoveryOutbox {
+  id             String    @id @default(uuid()) @db.Uuid
+  recoveryId     String    @map("recovery_id") @db.Uuid
+  eventType      String    @map("event_type")
+  version        Int
+  payload        Json      @default("{}")
+  claimToken     String?   @map("claim_token") @db.Uuid
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz
+  deliveredAt    DateTime? @map("delivered_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([recoveryId, eventType, version])
+  @@index([deliveredAt, createdAt])
+  @@map("runtime_recovery_outbox")
+}
+
+model RuntimeRecoveryPermit {
+  runtimeId       String    @id @map("runtime_id") @db.Uuid
+  recoveryId      String    @map("recovery_id") @db.Uuid
+  activeCommandId String?   @map("active_command_id") @db.Uuid
+  claimToken      String    @map("claim_token") @db.Uuid
+  claimExpiresAt  DateTime  @map("claim_expires_at") @db.Timestamptz
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("runtime_recovery_permits")
+}
+
+model RuntimeDrainAttestation {
+  id                   String    @id @default(uuid()) @db.Uuid
+  teamId               String    @map("team_id") @db.Uuid
+  runtimeId            String    @map("runtime_id") @db.Uuid
+  drainGeneration      Int       @map("drain_generation")
+  connectionGeneration BigInt    @map("connection_generation")
+  hostInstanceId       String?   @map("host_instance_id")
+  frozenSessions       Json      @map("frozen_sessions")
+  snapshotDigest       String    @map("snapshot_digest")
+  state                String    @default("FROZEN")
+  createdBy            String    @map("created_by") @db.Uuid
+  attestedBy           String?   @map("attested_by") @db.Uuid
+  idempotencyKey       String?   @map("idempotency_key")
+  attestationDigest    String?   @map("attestation_digest")
+  evidenceRefs         Json      @default("[]") @map("evidence_refs")
+  note                 String?
+  attestedAt           DateTime? @map("attested_at") @db.Timestamptz
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([runtimeId, drainGeneration])
+  @@index([teamId, state, createdAt])
+  @@map("runtime_drain_attestations")
 }
