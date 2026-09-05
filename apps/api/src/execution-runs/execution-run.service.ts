@@ -1,7 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import {
+  BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -364,6 +366,37 @@ export class ExecutionRunService {
     return safeRunProfile(run);
   }
 
+  async downloadEvidence(
+    current: ToolAuthContext,
+    runId: string,
+    evidenceId: string,
+    range?: string,
+  ) {
+    if (range && !/^bytes=(?:\d+-\d*|-\d+)$/u.test(range)) {
+      throw new BadRequestException("Only one byte range is supported.");
+    }
+    const evidence = await this.prisma.runEvidence.findFirst({
+      where: { id: evidenceId, runId, teamId: current.team.id },
+      include: { runtimeArtifact: true },
+    });
+    if (!evidence?.runtimeArtifact)
+      throw new NotFoundException("Evidence not found.");
+    try {
+      return await this.storage.downloadStream(
+        evidence.runtimeArtifact.storageKey,
+        range,
+      );
+    } catch (error) {
+      if (
+        (error as { $metadata?: { httpStatusCode?: number } }).$metadata
+          ?.httpStatusCode === 416
+      ) {
+        throw new HttpException("Requested range is not satisfiable.", 416);
+      }
+      throw error;
+    }
+  }
+
   async consoleDetail(current: ToolAuthContext, id: string) {
     const run = await this.prisma.executionRun.findFirst({
       include: {
@@ -471,12 +504,7 @@ export class ExecutionRunService {
         run.evidences.map(async (evidence) => ({
           ...evidence,
           downloadUrl: evidence.runtimeArtifact
-            ? await this.storage.signedDownloadUrl(
-                evidence.runtimeArtifact.storageKey,
-                evidence.runtimeArtifact.contentType.startsWith("video/")
-                  ? 3_600
-                  : 900,
-              )
+            ? `/console/api/runs/${encodeURIComponent(run.id)}/evidences/${encodeURIComponent(evidence.id)}/download`
             : null,
           runtimeArtifact: evidence.runtimeArtifact
             ? {

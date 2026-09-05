@@ -613,7 +613,7 @@ function toolDefinitions(
       parameters: objectSchema(
         {
           analysisSummary,
-          page: { maximum: 15, minimum: 1, type: "integer" },
+          page: { maximum: 150, minimum: 1, type: "integer" },
           pullRequestUrl,
         },
         ["analysisSummary", "pullRequestUrl"],

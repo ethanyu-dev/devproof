@@ -16,6 +16,7 @@ import type { z } from "zod";
 import { runtimeEventSchema } from "@devproof/runtime-protocol";
 
 import { env } from "../config/env.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { RuntimeConnectionHub } from "./runtime-connection-hub.service.js";
@@ -315,6 +316,12 @@ export class RuntimeCommandDispatcher {
         artifact.kind.toLowerCase() +
         "-" +
         randomUUID();
+      // Persist cleanup intent before the external write, including partial batches
+      // and process crashes. Publication must consume an unclaimed intent.
+      const uploadSignal = AbortSignal.timeout(60_000);
+      await this.prisma.objectStorageDeletionTask.create({
+        data: { storageKey, nextAttemptAt: new Date(Date.now() + 3_600_000) },
+      });
       const stored = await this.storage.put(
         storageKey,
         artifact.contentType,
@@ -324,6 +331,7 @@ export class RuntimeCommandDispatcher {
           kind: artifact.kind,
           sessionId: command.sessionId,
         },
+        uploadSignal,
       );
       artifacts.push({
         ...stored,
@@ -335,6 +343,21 @@ export class RuntimeCommandDispatcher {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      for (const artifact of artifacts) {
+        await acquireAdvisoryTransactionLock(tx, artifact.storageKey);
+        const intent = await tx.objectStorageDeletionTask.deleteMany({
+          where: {
+            storageKey: artifact.storageKey,
+            attempts: 0,
+            leaseToken: null,
+            nextAttemptAt: { gt: new Date() },
+          },
+        });
+        if (intent.count !== 1)
+          throw new ConflictException(
+            "Artifact upload intent expired before publication.",
+          );
+      }
       const claimed = await tx.browserRuntimeCommand.updateMany({
         data: {
           completedAt: new Date(),
@@ -345,6 +368,11 @@ export class RuntimeCommandDispatcher {
         where: { id: command.id, status: { in: ["PENDING", "DISPATCHED"] } },
       });
       if (claimed.count !== 1) {
+        // Roll back intent consumption so retention can reclaim the uploaded objects.
+        if (artifacts.length)
+          throw new ConflictException(
+            "Command result was superseded during artifact upload.",
+          );
         return;
       }
       if (

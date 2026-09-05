@@ -190,6 +190,29 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deliver(id: string) {
+    const owner = await this.prisma.notificationOutbox.findUniqueOrThrow({
+      select: {
+        taskExecutionId: true,
+        runId: true,
+        executionRun: { select: { taskExecutionId: true } },
+      },
+      where: { id },
+    });
+    // Keep updates to the same external task card/comment ordered across replicas
+    // and rerun generations. Claims and acknowledgements remain durable separately.
+    await this.prisma.$transaction(
+      async (tx) => {
+        const key = `notification:${owner.taskExecutionId ?? owner.executionRun?.taskExecutionId ?? owner.runId ?? id}`;
+        const locked = await tx.$queryRaw<Array<{ locked: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS "locked"
+      `;
+        if (locked[0]?.locked) await this.deliverLocked(id);
+      },
+      { timeout: 120_000 },
+    );
+  }
+
+  private async deliverLocked(id: string) {
     const started = Date.now();
     const leaseToken = randomUUID();
     const claimed = await this.prisma.notificationOutbox.updateMany({
@@ -201,6 +224,8 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       },
       where: {
         id,
+        attempts: { lt: 10 },
+        nextAttemptAt: { lte: new Date() },
         status: { in: ["PENDING", "FAILED"] },
         OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: new Date() } }],
       },
@@ -221,6 +246,8 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
         taskExecution: {
           select: {
             notificationContext: true,
+            postRunAnalysisGeneration: true,
+            lifecycle: true,
             title: true,
             traceId: true,
           },
@@ -235,11 +262,63 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     if (!traceId) {
       throw new Error("Notification outbox has no owning run or task.");
     }
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(90_000),
+    ]);
+    const ownedWhere = () => ({
+      id,
+      leaseToken,
+      status: "PROCESSING" as const,
+      leaseExpiresAt: { gt: new Date() },
+    });
+    let renewing = false;
+    const timer = setInterval(() => {
+      if (renewing || signal.aborted) return;
+      renewing = true;
+      void this.prisma.notificationOutbox
+        .updateMany({
+          where: ownedWhere(),
+          data: { leaseExpiresAt: new Date(Date.now() + 30_000) },
+        })
+        .then((result) => {
+          if (result.count !== 1) controller.abort();
+        })
+        .catch(() => controller.abort())
+        .finally(() => {
+          renewing = false;
+        });
+    }, 10_000);
+    timer.unref();
     try {
+      const payload = record(row.payload);
+      const generation =
+        typeof payload.generation === "number" ? payload.generation : 1;
+      if (
+        row.taskExecution &&
+        payload.notificationKind === "TASK_COMPLETED" &&
+        (generation !== row.taskExecution.postRunAnalysisGeneration ||
+          !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
+            row.taskExecution.lifecycle,
+          ))
+      ) {
+        await this.prisma.notificationOutbox.updateMany({
+          where: ownedWhere(),
+          data: {
+            status: "DELIVERED",
+            deliveredAt: new Date(),
+            lastError: "Superseded by a newer task state.",
+            leaseToken: null,
+            leaseExpiresAt: null,
+          },
+        });
+        return;
+      }
       if (row.channel === "AGENT_WEBHOOK") {
-        await this.sendAgentResumeWebhook(row.id, row.payload);
+        await this.sendAgentResumeWebhook(row.id, row.payload, signal);
       } else if (row.channel === "GITHUB") {
-        await this.sendGithub(row.teamId, row.payload);
+        await this.sendGithub(row.teamId, row.payload, signal);
       } else {
         const taskExecution =
           row.taskExecution ?? row.executionRun?.taskExecution;
@@ -254,10 +333,12 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
                 taskTitle: taskExecution.title,
               }
             : undefined,
+          signal,
         );
       }
+      signal.throwIfAborted();
       await this.prisma.$transaction(async (tx) => {
-        await tx.notificationOutbox.update({
+        const acknowledged = await tx.notificationOutbox.updateMany({
           data: {
             deliveredAt: new Date(),
             lastError: null,
@@ -265,8 +346,9 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
             leaseToken: null,
             status: "DELIVERED",
           },
-          where: { id },
+          where: ownedWhere(),
         });
+        if (acknowledged.count !== 1) return;
         if (row.executionRunId) {
           await tx.runEvent.create({
             data: {
@@ -308,7 +390,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       );
       const backoffSeconds = Math.min(3600, 2 ** row.attempts * 5);
       await this.prisma.$transaction(async (tx) => {
-        await tx.notificationOutbox.update({
+        const acknowledged = await tx.notificationOutbox.updateMany({
           data: {
             lastError: message.slice(0, 4000),
             leaseExpiresAt: null,
@@ -316,8 +398,9 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
             nextAttemptAt: new Date(Date.now() + backoffSeconds * 1000),
             status: "FAILED",
           },
-          where: { id },
+          where: ownedWhere(),
         });
+        if (acknowledged.count !== 1) return;
         if (row.executionRunId) {
           await tx.runEvent.create({
             data: {
@@ -366,6 +449,9 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
         }
       });
       this.logger.warn(`Notification outbox ${id} delivery failed: ${message}`);
+    } finally {
+      clearInterval(timer);
+      controller.abort();
     }
   }
 
@@ -377,6 +463,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       taskExecutionId: string | null | undefined;
       taskTitle: string;
     },
+    signal: AbortSignal = new AbortController().signal,
   ) {
     const config = env();
     const payload = payloadValue as Record<string, unknown>;
@@ -386,7 +473,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     const cardMessageId =
       context.feishu?.cardMessageId ?? stringValue(payload.feishuCardMessageId);
     if (cardMessageId) {
-      await this.feishu.updateCardMessage(cardMessageId, card);
+      await this.feishu.updateCardMessage(cardMessageId, card, signal);
       return;
     }
     const replyToMessageId =
@@ -397,6 +484,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
         replyToMessageId,
         deliveryId,
         card,
+        signal,
       );
       if (task?.taskExecutionId) {
         await this.rememberTaskCard(
@@ -423,7 +511,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       body: JSON.stringify(body),
       headers: { "content-type": "application/json; charset=utf-8" },
       method: "POST",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     });
     const text = await response.text();
     if (!response.ok)
@@ -461,7 +549,11 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async sendGithub(teamId: string, payloadValue: Prisma.JsonValue) {
+  private async sendGithub(
+    teamId: string,
+    payloadValue: Prisma.JsonValue,
+    signal: AbortSignal = new AbortController().signal,
+  ) {
     const configuration = env();
     const payload = payloadValue as Record<string, unknown>;
     const pullRequestUrl = String(payload.primaryPullRequestUrl ?? "");
@@ -482,6 +574,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
     const body = githubTaskResultComment(payload, consoleUrl);
     const marker = `<!-- devproof-task:${String(payload.taskExecutionId ?? "")} -->`;
     for (const [index, candidate] of candidates.entries()) {
+      signal.throwIfAborted();
       try {
         const headers = {
           accept: "application/vnd.github+json",
@@ -489,31 +582,41 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
           "content-type": "application/json; charset=utf-8",
           "x-github-api-version": configuration.GITHUB_API_VERSION,
         };
-        const commentsResponse = await fetch(
-          `${prefix}/issues/${reference.number}/comments?per_page=100`,
-          {
-            headers,
-            signal: AbortSignal.timeout(15_000),
-          },
-        );
-        if (!commentsResponse.ok) {
-          throw new GithubWritebackResponseError(
-            commentsResponse.status,
-            `GitHub comments lookup returned HTTP ${commentsResponse.status}.`,
+        let existingId: number | undefined;
+        for (let page = 1; ; page++) {
+          const commentsResponse = await fetch(
+            `${prefix}/issues/${reference.number}/comments?per_page=100&page=${page}`,
+            {
+              headers,
+              signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+            },
           );
+          if (!commentsResponse.ok)
+            throw new GithubWritebackResponseError(
+              commentsResponse.status,
+              `GitHub comments lookup returned HTTP ${commentsResponse.status}.`,
+            );
+          const comments: unknown = await commentsResponse.json();
+          if (!Array.isArray(comments))
+            throw new Error("GitHub comments response is invalid.");
+          const existing = comments.find((comment) => {
+            const row = record(comment);
+            return (
+              typeof row.body === "string" &&
+              row.body.includes(marker) &&
+              typeof row.id === "number"
+            );
+          });
+          if (existing) {
+            existingId = record(existing).id as number;
+            break;
+          }
+          if (comments.length < 100) break;
+          if (page >= 100)
+            throw new Error(
+              "GitHub comments lookup exceeded its page budget; refusing to create a duplicate result comment.",
+            );
         }
-        const comments = (await commentsResponse.json()) as unknown;
-        const existing = Array.isArray(comments)
-          ? comments.find((comment) => {
-              const row = record(comment);
-              return (
-                typeof row.body === "string" &&
-                row.body.includes(marker) &&
-                typeof row.id === "number"
-              );
-            })
-          : undefined;
-        const existingId = record(existing).id;
         const response = await fetch(
           typeof existingId === "number"
             ? `${prefix}/issues/comments/${existingId}`
@@ -522,7 +625,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
             body: JSON.stringify({ body }),
             headers,
             method: typeof existingId === "number" ? "PATCH" : "POST",
-            signal: AbortSignal.timeout(15_000),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
           },
         );
         if (!response.ok) {
@@ -547,6 +650,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
   private async sendAgentResumeWebhook(
     deliveryId: string,
     payloadValue: Prisma.JsonValue,
+    signal: AbortSignal = new AbortController().signal,
   ) {
     const config = env();
     if (
@@ -576,7 +680,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
         "x-devproof-timestamp": timestamp,
       },
       method: "POST",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     });
     if (!response.ok) {
       throw new Error(

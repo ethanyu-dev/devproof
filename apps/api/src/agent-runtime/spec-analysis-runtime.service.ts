@@ -33,7 +33,11 @@ import { z } from "zod";
 import { AgentModelConfigurationService } from "../console/agent-model-configuration.service.js";
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
-import { GithubPullRequestClient } from "../specifications/github-pull-request.client.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import {
+  assertGithubRevision,
+  GithubPullRequestClient,
+} from "../specifications/github-pull-request.client.js";
 import { KnowledgeContextClient } from "../specifications/knowledge-context.client.js";
 import { LinearContextClient } from "../specifications/linear-context.client.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
@@ -41,7 +45,7 @@ import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.
 const SPEC_PROTOCOL_MINOR = 3;
 const SOURCE_PAGE_SIZE = 20;
 const MAX_SOURCE_BYTES = 2_000_000;
-const MAX_SOURCE_COUNT = 250;
+const MAX_SOURCE_COUNT = 3_250;
 const MAX_SINGLE_SOURCE_BYTES = 250_000;
 
 const analysisSummarySchema = z.string().trim().min(1).max(4_000);
@@ -50,7 +54,7 @@ const githubToolSchema = z.object({
   pullRequestUrl: z.string().url().max(2_000),
 });
 const changedFilesToolSchema = githubToolSchema.extend({
-  page: z.number().int().min(1).max(15).default(1),
+  page: z.number().int().min(1).max(150).default(1),
 });
 const readFileToolSchema = githubToolSchema.extend({
   endLine: z.number().int().positive().optional(),
@@ -428,6 +432,7 @@ export class SpecAnalysisRuntimeService {
         teamId,
         arguments_.pullRequestUrl,
         [...allowedPullRequests][0] === arguments_.pullRequestUrl,
+        await this.pinnedRevision(attempt.id, arguments_.pullRequestUrl),
       );
       const source = await this.persistSource(attempt, {
         content: result,
@@ -436,7 +441,7 @@ export class SpecAnalysisRuntimeService {
         label: `${result.pullRequest.repository}#${result.pullRequest.number} · ${result.pullRequest.title}`,
         locator: { pullRequestNumber: result.pullRequest.number },
         revision: result.pullRequest.headSha,
-        uri: result.pullRequest.url,
+        uri: arguments_.pullRequestUrl,
       });
       return runtimeSpecAnalysisToolOutputSchema.parse({
         result: { ...result, sourceRef: source.externalId },
@@ -450,9 +455,11 @@ export class SpecAnalysisRuntimeService {
       const result = await this.github.changedFiles(
         teamId,
         arguments_.pullRequestUrl,
+        await this.pinnedRevision(attempt.id, arguments_.pullRequestUrl),
+        { page: arguments_.page, perPage: SOURCE_PAGE_SIZE },
       );
       const offset = (arguments_.page - 1) * SOURCE_PAGE_SIZE;
-      const page = result.files.slice(offset, offset + SOURCE_PAGE_SIZE);
+      const page = result.files;
       const sources = await this.persistSources(
         attempt,
         page.map((file) => ({
@@ -471,10 +478,12 @@ export class SpecAnalysisRuntimeService {
             ...file,
             sourceRef: sources[index]!.externalId,
           })),
-          hasMore: offset + page.length < result.files.length,
+          hasMore: offset + page.length < Math.min(result.total, 3_000),
           page: arguments_.page,
           revision: result.revision,
-          total: result.files.length,
+          total: result.total,
+          truncated: result.truncated,
+          retrievedTotal: offset + page.length,
         },
         sourceRefs: sources,
       });
@@ -485,6 +494,10 @@ export class SpecAnalysisRuntimeService {
       requireAllowedPullRequest(arguments_.pullRequestUrl, allowedPullRequests);
       const result = await this.github.readPullRequestFile({
         ...(arguments_.endLine ? { endLine: arguments_.endLine } : {}),
+        expectedRevision: await this.pinnedRevision(
+          attempt.id,
+          arguments_.pullRequestUrl,
+        ),
         path: arguments_.path,
         pullRequestUrl: arguments_.pullRequestUrl,
         ...(arguments_.startLine ? { startLine: arguments_.startLine } : {}),
@@ -515,6 +528,10 @@ export class SpecAnalysisRuntimeService {
       const result = await this.github.searchPullRequestCode({
         ...(arguments_.pathPrefix ? { pathPrefix: arguments_.pathPrefix } : {}),
         pullRequestUrl: arguments_.pullRequestUrl,
+        expectedRevision: await this.pinnedRevision(
+          attempt.id,
+          arguments_.pullRequestUrl,
+        ),
         query: arguments_.query,
         teamId,
       });
@@ -634,6 +651,13 @@ export class SpecAnalysisRuntimeService {
           }`,
         );
       }
+    }
+    const revisions = new Map<string, string>();
+    for (const source of attempt.analysisSources) {
+      if (!source.kind.startsWith("GITHUB_") || !source.revision) continue;
+      const uri = source.uri.split("/files#")[0]!;
+      assertGithubRevision(revisions.get(uri), source.revision, uri);
+      revisions.set(uri, source.revision);
     }
     const context = buildContext(attempt.analysisSources);
     const primaryPullRequest = selectPrimaryPullRequest(context);
@@ -1149,6 +1173,26 @@ export class SpecAnalysisRuntimeService {
     });
   }
 
+  private async pinnedRevision(
+    stageAttemptId: string,
+    pullRequestUrl: string,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    const source = await tx.taskAnalysisSource.findFirst({
+      orderBy: { createdAt: "asc" },
+      where: {
+        stageAttemptId,
+        kind: { in: ["GITHUB_PULL_REQUEST", "GITHUB_DIFF", "GITHUB_FILE"] },
+        OR: [
+          { uri: pullRequestUrl },
+          { uri: { startsWith: `${pullRequestUrl}/files#` } },
+        ],
+        revision: { not: null },
+      },
+    });
+    return source?.revision ?? undefined;
+  }
+
   private async persistSource(
     attempt: {
       id: string;
@@ -1166,47 +1210,58 @@ export class SpecAnalysisRuntimeService {
         `Analysis source exceeds the ${MAX_SINGLE_SOURCE_BYTES} byte per-source limit.`,
       );
     }
-    const usage = await this.prisma.taskAnalysisSource.aggregate({
-      _count: { _all: true },
-      _sum: { byteSize: true },
-      where: { stageAttemptId: attempt.id },
-    });
-    if (
-      usage._count._all >= MAX_SOURCE_COUNT ||
-      (usage._sum.byteSize ?? 0) + byteSize > MAX_SOURCE_BYTES
-    ) {
-      throw new BadRequestException(
-        "Spec analysis source budget is exhausted; synthesize the Spec from the sources already collected.",
-      );
-    }
-    const contentHash = createHash("sha256").update(serialized).digest("hex");
-    const sourceRef = runtimeSpecSourceRefSchema.parse({
-      contentHash,
-      excerpt: input.excerpt,
-      externalId,
-      kind: input.kind,
-      label: input.label,
-      locator: input.locator,
-      revision: input.revision,
-      uri: input.uri,
-    });
-    await this.prisma.taskAnalysisSource.create({
-      data: {
-        byteSize,
-        content: json(input.content),
+    return this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, `spec-source:${attempt.id}`);
+      if (input.kind.startsWith("GITHUB_") && input.revision) {
+        const pullRequestUrl = input.uri.split("/files#")[0]!;
+        assertGithubRevision(
+          await this.pinnedRevision(attempt.id, pullRequestUrl, tx),
+          input.revision,
+          pullRequestUrl,
+        );
+      }
+      const usage = await tx.taskAnalysisSource.aggregate({
+        _count: { _all: true },
+        _sum: { byteSize: true },
+        where: { stageAttemptId: attempt.id },
+      });
+      if (
+        usage._count._all >= MAX_SOURCE_COUNT ||
+        (usage._sum.byteSize ?? 0) + byteSize > MAX_SOURCE_BYTES
+      ) {
+        throw new BadRequestException(
+          "Spec analysis source budget is exhausted; synthesize the Spec from the sources already collected.",
+        );
+      }
+      const contentHash = createHash("sha256").update(serialized).digest("hex");
+      const sourceRef = runtimeSpecSourceRefSchema.parse({
         contentHash,
+        excerpt: input.excerpt,
         externalId,
         kind: input.kind,
         label: input.label,
-        locator: json(input.locator),
+        locator: input.locator,
         revision: input.revision,
-        stageAttemptId: attempt.id,
-        taskExecutionId: attempt.stage.taskExecution.id,
-        teamId: attempt.stage.taskExecution.teamId,
         uri: input.uri,
-      },
+      });
+      await tx.taskAnalysisSource.create({
+        data: {
+          byteSize,
+          content: json(input.content),
+          contentHash,
+          externalId,
+          kind: input.kind,
+          label: input.label,
+          locator: json(input.locator),
+          revision: input.revision,
+          stageAttemptId: attempt.id,
+          taskExecutionId: attempt.stage.taskExecution.id,
+          teamId: attempt.stage.taskExecution.teamId,
+          uri: input.uri,
+        },
+      });
+      return sourceRef;
     });
-    return sourceRef;
   }
 
   private async persistSources(

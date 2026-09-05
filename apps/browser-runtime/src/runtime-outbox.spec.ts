@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RuntimeClient } from "./index.js";
+import { RUNTIME_MAX_FRAME_BYTES } from "@devproof/runtime-protocol";
+import { fitRuntimeMessage, RuntimeClient } from "./index.js";
 
 function clientWithSocket(send: (value: string) => void) {
   const client = new RuntimeClient(
@@ -140,5 +141,67 @@ describe("RuntimeClient delivery outbox", () => {
     expect(client.outbox).toEqual([
       expect.objectContaining({ messageType: "runtime.event", priority: 2 }),
     ]);
+  });
+});
+
+describe("encoded artifact delivery limits", () => {
+  it("delivers an 8 MiB video and final screenshot reliably until acknowledged", async () => {
+    const send = vi.fn();
+    const client = clientWithSocket(send);
+    const commandId = "11111111-1111-4111-8111-111111111111";
+    client.send({
+      commandId,
+      type: "command.result",
+      ok: true,
+      result: { closed: true },
+      artifacts: [
+        {
+          kind: "VIDEO",
+          dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
+        },
+        {
+          kind: "SCREENSHOT",
+          dataBase64: Buffer.alloc(1024).toString("base64"),
+        },
+      ],
+    });
+    expect(send).toHaveBeenCalledOnce();
+    expect(client.outbox).toHaveLength(1);
+    expect(JSON.parse(send.mock.calls[0]![0]).artifacts).toHaveLength(2);
+    await client.handleMessage(
+      JSON.stringify({
+        type: "runtime.delivery.ack",
+        messageId: commandId,
+        messageType: "command.result",
+      }),
+    );
+    expect(client.outbox).toHaveLength(0);
+  });
+  it("preserves closure and video while explicitly reporting oversized bundles", () => {
+    const output: any = fitRuntimeMessage({
+      type: "command.result",
+      ok: true,
+      result: { closed: true },
+      artifacts: [
+        {
+          kind: "SCREENSHOT",
+          dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
+        },
+        {
+          kind: "VIDEO",
+          dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
+        },
+      ],
+    });
+    expect(output.result).toMatchObject({
+      closed: true,
+      artifactDeliveryWarning: "ARTIFACT_BUNDLE_EXCEEDS_FRAME_LIMIT",
+    });
+    expect(output.artifacts.map((artifact: any) => artifact.kind)).toEqual([
+      "VIDEO",
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThanOrEqual(
+      RUNTIME_MAX_FRAME_BYTES,
+    );
   });
 });

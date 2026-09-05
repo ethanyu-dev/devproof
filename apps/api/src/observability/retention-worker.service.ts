@@ -41,12 +41,26 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
     if (this.running) return;
     this.running = true;
     try {
-      await this.purgeVerificationTrace();
-      await this.purgeRuntimeData();
-      await this.purgePostRunAnalysisBundles();
-      await this.purgeUnlinkedToolInvocations();
-      await this.purgeAuditEvents();
-      await this.purgeObjectStorageDeletions();
+      const failures: unknown[] = [];
+      for (const stage of [
+        this.purgeVerificationTrace,
+        this.purgeRuntimeData,
+        this.purgePostRunAnalysisBundles,
+        this.purgeUnlinkedToolInvocations,
+        this.purgeAuditEvents,
+        this.purgeObjectStorageDeletions,
+      ]) {
+        try {
+          await stage.call(this);
+        } catch (error) {
+          failures.push(error);
+          this.logger.error(
+            `Retention stage ${stage.name} failed: ${String(error)}`,
+          );
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(failures, "Retention stages failed");
     } finally {
       this.running = false;
     }
@@ -98,6 +112,7 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
                   select: {
                     testRunArtifacts: true,
                     verificationArtifacts: true,
+                    runEvidences: true,
                   },
                 },
                 id: true,
@@ -112,7 +127,8 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
           (artifact) =>
             artifact.runtimeArtifact &&
             artifact.runtimeArtifact._count.verificationArtifacts === 1 &&
-            artifact.runtimeArtifact._count.testRunArtifacts === 0,
+            artifact.runtimeArtifact._count.testRunArtifacts === 0 &&
+            artifact.runtimeArtifact._count.runEvidences === 0,
         );
         const orphanOwned = [] as typeof artifacts;
         for (const artifact of artifacts) {
@@ -175,6 +191,7 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
           select: {
             storageKey: true,
             testRunArtifacts: { select: { id: true }, take: 1 },
+            runEvidences: { select: { id: true }, take: 1 },
           },
         },
       },
@@ -183,11 +200,15 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
         closedAt: { lte: cutoff },
         status: { in: ["CLOSED", "FAILED", "LOST"] },
         verificationRuns: { every: { purgedAt: { not: null } } },
+        resourceLeases: { none: {} },
+        artifacts: { none: { runEvidences: { some: {} } } },
       },
     });
+    const failures: unknown[] = [];
     for (const session of sessions) {
-      await this.serializable(async (tx) => {
-        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      try {
+        await this.serializable(async (tx) => {
+          const locked = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT session."id"
           FROM "browser_runtime_sessions" AS session
           WHERE session."id" = ${session.id}::uuid
@@ -199,31 +220,44 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
               WHERE run."runtime_session_id" = session."id"
                 AND run."purged_at" IS NULL
             )
+            AND NOT EXISTS (
+              SELECT 1 FROM "execution_resource_leases" AS lease
+              WHERE lease."session_id" = session."id"
+            )
           FOR UPDATE OF session
         `;
-        if (locked.length === 0) return;
-        await tx.$queryRaw`
+          if (locked.length === 0) return;
+          await tx.$queryRaw`
           SELECT "id"
           FROM "browser_runtime_artifacts"
           WHERE "session_id" = ${session.id}::uuid
           FOR UPDATE
         `;
-        const artifacts = await tx.browserRuntimeArtifact.findMany({
-          select: {
-            storageKey: true,
-            testRunArtifacts: { select: { id: true }, take: 1 },
-          },
-          where: { sessionId: session.id },
+          const artifacts = await tx.browserRuntimeArtifact.findMany({
+            select: {
+              storageKey: true,
+              testRunArtifacts: { select: { id: true }, take: 1 },
+              runEvidences: { select: { id: true }, take: 1 },
+            },
+            where: { sessionId: session.id },
+          });
+          // Locking the artifact rows also fences concurrent evidence attachments.
+          if (artifacts.some((artifact) => artifact.runEvidences.length > 0))
+            return;
+          await this.enqueueObjectDeletions(
+            tx,
+            artifacts
+              .filter((artifact) => artifact.testRunArtifacts.length === 0)
+              .map((artifact) => artifact.storageKey),
+          );
+          await tx.browserRuntimeSession.delete({ where: { id: session.id } });
         });
-        await this.enqueueObjectDeletions(
-          tx,
-          artifacts
-            .filter((artifact) => artifact.testRunArtifacts.length === 0)
-            .map((artifact) => artifact.storageKey),
-        );
-        await tx.browserRuntimeSession.delete({ where: { id: session.id } });
-      });
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    if (failures.length)
+      throw new AggregateError(failures, "Runtime retention failed");
   }
 
   private async enqueueObjectDeletions(
@@ -301,6 +335,7 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
           },
           where: {
             id: task.id,
+            nextAttemptAt: { lte: new Date() },
             OR: [
               { leaseExpiresAt: null },
               { leaseExpiresAt: { lte: new Date() } },

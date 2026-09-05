@@ -26,6 +26,7 @@ export interface GithubChangedFile {
   changes: number;
   deletions: number;
   patch: string;
+  patchTruncated: boolean;
   path: string;
   previousPath: string | null;
   status: string;
@@ -43,6 +44,7 @@ export class GithubPullRequestClient {
     teamId: string,
     pullRequestUrl: string,
     isPrimary: boolean,
+    expectedRevision?: string,
   ): Promise<GithubPullRequestResolution> {
     const reference = parsePullRequestUrl(pullRequestUrl);
     const candidates = await this.access.candidatesForRepository(
@@ -90,21 +92,35 @@ export class GithubPullRequestClient {
     const head = isRecord(raw.head) ? raw.head : {};
     const base = isRecord(raw.base) ? raw.base : {};
     const headSha = stringValue(head.sha, "unknown");
+    assertGithubRevision(expectedRevision, headSha, pullRequestUrl);
     const diagnostics: SpecificationContextDiagnostic[] = [];
     const [files, checks, deployment] = await Promise.all([
-      this.files(prefix, reference.number, token, pullRequestUrl).catch(
-        (error: unknown) => {
-          diagnostics.push(
-            diagnostic(
-              "WARNING",
-              "GITHUB_FILES_UNAVAILABLE",
-              errorMessage(error, "无法读取 PR 变更文件。"),
-              pullRequestUrl,
-            ),
-          );
-          return [];
-        },
-      ),
+      this.collectChangedFiles(
+        prefix,
+        reference.number,
+        token,
+        pullRequestUrl,
+        raw,
+      ).catch((error: unknown) => {
+        if (
+          error instanceof ContextSourceError &&
+          error.code === "SOURCE_REVISION_CHANGED"
+        )
+          throw error;
+        diagnostics.push(
+          diagnostic(
+            "WARNING",
+            "GITHUB_FILES_UNAVAILABLE",
+            errorMessage(error, "无法读取 PR 变更文件。"),
+            pullRequestUrl,
+          ),
+        );
+        return {
+          files: [],
+          total: numberValue(raw.changed_files),
+          truncated: true,
+        };
+      }),
       this.checks(prefix, headSha, token, pullRequestUrl).catch(() => []),
       this.deployment(prefix, headSha, token, pullRequestUrl).catch(
         (error: unknown) => {
@@ -130,11 +146,20 @@ export class GithubPullRequestClient {
         ),
       );
     }
+    if (files.truncated)
+      diagnostics.push(
+        diagnostic(
+          "WARNING",
+          "GITHUB_FILES_TRUNCATED",
+          `PR 文件列表不完整：已读取 ${files.files.length}/${files.total} 个文件。`,
+          pullRequestUrl,
+        ),
+      );
     const pullRequest = specificationPullRequestContextSchema.parse({
       additions: numberValue(raw.additions),
       baseRef: stringValue(base.ref, "unknown"),
       body: stringValue(raw.body),
-      changedFiles: files.map((file) => file.path),
+      changedFiles: files.files.map((file) => file.path),
       checks,
       commits: numberValue(raw.commits),
       deletions: numberValue(raw.deletions),
@@ -156,44 +181,30 @@ export class GithubPullRequestClient {
   async changedFiles(
     teamId: string,
     pullRequestUrl: string,
-  ): Promise<{ files: GithubChangedFile[]; revision: string }> {
+    expectedRevision?: string,
+    window?: { page: number; perPage: number },
+  ) {
     const {
       prefix,
       pullRequest: raw,
       reference,
       token,
     } = await this.authorizedPullRequest(teamId, pullRequestUrl);
-    const head = isRecord(raw) && isRecord(raw.head) ? raw.head : {};
-    const revision = stringValue(head.sha, "unknown");
-    const files: GithubChangedFile[] = [];
-    for (let page = 1; page <= 3; page += 1) {
-      const payload = await this.request(
-        `${prefix}/pulls/${reference.number}/files?per_page=100&page=${page}`,
-        token,
-        pullRequestUrl,
-      );
-      if (!Array.isArray(payload)) break;
-      const rows = payload.filter(isRecord);
-      files.push(
-        ...rows.map((row) => ({
-          additions: numberValue(row.additions),
-          changes: numberValue(row.changes),
-          deletions: numberValue(row.deletions),
-          patch: stringValue(row.patch).slice(0, 30_000),
-          path: stringValue(row.filename, "unknown"),
-          previousPath:
-            typeof row.previous_filename === "string"
-              ? row.previous_filename
-              : null,
-          status: stringValue(row.status, "modified"),
-        })),
-      );
-      if (rows.length < 100) break;
-    }
-    return { files, revision };
+    const revision = githubHead(raw);
+    assertGithubRevision(expectedRevision, revision, pullRequestUrl);
+    const result = await this.collectChangedFiles(
+      prefix,
+      reference.number,
+      token,
+      pullRequestUrl,
+      raw,
+      window,
+    );
+    return { ...result, revision };
   }
 
   async readPullRequestFile(input: {
+    expectedRevision?: string | undefined;
     endLine?: number;
     path: string;
     pullRequestUrl: string;
@@ -207,6 +218,11 @@ export class GithubPullRequestClient {
     } = await this.authorizedPullRequest(input.teamId, input.pullRequestUrl);
     const head = isRecord(raw) && isRecord(raw.head) ? raw.head : {};
     const revision = stringValue(head.sha, "unknown");
+    assertGithubRevision(
+      input.expectedRevision,
+      revision,
+      input.pullRequestUrl,
+    );
     const path = normalizeRepositoryPath(input.path);
     const payload = await this.request(
       `${prefix}/contents/${path
@@ -246,6 +262,7 @@ export class GithubPullRequestClient {
   }
 
   async searchPullRequestCode(input: {
+    expectedRevision?: string | undefined;
     pathPrefix?: string;
     pullRequestUrl: string;
     query: string;
@@ -259,6 +276,11 @@ export class GithubPullRequestClient {
     } = await this.authorizedPullRequest(input.teamId, input.pullRequestUrl);
     const head = isRecord(raw) && isRecord(raw.head) ? raw.head : {};
     const revision = stringValue(head.sha, "unknown");
+    assertGithubRevision(
+      input.expectedRevision,
+      revision,
+      input.pullRequestUrl,
+    );
     const query = input.query.trim().slice(0, 500);
     const qualifier = `repo:${reference.owner}/${reference.repository}`;
     const payload = await this.request(
@@ -358,27 +380,84 @@ export class GithubPullRequestClient {
     throw lastError;
   }
 
-  private async files(
+  private async collectChangedFiles(
     prefix: string,
     number: number,
     token: string,
     reference: string,
+    initial: unknown,
+    window?: { page: number; perPage: number },
   ) {
-    const result: Array<{ path: string }> = [];
-    for (let page = 1; page <= 3; page += 1) {
+    const files: GithubChangedFile[] = [];
+    let lastPageFull = false;
+    const perPage = window?.perPage ?? 100;
+    const firstPage = window?.page ?? 1;
+    const lastPage = window?.page ?? 30;
+    for (let page = firstPage; page <= lastPage; page += 1) {
       const payload = await this.request(
-        `${prefix}/pulls/${number}/files?per_page=100&page=${page}`,
+        `${prefix}/pulls/${number}/files?per_page=${perPage}&page=${page}`,
         token,
         reference,
       );
-      if (!Array.isArray(payload)) break;
+      if (!Array.isArray(payload))
+        throw new ContextSourceError(
+          "GITHUB",
+          "GITHUB_FILES_INVALID",
+          "GitHub 文件列表响应无效。",
+          reference,
+        );
       const rows = payload.filter(isRecord);
-      result.push(
-        ...rows.map((row) => ({ path: stringValue(row.filename, "unknown") })),
+      files.push(
+        ...rows.map((row) => ({
+          additions: numberValue(row.additions),
+          changes: numberValue(row.changes),
+          deletions: numberValue(row.deletions),
+          patch: stringValue(row.patch).slice(0, 30_000),
+          patchTruncated:
+            typeof row.patch !== "string" || row.patch.length > 30_000,
+          path: stringValue(row.filename, "unknown"),
+          previousPath:
+            typeof row.previous_filename === "string"
+              ? row.previous_filename
+              : null,
+          status: stringValue(row.status, "modified"),
+        })),
       );
-      if (rows.length < 100) break;
+      lastPageFull = rows.length === perPage;
+      if (!lastPageFull) break;
     }
-    return result;
+    // PR file pages are mutable: never label a mixed set with the original SHA.
+    const latest = await this.request(
+      `${prefix}/pulls/${number}`,
+      token,
+      reference,
+    );
+    assertGithubRevision(githubHead(initial), githubHead(latest), reference);
+    const base = (value: unknown) =>
+      isRecord(value) && isRecord(value.base)
+        ? stringValue(value.base.sha)
+        : "";
+    assertGithubRevision(base(initial), base(latest), reference);
+    const reportedTotal =
+      isRecord(initial) && typeof initial.changed_files === "number"
+        ? initial.changed_files
+        : null;
+    const total = reportedTotal ?? files.length;
+    return {
+      files,
+      total,
+      truncated:
+        reportedTotal === null
+          ? lastPageFull
+          : window
+            ? total > 3_000 ||
+              files.length <
+                Math.max(
+                  0,
+                  Math.min(perPage, total - (firstPage - 1) * perPage),
+                )
+            : files.length < total,
+    };
   }
 
   private async checks(
@@ -574,4 +653,25 @@ function httpUrl(value: unknown) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function githubHead(value: unknown) {
+  return isRecord(value) && isRecord(value.head)
+    ? stringValue(value.head.sha, "unknown")
+    : "unknown";
+}
+
+export function assertGithubRevision(
+  expected: string | undefined,
+  actual: string,
+  reference: string,
+) {
+  if (expected !== undefined && expected !== actual) {
+    throw new ContextSourceError(
+      "GITHUB",
+      "SOURCE_REVISION_CHANGED",
+      `PR 源码已从 ${expected} 变为 ${actual}，请重新开始 Spec 分析以获取一致的快照。`,
+      reference,
+    );
+  }
 }

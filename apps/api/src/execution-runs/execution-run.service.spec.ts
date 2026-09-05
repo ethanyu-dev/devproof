@@ -675,3 +675,62 @@ describe("Run trajectory projection", () => {
     });
   });
 });
+
+describe("evidence downloads", () => {
+  it("opens fresh storage streams for later video ranges and scopes the lookup to the team and run", async () => {
+    const findFirst = vi
+      .fn()
+      .mockResolvedValue({ runtimeArtifact: { storageKey: "evidence-key" } });
+    const downloadStream = vi.fn().mockResolvedValue({
+      body: "stream",
+      contentRange: "bytes 100-199/1000",
+    });
+    const service = new ExecutionRunService(
+      { runEvidence: { findFirst } } as never,
+      { downloadStream } as never,
+    );
+    await service.downloadEvidence(current, runId, "evidence-1");
+    await service.downloadEvidence(
+      current,
+      runId,
+      "evidence-1",
+      "bytes=100-199",
+    );
+    expect(downloadStream).toHaveBeenLastCalledWith(
+      "evidence-key",
+      "bytes=100-199",
+    );
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: "evidence-1", runId, teamId: snapshot.teamId },
+      include: { runtimeArtifact: true },
+    });
+    findFirst.mockResolvedValueOnce(null);
+    await expect(
+      service.downloadEvidence(current, runId, "other-evidence"),
+    ).rejects.toThrow("Evidence not found");
+    expect(downloadStream).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unsupported ranges and preserves storage range errors", async () => {
+    const service = new ExecutionRunService(
+      {
+        runEvidence: {
+          findFirst: vi
+            .fn()
+            .mockResolvedValue({ runtimeArtifact: { storageKey: "key" } }),
+        },
+      } as never,
+      {
+        downloadStream: vi
+          .fn()
+          .mockRejectedValue({ $metadata: { httpStatusCode: 416 } }),
+      } as never,
+    );
+    await expect(
+      service.downloadEvidence(current, runId, "evidence", "bytes=0-1,4-5"),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      service.downloadEvidence(current, runId, "evidence", "bytes=1000-"),
+    ).rejects.toMatchObject({ status: 416 });
+  });
+});

@@ -7,6 +7,7 @@ function fixture(
   counts: {
     testRunArtifacts: number;
     verificationArtifacts: number;
+    runEvidences?: number;
   },
   postRunBundle = false,
 ) {
@@ -42,7 +43,7 @@ function fixture(
         {
           id: "artifact-link-1",
           runtimeArtifact: {
-            _count: counts,
+            _count: { runEvidences: 0, ...counts },
             id: "runtime-artifact-1",
           },
           storageKey: "runtime/team/session/command/screenshot",
@@ -149,6 +150,43 @@ describe("RetentionWorker", () => {
     expect(tx.browserRuntimeArtifact.deleteMany).toHaveBeenCalledWith({
       where: { id: { in: [] } },
     });
+  });
+
+  it("preserves runtime metadata referenced by v2 evidence when a legacy trace expires", async () => {
+    const { tx, storage, worker } = fixture({
+      testRunArtifacts: 0,
+      verificationArtifacts: 1,
+      runEvidences: 1,
+    });
+    await worker.sweep();
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(tx.browserRuntimeArtifact.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [] } },
+    });
+  });
+
+  it("continues every retention stage after a runtime purge failure and surfaces the failure", async () => {
+    const { worker, prisma } = fixture({
+      testRunArtifacts: 0,
+      verificationArtifacts: 1,
+    });
+    const purge = vi
+      .spyOn(worker as never, "purgeRuntimeData" as never)
+      .mockRejectedValue(new Error("foreign key"));
+    const bundles = vi.spyOn(
+      worker as never,
+      "purgePostRunAnalysisBundles" as never,
+    );
+    const objects = vi.spyOn(
+      worker as never,
+      "purgeObjectStorageDeletions" as never,
+    );
+    await expect(worker.sweep()).rejects.toThrow("Retention stages failed");
+    expect(bundles).toHaveBeenCalledOnce();
+    expect(objects).toHaveBeenCalledOnce();
+    expect(prisma.auditEvent.deleteMany).toHaveBeenCalledOnce();
+    purge.mockRestore();
+    await expect(worker.sweep()).resolves.toBeUndefined();
   });
 
   it("detaches and deletes expired post-run bundles without deleting findings", async () => {

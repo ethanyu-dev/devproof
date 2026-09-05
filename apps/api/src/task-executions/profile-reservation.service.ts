@@ -120,117 +120,146 @@ export class ProfileReservationService {
       return { acquired: true as const, profile };
     }
 
-    const current = await this.prisma.browserProfileReservation.upsert({
-      create: {
-        profileId: profile.id,
-        status: "QUEUED",
-        taskExecutionId: task.id,
-        teamId: task.teamId,
-      },
-      update: {},
-      where: {
-        profileId_taskExecutionId: {
-          profileId: profile.id,
-          taskExecutionId: task.id,
-        },
-      },
-    });
-    if (current.status === "ACTIVE") {
-      await this.renew(current.id, now);
-      return { acquired: true as const, profile };
-    }
-    if (!["QUEUED", "EXPIRED"].includes(current.status)) {
-      return blocked("PROFILE_RESERVED", {
-        resourceType: "PROFILE",
-        resourceId: profile.id,
-      });
-    }
-    if (current.status === "EXPIRED") {
-      await this.prisma.browserProfileReservation.update({
-        data: { status: "QUEUED" },
-        where: { id: current.id },
-      });
-    }
-
     await this.releaseStaleActive(profile.id, now);
-    const active = await this.prisma.browserProfileReservation.findFirst({
-      select: { id: true, taskExecutionId: true },
-      where: { profileId: profile.id, status: "ACTIVE" },
-    });
-    const queuePosition = async (): Promise<
-      CaseSchedulingDecision["queue"]
-    > => ({
-      scope: "PROFILE_TASK",
-      position:
-        1 +
-        (await this.prisma.browserProfileReservation.count({
-          where: {
-            profileId: profile.id,
-            status: "QUEUED",
-            OR: [
-              { queuedAt: { lt: current.queuedAt ?? now } },
-              { queuedAt: current.queuedAt ?? now, id: { lt: current.id } },
-            ],
-          },
-        })),
-      snapshotAt: now.toISOString(),
-    });
-    if (active)
-      return blocked(
-        "PROFILE_RESERVED",
-        {
-          resourceType: "PROFILE",
-          resourceId: profile.id,
-          taskId: active.taskExecutionId,
-        },
-        await queuePosition(),
-      );
-    const first = await this.prisma.browserProfileReservation.findFirst({
-      orderBy: [{ queuedAt: "asc" }, { id: "asc" }],
-      select: { id: true },
-      where: { profileId: profile.id, status: "QUEUED" },
-    });
-    if (first?.id !== current.id)
-      return blocked(
-        "PROFILE_RESERVED",
-        { resourceType: "PROFILE", resourceId: profile.id },
-        await queuePosition(),
-      );
-
-    const leaseToken = randomUUID();
-    try {
-      const activated = await this.prisma.browserProfileReservation.updateMany({
-        data: {
-          activatedAt: current.activatedAt ?? now,
-          leaseExpiresAt: new Date(now.getTime() + RESERVATION_LEASE_MS),
-          leaseOwner: `task:${task.id}`,
-          leaseToken,
-          releasedAt: null,
-          status: "ACTIVE",
-        },
-        where: {
-          id: current.id,
+    return this.prisma.$transaction(async (tx) => {
+      // Serialize with task reopen/cancel and terminal reservation release.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "task_executions"
+        WHERE "id" = ${task.id}::uuid AND "updated_at" = ${task.updatedAt}
+          AND "lifecycle" NOT IN ('COMPLETED', 'CANCELLED', 'TIMED_OUT')
+        FOR UPDATE
+      `;
+      if (!locked.length) return blocked("PROFILE_RESERVED");
+      let current = await tx.browserProfileReservation.upsert({
+        create: {
+          profileId: profile.id,
           status: "QUEUED",
+          taskExecutionId: task.id,
+          teamId: task.teamId,
+        },
+        update: {},
+        where: {
+          profileId_taskExecutionId: {
+            profileId: profile.id,
+            taskExecutionId: task.id,
+          },
         },
       });
-      return activated.count === 1
-        ? { acquired: true as const, profile }
-        : blocked("PROFILE_RESERVED", {
-            resourceType: "PROFILE",
-            resourceId: profile.id,
-          });
-    } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        ["P2002", "P2034"].includes(error.code)
-      ) {
+      if (["RELEASED", "CANCELLED"].includes(current.status)) {
+        current = await tx.browserProfileReservation.update({
+          where: { id: current.id },
+          data: {
+            status: "QUEUED",
+            queuedAt: now,
+            activatedAt: null,
+            releasedAt: null,
+            leaseToken: null,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+          },
+        });
+      }
+      if (current.status === "ACTIVE") {
+        await tx.browserProfileReservation.updateMany({
+          data: {
+            leaseExpiresAt: new Date(now.getTime() + RESERVATION_LEASE_MS),
+          },
+          where: { id: current.id, status: "ACTIVE" },
+        });
+        return { acquired: true as const, profile };
+      }
+      if (!["QUEUED", "EXPIRED"].includes(current.status)) {
         return blocked("PROFILE_RESERVED", {
           resourceType: "PROFILE",
           resourceId: profile.id,
         });
       }
-      throw error;
-    }
+      if (current.status === "EXPIRED") {
+        await tx.browserProfileReservation.update({
+          data: { status: "QUEUED" },
+          where: { id: current.id },
+        });
+      }
+
+      const active = await tx.browserProfileReservation.findFirst({
+        select: { id: true, taskExecutionId: true },
+        where: { profileId: profile.id, status: "ACTIVE" },
+      });
+      const queuePosition = async (): Promise<
+        CaseSchedulingDecision["queue"]
+      > => ({
+        scope: "PROFILE_TASK",
+        position:
+          1 +
+          (await tx.browserProfileReservation.count({
+            where: {
+              profileId: profile.id,
+              status: "QUEUED",
+              OR: [
+                { queuedAt: { lt: current.queuedAt ?? now } },
+                { queuedAt: current.queuedAt ?? now, id: { lt: current.id } },
+              ],
+            },
+          })),
+        snapshotAt: now.toISOString(),
+      });
+      if (active)
+        return blocked(
+          "PROFILE_RESERVED",
+          {
+            resourceType: "PROFILE",
+            resourceId: profile.id,
+            taskId: active.taskExecutionId,
+          },
+          await queuePosition(),
+        );
+      const first = await tx.browserProfileReservation.findFirst({
+        orderBy: [{ queuedAt: "asc" }, { id: "asc" }],
+        select: { id: true },
+        where: { profileId: profile.id, status: "QUEUED" },
+      });
+      if (first?.id !== current.id)
+        return blocked(
+          "PROFILE_RESERVED",
+          { resourceType: "PROFILE", resourceId: profile.id },
+          await queuePosition(),
+        );
+
+      const leaseToken = randomUUID();
+      try {
+        const activated = await tx.browserProfileReservation.updateMany({
+          data: {
+            activatedAt: current.activatedAt ?? now,
+            leaseExpiresAt: new Date(now.getTime() + RESERVATION_LEASE_MS),
+            leaseOwner: `task:${task.id}`,
+            leaseToken,
+            releasedAt: null,
+            status: "ACTIVE",
+          },
+          where: {
+            id: current.id,
+            status: "QUEUED",
+          },
+        });
+        return activated.count === 1
+          ? { acquired: true as const, profile }
+          : blocked("PROFILE_RESERVED", {
+              resourceType: "PROFILE",
+              resourceId: profile.id,
+            });
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          ["P2002", "P2034"].includes(error.code)
+        ) {
+          return blocked("PROFILE_RESERVED", {
+            resourceType: "PROFILE",
+            resourceId: profile.id,
+          });
+        }
+        throw error;
+      }
+    });
   }
 
   async recordUsage(input: {
@@ -336,19 +365,27 @@ export class ProfileReservationService {
   }
 
   async releaseTask(taskExecutionId: string) {
-    const now = new Date();
-    await this.prisma.browserProfileReservation.updateMany({
-      data: {
-        leaseExpiresAt: null,
-        leaseOwner: null,
-        leaseToken: null,
-        releasedAt: now,
-        status: "RELEASED",
-      },
-      where: {
-        status: { in: ["ACTIVE", "QUEUED", "EXPIRED"] },
-        taskExecutionId,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "task_executions"
+        WHERE "id" = ${taskExecutionId}::uuid
+          AND "lifecycle" IN ('COMPLETED', 'CANCELLED', 'TIMED_OUT')
+        FOR UPDATE
+      `;
+      if (!locked.length) return;
+      await tx.browserProfileReservation.updateMany({
+        data: {
+          leaseExpiresAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          releasedAt: new Date(),
+          status: "RELEASED",
+        },
+        where: {
+          status: { in: ["ACTIVE", "QUEUED", "EXPIRED"] },
+          taskExecutionId,
+        },
+      });
     });
   }
 

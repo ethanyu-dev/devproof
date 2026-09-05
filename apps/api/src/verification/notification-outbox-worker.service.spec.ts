@@ -136,6 +136,7 @@ describe("Feishu task card delivery", () => {
       expect.objectContaining({
         header: expect.objectContaining({ template: "orange" }),
       }),
+      expect.any(AbortSignal),
     );
     expect(feishu.replyCardToMessage).not.toHaveBeenCalled();
     expect(
@@ -153,5 +154,39 @@ describe("Agent resume webhook signing", () => {
         "secretsecretsecretsecretsecretsecret",
       ),
     ).toBe("89a53534b32c52279d021c98a5a7b4aa9d7ef3d177faf9ca39bfdb1c66ad22bb");
+  });
+});
+
+describe("GitHub result comment pagination", () => {
+  it("updates an existing task result beyond the first 100 comments", async () => {
+    const fetcher = vi.fn(async (input: string, init?: RequestInit) => {
+      if (new URL(input).searchParams.get("page") === "1")
+        return Response.json(
+          Array.from({ length: 100 }, (_, id) => ({ id, body: "discussion" })),
+        );
+      if (new URL(input).searchParams.get("page") === "2")
+        return Response.json([
+          { id: 123, body: "<!-- devproof-task:task-1 -->" },
+        ]);
+      expect(init?.method).toBe("PATCH");
+      return Response.json({ id: 123 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const worker = new NotificationOutboxWorker(
+        {} as never,
+        {} as never,
+        { candidatesForRepository: async () => [{ token: "test" }] } as never,
+      );
+      await Reflect.get(worker, "sendGithub").call(worker, "team-1", {
+        taskExecutionId: "task-1",
+        primaryPullRequestUrl: "https://github.com/acme/web/pull/7",
+        verdict: "PASSED",
+      });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(fetcher.mock.calls[2]![0]).toContain("/issues/comments/123");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

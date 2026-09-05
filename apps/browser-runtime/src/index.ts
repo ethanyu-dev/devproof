@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   RUNTIME_PROTOCOL,
+  RUNTIME_MAX_FRAME_BYTES,
   RUNTIME_CAPABILITIES,
   RUNTIME_SESSION_PERMIT_MINOR,
   type RuntimeSessionPermit,
@@ -4316,6 +4317,7 @@ export class RuntimeClient {
   }
 
   private send(message: unknown) {
+    message = fitRuntimeMessage(message);
     const serialized = JSON.stringify(message);
     const type =
       message && typeof message === "object" && "type" in message
@@ -4364,10 +4366,10 @@ export class RuntimeClient {
       return;
     }
     const bytes = Buffer.byteLength(serialized);
-    const maxBytes = 10 * 1_024 * 1_024;
+    const maxBytes = 4 * RUNTIME_MAX_FRAME_BYTES;
     const maxMessages = 500;
     const priority = this.bufferedMessagePriority(message, messageType);
-    if (bytes > maxBytes) {
+    if (bytes > RUNTIME_MAX_FRAME_BYTES) {
       this.recordDrop(messageType, "message_too_large");
       return;
     }
@@ -4699,4 +4701,59 @@ if (isMainModule()) {
     runtimeLog("error", "runtime.failed", { detail });
     process.exitCode = 1;
   }
+}
+
+/** Keep the complete encoded envelope within both the gateway and outbox limits. */
+export function fitRuntimeMessage(message: unknown): unknown {
+  if (Buffer.byteLength(JSON.stringify(message)) <= RUNTIME_MAX_FRAME_BYTES)
+    return message;
+  if (
+    !message ||
+    typeof message !== "object" ||
+    !("type" in message) ||
+    message.type !== "command.result"
+  )
+    return message;
+  const result = message as Record<string, unknown>;
+  const artifacts = Array.isArray(result.artifacts)
+    ? [...result.artifacts]
+    : [];
+  // Final video is the richest evidence; drop other artifacts first.
+  artifacts.sort(
+    (a, b) => Number(b.kind === "VIDEO") - Number(a.kind === "VIDEO"),
+  );
+  const output = {
+    ...result,
+    artifacts,
+    result: {
+      ...(result.result && typeof result.result === "object"
+        ? result.result
+        : {}),
+      artifactDeliveryWarning: "ARTIFACT_BUNDLE_EXCEEDS_FRAME_LIMIT",
+    },
+  };
+  while (
+    artifacts.length &&
+    Buffer.byteLength(JSON.stringify(output)) > RUNTIME_MAX_FRAME_BYTES
+  )
+    artifacts.pop();
+  if (Buffer.byteLength(JSON.stringify(output)) <= RUNTIME_MAX_FRAME_BYTES)
+    return output;
+  // Even pathological result metadata must not swallow the terminal acknowledgement.
+  return {
+    ...result,
+    artifacts: [],
+    result: {
+      closed: (output.result as Record<string, unknown>).closed === true,
+      artifactDeliveryWarning: "RESULT_EXCEEDS_FRAME_LIMIT",
+    },
+    error: {
+      code: "RESULT_EXCEEDS_FRAME_LIMIT",
+      message: "Runtime result metadata exceeds the frame limit.",
+      retryable: false,
+    },
+    ok:
+      result.ok === true &&
+      (output.result as Record<string, unknown>).closed === true,
+  };
 }

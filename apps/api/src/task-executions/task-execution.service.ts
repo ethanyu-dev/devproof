@@ -77,10 +77,12 @@ export function taskDeadlineElapsed(input: {
   lifecycle: string;
   now: Date;
   waitingForHuman: boolean;
+  completedWithinDeadline?: boolean;
 }) {
   return (
     input.lifecycle === "TIMED_OUT" ||
     (!input.waitingForHuman &&
+      !input.completedWithinDeadline &&
       input.deadlineAt <= input.now &&
       !["COMPLETED", "CANCELLED"].includes(input.lifecycle))
   );
@@ -1274,7 +1276,7 @@ export class TaskExecutionService {
         caseExecutions: {
           include: { run: { include: { tasks: currentAgentTaskInclude } } },
         },
-        deployments: { select: { id: true } },
+        deployments: { select: { id: true }, where: { enabled: true } },
         executionRuns: { include: { tasks: currentAgentTaskInclude } },
         profileBinding: true,
         specificationSnapshots: {
@@ -1336,11 +1338,41 @@ export class TaskExecutionService {
     const waitingForHuman = [...issueCases, ...directCases].some(
       (item) => item.run?.lifecycle === "WAITING_HUMAN",
     );
+    const direct = task.kind === "DIRECT_RUN" || task.kind === "LEGACY_RUN";
+    const matrix = taskDeploymentMatrix(
+      task.id,
+      currentCases ?? [],
+      task.deployments,
+    );
+    const allPlannedCasesLinked = direct
+      ? task.executionRuns.length > 0
+      : matrix.length > 0 &&
+        matrix.every((planned) =>
+          latestIssueExecutions.some(
+            (item) =>
+              item.caseId === planned.caseId &&
+              item.deploymentId === planned.deploymentId &&
+              item.dispatchStatus === "LINKED" &&
+              item.run,
+          ),
+        );
+    const terminalRuns = direct
+      ? task.executionRuns
+      : latestIssueExecutions.flatMap((item) => (item.run ? [item.run] : []));
+    const completedWithinDeadline =
+      allPlannedCasesLinked &&
+      terminalRuns.every(
+        (run) =>
+          run.lifecycle === "COMPLETED" &&
+          run.finishedAt !== null &&
+          run.finishedAt <= task.deadlineAt,
+      );
     const timedOut = taskDeadlineElapsed({
       deadlineAt: task.deadlineAt,
       lifecycle: task.lifecycle,
       now: new Date(),
       waitingForHuman,
+      completedWithinDeadline,
     });
     // Profile resolution owns its active wait, but cannot block completion of
     // a failed/cancelled Spec or the parent deadline before a profile exists.
@@ -1474,6 +1506,7 @@ export class TaskExecutionService {
           taskExecutionId: task.id,
         });
         await enqueueTaskCompletionNotifications(tx, {
+          generation: task.postRunAnalysisGeneration,
           counts: completionCounts,
           enableFeishu: Boolean(
             taskNotificationContext(task.notificationContext).feishu ||

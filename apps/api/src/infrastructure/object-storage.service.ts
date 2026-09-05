@@ -61,6 +61,7 @@ export class ObjectStorageService implements OnModuleInit {
     contentType: string,
     body: Buffer,
     metadata: Record<string, string>,
+    signal?: AbortSignal,
   ) {
     const sha256 = createHash("sha256").update(body).digest("hex");
     await this.client.send(
@@ -71,6 +72,7 @@ export class ObjectStorageService implements OnModuleInit {
         Key: storageKey,
         Metadata: { ...metadata, sha256 },
       }),
+      signal ? { abortSignal: signal } : undefined,
     );
     return { byteSize: body.byteLength, sha256 };
   }
@@ -109,6 +111,23 @@ export class ObjectStorageService implements OnModuleInit {
     return {
       body: Buffer.from(bytes),
       contentType: response.ContentType ?? "application/octet-stream",
+    };
+  }
+
+  async downloadStream(storageKey: string, range?: string) {
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.config.OBJECT_STORAGE_BUCKET,
+        Key: storageKey,
+        ...(range ? { Range: range } : {}),
+      }),
+    );
+    if (!response.Body) throw new Error("Artifact body is unavailable.");
+    return {
+      body: response.Body as Readable,
+      contentType: response.ContentType ?? "application/octet-stream",
+      contentLength: response.ContentLength,
+      contentRange: response.ContentRange,
     };
   }
 
