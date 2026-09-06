@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionClosureJournal } from "./closure-journal.js";
 
 import {
   BrowserSessionManager,
@@ -207,6 +209,9 @@ describe("user Browser Profile inactivity retention", () => {
       "http://127.0.0.1:1",
       () => undefined,
       () => undefined,
+      undefined,
+      undefined,
+      { closureJournal: new SessionClosureJournal(await root()) },
     );
     const sessions = Reflect.get(manager, "sessions") as Map<
       string,
@@ -223,14 +228,14 @@ describe("user Browser Profile inactivity retention", () => {
     await expect(
       open.call(manager, {
         fencingToken: "1",
-        leaseToken: "lease-token",
+        leaseToken: randomUUID(),
         profileKey: "shared-user-profile",
         profileMode: "PERSISTENT",
         profileRetention: {
           inactivityTtlSeconds: 2_592_000,
           kind: "USER",
         },
-        sessionId: "second-session",
+        sessionId: randomUUID(),
         state: "OPEN",
       }),
     ).rejects.toMatchObject({ code: "PROFILE_IN_USE" });

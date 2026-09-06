@@ -665,6 +665,15 @@ export class UserBrowserProfilesService {
     ) {
       throw new ConflictException("This browser profile cannot be prepared.");
     }
+    return this.prepareProfile(current, profile, input);
+  }
+
+  private async prepareProfile(
+    current: AuthContext,
+    profile: ProfileRow,
+    input: UserBrowserProfilePrepareInput,
+  ) {
+    const id = profile.id;
     if (!profile.verificationUrl) {
       throw new ConflictException("Profile verificationUrl is not configured.");
     }
@@ -678,6 +687,7 @@ export class UserBrowserProfilesService {
     }
     if (
       existing &&
+      !["READY", "LOST"].includes(profile.status) &&
       ["OPENING", "ACTIVE", "HUMAN_CONTROL"].includes(existing.status)
     ) {
       if (existing.status === "OPENING") {
@@ -723,27 +733,24 @@ export class UserBrowserProfilesService {
     );
     const previousStatus = profile.status;
     const claimedVersion = profile.version + 1;
-    const claimed = await this.prisma.userBrowserProfile.updateMany({
-      data: {
-        assignedRuntimeId: runtimeId,
-        status: "PREPARING",
-        verificationError: Prisma.JsonNull,
-        version: { increment: 1 },
-      },
-      where: { id, status: previousStatus, version: profile.version },
-    });
-    if (claimed.count !== 1) {
-      throw new ConflictException(
-        "Browser profile preparation was started by another request.",
-      );
-    }
+    let allocatedSessionId: string | undefined;
     try {
-      const session = await this.sessions.create(current, {
-        profileMode: "PERSISTENT",
-        purpose: "PROFILE_PREPARATION",
-        runtimeId,
-        userBrowserProfileId: id,
-      });
+      const session = await this.sessions.create(
+        current,
+        {
+          profileMode: "PERSISTENT",
+          purpose: "PROFILE_PREPARATION",
+          runtimeId,
+          userBrowserProfileId: id,
+        },
+        {
+          expectedStatus: previousStatus,
+          expectedVersion: profile.version,
+          onAllocated: (sessionId) => {
+            allocatedSessionId = sessionId;
+          },
+        },
+      );
       if (session.status !== "ACTIVE") {
         throw new ConflictException(
           "Browser Runtime could not open the profile.",
@@ -776,19 +783,28 @@ export class UserBrowserProfilesService {
         sessionId: session.id,
       };
     } catch (error) {
+      // Admission failures leave the original profile intact. Only this
+      // request's committed allocation can invalidate its preparation claim.
+      if (!allocatedSessionId) throw error;
       await this.prisma.userBrowserProfile.updateMany({
         data: {
-          status:
-            previousStatus === "REAUTH_REQUIRED"
-              ? "REAUTH_REQUIRED"
-              : "UNINITIALIZED",
+          status: ["READY", "REAUTH_REQUIRED", "LOST"].includes(previousStatus)
+            ? "REAUTH_REQUIRED"
+            : "UNINITIALIZED",
           verificationError: json({
             code: "PROFILE_PREPARATION_FAILED",
             message: error instanceof Error ? error.message : String(error),
           }),
           version: { increment: 1 },
         },
-        where: { id, status: "PREPARING", version: claimedVersion },
+        where: {
+          id,
+          ownerUserId: current.user.id,
+          teamId: current.team.id,
+          status: "PREPARING",
+          version: claimedVersion,
+          runtimeSessions: { some: { id: allocatedSessionId } },
+        },
       });
       throw error;
     }
@@ -1176,14 +1192,7 @@ export class UserBrowserProfilesService {
         "This browser profile cannot be reauthenticated.",
       );
     }
-    const claimed = await this.prisma.userBrowserProfile.updateMany({
-      data: { status: "REAUTH_REQUIRED", version: { increment: 1 } },
-      where: { id, status: profile.status, version: profile.version },
-    });
-    if (claimed.count !== 1) {
-      throw new ConflictException("The profile state changed concurrently.");
-    }
-    return this.prepare(current, id, input);
+    return this.prepareProfile(current, profile, input);
   }
 
   async stream(

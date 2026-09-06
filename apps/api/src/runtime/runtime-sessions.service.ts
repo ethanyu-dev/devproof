@@ -7,7 +7,7 @@ import {
   NotFoundException,
   Optional,
 } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { Prisma, type UserBrowserProfileStatus } from "@prisma/client";
 import type {
   HumanControlInput,
   RuntimeCommandInput,
@@ -35,6 +35,14 @@ import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.j
 
 function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+/** Internal admission claim; never accepted from the runtime session API. */
+export interface ProfilePreparationClaim {
+  expectedStatus: UserBrowserProfileStatus;
+  expectedVersion: number;
+  // Called synchronously after allocation commits, before any browser command.
+  onAllocated: (sessionId: string) => void;
 }
 
 function safeProfileJson(
@@ -125,7 +133,26 @@ export class RuntimeSessionsService {
     };
   }
 
-  async create(current: AuthContext, input: RuntimeSessionCreateInput) {
+  async create(
+    current: AuthContext,
+    input: RuntimeSessionCreateInput,
+    preparation?: ProfilePreparationClaim,
+  ) {
+    if (
+      preparation &&
+      (input.purpose !== "PROFILE_PREPARATION" ||
+        input.profileMode !== "PERSISTENT" ||
+        !input.userBrowserProfileId ||
+        ![
+          "UNINITIALIZED",
+          "PREPARING",
+          "READY",
+          "REAUTH_REQUIRED",
+          "LOST",
+        ].includes(preparation.expectedStatus))
+    ) {
+      throw new ConflictException("Invalid browser profile preparation claim.");
+    }
     const runtime = await this.prisma.browserRuntime.findFirst({
       where: {
         enabled: true,
@@ -143,7 +170,9 @@ export class RuntimeSessionsService {
             id: input.userBrowserProfileId,
             ownerUserId: current.user.id,
             status: {
-              in: ["UNINITIALIZED", "PREPARING", "READY", "REAUTH_REQUIRED"],
+              in: preparation
+                ? [preparation.expectedStatus]
+                : ["UNINITIALIZED", "PREPARING", "READY", "REAUTH_REQUIRED"],
             },
             teamId: current.team.id,
           },
@@ -153,6 +182,7 @@ export class RuntimeSessionsService {
       throw new NotFoundException("User browser profile was not found.");
     }
     if (
+      !preparation &&
       userProfile?.status === "READY" &&
       (!userProfile.inactivityExpiresAt ||
         userProfile.inactivityExpiresAt.getTime() <= Date.now())
@@ -241,6 +271,41 @@ export class RuntimeSessionsService {
                 tx,
                 `browser-profile:${userProfile.id}`,
               );
+              const freshProfile = await tx.userBrowserProfile.findFirst({
+                where: {
+                  id: userProfile.id,
+                  ownerUserId: current.user.id,
+                  teamId: current.team.id,
+                  owner: {
+                    status: "ACTIVE",
+                    memberships: { some: { teamId: current.team.id } },
+                  },
+                },
+              });
+              if (
+                !freshProfile ||
+                freshProfile.status !==
+                  (preparation?.expectedStatus ?? userProfile.status) ||
+                freshProfile.version !==
+                  (preparation?.expectedVersion ?? userProfile.version) ||
+                freshProfile.runtimeProfileKey !== profileKey ||
+                (freshProfile.assignedRuntimeId &&
+                  freshProfile.assignedRuntimeId !== runtime.id)
+              ) {
+                throw new ConflictException(
+                  "The browser profile changed before session admission.",
+                );
+              }
+              if (
+                !preparation &&
+                freshProfile.status === "READY" &&
+                (!freshProfile.inactivityExpiresAt ||
+                  freshProfile.inactivityExpiresAt.getTime() <= Date.now())
+              ) {
+                throw new ConflictException(
+                  "The user Browser Profile expired and must be prepared again.",
+                );
+              }
               const busy = await tx.browserRuntimeSession.count({
                 where: {
                   userBrowserProfileId: userProfile.id,
@@ -290,6 +355,28 @@ export class RuntimeSessionsService {
               throw new ConflictException(
                 "A manual execution requires exclusive business access while other executions are running.",
               );
+            if (preparation && userProfile) {
+              const claimed = await tx.userBrowserProfile.updateMany({
+                data: {
+                  assignedRuntimeId: runtime.id,
+                  status: "PREPARING",
+                  verificationError: Prisma.JsonNull,
+                  version: { increment: 1 },
+                },
+                where: {
+                  id: userProfile.id,
+                  ownerUserId: current.user.id,
+                  teamId: current.team.id,
+                  status: preparation.expectedStatus,
+                  version: preparation.expectedVersion,
+                },
+              });
+              if (claimed.count !== 1) {
+                throw new ConflictException(
+                  "The browser profile changed before session admission.",
+                );
+              }
+            }
             const counter = await tx.browserRuntimeFenceCounter.upsert({
               create: { runtimeId: runtime.id, value: 1n },
               update: { value: { increment: 1n } },
@@ -350,6 +437,7 @@ export class RuntimeSessionsService {
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
         sessionId = session.id;
+        preparation?.onAllocated(session.id);
         break;
       } catch (error) {
         if (

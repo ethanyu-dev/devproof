@@ -653,8 +653,14 @@ describe("UserBrowserProfilesService", () => {
   });
 
   it("uses a versioned claim so a concurrent preparation cannot roll back the winner", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
-    const sessions = { create: vi.fn() };
+    const updateMany = vi.fn();
+    const sessions = {
+      create: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("The browser profile changed before session admission."),
+        ),
+    };
     const profiles = new UserBrowserProfilesService(
       { userBrowserProfile: { updateMany } } as never,
       {} as never,
@@ -691,19 +697,18 @@ describe("UserBrowserProfilesService", () => {
         "profile-1",
         { ttlSeconds: 300 },
       ),
-    ).rejects.toThrow("started by another request");
+    ).rejects.toThrow("changed before session admission");
 
-    expect(updateMany).toHaveBeenCalledWith({
-      data: {
-        assignedRuntimeId: "runtime-1",
-        status: "PREPARING",
-        verificationError: expect.anything(),
-        version: { increment: 1 },
+    expect(sessions.create).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userBrowserProfileId: "profile-1" }),
+      {
+        expectedStatus: "UNINITIALIZED",
+        expectedVersion: 7,
+        onAllocated: expect.any(Function),
       },
-      where: { id: "profile-1", status: "UNINITIALIZED", version: 7 },
-    });
-    expect(sessions.create).not.toHaveBeenCalled();
-    expect(updateMany).toHaveBeenCalledTimes(1);
+    );
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it("rejects a new preparation while the previous session is closing", async () => {
@@ -739,9 +744,13 @@ describe("UserBrowserProfilesService", () => {
     ).rejects.toThrow("still closing");
   });
 
-  it.each(["ACTIVE", "HUMAN_CONTROL"] as const)(
-    "reopens the verification URL when reusing a %s profile session",
-    async (status) => {
+  it.each([
+    ["REAUTH_REQUIRED", "ACTIVE"],
+    ["REAUTH_REQUIRED", "HUMAN_CONTROL"],
+    ["UNINITIALIZED", "ACTIVE"],
+  ] as const)(
+    "reopens the verification URL for a %s profile reusing its %s session",
+    async (profileStatus, status) => {
       const execute = vi.fn().mockResolvedValue({ status: "SUCCEEDED" });
       const takeover = vi.fn().mockResolvedValue(undefined);
       const update = vi.fn().mockResolvedValue(undefined);
@@ -760,7 +769,7 @@ describe("UserBrowserProfilesService", () => {
         runtimeSessions: [
           { id: "session-1", purpose: "PROFILE_PREPARATION", status },
         ],
-        status: "REAUTH_REQUIRED",
+        status: profileStatus,
         verificationRules: {},
         verificationUrl: "https://app.example.com/login",
       } as never);
@@ -861,6 +870,10 @@ describe("UserBrowserProfilesService", () => {
         purpose: "PROFILE_PREPARATION",
         userBrowserProfileId: "profile-1",
       }),
+      expect.objectContaining({
+        expectedStatus: "REAUTH_REQUIRED",
+        expectedVersion: 3,
+      }),
     );
     expect(takeover).toHaveBeenCalledWith(
       expect.anything(),
@@ -923,7 +936,10 @@ describe("UserBrowserProfilesService", () => {
       { userBrowserProfile: { updateMany } } as never,
       {} as never,
       {
-        create: vi.fn().mockRejectedValue(new Error("runtime offline")),
+        create: vi.fn().mockImplementation(async (_current, _input, claim) => {
+          claim.onAllocated("preparation-session");
+          throw new Error("session.open timed out");
+        }),
       } as never,
       {} as never,
       {} as never,
@@ -957,7 +973,7 @@ describe("UserBrowserProfilesService", () => {
         "profile-1",
         { ttlSeconds: 300 },
       ),
-    ).rejects.toThrow("runtime offline");
+    ).rejects.toThrow("session.open timed out");
 
     expect(updateMany).toHaveBeenLastCalledWith({
       data: {
@@ -967,9 +983,162 @@ describe("UserBrowserProfilesService", () => {
         }),
         version: { increment: 1 },
       },
-      where: { id: "profile-1", status: "PREPARING", version: 12 },
+      where: {
+        id: "profile-1",
+        ownerUserId: "user-1",
+        teamId: "team-1",
+        status: "PREPARING",
+        version: 12,
+        runtimeSessions: { some: { id: "preparation-session" } },
+      },
     });
+    expect(updateMany).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    "missing verification URL",
+    "runtime unavailable",
+    "identity in use",
+  ])(
+    "leaves a READY profile untouched when reauthentication fails: %s",
+    async (failure) => {
+      const updateMany = vi.fn();
+      const create = vi.fn().mockRejectedValue(new Error("identity in use"));
+      const profiles = new UserBrowserProfilesService(
+        { userBrowserProfile: { updateMany } } as never,
+        {} as never,
+        { create } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+        id: "profile-1",
+        assignedRuntimeId: "runtime-1",
+        status: "READY",
+        version: 11,
+        runtimeSessions: [],
+        verificationUrl:
+          failure === "missing verification URL"
+            ? null
+            : "https://app.example.com/login",
+      } as never);
+      const selectRuntime = vi.spyOn(
+        profiles as never,
+        "selectRuntime" as never,
+      );
+      if (failure === "runtime unavailable") {
+        selectRuntime.mockRejectedValue(new Error("runtime unavailable"));
+      } else {
+        selectRuntime.mockResolvedValue("runtime-1" as never);
+      }
+      await expect(
+        profiles.reauth(
+          {
+            sessionId: "cookie",
+            team: { id: "team-1", name: "Team", slug: "team" },
+            user: {
+              id: "user-1",
+              name: "User",
+              email: "user@example.com",
+              avatarUrl: null,
+            },
+          },
+          "profile-1",
+          { ttlSeconds: 300 },
+        ),
+      ).rejects.toThrow(
+        failure === "missing verification URL" ? "verificationUrl" : failure,
+      );
+      expect(updateMany).not.toHaveBeenCalled();
+      if (failure === "identity in use") {
+        expect(create).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({
+            expectedStatus: "READY",
+            expectedVersion: 11,
+          }),
+        );
+      } else {
+        expect(create).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each(["session.open", "page.navigate"])(
+    "requires reauthentication after an allocated READY profile fails at %s",
+    async (failure) => {
+      const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const create = vi
+        .fn()
+        .mockImplementation(async (_current, _input, claim) => {
+          claim.onAllocated("preparation-session");
+          if (failure === "session.open")
+            throw new Error("session.open timed out");
+          return { id: "preparation-session", status: "ACTIVE" };
+        });
+      const profiles = new UserBrowserProfilesService(
+        { userBrowserProfile: { updateMany } } as never,
+        {} as never,
+        {
+          create,
+          execute: vi
+            .fn()
+            .mockRejectedValue(new Error("page.navigate timed out")),
+        } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+        id: "profile-1",
+        assignedRuntimeId: "runtime-1",
+        status: "READY",
+        version: 11,
+        runtimeSessions: [],
+        verificationUrl: "https://app.example.com/login",
+      } as never);
+      vi.spyOn(profiles as never, "selectRuntime" as never).mockResolvedValue(
+        "runtime-1" as never,
+      );
+
+      await expect(
+        profiles.reauth(
+          {
+            sessionId: "cookie",
+            team: { id: "team-1", name: "Team", slug: "team" },
+            user: {
+              id: "user-1",
+              name: "User",
+              email: "user@example.com",
+              avatarUrl: null,
+            },
+          },
+          "profile-1",
+          { ttlSeconds: 300 },
+        ),
+      ).rejects.toThrow(`${failure} timed out`);
+      expect(updateMany).toHaveBeenCalledOnce();
+      expect(updateMany).toHaveBeenCalledWith({
+        data: {
+          status: "REAUTH_REQUIRED",
+          verificationError: expect.objectContaining({
+            code: "PROFILE_PREPARATION_FAILED",
+          }),
+          version: { increment: 1 },
+        },
+        where: {
+          id: "profile-1",
+          ownerUserId: "user-1",
+          teamId: "team-1",
+          status: "PREPARING",
+          version: 12,
+          runtimeSessions: { some: { id: "preparation-session" } },
+        },
+      });
+    },
+  );
 
   it("requires an active owner and a current team membership at resolution time", async () => {
     const findMany = vi.fn().mockResolvedValue([]);

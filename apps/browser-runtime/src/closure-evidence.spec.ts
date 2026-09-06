@@ -130,6 +130,218 @@ describe("challenge-bound durable closure evidence", () => {
     expect(await f.journal.read(f.command.sessionId)).toBeUndefined();
   });
 
+  it("closes a rejected profile launch durably without closing its existing owner", async () => {
+    const f = await fixture();
+    const owner = {
+      ...f.command,
+      sessionId: randomUUID(),
+      leaseToken: randomUUID(),
+      payload: {
+        profileKey: "busy-profile",
+        profileMode: "PERSISTENT",
+        profileRetention: { kind: "USER", inactivityTtlSeconds: 2_592_000 },
+        launchIdentityId: randomUUID(),
+      },
+    };
+    sessions.get(f.manager)!.push(owner.sessionId);
+    await f.manager.execute(owner);
+    const rejected = {
+      ...f.command,
+      payload: { ...owner.payload, launchIdentityId: randomUUID() },
+    };
+    const request = {
+      ...f.request,
+      expectedLaunchIdentity: rejected.payload.launchIdentityId,
+    };
+    await expect(f.manager.execute(rejected)).rejects.toMatchObject({
+      code: "PROFILE_IN_USE",
+    });
+    await expect(f.close(f.manager, request)).resolves.toMatchObject({
+      result: {
+        closed: true,
+        closureEvidence: {
+          sessionId: rejected.sessionId,
+          method: "IDENTIFIED_PROCESS_SET_TERMINATED",
+          networkRevoked: true,
+        },
+      },
+    });
+    expect(await discoverBrowserProcess(owner.sessionId)).not.toBeNull();
+    expect(await discoverBrowserProcess(rejected.sessionId)).toBeNull();
+    await expect(f.manager.execute(owner)).resolves.toHaveProperty("result");
+    await expect(f.manager.execute(rejected)).rejects.toMatchObject({
+      code: "SESSION_PERMIT_EXPIRED",
+    });
+
+    const restarted = f.create(randomUUID());
+    await expect(
+      f.close(restarted, { ...request, requestId: randomUUID() }),
+    ).resolves.toMatchObject({ result: { closed: true } });
+    await expect(restarted.execute(rejected)).rejects.toMatchObject({
+      code: "SESSION_PERMIT_EXPIRED",
+    });
+  }, 30_000);
+
+  it.each(["PERSISTENT", "AUTH_SNAPSHOT", "JOURNAL_FAILURE"])(
+    "retains another opening profile's reservation after rejecting %s",
+    async (mode) => {
+      const f = await fixture();
+      const owner = {
+        ...f.command,
+        sessionId: randomUUID(),
+        leaseToken: randomUUID(),
+        payload: {
+          profileKey: "opening-profile",
+          profileMode: "PERSISTENT",
+          profileRetention: { kind: "USER", inactivityTtlSeconds: 2_592_000 },
+          launchIdentityId: randomUUID(),
+        },
+      };
+      sessions.get(f.manager)!.push(owner.sessionId);
+      let resume!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      let started!: () => void;
+      const starting = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const original = chromium.launchPersistentContext.bind(chromium);
+      const launch = vi
+        .spyOn(chromium, "launchPersistentContext")
+        .mockImplementationOnce(async (...args) => {
+          started();
+          await waiting;
+          return original(...args);
+        });
+      const opening = f.manager.execute(owner);
+      try {
+        await starting;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const sessionId = attempt === 0 ? f.command.sessionId : randomUUID();
+          sessions.get(f.manager)!.push(sessionId);
+          const rejected = {
+            ...f.command,
+            sessionId,
+            permit: {
+              sessionId,
+              leaseToken: f.command.leaseToken,
+              fencingToken: f.command.fencingToken,
+              ownerKind: "STARTUP" as const,
+              expiresAt: f.command.deadlineAt,
+            },
+            payload:
+              mode !== "AUTH_SNAPSHOT"
+                ? { ...owner.payload, launchIdentityId: randomUUID() }
+                : {
+                    profileKey: randomUUID(),
+                    profileMode: "EPHEMERAL",
+                    authSnapshot: {
+                      profileKey: owner.payload.profileKey,
+                      generation: 1,
+                    },
+                    launchIdentityId: randomUUID(),
+                  },
+          };
+          if (mode === "JOURNAL_FAILURE" && attempt === 0) {
+            const failure = vi
+              .spyOn(f.journal, "recordLaunch")
+              .mockRejectedValue(new Error("journal disk full"));
+            try {
+              await expect(f.manager.execute(rejected)).rejects.toThrow(
+                "journal disk full",
+              );
+              expect(await f.journal.read(sessionId)).toBeUndefined();
+              await expect(
+                f.close(f.manager, {
+                  ...f.request,
+                  expectedLaunchIdentity: rejected.payload.launchIdentityId,
+                }),
+              ).rejects.toMatchObject({ code: "CLOSURE_UNVERIFIED" });
+              expect(await f.journal.read(sessionId)).toBeUndefined();
+            } finally {
+              failure.mockRestore();
+            }
+            // A new attempt below must still see the original reservation.
+            continue;
+          }
+          await expect(f.manager.execute(rejected)).rejects.toMatchObject({
+            code: "PROFILE_IN_USE",
+          });
+          expect(await f.journal.read(sessionId)).toMatchObject({
+            launch: { id: rejected.payload.launchIdentityId },
+            closed: { method: "IDENTIFIED_PROCESS_SET_TERMINATED" },
+          });
+          if (attempt === 0)
+            await expect(
+              f.close(f.manager, {
+                ...f.request,
+                expectedLaunchIdentity: rejected.payload.launchIdentityId,
+              }),
+            ).resolves.toMatchObject({ result: { closed: true } });
+        }
+        expect(launch).toHaveBeenCalledTimes(1);
+      } finally {
+        resume();
+        await opening;
+      }
+      expect(await discoverBrowserProcess(owner.sessionId)).not.toBeNull();
+    },
+    30_000,
+  );
+
+  it("fences a rejected launch when close races its initial journal write", async () => {
+    const f = await fixture();
+    const rejected = {
+      ...f.command,
+      payload: { ...f.command.payload, launchIdentityId: randomUUID() },
+    };
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let started!: () => void;
+    const starting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const recordLaunch = f.journal.recordLaunch.bind(f.journal);
+    vi.spyOn(f.journal, "recordLaunch").mockImplementationOnce(
+      async (...args) => {
+        started();
+        await waiting;
+        return recordLaunch(...args);
+      },
+    );
+    const opening = f.manager.execute(rejected);
+    const openingRejected = expect(opening).rejects.toMatchObject({
+      code: "SESSION_PERMIT_EXPIRED",
+    });
+    try {
+      await starting;
+      const closing = f.close(f.manager, {
+        ...f.request,
+        expectedLaunchIdentity: rejected.payload.launchIdentityId,
+      });
+      await vi.waitFor(async () => {
+        expect(await f.journal.read(rejected.sessionId)).toHaveProperty(
+          "revokedAt",
+        );
+      });
+      resume();
+      await openingRejected;
+      await expect(closing).resolves.toMatchObject({
+        result: { closed: true },
+      });
+      await expect(f.manager.execute(rejected)).rejects.toMatchObject({
+        code: "SESSION_PERMIT_EXPIRED",
+      });
+      expect(await discoverBrowserProcess(rejected.sessionId)).toBeNull();
+    } finally {
+      resume();
+      await openingRejected;
+    }
+  });
+
   it("does not prove a legacy session or unknown browser closed from an empty marker scan", async () => {
     const f = await fixture();
     await expect(f.close()).rejects.toMatchObject({

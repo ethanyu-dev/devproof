@@ -161,6 +161,179 @@ describe("RuntimeSessionsService user Profile isolation", () => {
   });
 });
 
+describe("RuntimeSessionsService preparation admission", () => {
+  const current = {
+    sessionId: "cookie",
+    team: { id: "team-1", name: "Team", slug: "team" },
+    user: {
+      id: "user-1",
+      name: "User",
+      email: "user@example.com",
+      avatarUrl: null,
+    },
+  };
+  const input = {
+    profileMode: "PERSISTENT" as const,
+    purpose: "PROFILE_PREPARATION" as const,
+    runtimeId: "runtime-1",
+    userBrowserProfileId: "profile-1",
+  };
+
+  function fixture(status: "READY" | "LOST" = "READY") {
+    const events: string[] = [];
+    const profile = {
+      id: "profile-1",
+      assignedRuntimeId: "runtime-1",
+      runtimeProfileKey: "opaque-profile",
+      status,
+      version: 7,
+      inactivityExpiresAt: new Date(0),
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      userBrowserProfile: {
+        findFirst: vi.fn().mockResolvedValue(profile),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn(),
+      },
+      browserRuntime: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          enabled: true,
+          revokedAt: null,
+          maxConcurrency: 1,
+        }),
+      },
+      browserRuntimeSession: {
+        count: vi.fn().mockResolvedValue(0),
+        create: vi.fn().mockResolvedValue({ id: "session-1" }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      browserRuntimeSlot: {
+        count: vi.fn().mockResolvedValue(0),
+        create: vi.fn(),
+      },
+      browserRuntimeProfileLease: { create: vi.fn() },
+      browserRuntimeFenceCounter: {
+        upsert: vi.fn().mockResolvedValue({ value: 1n }),
+      },
+    };
+    const prisma = {
+      browserRuntime: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "runtime-1",
+          maxConcurrency: 1,
+          protocolMinor: 13,
+        }),
+      },
+      userBrowserProfile: { findFirst: vi.fn().mockResolvedValue(profile) },
+      browserRuntimeSession: { findFirst: vi.fn().mockResolvedValue(null) },
+      $transaction: vi.fn().mockImplementation(async (work) => {
+        const result = await work(tx);
+        events.push("commit");
+        return result;
+      }),
+    };
+    const commands = {
+      execute: vi.fn().mockImplementation(async () => {
+        events.push("session.open");
+        return { status: "SUCCEEDED" };
+      }),
+    };
+    const service = new RuntimeSessionsService(
+      prisma as never,
+      { isRuntimeOnline: vi.fn().mockResolvedValue(true) } as never,
+      commands as never,
+      {} as never,
+      { record: vi.fn() } as never,
+    );
+    vi.spyOn(service as never, "expireSlots" as never).mockResolvedValue(
+      undefined as never,
+    );
+    vi.spyOn(service, "detail").mockResolvedValue({
+      id: "session-1",
+      status: "ACTIVE",
+    } as never);
+    const claim = {
+      expectedStatus: status,
+      expectedVersion: 7,
+      onAllocated: vi.fn().mockImplementation(() => {
+        events.push("allocated");
+      }),
+    };
+    return { service, profile, tx, prisma, commands, events, claim };
+  }
+
+  it.each(["READY", "LOST"] as const)(
+    "admits %s reauthentication and marks allocation only after commit, before opening",
+    async (status) => {
+      const { service, tx, events, claim } = fixture(status);
+      await service.create(current, input, claim);
+      expect(events.slice(0, 3)).toEqual([
+        "commit",
+        "allocated",
+        "session.open",
+      ]);
+      expect(tx.userBrowserProfile.updateMany).toHaveBeenCalledWith({
+        data: {
+          assignedRuntimeId: "runtime-1",
+          status: "PREPARING",
+          verificationError: expect.anything(),
+          version: { increment: 1 },
+        },
+        where: {
+          id: "profile-1",
+          ownerUserId: "user-1",
+          teamId: "team-1",
+          status,
+          version: 7,
+        },
+      });
+      expect(tx.userBrowserProfile.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "profile-1",
+          ownerUserId: "user-1",
+          teamId: "team-1",
+          owner: {
+            status: "ACTIVE",
+            memberships: { some: { teamId: "team-1" } },
+          },
+        },
+      });
+    },
+  );
+
+  it.each(["old session", "no capacity", "new version", "owner unavailable"])(
+    "rejects %s before changing the profile or sending an open command",
+    async (conflict) => {
+      const { service, profile, tx, commands, claim } = fixture();
+      if (conflict === "old session")
+        tx.browserRuntimeSession.count.mockResolvedValue(1);
+      if (conflict === "no capacity")
+        tx.browserRuntimeSlot.count.mockResolvedValue(1);
+      if (conflict === "new version")
+        tx.userBrowserProfile.findFirst.mockResolvedValue({
+          ...profile,
+          version: 8,
+        });
+      if (conflict === "owner unavailable")
+        tx.userBrowserProfile.findFirst.mockResolvedValue(null);
+      await expect(service.create(current, input, claim)).rejects.toThrow();
+      expect(tx.userBrowserProfile.updateMany).not.toHaveBeenCalled();
+      expect(tx.browserRuntimeSession.create).not.toHaveBeenCalled();
+      expect(claim.onAllocated).not.toHaveBeenCalled();
+      expect(commands.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not let a preparation claim bypass execution admission", async () => {
+    const { service, prisma, claim } = fixture();
+    await expect(
+      service.create(current, { ...input, purpose: "EXECUTION" }, claim),
+    ).rejects.toThrow("Invalid browser profile preparation claim");
+    expect(prisma.browserRuntime.findFirst).not.toHaveBeenCalled();
+  });
+});
+
 describe("RuntimeSessionsService lifecycle cleanup", () => {
   beforeEach(() => {
     vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true");

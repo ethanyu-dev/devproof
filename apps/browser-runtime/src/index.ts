@@ -2845,40 +2845,10 @@ export class BrowserSessionManager {
     const tracksUserProfile =
       descriptor.profileMode === "PERSISTENT" &&
       descriptor.profileRetention?.kind === "USER";
-    if (descriptor.profileMode === "PERSISTENT") {
-      if (
-        this.openingProfileKeys.has(descriptor.profileKey) ||
-        (tracksUserProfile &&
-          Array.from(this.sessions.values()).some(
-            (session) =>
-              session.profileMode === "PERSISTENT" &&
-              session.profileKey === descriptor.profileKey,
-          ))
-      ) {
-        throw codedError(
-          "PROFILE_IN_USE",
-          "Persistent profile is already open, being opened, or being purged.",
-          true,
-        );
-      }
-      this.openingProfileKeys.add(descriptor.profileKey);
-    }
     this.openingSessions.add(descriptor.sessionId);
     const snapshotKey = descriptor.authSnapshot?.profileKey;
-    if (snapshotKey) {
-      if (this.openingProfileKeys.has(snapshotKey)) {
-        this.openingSessions.delete(descriptor.sessionId);
-        throw codedError(
-          "PROFILE_IN_USE",
-          "The authentication profile is being prepared or purged.",
-          true,
-        );
-      }
-      this.openingSnapshotProfiles.set(
-        snapshotKey,
-        (this.openingSnapshotProfiles.get(snapshotKey) ?? 0) + 1,
-      );
-    }
+    let ownsProfileReservation = false;
+    let ownsSnapshotReservation = false;
     let browser: Browser | undefined;
     let context: BrowserContext | undefined;
     let networkProxy: SsrfProxy | undefined;
@@ -2901,6 +2871,41 @@ export class BrowserSessionManager {
         browserProcessMarker(descriptor.sessionId),
         descriptor.launchIdentityId,
       );
+      // Register this launch attempt before admission can reject it. Its failure
+      // then has a durable closed epoch, even though Chromium never started.
+      if (descriptor.profileMode === "PERSISTENT") {
+        if (
+          this.openingProfileKeys.has(descriptor.profileKey) ||
+          (tracksUserProfile &&
+            Array.from(this.sessions.values()).some(
+              (session) =>
+                session.profileMode === "PERSISTENT" &&
+                session.profileKey === descriptor.profileKey,
+            ))
+        ) {
+          throw codedError(
+            "PROFILE_IN_USE",
+            "Persistent profile is already open, being opened, or being purged.",
+            true,
+          );
+        }
+        this.openingProfileKeys.add(descriptor.profileKey);
+        ownsProfileReservation = true;
+      }
+      if (snapshotKey) {
+        if (this.openingProfileKeys.has(snapshotKey)) {
+          throw codedError(
+            "PROFILE_IN_USE",
+            "The authentication profile is being prepared or purged.",
+            true,
+          );
+        }
+        this.openingSnapshotProfiles.set(
+          snapshotKey,
+          (this.openingSnapshotProfiles.get(snapshotKey) ?? 0) + 1,
+        );
+        ownsSnapshotReservation = true;
+      }
       // Persist the exact launch scope before Chromium can outlive this daemon.
       await this.store.replaceSession({ ...descriptor, state: "INTERRUPTED" });
       if (this.permits.isRevoked(descriptor.sessionId))
@@ -3094,12 +3099,12 @@ export class BrowserSessionManager {
       throw error;
     } finally {
       this.openingSessions.delete(descriptor.sessionId);
-      if (snapshotKey) {
+      if (snapshotKey && ownsSnapshotReservation) {
         const count = (this.openingSnapshotProfiles.get(snapshotKey) ?? 1) - 1;
         if (count) this.openingSnapshotProfiles.set(snapshotKey, count);
         else this.openingSnapshotProfiles.delete(snapshotKey);
       }
-      if (descriptor.profileMode === "PERSISTENT") {
+      if (ownsProfileReservation) {
         this.openingProfileKeys.delete(descriptor.profileKey);
       }
     }
