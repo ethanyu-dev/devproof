@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { Prisma, type BrowserRuntimePairingToken } from "@prisma/client";
 
 import {
   ConflictException,
@@ -22,7 +23,14 @@ import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import { RuntimeConnectionHub } from "../runtime/runtime-connection-hub.service.js";
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
-import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
+import {
+  recoveryEnabled,
+  requireRecoveryEnabled,
+} from "../runtime/session-recovery.enabled.js";
+import {
+  assertResumeInventory,
+  assertResumeScope,
+} from "../runtime/runtime-drain-resume.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { AuditService } from "./audit.service.js";
 
@@ -368,6 +376,9 @@ export class BrowserRuntimeService {
         );
       }
 
+      if (pairing.resumeDrainId)
+        return this.pairResuming(tx, pairing, input, runtimeToken);
+
       const existing = await tx.browserRuntime.findUnique({
         where: {
           teamId_instanceKey: {
@@ -438,6 +449,127 @@ export class BrowserRuntimeService {
       runtimeId: runtime.id,
       runtimeToken,
     };
+  }
+
+  private async pairResuming(
+    tx: Prisma.TransactionClient,
+    pairing: BrowserRuntimePairingToken,
+    input: RuntimePairInput,
+    runtimeToken: string,
+  ) {
+    requireRecoveryEnabled();
+    const drain = await tx.runtimeDrainAttestation.findFirst({
+      where: {
+        id: pairing.resumeDrainId!,
+        teamId: pairing.teamId,
+      },
+    });
+    if (!drain)
+      throw new UnauthorizedException("Runtime recovery ticket is invalid.");
+    await tx.$queryRaw`SELECT id FROM browser_runtimes WHERE id = ${drain.runtimeId}::uuid FOR UPDATE`;
+    const runtime = await tx.browserRuntime.findFirst({
+      where: {
+        id: drain.runtimeId,
+        teamId: pairing.teamId,
+        instanceKey: input.instanceKey,
+      },
+    });
+    if (!runtime)
+      throw new UnauthorizedException(
+        "Recovery ticket belongs to a different Runtime instance.",
+      );
+    assertResumeScope(runtime, drain);
+    if (
+      runtime.drainState !== "ATTESTED" ||
+      pairing.resumeGeneration !== drain.resumeGeneration
+    )
+      throw new ConflictException("Runtime recovery ticket was superseded.");
+    const operator = await tx.user.findFirst({
+      where: {
+        id: pairing.resumeRequestedBy!,
+        status: "ACTIVE",
+        memberships: {
+          some: { teamId: pairing.teamId, role: "ADMIN" },
+        },
+      },
+      select: { id: true },
+    });
+    if (!operator)
+      throw new UnauthorizedException(
+        "The recovery ticket issuer is no longer an active team administrator.",
+      );
+    await assertResumeInventory(tx, runtime.id);
+    const claimed = await tx.browserRuntimePairingToken.updateMany({
+      where: {
+        id: pairing.id,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+        resumeDrainId: drain.id,
+        resumeGeneration: drain.resumeGeneration,
+      },
+      data: { usedAt: new Date() },
+    });
+    if (claimed.count !== 1)
+      throw new UnauthorizedException(
+        "Recovery ticket was already consumed or expired.",
+      );
+    const connectionGeneration = runtime.connectionGeneration + 1n;
+    const updated = await tx.browserRuntime.update({
+      where: { id: runtime.id },
+      data: {
+        drainState: "RESUMING",
+        enabled: false,
+        revokedAt: null,
+        status: "OFFLINE",
+        tokenHash: hashToken(runtimeToken),
+        tokenHint: "••••" + runtimeToken.slice(-4),
+        connectionGeneration,
+        connectionId: null,
+        gatewayInstanceId: null,
+        connectedAt: null,
+        lastSeenAt: null,
+      },
+    });
+    await tx.runtimeDrainAttestation.update({
+      where: { id: drain.id },
+      data: {
+        resumeConnectionGeneration: connectionGeneration,
+      },
+    });
+    // The directory and Profile identity survive; authentication is not assumed
+    // valid merely because the host was drained and a new credential was issued.
+    await tx.userBrowserProfile.updateMany({
+      where: {
+        assignedRuntimeId: runtime.id,
+        status: { not: "DISABLED" },
+      },
+      data: {
+        status: "REAUTH_REQUIRED",
+        version: { increment: 1 },
+        authSnapshotGeneration: null,
+        authSnapshotCreatedAt: null,
+        verificationError: {
+          code: "RUNTIME_RESUMED",
+          message:
+            "Verify the preserved login identity after Runtime recovery.",
+        },
+      },
+    });
+    await tx.auditEvent.create({
+      data: {
+        teamId: pairing.teamId,
+        actorUserId: operator.id,
+        entityId: drain.id,
+        entityType: "runtime_drain",
+        action: "runtime.drain.resume_paired",
+        metadata: {
+          runtimeId: runtime.id,
+          resumeGeneration: drain.resumeGeneration,
+          connectionGeneration: connectionGeneration.toString(),
+        },
+      },
+    });
+    return updated;
   }
 
   async revoke(current: AuthContext, id: string) {

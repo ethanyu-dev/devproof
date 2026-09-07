@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   runtimeDrainAttestSchema,
+  runtimeDrainResumeSchema,
   runtimeRecoveryResolveWriteOutcomeSchema,
 } from "./runtime-recovery.js";
 
@@ -10,6 +11,25 @@ const evidence = {
   evidenceRefs: ["operations://incident/123"],
 };
 describe("recovery requests", () => {
+  it("requires current drain evidence and preserved storage for recovery tickets", () => {
+    const valid = {
+      snapshotDigest: "current-drain",
+      note: evidence.note,
+      evidenceRefs: evidence.evidenceRefs,
+      profileStoragePreserved: true,
+    };
+    expect(runtimeDrainResumeSchema.safeParse(valid).success).toBe(true);
+    for (const change of [
+      { profileStoragePreserved: false },
+      { evidenceRefs: [] },
+      { snapshotDigest: "" },
+      { note: "" },
+      { runtimeId: "unbound-override" },
+    ])
+      expect(
+        runtimeDrainResumeSchema.safeParse({ ...valid, ...change }).success,
+      ).toBe(false);
+  });
   it("requires explicit infrastructure termination and evidence for admin attestation", () => {
     expect(
       runtimeDrainAttestSchema.safeParse({

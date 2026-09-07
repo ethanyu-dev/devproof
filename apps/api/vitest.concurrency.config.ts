@@ -9,6 +9,7 @@ export default defineConfig({
       "src/agent-runtime/spec-lease-recovery.integration.ts",
       "src/browser-profiles/profile-preparation.integration.ts",
       "src/runtime/session-recovery-concurrency.integration.ts",
+      "src/runtime/runtime-drain-resume.integration.ts",
       "src/verification/execution-concurrency.integration.ts",
       "src/verification/execution-hitl-cleanup.integration.ts",
     ],
