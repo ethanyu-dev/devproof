@@ -4418,7 +4418,8 @@ export class RuntimeClient {
         if (this.socket !== socket) return;
         void this.handleMessage(String(event.data)).catch((error: Error) => {
           runtimeLog("error", "runtime.gateway.message_failed", {}, error);
-          socket.close(1011, "Runtime failed to process server message.");
+          // The WHATWG client API only accepts 1000 or application codes.
+          socket.close(4000, "Runtime failed to process server message.");
         });
       });
       socket.addEventListener("error", () => {
@@ -4466,7 +4467,14 @@ export class RuntimeClient {
   private async handleMessage(raw: string) {
     const message = runtimeServerMessageSchema.parse(JSON.parse(raw));
     if (message.type === "runtime.hello.rejected") {
-      throw new Error(message.code + ": " + message.message);
+      runtimeLog("warn", "runtime.gateway.hello_rejected", {
+        code: message.code,
+        message: message.message,
+      });
+      // Stop before closing: the peer may close with a different code or vanish.
+      this.stopped = true;
+      this.socket?.close(4003, "Runtime credential or protocol was rejected.");
+      return;
     }
     if (message.type === "runtime.hello.accepted") {
       this.negotiatedProtocolMinor = message.protocol.minor;
