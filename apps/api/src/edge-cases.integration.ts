@@ -420,7 +420,7 @@ describe("durable edge cases", () => {
     expect(storage.delete).not.toHaveBeenCalledWith("legacy");
   });
 
-  it.each(["lost-cas", "partial-upload", "expired-intent"])(
+  it.each(["lost-cas", "timed-out", "partial-upload", "expired-intent"])(
     "reclaims uploads after %s",
     async (failure) => {
       const { row, result, context } = await command();
@@ -431,10 +431,14 @@ describe("durable edge cases", () => {
           }),
         ).toBe(1);
         objects.set(key, body);
-        if (failure === "lost-cas")
+        if (failure === "lost-cas" || failure === "timed-out")
           await db.browserRuntimeCommand.update({
             where: { id: row.id },
-            data: { status: "CANCELLED" },
+            data: {
+              status: failure === "lost-cas" ? "CANCELLED" : "TIMED_OUT",
+              completedAt: old,
+              error: { code: "EXISTING_OUTCOME" },
+            },
           });
         if (failure === "expired-intent")
           await db.objectStorageDeletionTask.update({
@@ -445,12 +449,33 @@ describe("durable edge cases", () => {
           throw new Error("process died after upload");
         return { byteSize: body.length, sha256: "test" };
       });
+      const metrics = { increment: vi.fn(), observe: vi.fn() };
       const dispatcher = new RuntimeCommandDispatcher(
         db as never,
         {} as never,
         storage as never,
+        metrics as never,
       );
-      await expect(dispatcher.acceptResult(result, context)).rejects.toThrow();
+      const accepting = dispatcher.acceptResult(result, context);
+      if (failure === "lost-cas" || failure === "timed-out") {
+        await expect(accepting).resolves.toBeUndefined();
+        expect(
+          await db.browserRuntimeCommand.findUnique({ where: { id: row.id } }),
+        ).toMatchObject({
+          status: failure === "lost-cas" ? "CANCELLED" : "TIMED_OUT",
+          completedAt: old,
+          error: { code: "EXISTING_OUTCOME" },
+          result: null,
+        });
+      } else {
+        await expect(accepting).rejects.toThrow();
+        // Publication conflicts must roll back the command CAS as well.
+        expect(
+          await db.browserRuntimeCommand.findUnique({ where: { id: row.id } }),
+        ).toMatchObject({ status: "DISPATCHED", completedAt: null });
+      }
+      expect(metrics.increment).not.toHaveBeenCalled();
+      expect(metrics.observe).not.toHaveBeenCalled();
       expect(await db.browserRuntimeArtifact.count()).toBe(0);
       expect(await db.objectStorageDeletionTask.count()).toBe(1);
       await db.objectStorageDeletionTask.updateMany({
