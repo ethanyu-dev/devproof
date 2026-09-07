@@ -519,7 +519,7 @@ export class RuntimeCommandDispatcher {
       });
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    const published = await this.prisma.$transaction(async (tx) => {
       await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       await lockRuntimeAndSession(
         tx,
@@ -538,9 +538,21 @@ export class RuntimeCommandDispatcher {
           },
         }))
       )
-        return;
-      // Check the connection before consuming cleanup intent: a reconnect
-      // during upload must leave the unpublished object reclaimable.
+        return false;
+      const claimed = await tx.browserRuntimeCommand.updateMany({
+        data: {
+          completedAt: new Date(),
+          error: result.error ? asJson(result.error) : Prisma.JsonNull,
+          result: result.result ? asJson(result.result) : Prisma.JsonNull,
+          status: result.ok ? "SUCCEEDED" : "FAILED",
+        },
+        where: { id: command.id, status: { in: ["PENDING", "DISPATCHED"] } },
+      });
+      // A deadline or cancellation can win while artifacts upload. Preserve its
+      // terminal result and the cleanup intents for unpublished objects.
+      if (claimed.count !== 1) return false;
+      // Consume cleanup intents only after claiming this result. A reconnect
+      // or superseding result must leave unpublished objects reclaimable.
       for (const artifact of artifacts) {
         await acquireAdvisoryTransactionLock(tx, artifact.storageKey);
         const intent = await tx.objectStorageDeletionTask.deleteMany({
@@ -555,23 +567,6 @@ export class RuntimeCommandDispatcher {
           throw new ConflictException(
             "Artifact upload intent expired before publication.",
           );
-      }
-      const claimed = await tx.browserRuntimeCommand.updateMany({
-        data: {
-          completedAt: new Date(),
-          error: result.error ? asJson(result.error) : Prisma.JsonNull,
-          result: result.result ? asJson(result.result) : Prisma.JsonNull,
-          status: result.ok ? "SUCCEEDED" : "FAILED",
-        },
-        where: { id: command.id, status: { in: ["PENDING", "DISPATCHED"] } },
-      });
-      if (claimed.count !== 1) {
-        // Roll back intent consumption so retention can reclaim the uploaded objects.
-        if (artifacts.length)
-          throw new ConflictException(
-            "Command result was superseded during artifact upload.",
-          );
-        return;
       }
       if (command.commandType === "session.open" && result.ok && context) {
         const output = record(result.result);
@@ -607,7 +602,9 @@ export class RuntimeCommandDispatcher {
           })),
         });
       }
+      return true;
     });
+    if (!published) return;
     this.metrics?.increment(
       "devproof_runtime_command_results_total",
       "Runtime command results by terminal status.",
