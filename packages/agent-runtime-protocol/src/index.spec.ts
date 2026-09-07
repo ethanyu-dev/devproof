@@ -1,19 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  POST_RUN_ANALYSIS_REPORT_MAX_BYTES,
   agentProviderSchema,
   missingRequiredEvidenceKinds,
   runtimeBrowserAcquireOutputSchema,
   runtimeCriterionSchema,
   runtimeModelCandidateSchema,
-  runtimePostRunAnalysisOutcomeSchema,
-  runtimePostRunAnalysisReportSchema,
-  runtimePostRunAnalysisTaskLeaseSchema,
-  runtimePostRunAnalysisToolInputSchema,
+  runtimeOutcomeSchema,
   runtimeRegistrationInputSchema,
   runtimeRegistrationOutputSchema,
-  runtimeOutcomeSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeSpecAnalysisTaskLeaseSchema,
   runtimeTaskSnapshotSchema,
@@ -44,7 +39,7 @@ describe("agent runtime protocol", () => {
     expect(agentProviderSchema.parse("CUSTOM")).toBe("CUSTOM");
   });
 
-  it("defaults analysis concurrency when registering against a v4 control plane", () => {
+  it("accepts registration without retired analysis capacity", () => {
     expect(
       runtimeRegistrationOutputSchema.parse({
         browserConcurrency: 2,
@@ -52,7 +47,7 @@ describe("agent runtime protocol", () => {
         refreshAfterMs: 5_000,
         specConcurrency: 0,
       }),
-    ).toMatchObject({ analysisConcurrency: 0 });
+    ).not.toHaveProperty("analysisConcurrency");
   });
 
   it("registers a v9 Runtime with one declared pool", () => {
@@ -238,202 +233,6 @@ describe("agent runtime protocol", () => {
       runtimeTraceEventSchema.safeParse({
         kind: "agent.model.completed",
         payload: { attemptNumber: 1, segmentId: "task-1:4", step: 0 },
-      }).success,
-    ).toBe(false);
-  });
-
-  it("validates leased post-run bundle and evidence readers", () => {
-    const identity = {
-      fencingToken: "3",
-      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
-      workerId: "worker-1",
-    };
-    expect(
-      runtimePostRunAnalysisToolInputSchema.parse({
-        ...identity,
-        analysisSummary: "读取完整执行索引。",
-        cursor: 0,
-        maxBytes: 64_000,
-        name: "read_analysis_manifest",
-      }).name,
-    ).toBe("read_analysis_manifest");
-    expect(
-      runtimePostRunAnalysisToolInputSchema.parse({
-        ...identity,
-        analysisSummary: "读取日志包。",
-        cursor: 0,
-        maxBytes: 64_000,
-        name: "read_analysis_bundle",
-      }).name,
-    ).toBe("read_analysis_bundle");
-    expect(
-      runtimePostRunAnalysisToolInputSchema.parse({
-        ...identity,
-        analysisSummary: "读取网络日志证据。",
-        cursor: 0,
-        evidenceRef: "artifact://network-log",
-        maxBytes: 32_000,
-        name: "read_analysis_evidence",
-      }).name,
-    ).toBe("read_analysis_evidence");
-    expect(
-      runtimePostRunAnalysisToolInputSchema.safeParse({
-        ...identity,
-        analysisSummary: "缺少证据引用。",
-        cursor: 0,
-        name: "read_analysis_evidence",
-      }).success,
-    ).toBe(false);
-  });
-
-  it("requires Runtime phase location on post-run findings", () => {
-    const outcome = runtimePostRunAnalysisOutcomeSchema.parse({
-      kind: "ANALYSIS_COMPLETED",
-      report: {
-        coverage: {
-          bundleBytesRead: 0,
-          bundleFullyScanned: false,
-          candidateCount: 8,
-          evidenceBytesRead: 64_000,
-          evidenceReadCount: 2,
-          manifestBytesRead: 0,
-          manifestFullyScanned: false,
-          strategy: "failure-first-v1",
-        },
-        findings: [
-          {
-            attemptNumber: 3,
-            category: "AGENT_REASONING",
-            component: "agent-runtime.context-manager",
-            confidence: 0.99,
-            evidenceRefs: ["run-event://event-1"],
-            failureClass: "CONTEXT_WINDOW_EXCEEDED",
-            impact: "运行后分析无法完成。",
-            phase: "POST_RUN_ANALYSIS.MODEL_INVOCATION",
-            recommendation: "使用滚动摘要限制模型历史。",
-            rootCause: "日志分块被持续累积到模型上下文。",
-            runId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
-            runtimeId: null,
-            severity: "HIGH",
-            title: "模型上下文持续增长",
-          },
-        ],
-        summary: "问题已定位到运行后分析的模型调用阶段。",
-      },
-    });
-
-    expect(outcome).toMatchObject({
-      report: {
-        coverage: {
-          candidateCount: 8,
-          evidenceReadCount: 2,
-          strategy: "failure-first-v1",
-        },
-        findings: [
-          {
-            failureClass: "CONTEXT_WINDOW_EXCEEDED",
-            phase: "POST_RUN_ANALYSIS.MODEL_INVOCATION",
-          },
-        ],
-      },
-    });
-  });
-
-  it("permits a model-free lease for a deterministic clean pass", () => {
-    const lease = runtimePostRunAnalysisTaskLeaseSchema.parse({
-      fencingToken: "1",
-      leaseExpiresAt: "2026-09-02T08:00:00.000Z",
-      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
-      snapshot: {
-        analysisId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
-        analyzerVersion: "post-run-analysis-v4",
-        attemptNumber: 1,
-        deadlineAt: "2026-09-02T08:00:00.000Z",
-        input: {
-          byteSize: 2,
-          completeness: {
-            browserExecutionsFinalized: true,
-            durableEvents: true,
-            evidenceMetadata: true,
-          },
-          manifest: {
-            analysisSynopsis: {
-              candidateCount: 0,
-              cleanPass: true,
-              completenessSufficient: true,
-            },
-          },
-          schemaVersion: "devproof.task-logs.v2",
-          sha256: "a".repeat(64),
-        },
-        modelCandidates: [],
-        sourceRef: null,
-        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
-        teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
-        title: "clean pass",
-        traceId: "1".repeat(32),
-      },
-      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
-    });
-
-    expect(lease.snapshot.modelCandidates).toEqual([]);
-  });
-
-  it("rejects a post-run report that cannot fit inside the API request limit", () => {
-    const finding = {
-      attemptNumber: null,
-      category: "PRODUCT_BUG" as const,
-      component: "Runtime",
-      confidence: 0.9,
-      evidenceRefs: ["artifact://runtime-log"],
-      failureClass: "COMMAND_FAILED",
-      impact: "错".repeat(8_000),
-      phase: "SPEC_EXECUTION",
-      recommendation: "错".repeat(8_000),
-      rootCause: "错".repeat(8_000),
-      runId: null,
-      runtimeId: null,
-      severity: "HIGH" as const,
-      title: "Runtime command failed",
-    };
-    const report = {
-      findings: Array.from({ length: 10 }, () => finding),
-      summary: "Oversized report",
-    };
-
-    expect(JSON.stringify(report).length).toBeLessThan(
-      POST_RUN_ANALYSIS_REPORT_MAX_BYTES,
-    );
-    expect(runtimePostRunAnalysisReportSchema.safeParse(report).success).toBe(
-      false,
-    );
-  });
-
-  it("requires runId whenever a post-run finding identifies a runtime", () => {
-    expect(
-      runtimePostRunAnalysisOutcomeSchema.safeParse({
-        kind: "ANALYSIS_COMPLETED",
-        report: {
-          findings: [
-            {
-              attemptNumber: 1,
-              category: "RUNTIME_ENVIRONMENT",
-              component: "Browser Runtime",
-              confidence: 0.9,
-              evidenceRefs: ["browser-event://event-1"],
-              failureClass: "RUNTIME_LOST",
-              impact: "测试中断。",
-              phase: "SPEC_EXECUTION",
-              recommendation: "检查 Runtime 健康状态。",
-              rootCause: "Runtime 失联。",
-              runId: null,
-              runtimeId: "6f090d88-8987-487f-8338-1a734beab6a6",
-              severity: "HIGH",
-              title: "Runtime 失联",
-            },
-          ],
-          summary: "Runtime 异常。",
-        },
       }).success,
     ).toBe(false);
   });

@@ -2,10 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AgentRuntimeControlService } from "./agent-runtime-control.service.js";
 
-vi.mock("../config/env.js", () => ({
-  env: () => ({ POST_RUN_ANALYSIS_CONCURRENCY: 3 }),
-}));
-
 const teamId = "4a9f2473-0b1f-4de8-87d7-2ac49b425d75";
 
 describe("Agent Runtime pool registration", () => {
@@ -43,7 +39,6 @@ describe("Agent Runtime pool registration", () => {
         },
       ),
     ).resolves.toEqual({
-      analysisConcurrency: 0,
       browserConcurrency: 12,
       pools: ["BROWSER_EXECUTION"],
       refreshAfterMs: 5_000,
@@ -76,7 +71,6 @@ describe("Agent Runtime pool registration", () => {
         },
       ),
     ).resolves.toMatchObject({
-      analysisConcurrency: 0,
       browserConcurrency: 0,
       pools: ["SPEC_ANALYSIS"],
       specConcurrency: 5,
@@ -84,7 +78,7 @@ describe("Agent Runtime pool registration", () => {
     expect(findMany).not.toHaveBeenCalled();
   });
 
-  it("advertises the configured post-run analysis lane capacity", async () => {
+  it("rejects a retired post-run credential even without a declared pool", async () => {
     const service = new AgentRuntimeControlService({} as never, {} as never);
 
     await expect(
@@ -94,17 +88,11 @@ describe("Agent Runtime pool registration", () => {
           team: { id: teamId },
         } as never,
         {
-          pool: "POST_RUN_ANALYSIS",
           protocol: { minor: 8 },
           workerId: "analysis-worker",
         },
       ),
-    ).resolves.toMatchObject({
-      analysisConcurrency: 3,
-      browserConcurrency: 0,
-      pools: ["POST_RUN_ANALYSIS"],
-      specConcurrency: 0,
-    });
+    ).rejects.toThrow(/retired or unsupported/u);
   });
 
   it("rejects legacy mixed credentials", async () => {
@@ -121,7 +109,7 @@ describe("Agent Runtime pool registration", () => {
           workerId: "legacy-worker",
         },
       ),
-    ).rejects.toThrow("MIXED");
+    ).rejects.toThrow(/retired or unsupported/u);
   });
 
   it("rejects registration clients older than the compatible v4 baseline", async () => {

@@ -5,7 +5,7 @@ DevProof is a self-hosted control plane for AI-driven test execution. It accepts
 ## System context
 
 ```text
-Codex / Claude / custom clients / Console Playground
+Codex / Claude / custom clients
                          |
                          | HTTP or Streamable HTTP MCP
                          v
@@ -56,7 +56,7 @@ The API is a modular monolith backed by PostgreSQL, Redis, and S3-compatible obj
 
 Agent Runtime is a stateless lease worker. It claims one Runtime Task, heartbeats the lease, invokes a model, calls a constrained execution interface, appends bounded events, and submits an idempotent outcome. It does not own retry policy or final Run state.
 
-Each Agent Runtime deployment declares exactly one pool: `SPEC_ANALYSIS`, `BROWSER_EXECUTION`, or `POST_RUN_ANALYSIS`. Registration must match the pool bound to its credential, the worker creates lanes and loads an Executor only for that pool, and each pool receives candidates from its own independently ordered model list.
+Each Agent Runtime deployment declares exactly one pool: `SPEC_ANALYSIS` or `BROWSER_EXECUTION`. Registration must match the pool bound to its credential, the worker creates lanes and loads an Executor only for that pool, and each pool receives candidates from its own independently ordered model list.
 
 ### Execution Runner
 
@@ -74,7 +74,7 @@ The runner boundary is intentionally capability-based so HTTP, shell, container,
 
 A Direct Task skips the first two stages and creates one Run. Each Run owns its attempts, Agent Runtime Task, Browser Execution, interventions, evidence, and outcome. Parent Task status is a projection of its stages and child Runs.
 
-Terminal Issue Tasks may also enqueue a post-run optimization analysis sidecar. It is deliberately not a fourth Task stage: capture or model failures never delay notification, alter the Task lifecycle, or replace the original execution verdict. After browser cleanup reaches a terminal state (or a bounded capture grace period expires), the control plane stores an immutable `devproof.task-logs.v2` bundle and leases analysis to the isolated `POST_RUN_ANALYSIS` Agent Runtime pool. Evidence-validated findings are persisted separately and deduplicated into an internal improvement work item. See [Post-run optimization analysis](post-run-analysis.md).
+Terminal Tasks retain their execution verdict and completion notifications. Operators can manually export a redacted `devproof.task-logs.v2` bundle from the Task detail page. No post-completion model loop is scheduled.
 
 The public entry point is `POST /v2/tasks`. `POST /v2/runs` remains an upgrade-compatible wrapper that creates a Direct Task. Legacy specification and verification endpoints are read-only compatibility surfaces and must not receive new product traffic.
 

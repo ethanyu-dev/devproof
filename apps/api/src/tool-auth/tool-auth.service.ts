@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 
+import type {
+  ToolCredentialCreateInput,
+  ToolCredentialScope,
+} from "@devproof/contracts";
 import {
   BadRequestException,
   ConflictException,
@@ -9,10 +13,6 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import type {
-  ToolCredentialCreateInput,
-  ToolCredentialScope,
-} from "@devproof/contracts";
 
 import type { AuthContext } from "../auth/auth.types.js";
 import { AuditService } from "../console/audit.service.js";
@@ -186,6 +186,14 @@ export class ToolAuthService {
       );
     }
 
+    if (
+      credential.pool !== "SPEC_ANALYSIS" &&
+      credential.pool !== "BROWSER_EXECUTION"
+    ) {
+      throw new UnauthorizedException(
+        "This Agent Runtime pool is retired or unsupported.",
+      );
+    }
     await this.prisma.agentRuntimeCredential.update({
       data: { lastUsedAt: new Date() },
       where: { id: credential.id },

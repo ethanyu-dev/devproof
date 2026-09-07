@@ -1,11 +1,14 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
 import type {
-  RunTrajectoryRecord,
   ExecutionConcurrencyPolicy,
+  RunTrajectoryRecord,
 } from "@devproof/contracts";
 import {
   Activity,
@@ -24,12 +27,9 @@ import {
   Search,
   XCircle,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/native-select";
+import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -39,13 +39,6 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
-import {
-  aggregateAnalysisEvents,
-  analysisEventFilters,
-  analysisEventMatches,
-  mergePostRunAnalysisEventPage,
-  mergePostRunAnalysisEvents,
-} from "./post-run-analysis-view";
 import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
 import {
@@ -59,12 +52,9 @@ import type {
   TaskCaseExecution,
   TaskDetail,
   TaskEvent,
-  PostRunAnalysisDetail,
-  PostRunAnalysisEventCategory,
-  PostRunAnalysisEventPage,
+  TaskScheduling,
   TaskStage,
   TaskSummary,
-  TaskScheduling,
 } from "./task-types";
 
 const PAGE_SIZE = 10;
@@ -129,8 +119,6 @@ function tone(
       "PROVIDER_ERROR",
       "BROWSER_UNAVAILABLE",
       "RUNTIME_LOST",
-      "CRITICAL",
-      "HIGH",
     ].includes(status ?? "")
   )
     return "danger";
@@ -142,11 +130,7 @@ function tone(
       "WAITING_INPUT",
       "WAITING_HUMAN",
       "DISPATCHING",
-      "PENDING_CAPTURE",
-      "CAPTURING",
       "READY",
-      "MEDIUM",
-      "LOW",
     ].includes(status ?? "")
   )
     return "warning";
@@ -174,13 +158,6 @@ function prettyValue(value: unknown) {
   } catch {
     return String(value);
   }
-}
-
-function formatByteSize(byteSize: number | null) {
-  if (byteSize === null) return "大小未知";
-  if (byteSize < 1_024) return `${byteSize} B`;
-  if (byteSize < 1_048_576) return `${(byteSize / 1_024).toFixed(1)} KB`;
-  return `${(byteSize / 1_048_576).toFixed(1)} MB`;
 }
 
 function downloadJson(value: unknown, filename: string) {
@@ -446,7 +423,7 @@ function TaskListClient({ initialId }: { initialId?: string | undefined }) {
         ) : rows === null ? (
           <LoadingState />
         ) : rows.length === 0 ? (
-          <div className="dp-playground-empty">
+          <div className="dp-task-empty">
             <Activity />
             <b>还没有任务</b>
             <span>前往集成试验场，粘贴 Issue 或创建直接执行任务。</span>
@@ -534,9 +511,8 @@ function TaskRow({
   task: TaskSummary;
 }) {
   const [detail, setDetail] = useState<TaskDetail | null>(null);
-  const [events, setEvents] = useState<TaskEvent[]>([]);
   const [trajectory, setTrajectory] = useState<RunTrajectoryRecord[]>([]);
-  const [view, setView] = useState<"analysis" | "logs" | "specs">("specs");
+  const [view, setView] = useState<"logs" | "specs">("specs");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const loadingRef = useRef(false);
@@ -559,7 +535,6 @@ function TaskRow({
         nextEvents,
       );
       setDetail(nextDetail);
-      setEvents(nextEvents);
       setTrajectory(nextTrajectory);
       onSummary(nextDetail);
       setMessage((current) => (current?.tone === "error" ? null : current));
@@ -584,17 +559,6 @@ function TaskRow({
     const timer = window.setInterval(() => void load(), 2_000);
     return () => window.clearInterval(timer);
   }, [detail?.lifecycle, expanded, load]);
-
-  useEffect(() => {
-    if (
-      view === "analysis" &&
-      detail &&
-      (!detail.capabilities.postRunAnalysis ||
-        !terminalLifecycles.has(detail.lifecycle))
-    ) {
-      setView("specs");
-    }
-  }, [detail, view]);
 
   async function mutate(path: string, body?: unknown) {
     setBusy(true);
@@ -756,17 +720,6 @@ function TaskRow({
                   <ScrollText /> 日志
                   <span>{trajectory.length}</span>
                 </button>
-                {detail.capabilities.postRunAnalysis &&
-                terminalLifecycles.has(detail.lifecycle) ? (
-                  <button
-                    aria-selected={view === "analysis"}
-                    onClick={() => setView("analysis")}
-                    role="tab"
-                    type="button"
-                  >
-                    <FileSearch /> 自动优化分析
-                  </button>
-                ) : null}
               </div>
               <div className="dp-task-status-panel" role="tabpanel">
                 <TaskStatusPanel
@@ -796,7 +749,7 @@ function TaskStatusPanel({
   detail: TaskDetail;
   onMutate: (path: string, body?: unknown) => Promise<TaskDetail | null>;
   trajectory: RunTrajectoryRecord[];
-  view: "analysis" | "logs" | "specs";
+  view: "logs" | "specs";
 }) {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -958,7 +911,7 @@ function TaskStatusPanel({
               </span>
               <Badge tone="warning">等待部署地址</Badge>
             </div>
-            <div className="dp-playground-form">
+            <div className="dp-task-form">
               <Field label="验证环境（可添加多个）">
                 <div className="dp-deployment-editor">
                   {deploymentDrafts.map((deployment, index) => (
@@ -1097,7 +1050,7 @@ function TaskStatusPanel({
               </span>
               <Badge tone="warning">等待浏览器身份所有人</Badge>
             </div>
-            <div className="dp-playground-form">
+            <div className="dp-task-form">
               <p>
                 系统已根据任务目标自动准备浏览器身份「
                 {detail.profileBinding.requestedProfile.displayName}
@@ -1138,7 +1091,7 @@ function TaskStatusPanel({
               </span>
               <Badge tone="warning">等待浏览器身份</Badge>
             </div>
-            <div className="dp-playground-form">
+            <div className="dp-task-form">
               <Field
                 description={profileStrategyDescriptions[profileStrategy]}
                 label="浏览器身份策略"
@@ -1264,683 +1217,8 @@ function TaskStatusPanel({
           )}
         </div>
       </section>
-
-      <section className="dp-task-detail-section" hidden={view !== "analysis"}>
-        {view === "analysis" &&
-        detail.capabilities.postRunAnalysis &&
-        terminalLifecycles.has(detail.lifecycle) ? (
-          <PostRunAnalysisPanel taskId={detail.id} />
-        ) : null}
-      </section>
     </>
   );
-}
-
-function PostRunAnalysisPanel({ taskId }: { taskId: string }) {
-  const [analysis, setAnalysis] = useState<PostRunAnalysisDetail | null>(null);
-  const [eventCategory, setEventCategory] =
-    useState<PostRunAnalysisEventCategory>("KEY");
-  const [eventError, setEventError] = useState<string | null>(null);
-  const [eventPage, setEventPage] = useState<PostRunAnalysisEventPage | null>(
-    null,
-  );
-  const [loadingEvents, setLoadingEvents] = useState(false);
-  const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [pollGeneration, setPollGeneration] = useState(0);
-  const [retrying, setRetrying] = useState(false);
-  const olderEventRequestRef = useRef(0);
-  const eventScopeKey = `${analysis?.id ?? "none"}:${eventCategory}:${pollGeneration}`;
-  const eventScopeRef = useRef(eventScopeKey);
-  eventScopeRef.current = eventScopeKey;
-
-  useEffect(() => {
-    let active = true;
-    let timer: number | undefined;
-    let current: PostRunAnalysisDetail | null = null;
-    let eventCursor: string | null = null;
-    const load = async () => {
-      try {
-        const query = eventCursor
-          ? `?afterSequence=${encodeURIComponent(eventCursor)}`
-          : "";
-        const next = await consoleApi<PostRunAnalysisDetail | null>(
-          `/tasks/${taskId}/post-run-analysis${query}`,
-        );
-        if (!active) return;
-        if (!next) {
-          current = null;
-          eventCursor = null;
-          setAnalysis(null);
-          setError(null);
-          timer = window.setTimeout(() => void load(), 15_000);
-          return;
-        }
-        current =
-          current && eventCursor && current.id === next.id
-            ? {
-                ...next,
-                events: mergePostRunAnalysisEvents(current.events, next.events),
-                eventsTruncated:
-                  current.eventsTruncated || next.eventsTruncated,
-              }
-            : next;
-        eventCursor = current.eventCursor;
-        setAnalysis(current);
-        setError(null);
-        if (
-          next.eventsHasMore ||
-          !["SUCCEEDED", "FAILED", "CANCELLED"].includes(next.status)
-        ) {
-          timer = window.setTimeout(
-            () => void load(),
-            next.eventsHasMore ? 0 : 5_000,
-          );
-        }
-      } catch (loadError) {
-        if (!active) return;
-        setError((loadError as Error).message);
-        timer = window.setTimeout(() => void load(), 5_000);
-      }
-    };
-    void load();
-    return () => {
-      active = false;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [pollGeneration, taskId]);
-
-  useEffect(() => {
-    let active = true;
-    if (!analysis) {
-      setEventPage(null);
-      setEventError(null);
-      setLoadingEvents(false);
-      return () => {
-        active = false;
-      };
-    }
-    const analysisId = analysis.id;
-    const requestId = ++olderEventRequestRef.current;
-    setLoadingEvents(true);
-    setLoadingOlderEvents(false);
-    setEventError(null);
-    setEventPage(null);
-    void consoleApi<PostRunAnalysisEventPage>(
-      `/tasks/${taskId}/post-run-analysis/events?category=${eventCategory}`,
-    )
-      .then((page) => {
-        if (active && requestId === olderEventRequestRef.current) {
-          setEventPage(
-            mergePostRunAnalysisEventPage(null, page, {
-              analysisId,
-              category: eventCategory,
-            }),
-          );
-        }
-      })
-      .catch((loadError: unknown) => {
-        if (active) setEventError((loadError as Error).message);
-      })
-      .finally(() => {
-        if (active) setLoadingEvents(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [analysis?.id, eventCategory, pollGeneration, taskId]);
-
-  const visibleEvents = useMemo(() => {
-    const pageEvents =
-      eventPage &&
-      eventPage.analysisId === analysis?.id &&
-      eventPage.category === eventCategory
-        ? eventPage.events
-        : [];
-    const liveEvents = (analysis?.events ?? []).filter((event) =>
-      analysisEventMatches(event, eventCategory),
-    );
-    return mergePostRunAnalysisEvents(pageEvents, liveEvents);
-  }, [analysis?.events, analysis?.id, eventCategory, eventPage]);
-  const groupedEvents = useMemo(
-    () => aggregateAnalysisEvents(visibleEvents),
-    [visibleEvents],
-  );
-
-  async function loadOlderEvents() {
-    const analysisId = analysis?.id;
-    const beforeSequence = visibleEvents.at(0)?.sequence;
-    if (!analysisId || !beforeSequence) return;
-    const category = eventCategory;
-    const scopeKey = eventScopeRef.current;
-    const requestId = ++olderEventRequestRef.current;
-    setLoadingOlderEvents(true);
-    setEventError(null);
-    try {
-      const page = await consoleApi<PostRunAnalysisEventPage>(
-        `/tasks/${taskId}/post-run-analysis/events?category=${category}&beforeSequence=${encodeURIComponent(beforeSequence)}`,
-      );
-      if (
-        requestId !== olderEventRequestRef.current ||
-        scopeKey !== eventScopeRef.current
-      ) {
-        return;
-      }
-      setEventPage((current) =>
-        mergePostRunAnalysisEventPage(current, page, {
-          analysisId,
-          category,
-        }),
-      );
-    } catch (loadError) {
-      if (
-        requestId === olderEventRequestRef.current &&
-        scopeKey === eventScopeRef.current
-      ) {
-        setEventError((loadError as Error).message);
-      }
-    } finally {
-      if (requestId === olderEventRequestRef.current) {
-        setLoadingOlderEvents(false);
-      }
-    }
-  }
-
-  async function retry() {
-    setRetrying(true);
-    setError(null);
-    try {
-      const next = await consoleApi<PostRunAnalysisDetail | null>(
-        `/tasks/${taskId}/post-run-analysis/retry`,
-        { method: "POST" },
-      );
-      setAnalysis(next);
-      setPollGeneration((generation) => generation + 1);
-    } catch (retryError) {
-      setError((retryError as Error).message);
-    } finally {
-      setRetrying(false);
-    }
-  }
-
-  return (
-    <Card className="dp-task-input-card dp-post-run-analysis">
-      <div className="dp-section-head">
-        <span>
-          <FileSearch />
-          <b>运行后自动优化分析</b>
-        </span>
-        {analysis ? (
-          <Badge tone={tone(analysis.status)}>
-            {displayLabel(analysis.status)}
-          </Badge>
-        ) : null}
-      </div>
-      {error ? <FormMessage message={error} tone="error" /> : null}
-      {analysis ? (
-        <>
-          <div className="dp-post-run-analysis-meta">
-            <span>
-              分析器 <b>{analysis.analyzerVersion}</b>
-            </span>
-            <span>
-              运行代 <b>{analysis.generation}</b>
-            </span>
-            <span>
-              尝试{" "}
-              <b>
-                {analysis.attemptNumber}/{analysis.maxAttempts}
-              </b>
-            </span>
-            {analysis.input ? (
-              <span>
-                日志包{" "}
-                <b>
-                  {analysis.input.schemaVersion} ·{" "}
-                  {formatByteSize(analysis.input.byteSize)}
-                </b>
-              </span>
-            ) : (
-              <span>正在等待日志与制品收口</span>
-            )}
-          </div>
-          <section className="dp-post-run-analysis-overview">
-            <div className="dp-post-run-analysis-overview-head">
-              <span>
-                <Activity />
-                <b>{analysis.progress.phaseLabel}</b>
-              </span>
-              <small>
-                最近活动{" "}
-                {new Date(analysis.progress.lastActivityAt).toLocaleTimeString(
-                  "zh-CN",
-                  { hour12: false },
-                )}
-              </small>
-            </div>
-            <p>{analysis.progress.currentMessage}</p>
-            <div className="dp-post-run-analysis-steps">
-              {analysis.progress.steps.map((step) => (
-                <div
-                  className={`is-${step.status.toLowerCase()}`}
-                  key={step.key}
-                >
-                  <i aria-hidden="true" />
-                  <span>{step.label}</span>
-                </div>
-              ))}
-            </div>
-            <div className="dp-post-run-analysis-kpis">
-              <div>
-                <small>本次 Attempt</small>
-                <b>
-                  {formatAnalysisDuration(
-                    analysis.progress.currentAttemptElapsedMs,
-                  )}
-                </b>
-              </div>
-              <div>
-                <small>累计实际执行</small>
-                <b>
-                  {formatAnalysisDuration(analysis.progress.activeElapsedMs)}
-                </b>
-              </div>
-              <div>
-                <small>任务生命周期</small>
-                <b>
-                  {formatAnalysisDuration(analysis.progress.lifecycleElapsedMs)}
-                </b>
-              </div>
-              <div>
-                <small>排队等待</small>
-                <b>
-                  {analysis.progress.queueWaitMs === null
-                    ? "—"
-                    : formatAnalysisDuration(analysis.progress.queueWaitMs)}
-                </b>
-              </div>
-              <div>
-                <small>本次模型调用</small>
-                <b>
-                  {formatAnalysisNumber(
-                    analysis.progress.currentAttemptMetrics.modelCalls,
-                  )}{" "}
-                  次
-                  {analysis.progress.currentAttemptMetrics.modelDurationMs
-                    ? ` · ${formatAnalysisDuration(
-                        analysis.progress.currentAttemptMetrics.modelDurationMs,
-                      )}`
-                    : ""}
-                  {analysis.progress.currentAttemptMetrics.failedModelCalls
-                    ? ` · ${formatAnalysisNumber(
-                        analysis.progress.currentAttemptMetrics
-                          .failedModelCalls,
-                      )} 失败`
-                    : ""}
-                </b>
-              </div>
-              <div>
-                <small>累计模型调用</small>
-                <b>
-                  {formatAnalysisNumber(analysis.progress.metrics.modelCalls)}{" "}
-                  次
-                </b>
-              </div>
-              <div>
-                <small>失败优先候选</small>
-                <b>
-                  {formatAnalysisNumber(
-                    analysis.progress.metrics.candidateCount,
-                  )}
-                </b>
-              </div>
-              <div>
-                <small>已核验证据</small>
-                <b>
-                  {formatAnalysisNumber(
-                    analysis.progress.metrics.uniqueEvidence,
-                  )}
-                </b>
-              </div>
-              <div>
-                <small>累计读取索引 / 证据 / 原始包</small>
-                <b>
-                  {formatByteSize(analysis.progress.metrics.manifestBytesRead)}{" "}
-                  /{" "}
-                  {formatByteSize(analysis.progress.metrics.evidenceBytesRead)}{" "}
-                  / {formatByteSize(analysis.progress.metrics.bundleBytesRead)}
-                </b>
-              </div>
-              <div>
-                <small>累计 Token 输入 / 输出</small>
-                <b>
-                  {formatAnalysisNumber(analysis.progress.metrics.inputTokens)}{" "}
-                  /{" "}
-                  {formatAnalysisNumber(analysis.progress.metrics.outputTokens)}
-                </b>
-              </div>
-              <div>
-                <small>分析发现</small>
-                <b>{formatAnalysisNumber(analysis.progress.findingCount)}</b>
-              </div>
-            </div>
-            {!["SUCCEEDED", "FAILED", "CANCELLED"].includes(analysis.status) ? (
-              <small className="dp-post-run-analysis-deadline">
-                当前期限剩余{" "}
-                {formatAnalysisDuration(analysis.progress.deadlineRemainingMs)}
-              </small>
-            ) : null}
-          </section>
-          {analysis.error ? (
-            <div className="dp-post-run-analysis-alert">
-              <XCircle />
-              <div>
-                <b>{analysisErrorTitle(analysis.error)}</b>
-                <p>{analysisErrorMessage(analysis.error)}</p>
-              </div>
-            </div>
-          ) : null}
-          <div className="dp-run-technical-body dp-post-run-analysis-body">
-            {analysis.progress.attempts.length ? (
-              <details className="dp-run-technical-details dp-post-run-analysis-details">
-                <summary>
-                  <span>
-                    <Activity />
-                    <b>Attempt 指标</b>
-                    <small>{analysis.progress.attempts.length} 次</small>
-                  </span>
-                  <ChevronDown />
-                </summary>
-                <div className="dp-post-run-analysis-events">
-                  {[...analysis.progress.attempts].reverse().map((attempt) => (
-                    <article key={attempt.attemptNumber}>
-                      <header>
-                        <span>
-                          <strong>Attempt #{attempt.attemptNumber}</strong>
-                          <small>
-                            {displayLabel(attempt.status)} · 执行{" "}
-                            {formatAnalysisDuration(attempt.elapsedMs)}
-                            {attempt.queueWaitMs === null
-                              ? ""
-                              : ` · 排队 ${formatAnalysisDuration(
-                                  attempt.queueWaitMs,
-                                )}`}
-                          </small>
-                        </span>
-                        <time dateTime={attempt.startedAt}>
-                          {new Date(attempt.startedAt).toLocaleString("zh-CN", {
-                            hour12: false,
-                          })}
-                        </time>
-                      </header>
-                      <p>
-                        模型 {formatAnalysisNumber(attempt.metrics.modelCalls)}{" "}
-                        次 · 模型耗时{" "}
-                        {formatAnalysisDuration(
-                          attempt.metrics.modelDurationMs,
-                        )}
-                        {attempt.metrics.failedModelCalls
-                          ? ` · ${formatAnalysisNumber(
-                              attempt.metrics.failedModelCalls,
-                            )} 次失败`
-                          : ""}
-                        {` · Token ${formatAnalysisNumber(
-                          attempt.metrics.inputTokens,
-                        )} / ${formatAnalysisNumber(
-                          attempt.metrics.outputTokens,
-                        )} · 证据 ${formatAnalysisNumber(
-                          attempt.metrics.uniqueEvidence,
-                        )}`}
-                      </p>
-                    </article>
-                  ))}
-                </div>
-              </details>
-            ) : null}
-            {analysis.input ? (
-              <details className="dp-run-technical-details dp-post-run-analysis-details">
-                <summary>
-                  <span>
-                    <ScrollText />
-                    <b>日志包完整性</b>
-                  </span>
-                  <ChevronDown />
-                </summary>
-                <pre>{prettyValue(analysis.input.completeness)}</pre>
-              </details>
-            ) : null}
-            {analysis.events.length || eventPage?.events.length ? (
-              <details className="dp-run-technical-details dp-post-run-analysis-details">
-                <summary>
-                  <span>
-                    <Activity />
-                    <b>技术事件</b>
-                    <small>
-                      {groupedEvents.length} 组 · {visibleEvents.length} 条事件
-                      {eventPage?.hasMore ? " · 可加载更早记录" : ""}
-                    </small>
-                  </span>
-                  <ChevronDown />
-                </summary>
-                <div className="dp-post-run-analysis-event-tools">
-                  <div role="tablist" aria-label="分析事件筛选">
-                    {analysisEventFilters.map((filter) => (
-                      <button
-                        aria-selected={eventCategory === filter.key}
-                        className={
-                          eventCategory === filter.key ? "is-active" : ""
-                        }
-                        key={filter.key}
-                        onClick={() => setEventCategory(filter.key)}
-                        role="tab"
-                        type="button"
-                      >
-                        {filter.label}
-                      </button>
-                    ))}
-                  </div>
-                  {loadingEvents ? <small>正在加载事件…</small> : null}
-                </div>
-                {eventError ? (
-                  <FormMessage message={eventError} tone="error" />
-                ) : null}
-                <div className="dp-post-run-analysis-events">
-                  {groupedEvents.map((group) => (
-                    <article key={group.id}>
-                      <header>
-                        <span>
-                          <strong>
-                            {group.title ?? displayLabel(group.kind)}
-                          </strong>
-                          <small>
-                            {group.meta ? `${group.meta} · ` : ""}
-                            {group.actor} · #{group.sequence}
-                          </small>
-                        </span>
-                        <time dateTime={group.occurredAt}>
-                          {new Date(group.occurredAt).toLocaleTimeString(
-                            "zh-CN",
-                            { hour12: false },
-                          )}
-                        </time>
-                      </header>
-                      {group.summary ? <p>{group.summary}</p> : null}
-                      {hasDisplayPayload(group.payload) ? (
-                        <details className="dp-post-run-analysis-event-raw">
-                          <summary>查看原始数据</summary>
-                          <pre>{prettyValue(group.payload)}</pre>
-                        </details>
-                      ) : null}
-                    </article>
-                  ))}
-                  {!loadingEvents && !groupedEvents.length ? (
-                    <p className="dp-post-run-analysis-event-empty">
-                      当前筛选条件下没有事件。
-                    </p>
-                  ) : null}
-                </div>
-                {eventPage?.hasMore ? (
-                  <div className="dp-post-run-analysis-event-more">
-                    <Button
-                      disabled={loadingOlderEvents}
-                      onClick={() => void loadOlderEvents()}
-                      size="sm"
-                      variant="secondary"
-                    >
-                      {loadingOlderEvents ? "正在加载…" : "加载更早事件"}
-                    </Button>
-                  </div>
-                ) : null}
-              </details>
-            ) : null}
-            {analysis.error ? (
-              <details className="dp-run-technical-details dp-post-run-analysis-details">
-                <summary>
-                  <span>
-                    <XCircle />
-                    <b>分析失败原因</b>
-                  </span>
-                  <ChevronDown />
-                </summary>
-                <pre>{prettyValue(analysis.error)}</pre>
-              </details>
-            ) : null}
-            {analysis.findings.length ? (
-              <div className="dp-post-run-analysis-findings">
-                {analysis.findings.map((finding) => (
-                  <article
-                    className="dp-post-run-analysis-finding"
-                    key={finding.id}
-                  >
-                    <div>
-                      <Badge tone={tone(finding.severity)}>
-                        {finding.severity}
-                      </Badge>
-                      <strong>{finding.title}</strong>
-                    </div>
-                    <p>{finding.impact}</p>
-                    <small>
-                      {finding.category} · {finding.component} · 置信度{" "}
-                      {finding.confidence.toFixed(2)}
-                    </small>
-                    <small>
-                      阶段 {finding.phase} · {finding.failureClass}
-                      {finding.attemptNumber
-                        ? ` · Attempt #${finding.attemptNumber}`
-                        : ""}
-                      {finding.runId
-                        ? ` · Run ${finding.runId.slice(0, 8)}`
-                        : ""}
-                      {finding.runtimeId
-                        ? ` · Runtime ${finding.runtimeId.slice(0, 8)}`
-                        : ""}
-                    </small>
-                    <details className="dp-run-technical-details dp-post-run-analysis-details">
-                      <summary>
-                        <span>
-                          <FileSearch />
-                          <b>根因、建议与证据</b>
-                        </span>
-                        <ChevronDown />
-                      </summary>
-                      <pre>
-                        {prettyValue({
-                          evidenceRefs: finding.evidenceRefs,
-                          recommendation: finding.recommendation,
-                          rootCause: finding.rootCause,
-                        })}
-                      </pre>
-                    </details>
-                  </article>
-                ))}
-              </div>
-            ) : analysis.status === "SUCCEEDED" ? (
-              <p className="dp-post-run-analysis-empty">
-                本次分析没有发现达到置信度阈值的可执行问题。
-              </p>
-            ) : null}
-            {analysis.workItem ? (
-              <details className="dp-run-technical-details dp-post-run-analysis-details">
-                <summary>
-                  <span>
-                    <FileSearch />
-                    <b>
-                      改进任务：{analysis.workItem.title}（
-                      {analysis.workItem.status}）
-                    </b>
-                  </span>
-                  <ChevronDown />
-                </summary>
-                <pre>{analysis.workItem.body}</pre>
-              </details>
-            ) : null}
-            {analysis.status === "FAILED" ? (
-              <div className="dp-post-run-analysis-actions">
-                <Button
-                  disabled={retrying}
-                  onClick={() => void retry()}
-                  size="sm"
-                  variant="secondary"
-                >
-                  <RefreshCw /> {retrying ? "正在重试…" : "重试自动分析"}
-                </Button>
-              </div>
-            ) : null}
-          </div>
-        </>
-      ) : (
-        <div className="dp-run-technical-body dp-post-run-analysis-body">
-          <p className="dp-post-run-analysis-empty">
-            暂无自动优化分析记录。系统会继续等待补偿任务，也可以立即开始分析。
-          </p>
-          <div className="dp-post-run-analysis-actions">
-            <Button
-              disabled={retrying}
-              onClick={() => void retry()}
-              size="sm"
-              variant="secondary"
-            >
-              <RefreshCw /> {retrying ? "正在启动…" : "开始自动分析"}
-            </Button>
-          </div>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function hasDisplayPayload(value: unknown) {
-  if (value === null || value === undefined) return false;
-  if (Array.isArray(value)) return value.length > 0;
-  if (isRecord(value)) return Object.keys(value).length > 0;
-  return true;
-}
-
-function formatAnalysisDuration(milliseconds: number) {
-  if (milliseconds < 1_000)
-    return `${Math.max(0, Math.round(milliseconds))} ms`;
-  if (milliseconds < 60_000) return `${Math.round(milliseconds / 1_000)} 秒`;
-  const minutes = Math.floor(milliseconds / 60_000);
-  const seconds = Math.round((milliseconds % 60_000) / 1_000);
-  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
-}
-
-function formatAnalysisNumber(value: number) {
-  return new Intl.NumberFormat("zh-CN").format(value);
-}
-
-function analysisErrorTitle(value: unknown) {
-  if (!isRecord(value)) return "自动优化分析未完成";
-  return typeof value.code === "string"
-    ? displayLabel(value.code)
-    : "自动优化分析未完成";
-}
-
-function analysisErrorMessage(value: unknown) {
-  if (!isRecord(value)) return "请展开技术详情查看失败信息。";
-  return typeof value.message === "string"
-    ? value.message
-    : "请展开技术详情查看失败信息。";
 }
 
 function summarizeCaseExecution(testCase: TaskCase) {
@@ -2331,7 +1609,7 @@ function CasePolicyEditor({
         执行策略 ·{" "}
         {displayLabel(execution.executionPolicy?.accessMode ?? "UNKNOWN")}
       </summary>
-      <div className="dp-playground-form">
+      <div className="dp-task-form">
         <Field
           label="业务数据访问"
           description="只有已核对不会修改共享业务数据的 Case 才能共享读并发；未知 Case 按独占执行。"

@@ -12,6 +12,8 @@ DevProof keeps its complete Prisma migration chain so an existing installation c
 
 ## Deployment order
 
+For the feature-retirement release, use the coordinated shutdown below before applying migrations. For additive releases:
+
 1. Deploy the database migrations with `pnpm prisma:deploy`.
 2. Deploy API and verify `/live`, `/ready`, and worker health.
 3. Deploy Web and verify `/health` and authenticated Console proxy routes.
@@ -24,14 +26,67 @@ DevProof keeps its complete Prisma migration chain so an existing installation c
 
 Never use `pnpm prisma:migrate` in production; it is for creating development migrations. Do not edit, delete, reorder, or squash a migration that may already have been applied.
 
-For the Agent Runtime pool-isolation migration, the database deployment clones
-the previous team-wide model order into the `SPEC_ANALYSIS`,
-`BROWSER_EXECUTION`, and `POST_RUN_ANALYSIS` pools. Review the three lists in
-Console after deployment and remove models that a pool should not use. Set
-`DEVPROOF_AGENT_RUNTIME_POOL` on each standalone Agent Runtime to make its
-credential-bound pool explicit. During a rolling upgrade the variable may be
-omitted: the Runtime binds to the single pool returned for its credential on
-first registration. A mismatched declaration is rejected.
+Each standalone Agent Runtime uses a pool-specific credential. Set
+`DEVPROOF_AGENT_RUNTIME_POOL` to `SPEC_ANALYSIS` or `BROWSER_EXECUTION`
+to assert the binding explicitly; a mismatched declaration is rejected.
+
+## Removing premature features
+
+The 2026-09-07 release removes Playground, automatic post-run optimization and
+its dedicated Runtime, plus unreachable legacy execution writers. Task creation
+continues through HTTP/MCP. Existing Task/Run details, manual log export,
+completion notifications, current human intervention and read-only legacy records
+remain available. Old Playground/analysis endpoints return 404; retired Runtime
+credentials are rejected instead of being reassigned to another pool.
+
+This is a coordinated upgrade, not a rolling schema change. Migration
+`20260907193000_retire_post_run_analysis` removes analysis tables and renames
+`task_executions.post_run_analysis_generation` to `execution_generation`.
+Old API instances cannot run against the contracted schema. The counter values
+and existing notification payloads/deduplication keys are preserved. Manual log
+exports keep `devproof.task-logs.v2`; the embedded Task counter now uses the
+generic name `executionGeneration`.
+
+1. Inventory the actual service's credential-bound pool, active analysis leases,
+   both retained Runtime pools, and active Tasks. Save the deployed revisions.
+2. On the old API, set `POST_RUN_ANALYSIS_ENABLED=false`, stop the analysis
+   Runtime, and drain active main-flow tasks. Stop all old API/Worker replicas
+   before migration, including their Retention Workers. Wait for analysis leases
+   to expire; the migration aborts atomically if a live RUNNING lease remains.
+3. Back up PostgreSQL and verify the backup before deleting analysis rows.
+   Include `post_run_analysis_jobs`, `post_run_analysis_events`,
+   `analysis_findings` and `improvement_work_items`. Preserve any reports
+   required for archive, together with their analysis-only objects, outside the
+   live bucket's cleanup lifecycle. Retain task/execution evidence normally.
+4. Deploy the new API with the migration, then Web and the two Agent Runtime
+   pools. Railway API pre-deploy runs `pnpm prisma:deploy`; ensure old replicas
+   have stopped before triggering it. The migration transfers all four dedicated
+   object-key locations (input, capture, capture evidence and manifest structured
+   evidence) to `object_storage_deletion_tasks` with deduplication, preserving
+   existing queue leases/retry counts. It then drops only the four analysis
+   tables and their exclusive enums, revokes third-pool credentials, deletes
+   third-pool model settings and renames the counter without resetting it.
+5. Delete the retired deployment by verified service ID. Remove obsolete
+   `POST_RUN_ANALYSIS_*` and `DEVPROOF_POST_RUN_ANALYSIS_*` variables. Keep
+   `apps/agent-runtime`, its Dockerfile and `railway.agent-runtime.json`, which
+   are shared by the two retained pools. The database enum label is retained only
+   for revoked credential history; it is not a supported API pool.
+6. Verify API readiness, both pool registrations, a Direct Task and an Issue
+   Task, cancellation/resume, notification fencing, manual log export, historical
+   record access and object cleanup. Confirm no analysis requests or queries
+   remain. No Browser Runtime restart is required for this removal alone.
+
+After contraction, rolling back the old API requires restoring the removed
+schema/data and the old column name first. An image-only rollback is insufficient.
+Keep the database and archived-object backups until this rollback window closes.
+
+The migration regression test requires `psql` and an isolated local database
+matching the concurrency launcher's name/user guard. It creates and drops its
+own temporary schema, applies the complete old migration chain, seeds nonempty
+history, checks rollback with a live lease, then verifies contraction and retained
+Task/notification/model/credential data:
+
+`DEVPROOF_CONCURRENCY_TEST_DATABASE_URL=<disposable-local-url> node apps/api/scripts/test-analysis-retirement.mjs`
 
 ## Concurrency and recovery upgrade
 

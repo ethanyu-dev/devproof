@@ -1,6 +1,3 @@
-import { URL } from "node:url";
-
-import { z } from "zod";
 import {
   agentProviderSchema as executionAgentProviderSchema,
   runtimeBusinessReferenceSchema,
@@ -9,10 +6,11 @@ import {
   runtimePoolSchema,
 } from "@devproof/agent-runtime-protocol";
 import {
-  runtimeNetworkAllowlistSchema,
   runtimeActionCommandInputSchema as protocolRuntimeCommandInputSchema,
   runtimeCommandTypeSchema,
+  runtimeNetworkAllowlistSchema,
 } from "@devproof/runtime-protocol";
+import { z } from "zod";
 
 const sensitiveVerificationKey =
   /(?:authorization|cookie|password|secret|token|api[-_]?key|credential|session(?:id)?)$/iu;
@@ -1187,29 +1185,6 @@ export const specificationDeploymentTargetInputSchema = z.object({
   url: z.string().url().max(2_000),
 });
 
-export const specificationPlaygroundInputSchema = z
-  .object({
-    casePolicyReviewRequired: z.boolean().optional(),
-    deployments: z.array(taskDeploymentSchema).max(20).default([]),
-    issueRef: z.string().trim().min(1).max(500),
-    profilePolicy: taskProfilePolicySchema,
-    submissionId: z.string().uuid(),
-    targetUrl: z.string().url().max(2_000).optional(),
-  })
-  .superRefine((input, context) => {
-    const keys = new Set<string>();
-    for (const [index, deployment] of input.deployments.entries()) {
-      if (keys.has(deployment.key)) {
-        context.addIssue({
-          code: "custom",
-          message: "Deployment keys must be unique.",
-          path: ["deployments", index, "key"],
-        });
-      }
-      keys.add(deployment.key);
-    }
-  });
-
 export type SpecificationIssueContext = z.infer<
   typeof specificationIssueContextSchema
 >;
@@ -1234,9 +1209,6 @@ export type SpecificationResolveInput = z.infer<
 >;
 export type SpecificationDeploymentTargetInput = z.infer<
   typeof specificationDeploymentTargetInputSchema
->;
-export type SpecificationPlaygroundInput = z.infer<
-  typeof specificationPlaygroundInputSchema
 >;
 
 export const agentRuntimeProviderSchema = z.enum([
@@ -1392,23 +1364,6 @@ export const verificationEvidencePolicySchema = z.object({
 });
 
 export const verificationHitlPolicySchema = runHitlPolicySchema;
-
-export const playgroundRunInputSchema = z.object({
-  acceptanceCriterion: z.string().trim().min(1).max(2000),
-  goal: z.string().trim().min(1).max(8000),
-  hitlEnabled: z.boolean().default(false),
-  submissionId: z.string().uuid(),
-  targetUrl: z
-    .string()
-    .trim()
-    .url()
-    .refine((value) => /^https?:\/\//u.test(value), {
-      message: "targetUrl must use http or https.",
-    })
-    .refine((value) => !/^https?:\/\/[^/?#]*@/iu.test(value), {
-      message: "targetUrl cannot contain URL credentials.",
-    }),
-});
 
 export const verificationRequestSchema = z
   .object({
@@ -1742,7 +1697,6 @@ export type RuntimeRoutingRuleInput = z.infer<
 export type RuntimeConfigurationInput = z.infer<
   typeof runtimeConfigurationInputSchema
 >;
-export type PlaygroundRunInput = z.infer<typeof playgroundRunInputSchema>;
 export type RuntimePairInput = z.infer<typeof runtimePairInputSchema>;
 export type RuntimeHeartbeatInput = z.infer<typeof runtimeHeartbeatInputSchema>;
 export type RuntimeSessionCreateInput = z.infer<

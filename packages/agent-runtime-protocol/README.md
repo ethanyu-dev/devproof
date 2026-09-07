@@ -12,26 +12,7 @@ redacted before they cross the control-plane boundary.
 
 Protocol v2.3 adds leased `SPEC_ANALYSIS` work, source-cited `agent-spec-v2`
 outcomes, read-only Linear/GitHub/Knowledge tool calls, and structured
-`agent.analysis.*` / `agent.spec.*` events. Protocol v2.5 adds the isolated
-`POST_RUN_ANALYSIS` pool, immutable `devproof.task-logs.v2` bundle reads,
-task-scoped text-evidence reads, and evidence-cited structured findings.
-Protocol v2.6 adds a compact Execution Manifest, bounded rolling analysis
-context, and structured Runtime phase location on every finding.
-Protocol v2.7 adds a complete evidence index and targeted evidence-record
-reads so large post-run bundles no longer require exhaustive model scans. A
-manifest larger than the bounded inline budget is represented by a compact
-summary and read through `read_analysis_manifest` pages before evidence access
-or report completion. Text evidence reports its total byte size on the first
-page and supports targeted range reads so a Runtime does not have to scan an
-entire large artifact. A finding may cite only evidence that the Runtime
-actually fetched through `read_analysis_evidence` during the active lease;
-Manifest membership alone does not satisfy the evidence requirement.
-Analysis events contain concise auditable summaries, never provider hidden
-chain-of-thought. Registration responses default a missing
-`analysisConcurrency` field to zero so a v2.7 Runtime can remain connected to a
-v2.4 control plane during a rolling deployment; the control plane still
-requires v2.7 before it leases post-run work. Completed analysis reports are
-limited to 512 KiB of UTF-8 JSON before transport.
+`agent.analysis.*` / `agent.spec.*` events.
 
 Protocol v2.8 makes the Runtime's single declared pool part of registration.
 The control plane rejects a declaration that does not match the pool bound to
@@ -41,7 +22,7 @@ Runtime can derive its pool from that credential when the deployment has not
 yet added the explicit assertion. Once registered, the Runtime locks to the
 single returned pool. Agent model candidates are selected from an independent
 ordered list for that same pool; models are never shared implicitly across Spec
-Analysis, Browser Execution, and Post-run Analysis.
+Analysis and Browser Execution.
 
 This package is intentionally separate from `@devproof/runtime-protocol`, which
 is the browser data-plane protocol.
@@ -53,3 +34,10 @@ Analysis claims. Spec workers use the same single-flight lease supervisor and
 abort source tools, trace requests, and outcome submission when ownership is
 lost. The metadata remains optional for rolling upgrades; older control planes
 use the conservative local expiry fallback and older workers can still drain.
+
+The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.
+The retired optimization pool, its routes, capabilities and concurrency field
+are removed. Existing workers for the two retained pools accept the registration
+response (the removed optional concurrency field defaulted to zero). Upgrade API
+and workers together with the coordinated database migration described in
+[Upgrading DevProof](../../docs/upgrading.md#removing-premature-features).

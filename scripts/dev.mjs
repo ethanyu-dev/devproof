@@ -107,8 +107,6 @@ try {
     process.env.DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN;
   const browserExecutionRuntimeToken =
     process.env.DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN;
-  const postRunAnalysisRuntimeToken =
-    process.env.DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN;
   const legacyAgentRuntimeToken =
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN ??
     process.env.DEVPROOF_RUNTIME_TOKEN;
@@ -133,21 +131,9 @@ try {
       label: "Browser Execution Agent Runtime",
     });
   }
-  if (postRunAnalysisRuntimeToken) {
-    start("@devproof/agent-runtime", {
-      env: {
-        DEVPROOF_AGENT_RUNTIME_POOL: "POST_RUN_ANALYSIS",
-        DEVPROOF_AGENT_RUNTIME_TOKEN: postRunAnalysisRuntimeToken,
-        DEVPROOF_AGENT_WORKER_ID: "local-post-run-analysis",
-      },
-      label: "Post-run Analysis Agent Runtime",
-    });
-  }
-
   if (
     !specAnalysisRuntimeToken &&
     !browserExecutionRuntimeToken &&
-    !postRunAnalysisRuntimeToken &&
     legacyAgentRuntimeToken &&
     process.env.DEVPROOF_AGENT_RUNTIME_POOL
   ) {
@@ -158,11 +144,7 @@ try {
       },
       label: `${process.env.DEVPROOF_AGENT_RUNTIME_POOL} Agent Runtime`,
     });
-  } else if (
-    !specAnalysisRuntimeToken &&
-    !browserExecutionRuntimeToken &&
-    !postRunAnalysisRuntimeToken
-  ) {
+  } else if (!specAnalysisRuntimeToken && !browserExecutionRuntimeToken) {
     process.stdout.write(
       "Agent Runtimes are disabled until pool-specific Runtime tokens are configured.\n",
     );
@@ -170,7 +152,6 @@ try {
     const missingPools = [
       ["SPEC_ANALYSIS", specAnalysisRuntimeToken],
       ["BROWSER_EXECUTION", browserExecutionRuntimeToken],
-      ["POST_RUN_ANALYSIS", postRunAnalysisRuntimeToken],
     ]
       .filter(([, token]) => !token)
       .map(([pool]) => pool);

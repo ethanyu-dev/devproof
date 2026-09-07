@@ -22,8 +22,8 @@ import {
 import type { AuthContext } from "./auth.types.js";
 import { CurrentAuth } from "./current-auth.decorator.js";
 import {
-  TenantAccessDeniedError,
   FeishuOAuthClient,
+  TenantAccessDeniedError,
 } from "./feishu-oauth.client.js";
 
 export function redirectFound(reply: FastifyReply, location: string) {
@@ -81,7 +81,7 @@ export class AuthController {
         sameSite: "lax",
         secure: env().NODE_ENV === "production",
       });
-      return redirectFound(reply, env().WEB_ORIGIN + "/console/playground");
+      return redirectFound(reply, env().WEB_ORIGIN + "/console/runs");
     } catch (error) {
       if (error instanceof TenantAccessDeniedError) {
         return redirectFound(

@@ -9,7 +9,6 @@ import {
   executionRunCreateInputSchema,
   githubAccessCredentialCreateInputSchema,
   githubAccessCredentialUpdateInputSchema,
-  playgroundRunInputSchema,
   runInterventionResolveInputSchema,
   runtimeCommandInputSchema,
   runtimeConfigurationInputSchema,
@@ -18,17 +17,17 @@ import {
   runtimeSettingsInputSchema,
   taskDeploymentTargetInputSchema,
   taskExecutionCreateInputSchema,
-  testGenerationContextSchema,
   testCaseDefinitionSchema,
   testEnvironmentInputSchema,
+  testGenerationContextSchema,
   testRunArtifactLinkInputSchema,
   toolCredentialCreateInputSchema,
   userBrowserProfileCreateInputSchema,
-  verificationRequestSchema,
-  verificationExecutionAcquireInputSchema,
   verificationCheckpointCreateInputSchema,
   verificationCheckpointResolveInputSchema,
   verificationEventAppendInputSchema,
+  verificationExecutionAcquireInputSchema,
+  verificationRequestSchema,
   verificationResultSchema,
 } from "./index.js";
 
@@ -98,32 +97,6 @@ describe("DevProof contracts", () => {
           "d63bd843-b89d-48ea-90c9-caad5b51d526",
         ],
         pool: "BROWSER_EXECUTION",
-      }).success,
-    ).toBe(false);
-  });
-
-  it("accepts an HTTP target for a Playground run", () => {
-    expect(
-      playgroundRunInputSchema.parse({
-        acceptanceCriterion: "The title is Example Domain.",
-        goal: "Open the page and capture evidence.",
-        submissionId: "d63bd843-b89d-48ea-90c9-caad5b51d526",
-        targetUrl: "https://example.com",
-      }).hitlEnabled,
-    ).toBe(false);
-    expect(
-      playgroundRunInputSchema.safeParse({
-        acceptanceCriterion: "Read a local file.",
-        goal: "Open a file URL.",
-        submissionId: "d63bd843-b89d-48ea-90c9-caad5b51d526",
-        targetUrl: "file:///etc/passwd",
-      }).success,
-    ).toBe(false);
-    expect(
-      playgroundRunInputSchema.safeParse({
-        acceptanceCriterion: "The title is Example Domain.",
-        goal: "Open the page and capture evidence.",
-        targetUrl: "https://example.com",
       }).success,
     ).toBe(false);
   });

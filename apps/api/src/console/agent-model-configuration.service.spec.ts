@@ -90,12 +90,12 @@ describe("AgentModelConfigurationService", () => {
         baseUrl: "https://gateway.example.com/v1",
         displayName: "Overflow",
         modelId: "provider/model-overflow",
-        pool: "POST_RUN_ANALYSIS",
+        pool: "SPEC_ANALYSIS",
       }),
-    ).rejects.toThrow(/POST_RUN_ANALYSIS/u);
+    ).rejects.toThrow(/SPEC_ANALYSIS/u);
     expect(prisma.agentModelConfiguration.count).toHaveBeenCalledWith({
       where: {
-        pool: "POST_RUN_ANALYSIS",
+        pool: "SPEC_ANALYSIS",
         teamId: current.team.id,
       },
     });

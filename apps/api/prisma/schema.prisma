@@ -29,6 +29,7 @@ enum RuntimeStatus {
 enum AgentRuntimePool {
   SPEC_ANALYSIS
   BROWSER_EXECUTION
+  // Historical revoked credentials only; never a schedulable pool.
   POST_RUN_ANALYSIS
   MIXED
 }
@@ -402,22 +403,6 @@ enum TaskCaseDispatchStatus {
   CANCELLED
 }
 
-enum PostRunAnalysisStatus {
-  PENDING_CAPTURE
-  CAPTURING
-  READY
-  RUNNING
-  SUCCEEDED
-  FAILED
-  CANCELLED
-}
-
-enum ImprovementWorkItemStatus {
-  OPEN
-  RESOLVED
-  IGNORED
-}
-
 model User {
   id                              String                     @id @default(uuid()) @db.Uuid
   name                            String?
@@ -531,10 +516,6 @@ model Team {
   taskDeploymentProfileBindings TaskDeploymentProfileBinding[]
   taskProfileRecoveryEvents     TaskProfileRecoveryEvent[]
   inboundIntegrationEvents      InboundIntegrationEvent[]
-  postRunAnalysisJobs           PostRunAnalysisJob[]
-  postRunAnalysisEvents         PostRunAnalysisEvent[]
-  analysisFindings              AnalysisFinding[]
-  improvementWorkItems          ImprovementWorkItem[]
 
   @@map("teams")
 }
@@ -713,54 +694,54 @@ model RuntimeRoutingRule {
 }
 
 model BrowserRuntimeSession {
-  id                       String                       @id @default(uuid()) @db.Uuid
-  teamId                   String                       @map("team_id") @db.Uuid
-  runtimeId                String                       @map("runtime_id") @db.Uuid
-  status                   RuntimeSessionStatus         @default(OPENING)
-  profileMode              BrowserProfileMode           @map("profile_mode")
-  profileKey               String                       @map("profile_key")
-  userBrowserProfileId     String?                      @map("user_browser_profile_id") @db.Uuid
-  authSnapshotGeneration   Int?                         @map("auth_snapshot_generation")
-  identityPermit           Int?                         @map("identity_permit")
-  ownerTaskId              String?                      @map("owner_task_id") @db.Uuid
-  ownerFencingToken        BigInt?                      @map("owner_fencing_token")
-  controlGeneration        Int                          @default(0) @map("control_generation")
-  executionPermitExpiresAt DateTime?                    @map("execution_permit_expires_at") @db.Timestamptz
-  quarantinedAt            DateTime?                    @map("quarantined_at") @db.Timestamptz
-  closureVerifiedAt        DateTime?                    @map("closure_verified_at") @db.Timestamptz
-  closureEvidenceId        String?                      @map("closure_evidence_id") @db.Uuid
-  launchIdentityVersion    Int?                         @map("launch_identity_version")
-  launchIdentity           Json?                        @map("launch_identity")
-  launchHostInstanceId     String?                      @map("launch_host_instance_id")
-  launchConnectionGeneration BigInt?                    @map("launch_connection_generation")
-  purpose                  BrowserRuntimeSessionPurpose @default(EXECUTION)
-  slotNumber               Int                          @map("slot_number")
-  leaseToken               String                       @map("lease_token") @db.Uuid
-  fencingToken             BigInt                       @map("fencing_token")
-  leaseExpiresAt           DateTime                     @map("lease_expires_at") @db.Timestamptz
-  protocolMajor            Int                          @map("protocol_major")
-  protocolMinor            Int                          @map("protocol_minor")
-  humanControllerUserId    String?                      @map("human_controller_user_id") @db.Uuid
-  humanControlExpiresAt    DateTime?                    @map("human_control_expires_at") @db.Timestamptz
-  lastError                Json?                        @map("last_error")
-  openedAt                 DateTime?                    @map("opened_at") @db.Timestamptz
-  closedAt                 DateTime?                    @map("closed_at") @db.Timestamptz
-  createdAt                DateTime                     @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt                DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
-  team                     Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  runtime                  BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Restrict)
-  humanController          User?                        @relation("RuntimeSessionHumanController", fields: [humanControllerUserId], references: [id], onDelete: SetNull)
-  slot                     BrowserRuntimeSlot?
-  profileLease             BrowserRuntimeProfileLease?
-  commands                 BrowserRuntimeCommand[]
-  artifacts                BrowserRuntimeArtifact[]
-  events                   BrowserRuntimeEvent[]
-  testRuns                 TestRun[]
-  verificationRuns         VerificationRun[]
-  humanControlLease        BrowserHumanControlLease?
-  browserExecutions        BrowserExecution[]
-  userBrowserProfile       UserBrowserProfile?          @relation(fields: [userBrowserProfileId], references: [id], onDelete: SetNull)
-  resourceLeases           ExecutionResourceLease[]
+  id                         String                       @id @default(uuid()) @db.Uuid
+  teamId                     String                       @map("team_id") @db.Uuid
+  runtimeId                  String                       @map("runtime_id") @db.Uuid
+  status                     RuntimeSessionStatus         @default(OPENING)
+  profileMode                BrowserProfileMode           @map("profile_mode")
+  profileKey                 String                       @map("profile_key")
+  userBrowserProfileId       String?                      @map("user_browser_profile_id") @db.Uuid
+  authSnapshotGeneration     Int?                         @map("auth_snapshot_generation")
+  identityPermit             Int?                         @map("identity_permit")
+  ownerTaskId                String?                      @map("owner_task_id") @db.Uuid
+  ownerFencingToken          BigInt?                      @map("owner_fencing_token")
+  controlGeneration          Int                          @default(0) @map("control_generation")
+  executionPermitExpiresAt   DateTime?                    @map("execution_permit_expires_at") @db.Timestamptz
+  quarantinedAt              DateTime?                    @map("quarantined_at") @db.Timestamptz
+  closureVerifiedAt          DateTime?                    @map("closure_verified_at") @db.Timestamptz
+  closureEvidenceId          String?                      @map("closure_evidence_id") @db.Uuid
+  launchIdentityVersion      Int?                         @map("launch_identity_version")
+  launchIdentity             Json?                        @map("launch_identity")
+  launchHostInstanceId       String?                      @map("launch_host_instance_id")
+  launchConnectionGeneration BigInt?                      @map("launch_connection_generation")
+  purpose                    BrowserRuntimeSessionPurpose @default(EXECUTION)
+  slotNumber                 Int                          @map("slot_number")
+  leaseToken                 String                       @map("lease_token") @db.Uuid
+  fencingToken               BigInt                       @map("fencing_token")
+  leaseExpiresAt             DateTime                     @map("lease_expires_at") @db.Timestamptz
+  protocolMajor              Int                          @map("protocol_major")
+  protocolMinor              Int                          @map("protocol_minor")
+  humanControllerUserId      String?                      @map("human_controller_user_id") @db.Uuid
+  humanControlExpiresAt      DateTime?                    @map("human_control_expires_at") @db.Timestamptz
+  lastError                  Json?                        @map("last_error")
+  openedAt                   DateTime?                    @map("opened_at") @db.Timestamptz
+  closedAt                   DateTime?                    @map("closed_at") @db.Timestamptz
+  createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                  DateTime                     @updatedAt @map("updated_at") @db.Timestamptz
+  team                       Team                         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runtime                    BrowserRuntime               @relation(fields: [runtimeId], references: [id], onDelete: Restrict)
+  humanController            User?                        @relation("RuntimeSessionHumanController", fields: [humanControllerUserId], references: [id], onDelete: SetNull)
+  slot                       BrowserRuntimeSlot?
+  profileLease               BrowserRuntimeProfileLease?
+  commands                   BrowserRuntimeCommand[]
+  artifacts                  BrowserRuntimeArtifact[]
+  events                     BrowserRuntimeEvent[]
+  testRuns                   TestRun[]
+  verificationRuns           VerificationRun[]
+  humanControlLease          BrowserHumanControlLease?
+  browserExecutions          BrowserExecution[]
+  userBrowserProfile         UserBrowserProfile?          @relation(fields: [userBrowserProfileId], references: [id], onDelete: SetNull)
+  resourceLeases             ExecutionResourceLease[]
 
   @@unique([userBrowserProfileId, identityPermit])
   @@index([ownerTaskId, closureVerifiedAt], map: "browser_runtime_session_owner_closure_idx")
@@ -884,16 +865,16 @@ model BrowserRuntimeEvent {
 }
 
 model BrowserRuntimePairingToken {
-  id        String    @id @default(uuid()) @db.Uuid
-  teamId    String    @map("team_id") @db.Uuid
-  tokenHash String    @unique @map("token_hash")
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz
-  usedAt    DateTime? @map("used_at") @db.Timestamptz
-  resumeDrainId String? @map("resume_drain_id") @db.Uuid
-  resumeGeneration Int? @map("resume_generation")
-  resumeRequestedBy String? @map("resume_requested_by") @db.Uuid
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id                String    @id @default(uuid()) @db.Uuid
+  teamId            String    @map("team_id") @db.Uuid
+  tokenHash         String    @unique @map("token_hash")
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz
+  usedAt            DateTime? @map("used_at") @db.Timestamptz
+  resumeDrainId     String?   @map("resume_drain_id") @db.Uuid
+  resumeGeneration  Int?      @map("resume_generation")
+  resumeRequestedBy String?   @map("resume_requested_by") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  team              Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@index([teamId, createdAt(sort: Desc)])
   @@index([expiresAt])
@@ -1234,7 +1215,7 @@ model TaskExecution {
   cancelRequestedAt         DateTime?                      @map("cancel_requested_at") @db.Timestamptz
   projectionNeededAt        DateTime?                      @map("projection_needed_at") @db.Timestamptz
   projectedAt               DateTime?                      @map("projected_at") @db.Timestamptz
-  postRunAnalysisGeneration Int                            @default(1) @map("post_run_analysis_generation")
+  executionGeneration       Int                            @default(1) @map("execution_generation")
   legacySpecificationId     String?                        @map("legacy_specification_id") @db.Uuid
   migrationSource           String                         @default("NATIVE") @map("migration_source")
   sourceSnapshotComplete    Boolean                        @default(true) @map("source_snapshot_complete")
@@ -1258,8 +1239,6 @@ model TaskExecution {
   browserProfileUsages      BrowserProfileUsage[]
   inboundIntegrationEvents  InboundIntegrationEvent[]
   notifications             NotificationOutbox[]
-  postRunAnalyses           PostRunAnalysisJob[]
-  improvementWorkItems      ImprovementWorkItem[]
 
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
@@ -1471,129 +1450,6 @@ model TaskExecutionEvent {
 
 /// A sidecar analysis of a terminal Issue task. It is deliberately separate
 /// from TaskExecution stages so analysis failure cannot change the test result.
-model PostRunAnalysisJob {
-  id                        String                 @id @default(uuid()) @db.Uuid
-  teamId                    String                 @map("team_id") @db.Uuid
-  taskExecutionId           String                 @map("task_execution_id") @db.Uuid
-  analyzerVersion           String                 @map("analyzer_version")
-  generation                Int                    @default(1)
-  status                    PostRunAnalysisStatus  @default(PENDING_CAPTURE)
-  attemptNumber             Int                    @default(0) @map("attempt_number")
-  maxAttempts               Int                    @default(3) @map("max_attempts")
-  inputStorageKey           String?                @map("input_storage_key")
-  captureStorageKey         String?                @map("capture_storage_key")
-  captureEvidenceStorageKey String?                @map("capture_evidence_storage_key")
-  inputSha256               String?                @map("input_sha256") @db.Char(64)
-  inputByteSize             Int?                   @map("input_byte_size")
-  inputCompleteness         Json                   @default("{}") @map("input_completeness")
-  inputManifest             Json                   @default("{}") @map("input_manifest")
-  analysisCheckpoint        Json                   @default("{}") @map("analysis_checkpoint")
-  result                    Json?
-  error                     Json?
-  leaseOwner                String?                @map("lease_owner")
-  leaseToken                String?                @map("lease_token") @db.Uuid
-  leaseExpiresAt            DateTime?              @map("lease_expires_at") @db.Timestamptz
-  fencingToken              BigInt                 @default(0) @map("fencing_token")
-  completionId              String?                @unique @map("completion_id") @db.Uuid
-  deadlineAt                DateTime               @map("deadline_at") @db.Timestamptz
-  hardDeadlineAt            DateTime               @default(dbgenerated("(CURRENT_TIMESTAMP + INTERVAL '2 hours')")) @map("hard_deadline_at") @db.Timestamptz
-  readyAt                   DateTime?              @map("ready_at") @db.Timestamptz
-  nextAttemptAt             DateTime?              @map("next_attempt_at") @db.Timestamptz
-  queuedAt                  DateTime               @default(now()) @map("queued_at") @db.Timestamptz
-  startedAt                 DateTime?              @map("started_at") @db.Timestamptz
-  finishedAt                DateTime?              @map("finished_at") @db.Timestamptz
-  createdAt                 DateTime               @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt                 DateTime               @updatedAt @map("updated_at") @db.Timestamptz
-  team                      Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  taskExecution             TaskExecution          @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
-  events                    PostRunAnalysisEvent[]
-  findings                  AnalysisFinding[]
-  workItem                  ImprovementWorkItem?
-
-  @@unique([taskExecutionId, analyzerVersion, generation], map: "post_run_analysis_jobs_task_analyzer_generation_key")
-  @@index([teamId, status, createdAt])
-  @@index([status, leaseExpiresAt, createdAt])
-  @@index([teamId, status, nextAttemptAt, attemptNumber], map: "post_run_analysis_jobs_schedulable_idx")
-  @@index([status, deadlineAt], map: "post_run_analysis_jobs_attempt_deadline_idx")
-  @@index([status, hardDeadlineAt], map: "post_run_analysis_jobs_hard_deadline_idx")
-  @@map("post_run_analysis_jobs")
-}
-
-model PostRunAnalysisEvent {
-  id         String             @id @default(uuid()) @db.Uuid
-  teamId     String             @map("team_id") @db.Uuid
-  analysisId String             @map("analysis_id") @db.Uuid
-  sequence   BigInt             @default(autoincrement())
-  actor      String
-  kind       String
-  payload    Json               @default("{}")
-  occurredAt DateTime           @default(now()) @map("occurred_at") @db.Timestamptz
-  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz
-  team       Team               @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  analysis   PostRunAnalysisJob @relation(fields: [analysisId], references: [id], onDelete: Cascade)
-
-  @@unique([analysisId, sequence])
-  @@index([teamId, analysisId, sequence])
-  @@map("post_run_analysis_events")
-}
-
-model AnalysisFinding {
-  id             String               @id @default(uuid()) @db.Uuid
-  teamId         String               @map("team_id") @db.Uuid
-  analysisId     String               @map("analysis_id") @db.Uuid
-  workItemId     String?              @map("work_item_id") @db.Uuid
-  fingerprint    String               @db.Char(64)
-  category       String
-  severity       String
-  confidence     Float
-  attemptNumber  Int?                 @map("attempt_number")
-  title          String
-  rootCause      String               @map("root_cause")
-  impact         String
-  recommendation String
-  component      String
-  phase          String
-  failureClass   String               @map("failure_class")
-  runId          String?              @map("run_id") @db.Uuid
-  runtimeId      String?              @map("runtime_id") @db.Uuid
-  evidenceRefs   String[]             @default([]) @map("evidence_refs")
-  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz
-  team           Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  analysis       PostRunAnalysisJob   @relation(fields: [analysisId], references: [id], onDelete: Cascade)
-  workItem       ImprovementWorkItem? @relation(fields: [workItemId], references: [id], onDelete: SetNull)
-
-  @@unique([analysisId, fingerprint])
-  @@index([teamId, fingerprint, createdAt])
-  @@index([workItemId])
-  @@index([runId])
-  @@index([runtimeId])
-  @@map("analysis_findings")
-}
-
-model ImprovementWorkItem {
-  id                    String                    @id @default(uuid()) @db.Uuid
-  teamId                String                    @map("team_id") @db.Uuid
-  sourceTaskExecutionId String                    @map("source_task_execution_id") @db.Uuid
-  analysisId            String                    @unique @map("analysis_id") @db.Uuid
-  dedupeKey             String                    @map("dedupe_key") @db.Char(64)
-  status                ImprovementWorkItemStatus @default(OPEN)
-  provider              String                    @default("INTERNAL")
-  externalRef           String?                   @map("external_ref")
-  title                 String
-  body                  String
-  findingCount          Int                       @map("finding_count")
-  createdAt             DateTime                  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt             DateTime                  @updatedAt @map("updated_at") @db.Timestamptz
-  team                  Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  sourceTaskExecution   TaskExecution             @relation(fields: [sourceTaskExecutionId], references: [id], onDelete: Cascade)
-  analysis              PostRunAnalysisJob        @relation(fields: [analysisId], references: [id], onDelete: Cascade)
-  findings              AnalysisFinding[]
-
-  @@unique([teamId, dedupeKey])
-  @@index([teamId, status, createdAt(sort: Desc)])
-  @@index([sourceTaskExecutionId])
-  @@map("improvement_work_items")
-}
 
 model UserExternalIdentity {
   id              String                   @id @default(uuid()) @db.Uuid
@@ -2308,46 +2164,45 @@ model AuditEvent {
   @@map("audit_events")
 }
 
-
 /// Durable workflow state, independently tracking physical closure and business outcome.
 model RuntimeSessionRecovery {
-  id                      String    @id @default(uuid()) @db.Uuid
-  teamId                  String    @map("team_id") @db.Uuid
-  runtimeId               String    @map("runtime_id") @db.Uuid
-  sessionId               String    @map("session_id") @db.Uuid
-  expectedSessionFence    BigInt    @map("expected_session_fence")
-  expectedLeaseDigest     String    @map("expected_lease_digest")
-  reason                  String
-  sourceRunId             String?   @map("source_run_id") @db.Uuid
-  observedProtocolMajor   Int       @map("observed_protocol_major")
-  observedProtocolMinor   Int       @map("observed_protocol_minor")
-  closureState            String    @default("REQUESTED") @map("closure_state")
-  closureEvidenceId       String?   @map("closure_evidence_id") @db.Uuid
-  closureVerifiedAt       DateTime? @map("closure_verified_at") @db.Timestamptz
-  writeOutcomeState       String    @default("UNASSESSED") @map("write_outcome_state")
-  outcomeEvidenceRefs      Json      @default("[]") @map("outcome_evidence_refs")
-  resolvedBy              String?   @map("resolved_by") @db.Uuid
-  resolutionNote          String?   @map("resolution_note")
-  resolutionOutcome       String?   @map("resolution_outcome")
-  resolutionKey           String?   @map("resolution_key")
-  resolutionDigest        String?   @map("resolution_digest")
-  writeResolvedAt         DateTime? @map("write_resolved_at") @db.Timestamptz
-  scopeSnapshot           Json      @default("[]") @map("scope_snapshot")
-  scopeProvenance         String    @default("UNKNOWN") @map("scope_provenance")
-  aliasRegistryVersion    String?   @map("alias_registry_version")
-  attempts                Int       @default(0)
-  nextAttemptAt           DateTime? @default(now()) @map("next_attempt_at") @db.Timestamptz
-  lastErrorCode           String?   @map("last_error_code")
-  lastErrorAt             DateTime? @map("last_error_at") @db.Timestamptz
-  activeCommandId         String?   @map("active_command_id") @db.Uuid
-  claimToken              String?   @map("claim_token") @db.Uuid
-  claimExpiresAt          DateTime? @map("claim_expires_at") @db.Timestamptz
-  claimVersion            Int       @default(0) @map("claim_version")
-  version                 Int       @default(1)
-  resolvedAt              DateTime? @map("resolved_at") @db.Timestamptz
-  discoveredAt            DateTime  @default(now()) @map("discovered_at") @db.Timestamptz
-  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  id                    String    @id @default(uuid()) @db.Uuid
+  teamId                String    @map("team_id") @db.Uuid
+  runtimeId             String    @map("runtime_id") @db.Uuid
+  sessionId             String    @map("session_id") @db.Uuid
+  expectedSessionFence  BigInt    @map("expected_session_fence")
+  expectedLeaseDigest   String    @map("expected_lease_digest")
+  reason                String
+  sourceRunId           String?   @map("source_run_id") @db.Uuid
+  observedProtocolMajor Int       @map("observed_protocol_major")
+  observedProtocolMinor Int       @map("observed_protocol_minor")
+  closureState          String    @default("REQUESTED") @map("closure_state")
+  closureEvidenceId     String?   @map("closure_evidence_id") @db.Uuid
+  closureVerifiedAt     DateTime? @map("closure_verified_at") @db.Timestamptz
+  writeOutcomeState     String    @default("UNASSESSED") @map("write_outcome_state")
+  outcomeEvidenceRefs   Json      @default("[]") @map("outcome_evidence_refs")
+  resolvedBy            String?   @map("resolved_by") @db.Uuid
+  resolutionNote        String?   @map("resolution_note")
+  resolutionOutcome     String?   @map("resolution_outcome")
+  resolutionKey         String?   @map("resolution_key")
+  resolutionDigest      String?   @map("resolution_digest")
+  writeResolvedAt       DateTime? @map("write_resolved_at") @db.Timestamptz
+  scopeSnapshot         Json      @default("[]") @map("scope_snapshot")
+  scopeProvenance       String    @default("UNKNOWN") @map("scope_provenance")
+  aliasRegistryVersion  String?   @map("alias_registry_version")
+  attempts              Int       @default(0)
+  nextAttemptAt         DateTime? @default(now()) @map("next_attempt_at") @db.Timestamptz
+  lastErrorCode         String?   @map("last_error_code")
+  lastErrorAt           DateTime? @map("last_error_at") @db.Timestamptz
+  activeCommandId       String?   @map("active_command_id") @db.Uuid
+  claimToken            String?   @map("claim_token") @db.Uuid
+  claimExpiresAt        DateTime? @map("claim_expires_at") @db.Timestamptz
+  claimVersion          Int       @default(0) @map("claim_version")
+  version               Int       @default(1)
+  resolvedAt            DateTime? @map("resolved_at") @db.Timestamptz
+  discoveredAt          DateTime  @default(now()) @map("discovered_at") @db.Timestamptz
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   @@unique([sessionId, expectedSessionFence])
   @@index([closureState, nextAttemptAt, id])
@@ -2358,24 +2213,24 @@ model RuntimeSessionRecovery {
 }
 
 model SessionClosureEvidence {
-  id                       String   @id @default(uuid()) @db.Uuid
-  evidenceId               String   @unique @map("evidence_id") @db.Uuid
-  recoveryId               String   @map("recovery_id") @db.Uuid
-  requestId                String   @map("request_id") @db.Uuid
-  sessionId                String   @map("session_id") @db.Uuid
-  sessionFence             BigInt   @map("session_fence")
-  leaseDigest              String   @map("lease_digest")
-  runtimeId                String   @map("runtime_id") @db.Uuid
-  connectionGeneration     BigInt?  @map("connection_generation")
-  hostInstanceId           String?  @map("host_instance_id")
-  daemonInstanceId         String?  @map("daemon_instance_id")
-  launchIdentityVersion    Int?     @map("launch_identity_version")
-  method                   String
-  capabilityVersion        String   @map("capability_version")
-  summary                  Json
-  serverVerifiedAt         DateTime @default(now()) @map("server_verified_at") @db.Timestamptz
-  actorId                  String?  @map("actor_id") @db.Uuid
-  auditRef                 String?  @map("audit_ref")
+  id                    String   @id @default(uuid()) @db.Uuid
+  evidenceId            String   @unique @map("evidence_id") @db.Uuid
+  recoveryId            String   @map("recovery_id") @db.Uuid
+  requestId             String   @map("request_id") @db.Uuid
+  sessionId             String   @map("session_id") @db.Uuid
+  sessionFence          BigInt   @map("session_fence")
+  leaseDigest           String   @map("lease_digest")
+  runtimeId             String   @map("runtime_id") @db.Uuid
+  connectionGeneration  BigInt?  @map("connection_generation")
+  hostInstanceId        String?  @map("host_instance_id")
+  daemonInstanceId      String?  @map("daemon_instance_id")
+  launchIdentityVersion Int?     @map("launch_identity_version")
+  method                String
+  capabilityVersion     String   @map("capability_version")
+  summary               Json
+  serverVerifiedAt      DateTime @default(now()) @map("server_verified_at") @db.Timestamptz
+  actorId               String?  @map("actor_id") @db.Uuid
+  auditRef              String?  @map("audit_ref")
 
   @@index([requestId])
   @@index([recoveryId, serverVerifiedAt])
@@ -2399,37 +2254,37 @@ model RuntimeRecoveryOutbox {
 }
 
 model RuntimeRecoveryPermit {
-  runtimeId       String    @id @map("runtime_id") @db.Uuid
-  recoveryId      String    @map("recovery_id") @db.Uuid
-  activeCommandId String?   @map("active_command_id") @db.Uuid
-  claimToken      String    @map("claim_token") @db.Uuid
-  claimExpiresAt  DateTime  @map("claim_expires_at") @db.Timestamptz
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  runtimeId       String   @id @map("runtime_id") @db.Uuid
+  recoveryId      String   @map("recovery_id") @db.Uuid
+  activeCommandId String?  @map("active_command_id") @db.Uuid
+  claimToken      String   @map("claim_token") @db.Uuid
+  claimExpiresAt  DateTime @map("claim_expires_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   @@map("runtime_recovery_permits")
 }
 
 model RuntimeDrainAttestation {
-  id                   String    @id @default(uuid()) @db.Uuid
-  teamId               String    @map("team_id") @db.Uuid
-  runtimeId            String    @map("runtime_id") @db.Uuid
-  drainGeneration      Int       @map("drain_generation")
-  connectionGeneration BigInt    @map("connection_generation")
-  hostInstanceId       String?   @map("host_instance_id")
-  frozenSessions       Json      @map("frozen_sessions")
-  snapshotDigest       String    @map("snapshot_digest")
-  state                String    @default("FROZEN")
-  createdBy            String    @map("created_by") @db.Uuid
-  attestedBy           String?   @map("attested_by") @db.Uuid
-  idempotencyKey       String?   @map("idempotency_key")
-  attestationDigest    String?   @map("attestation_digest")
-  evidenceRefs         Json      @default("[]") @map("evidence_refs")
-  note                 String?
-  attestedAt           DateTime? @map("attested_at") @db.Timestamptz
-  resumeGeneration     Int       @default(0) @map("resume_generation")
-  resumeConnectionGeneration BigInt? @map("resume_connection_generation")
-  resumedAt            DateTime? @map("resumed_at") @db.Timestamptz
-  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  id                         String    @id @default(uuid()) @db.Uuid
+  teamId                     String    @map("team_id") @db.Uuid
+  runtimeId                  String    @map("runtime_id") @db.Uuid
+  drainGeneration            Int       @map("drain_generation")
+  connectionGeneration       BigInt    @map("connection_generation")
+  hostInstanceId             String?   @map("host_instance_id")
+  frozenSessions             Json      @map("frozen_sessions")
+  snapshotDigest             String    @map("snapshot_digest")
+  state                      String    @default("FROZEN")
+  createdBy                  String    @map("created_by") @db.Uuid
+  attestedBy                 String?   @map("attested_by") @db.Uuid
+  idempotencyKey             String?   @map("idempotency_key")
+  attestationDigest          String?   @map("attestation_digest")
+  evidenceRefs               Json      @default("[]") @map("evidence_refs")
+  note                       String?
+  attestedAt                 DateTime? @map("attested_at") @db.Timestamptz
+  resumeGeneration           Int       @default(0) @map("resume_generation")
+  resumeConnectionGeneration BigInt?   @map("resume_connection_generation")
+  resumedAt                  DateTime? @map("resumed_at") @db.Timestamptz
+  createdAt                  DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   @@unique([runtimeId, drainGeneration])
   @@index([teamId, state, createdAt])

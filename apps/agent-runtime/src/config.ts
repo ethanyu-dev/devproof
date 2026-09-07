@@ -9,7 +9,7 @@ const configSchema = z
   .object({
     DEVPROOF_API_URL: z.string().url().default("http://localhost:4433"),
     DEVPROOF_AGENT_RUNTIME_POOL: z
-      .enum(["SPEC_ANALYSIS", "BROWSER_EXECUTION", "POST_RUN_ANALYSIS"])
+      .enum(["SPEC_ANALYSIS", "BROWSER_EXECUTION"])
       .optional(),
     DEVPROOF_AGENT_RUNTIME_TOKEN: z.string().min(16),
     DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: z.string().default(""),
@@ -43,12 +43,6 @@ const configSchema = z
       .min(5)
       .max(200)
       .default(60),
-    DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT: z.coerce
-      .number()
-      .int()
-      .min(10)
-      .max(1_000)
-      .default(300),
     DEVPROOF_AGENT_WORKER_ID: z
       .string()
       .trim()

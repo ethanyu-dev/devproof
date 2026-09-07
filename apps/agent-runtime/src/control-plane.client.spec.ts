@@ -119,7 +119,6 @@ describe("ControlPlaneClient registration", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          analysisConcurrency: 0,
           browserConcurrency: 0,
           pools: ["SPEC_ANALYSIS"],
           refreshAfterMs: 5_000,
@@ -144,7 +143,6 @@ describe("ControlPlaneClient registration", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          analysisConcurrency: 0,
           browserConcurrency: 0,
           pools: ["BROWSER_EXECUTION"],
           refreshAfterMs: 5_000,

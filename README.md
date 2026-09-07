@@ -27,14 +27,14 @@ DevProof brings these concerns into a single control plane. Callers describe the
 
 The system is organized into four layers:
 
-1. **Task Producer**: Codex, Claude, Playground, or another client creates tasks and reads results through MCP or HTTP without managing browser sessions or low-level execution lifecycles.
+1. **Task Producer**: Codex, Claude, or another client creates tasks and reads results through MCP or HTTP without managing browser sessions or low-level execution lifecycles.
 2. **Control Plane**: the DevProof API is the sole authority for task state. It owns specification analysis, Case/Run orchestration, leases, retries, cancellation, HITL, cleanup, and aggregate verdicts.
 3. **Agent Runtime**: a lightweight, independently deployable worker claims Runs, invokes a model for reasoning, and sends high-level actions to an Execution Runner.
 4. **Execution Runner**: a controlled environment in which actions actually run. Browser Runtime is the first Runner; the protocol boundary is designed to support HTTP, shell, and container Runners as well.
 
 Screenshots, DOM snapshots, console logs, network traces, video, and structured events flow back into the control plane, creating an evidence chain from task input through execution trajectory to final verdict. The Console uses the same control plane for configuration, observability, and human handoff.
 
-Browser Runtime is the first Execution Runner, not the platform boundary. The user-facing `TaskExecution` is the aggregate root. Issue tasks always contain three stages—Spec Analysis, Profile Resolution, and Spec Execution—while the original `ExecutionRun` remains the Case-level carrier for actual execution and evidence. Web Playground is only a task creation entry point; it no longer owns a separate model loop or task state.
+Browser Runtime is the first Execution Runner, not the platform boundary. The user-facing `TaskExecution` is the aggregate root. Issue tasks always contain three stages—Spec Analysis, Profile Resolution, and Spec Execution—while the original `ExecutionRun` remains the Case-level carrier for actual execution and evidence.
 
 ## Technology baseline
 
@@ -55,7 +55,7 @@ This flag controls presentation in the current browser only; it is not an author
 
 - **DevProof API**: the sole control plane for Tasks, Stages, Spec Snapshots, Cases, Runs, retries, cancellation, HITL, cleanup, and aggregate verdicts
 - **Agent Runtime**: a stateless lease worker responsible for model reasoning and the high-level Browser Verification Executor
-- **Task Producer**: Codex, Claude, Playground, or any other caller that creates tasks
+- **Task Producer**: Codex, Claude, or any other caller that creates tasks
 - **Execution Runner**: a concrete controlled environment such as Browser, HTTP, shell, or container
 
 ## Current scope
@@ -68,7 +68,7 @@ This flag controls presentation in the current browser only; it is not an author
 - The `/v2/tasks` user task API, Case-level `/v2/runs` API, and high-level Task MCP tools
 - Browser Runtime as an `ExecutionRunner` adapter, including capability discovery, automatic evidence association, and terminal cleanup
 - Event-driven HITL coordination, timeout policies, and a durable Feishu notification outbox
-- A unified Playground flow: Issue → Task → AI Spec Analysis → Profile Resolution → Spec Execution; direct tasks skip the first two stages
+- A unified task flow: Issue → Task → AI Spec Analysis → Profile Resolution → Spec Execution; direct tasks skip the first two stages
 - Linear, GitHub, and Knowledge context resolution; immutable task-level Spec Snapshots; deterministic Cases; and dispatch retries
 - Team-level Browser Runtime, Profile, and HITL settings
 - Runtime routing policies based on exact domains or `*.` wildcard domains
@@ -114,11 +114,9 @@ Requirements: Node.js 24, pnpm 10, and Docker.
        pnpm prisma:deploy
        pnpm dev
 
-5. In Console → Access → Agent Models, configure an independent ordered model list for each of the `SPEC_ANALYSIS`, `BROWSER_EXECUTION`, and `POST_RUN_ANALYSIS` pools. A model is never implicitly shared across pools; each list has its own fallback and recovery priority. Existing installations are migrated by cloning the previous shared list into all three pools so operators can separate them safely after upgrade. Provision one token for each deployment with `pnpm --filter @devproof/api runtime:provision -- --team default --pool SPEC_ANALYSIS`, `pnpm --filter @devproof/api runtime:provision -- --team default --pool BROWSER_EXECUTION`, and `pnpm --filter @devproof/api runtime:provision -- --team default --pool POST_RUN_ANALYSIS`. Local `pnpm dev` reads the one-time tokens from `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN`, `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`, and `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`; standalone Runtime deployments set the corresponding token as `DEVPROOF_AGENT_RUNTIME_TOKEN` and should also set `DEVPROOF_AGENT_RUNTIME_POOL` as an explicit assertion. If the pool variable is omitted, the Runtime binds to the single pool carried by its credential on first registration; a declared mismatch is rejected. Browser worker concurrency is assigned dynamically from the sum of the online Browser execution nodes' Console-managed capacities; do not configure a separate Browser pool concurrency environment variable. Operators can approve an exact private or HTTP model gateway with `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST`.
+5. In Console → Access → Agent Models, configure independent ordered model lists for the `SPEC_ANALYSIS` and `BROWSER_EXECUTION` pools. Provision one credential per deployment with `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>`. Local `pnpm dev` reads `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` and `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`; standalone deployments use `DEVPROOF_AGENT_RUNTIME_TOKEN` and may assert `DEVPROOF_AGENT_RUNTIME_POOL`. If omitted, the Runtime binds to its credential's pool on registration; a mismatch is rejected. Browser worker concurrency follows the online Browser nodes' Console-managed capacity. Approve private or HTTP model gateways with `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST`.
 
 6. Spec analysis for Issue Tasks is executed by Agent Runtime. The Agent reads the Issue, linked PR metadata, diffs, code pinned to the PR head SHA, and optional knowledge results through credential-isolated read-only control-plane tools, then submits an immutable source-cited `agent-spec-v2`. Configure `SPEC_ANALYSIS_MODE=AGENT`; use `SHADOW` to record a comparison with the legacy deterministic generator or `DETERMINISTIC` for rollback. Linear prefers the official GraphQL API through `LINEAR_API_TOKEN`, with `LINEAR_MCP_BEARER_TOKEN` as a fallback. Configure encrypted GitHub PAT entries in Console → Access and a read-only Knowledge MCP when required. Every model turn, structured analysis summary, tool call, validation correction, and final Spec is recorded in the Task trajectory; raw hidden chain-of-thought and credentials are never recorded.
-
-7. Optional post-run optimization analysis is disabled by default. Set `POST_RUN_ANALYSIS_ENABLED=true` only after provisioning its pool. A terminal Issue Task then captures an immutable redacted `devproof.task-logs.v2` bundle, runs evidence-cited analysis without changing the original verdict, and creates a deduplicated internal improvement work item for high-confidence findings. See [post-run optimization analysis](docs/post-run-analysis.md).
 
 The security migration revokes Runtime Tokens previously issued through Console; provision a replacement with the operator command above. Legacy Runtime Token variable names, Worker ID, polling interval, and tool-limit environment variable names remain readable during migration. Provider API Keys and Base URLs are managed only in Console; new Runtime settings should use the `DEVPROOF_AGENT_*` names in `.env.example`.
 
@@ -206,7 +204,7 @@ The MCP endpoint is `http://localhost:4433/mcp` and uses the same Bearer token. 
 
 MCP exposes only the unified Task control plane: `get_integration_status`, `create_task`, `get_task`, `list_tasks`, `set_task_deployment_target`, `retry_task_stage`, and `cancel_task`. Use `get_run`, `resolve_run_intervention`, and `read_run_evidence` only when drilling down into Case-level Runtime details. Legacy Spec, Verification, browser command, Profile cleanup, and compatible `create_run` tools are no longer published. Callers do not receive Browser Sessions and do not call low-level `command`, `complete`, or `release` lifecycle tools. The read-only discovery resource is `devproof://task-tools`.
 
-Console Playground is the end-to-end integration entry point. Issue mode creates a Task, then background workers resolve context into an immutable task-level Spec Snapshot, resolve the `EPHEMERAL`, `REQUESTER`, `ISSUE_ASSIGNEE`, or `EXPLICIT_PROFILE` strategy, and idempotently create a Run v2 for each Case. Direct mode creates a Task and skips analysis and Profile resolution. A user Profile may be used only for trigger sources and target domains authorized by its owner, and Tasks using the same Profile execute with FIFO exclusivity. Case dispatch uses database claims, stable idempotency keys, and background compensation; the Task Execution detail page presents stages, Cases, and recent errors together.
+Create tasks through HTTP or MCP and inspect execution in Console. Issue mode creates a Task, then background workers resolve context into an immutable task-level Spec Snapshot, resolve the `EPHEMERAL`, `REQUESTER`, `ISSUE_ASSIGNEE`, or `EXPLICIT_PROFILE` strategy, and idempotently create a Run v2 for each Case. Direct mode creates a Task and skips analysis and Profile resolution. A user Profile may be used only for trigger sources and target domains authorized by its owner, and Tasks using the same Profile execute with FIFO exclusivity. Case dispatch uses database claims, stable idempotency keys, and background compensation; the Task Execution detail page presents stages, Cases, and recent errors together.
 
 When an Agent requests HITL on a still-live Browser Session, the Task Execution detail page presents Browser Human Handoff. A human takes control of the Agent's original page to complete login, CAPTCHA, or MFA. Releasing control writes a structured response back to the same Runtime Task, which resumes under a new fencing lease. Live JPEG frames and mouse/keyboard input travel only over an ephemeral lease-protected channel and are not written to prompts, traces, the database, or object storage. The full browser data plane, SSRF protection, and fault injection require Browser Runtime protocol v1.2; physical control-plane cleanup requires v1.6; enhanced evidence capture requires v1.7; 30-day user Profile cleanup and lifecycle reporting require v1.8; per-step screenshots and action video require v1.10; structured locator recovery diagnostics require v1.11; and acknowledged, bounded video-finalization diagnostics require v1.12. Rebuild and restart Runtime after upgrading the code.
 

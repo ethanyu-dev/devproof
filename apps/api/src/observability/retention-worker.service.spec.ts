@@ -1,17 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-
-import { POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD } from "../post-run-analysis/task-log-bundle.service.js";
 import { leaseDigest } from "../runtime/session-recovery.state.js";
 import { RetentionWorker } from "./retention-worker.service.js";
 
-function fixture(
-  counts: {
-    testRunArtifacts: number;
-    verificationArtifacts: number;
-    runEvidences?: number;
-  },
-  postRunBundle = false,
-) {
+function fixture(counts: {
+  testRunArtifacts: number;
+  verificationArtifacts: number;
+  runEvidences?: number;
+}) {
   const queuedKeys: string[] = [];
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(1),
@@ -29,10 +24,6 @@ function fixture(
         },
       ),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-    },
-    postRunAnalysisJob: {
-      count: vi.fn().mockResolvedValue(0),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     testRunArtifact: { count: vi.fn().mockResolvedValue(0) },
@@ -79,22 +70,6 @@ function fixture(
         })),
       ),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-    },
-    postRunAnalysisJob: {
-      findMany: vi.fn().mockResolvedValue(
-        postRunBundle
-          ? [
-              {
-                id: "analysis-1",
-                inputManifest: {
-                  [POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD]:
-                    "post-run-analysis/team/task/job/bundle.json.evidence.ndjson",
-                },
-                inputStorageKey: "post-run-analysis/team/task/job/bundle.json",
-              },
-            ]
-          : [],
-      ),
     },
     toolInvocation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     verificationRun: {
@@ -174,16 +149,11 @@ describe("RetentionWorker", () => {
     const purge = vi
       .spyOn(worker as never, "purgeRuntimeData" as never)
       .mockRejectedValue(new Error("foreign key"));
-    const bundles = vi.spyOn(
-      worker as never,
-      "purgePostRunAnalysisBundles" as never,
-    );
     const objects = vi.spyOn(
       worker as never,
       "purgeObjectStorageDeletions" as never,
     );
     await expect(worker.sweep()).rejects.toThrow("Retention stages failed");
-    expect(bundles).toHaveBeenCalledOnce();
     expect(objects).toHaveBeenCalledOnce();
     expect(prisma.auditEvent.deleteMany).toHaveBeenCalledOnce();
     purge.mockRestore();
@@ -205,34 +175,6 @@ describe("RetentionWorker", () => {
       }),
     );
     expect(storage.delete).not.toHaveBeenCalled();
-  });
-
-  it("detaches and deletes expired post-run bundles without deleting findings", async () => {
-    const { storage, tx, worker } = fixture(
-      { testRunArtifacts: 1, verificationArtifacts: 1 },
-      true,
-    );
-
-    await worker.sweep();
-
-    expect(tx.postRunAnalysisJob.updateMany).toHaveBeenCalledWith({
-      data: {
-        analysisCheckpoint: {},
-        inputManifest: {},
-        inputStorageKey: null,
-      },
-      where: {
-        id: "analysis-1",
-        inputStorageKey: "post-run-analysis/team/task/job/bundle.json",
-        status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] },
-      },
-    });
-    expect(storage.delete).toHaveBeenCalledWith(
-      "post-run-analysis/team/task/job/bundle.json",
-    );
-    expect(storage.delete).toHaveBeenCalledWith(
-      "post-run-analysis/team/task/job/bundle.json.evidence.ndjson",
-    );
   });
 });
 

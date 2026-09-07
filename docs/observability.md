@@ -136,8 +136,6 @@ Inspect the oldest `STARTED` invocation and its Runtime command. If the work is 
 
 Inspect `agent.model.failed` events, duration, provider configuration, gateway status, limits, and credentials. Only redacted previews are available in events; use provider-side request IDs when deeper diagnosis is required.
 
-For the `POST_RUN_ANALYSIS` pool, also inspect `devproof_post_run_analysis_jobs` and the job's `inputCompleteness`. `PENDING_CAPTURE` points to cleanup or capture lag, `READY` points to missing pool capacity or credentials, and `FAILED` exposes a bounded structured error and supports a manual retry from the Task detail page.
-
 ### DevProofHttpErrorRatioHigh
 
 Break down HTTP metrics by route and status class, then use `requestId` to find the corresponding structured logs. Check whether failures are isolated to MCP, Console proxying, or Runtime Gateway endpoints.

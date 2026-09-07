@@ -1,35 +1,16 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import {
-  Activity,
-  ArrowLeft,
-  CheckCircle2,
-  FlaskConical,
-  RefreshCw,
-} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import { ArrowLeft, CheckCircle2, RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 
 import { PageHeader } from "@/components/page-header";
 import { FormMessage, LoadingState } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
-import { VerificationHitlBrowser } from "./verification-hitl-browser";
-import { VerificationLiveBrowser } from "./verification-live-browser";
-
-interface RunSummary {
-  _count: { artifacts: number; checkpoints: number; events: number };
-  agentProvider: string;
-  createdAt: string;
-  goal: string;
-  id: string;
-  status: string;
-}
 
 interface RunDetail {
   artifacts: Array<{
@@ -137,95 +118,12 @@ function tone(status: string): "success" | "warning" | "danger" | "neutral" {
   return "neutral";
 }
 
-export function VerificationsClient({ initialId }: { initialId?: string }) {
-  return initialId ? (
-    <VerificationDetailClient id={initialId} />
-  ) : (
-    <VerificationListClient />
-  );
-}
-
-function VerificationListClient() {
-  const [rows, setRows] = useState<RunSummary[] | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setMessage(null);
-    setRows(await consoleApi<RunSummary[]>("/verifications"));
-  }, []);
-
-  useEffect(() => {
-    void load().catch((error: Error) => setMessage(error.message));
-  }, [load]);
-
-  return (
-    <>
-      <PageHeader
-        actions={
-          <Button
-            onClick={() =>
-              void load().catch((error: Error) => setMessage(error.message))
-            }
-            variant="secondary"
-          >
-            <RefreshCw />
-            刷新
-          </Button>
-        }
-        title="验证任务"
-      />
-      {message ? (
-        <div className="dp-runtime-message">
-          <FormMessage message={message} tone="error" />
-        </div>
-      ) : null}
-      <Card className="dp-verification-list dp-verification-list-view">
-        <div className="dp-section-head">
-          <span>
-            <Activity />
-            <b>任务记录</b>
-          </span>
-          <span className="dp-count">{rows?.length ?? 0}</span>
-        </div>
-        {rows === null ? (
-          <LoadingState />
-        ) : rows.length === 0 ? (
-          <div className="dp-empty">
-            <FlaskConical />
-            <strong>还没有验证任务</strong>
-          </div>
-        ) : (
-          <div className="dp-list-items">
-            {rows.map((run) => (
-              <Link
-                className="dp-list-item"
-                href={`/console/verifications/${run.id}`}
-                key={run.id}
-              >
-                <div>
-                  <strong>{run.goal}</strong>
-                  <Badge tone={tone(run.status)}>
-                    {displayLabel(run.status)}
-                  </Badge>
-                </div>
-                <small>
-                  {run.agentProvider} · {run._count.events} 个事件 ·{" "}
-                  {run._count.artifacts} 个制品 ·{" "}
-                  {new Date(run.createdAt).toLocaleString("zh-CN")}
-                </small>
-              </Link>
-            ))}
-          </div>
-        )}
-      </Card>
-    </>
-  );
+export function VerificationsClient({ initialId }: { initialId: string }) {
+  return <VerificationDetailClient id={initialId} />;
 }
 
 function VerificationDetailClient({ id }: { id: string }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [note, setNote] = useState("已在 DevProof 控制台批准。");
-  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{
     text: string;
     tone: "error" | "success";
@@ -240,42 +138,6 @@ function VerificationDetailClient({ id }: { id: string }) {
       setMessage({ text: error.message, tone: "error" }),
     );
   }, [load]);
-
-  useEffect(() => {
-    if (
-      !detail ||
-      !["QUEUED", "WAITING_EXECUTION", "RUNNING", "WAITING_HUMAN"].includes(
-        detail.status,
-      )
-    )
-      return;
-    const timer = window.setInterval(() => void load(), 1_500);
-    return () => window.clearInterval(timer);
-  }, [detail?.status, load]);
-
-  async function resolve(checkpointId: string) {
-    setBusy(true);
-    setMessage(null);
-    try {
-      await consoleApi(`/verifications/checkpoints/${checkpointId}/resolve`, {
-        body: JSON.stringify({ response: { approved: true, note } }),
-        method: "POST",
-      });
-      await load();
-      setMessage({
-        text: "人工检查点已解决，Agent 可以继续。",
-        tone: "success",
-      });
-    } catch (error) {
-      setMessage({ text: (error as Error).message, tone: "error" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const browserCheckpoint = detail?.runtimeSessionId
-    ? detail.checkpoints.find((item) => item.status === "PENDING")
-    : undefined;
 
   return (
     <>
@@ -299,7 +161,8 @@ function VerificationDetailClient({ id }: { id: string }) {
             </Button>
           </>
         }
-        title="验证详情"
+        description="历史验证记录，仅供查阅。新任务请通过统一 Task 入口创建。"
+        title="历史验证详情"
       />
       {message ? (
         <div className="dp-runtime-message">
@@ -311,7 +174,7 @@ function VerificationDetailClient({ id }: { id: string }) {
           <LoadingState />
         </Card>
       ) : (
-        <div className="dp-verification-detail-layout">
+        <div className="dp-verification-history">
           <Card className="dp-verification-detail">
             <div className="dp-section-head">
               <span>
@@ -329,30 +192,6 @@ function VerificationDetailClient({ id }: { id: string }) {
                 {detail.callerCredential.tokenHint}
               </small>
             </div>
-
-            {detail.checkpoints
-              .filter(
-                (checkpoint) =>
-                  checkpoint.status === "PENDING" && !detail.runtimeSessionId,
-              )
-              .map((checkpoint) => (
-                <div className="dp-hitl-card" key={checkpoint.id}>
-                  <strong>需要人工输入</strong>
-                  <p>{checkpoint.prompt}</p>
-                  <Field label="处理备注">
-                    <Input
-                      onChange={(event) => setNote(event.target.value)}
-                      value={note}
-                    />
-                  </Field>
-                  <Button
-                    disabled={busy}
-                    onClick={() => void resolve(checkpoint.id)}
-                  >
-                    批准并继续
-                  </Button>
-                </div>
-              ))}
 
             <section className="dp-observe-section">
               <h3>事件 Trace · {detail.events.length}</h3>
@@ -500,18 +339,6 @@ function VerificationDetailClient({ id }: { id: string }) {
               </div>
             </section>
           </Card>
-
-          <aside className="dp-verification-live-rail">
-            {browserCheckpoint ? (
-              <VerificationHitlBrowser
-                checkpoint={browserCheckpoint}
-                onComplete={load}
-                runId={detail.id}
-              />
-            ) : (
-              <VerificationLiveBrowser runId={detail.id} />
-            )}
-          </aside>
         </div>
       )}
     </>

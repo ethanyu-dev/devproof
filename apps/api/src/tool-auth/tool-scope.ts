@@ -1,5 +1,5 @@
-import { ForbiddenException } from "@nestjs/common";
 import type { ToolCredentialScope } from "@devproof/contracts";
+import { ForbiddenException } from "@nestjs/common";
 
 import type { ToolAuthContext } from "./tool-auth.types.js";
 
@@ -25,7 +25,7 @@ export function requireAgentRuntimeIdentity(current: ToolAuthContext) {
 
 export function requireAgentRuntimePool(
   current: ToolAuthContext,
-  pool: "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS",
+  pool: "SPEC_ANALYSIS" | "BROWSER_EXECUTION",
 ) {
   requireAgentRuntimeIdentity(current);
   const credentialPool = current.credential.pool ?? "MIXED";

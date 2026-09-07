@@ -1,3 +1,9 @@
+import type {
+  AgentModelConfigurationCreateInput,
+  AgentModelConfigurationOrderInput,
+  AgentModelConfigurationUpdateInput,
+  AgentModelPool,
+} from "@devproof/contracts";
 import {
   BadRequestException,
   ConflictException,
@@ -5,12 +11,6 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import type {
-  AgentModelConfigurationCreateInput,
-  AgentModelConfigurationOrderInput,
-  AgentModelConfigurationUpdateInput,
-  AgentModelPool,
-} from "@devproof/contracts";
 
 import type { AuthContext } from "../auth/auth.types.js";
 import { PrismaService } from "../database/prisma.service.js";
@@ -48,7 +48,10 @@ export class AgentModelConfigurationService {
     return this.prisma.agentModelConfiguration.findMany({
       orderBy: [{ pool: "asc" }, { position: "asc" }, { createdAt: "asc" }],
       select: publicModelSelect,
-      where: { teamId: current.team.id },
+      where: {
+        teamId: current.team.id,
+        pool: { in: ["SPEC_ANALYSIS", "BROWSER_EXECUTION"] },
+      },
     });
   }
 
@@ -142,7 +145,11 @@ export class AgentModelConfigurationService {
 
   async remove(current: AuthContext, id: string) {
     const removed = await this.prisma.agentModelConfiguration.deleteMany({
-      where: { id, teamId: current.team.id },
+      where: {
+        id,
+        teamId: current.team.id,
+        pool: { in: ["SPEC_ANALYSIS", "BROWSER_EXECUTION"] },
+      },
     });
     if (removed.count !== 1) {
       throw new NotFoundException("Agent model was not found.");
@@ -215,7 +222,11 @@ export class AgentModelConfigurationService {
   private async requireOwned(teamId: string, id: string) {
     const row = await this.prisma.agentModelConfiguration.findFirst({
       select: { baseUrl: true, id: true },
-      where: { id, teamId },
+      where: {
+        id,
+        teamId,
+        pool: { in: ["SPEC_ANALYSIS", "BROWSER_EXECUTION"] },
+      },
     });
     if (!row) throw new NotFoundException("Agent model was not found.");
     return row;

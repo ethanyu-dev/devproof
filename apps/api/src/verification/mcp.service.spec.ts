@@ -9,7 +9,7 @@ import { VerificationMcpService } from "./mcp.service.js";
 const current: ToolAuthContext = {
   credential: {
     id: "credential-1",
-    name: "Playground",
+    name: "Task integration",
     scopes: ["run:read", "run:write", "run:cancel"],
   },
   team: { id: "team-1", name: "DevProof", slug: "devproof" },

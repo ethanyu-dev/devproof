@@ -1,6 +1,34 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
+import { runtimeGeneratedSpecCaseSchema } from "@devproof/agent-runtime-protocol";
+import {
+  executionConcurrencyPolicySchema,
+  generatedTestCaseDefinitionSchema,
+  taskExecutionCreateInputSchema,
+  taskExecutionStageTypeSchema,
+  testGenerationContextSchema,
+  type ExecutionConcurrencyPolicy,
+  type ExecutionRunCreateInput,
+  type TaskDeployment,
+  type TaskDeploymentsInput,
+  type TaskExecutionCreateInput,
+  type TaskStageRetryInput,
+} from "@devproof/contracts";
+import {
+  caseExecutionPhase,
+  countCaseExecutions,
+  generateBusinessTestSpec,
+  projectTaskExecution,
+  readCaseScheduling,
+  selectPrimaryPullRequest,
+  SPECIFICATION_GENERATOR,
+  specificationDefinitionHash,
+  summarizeCaseScheduling,
+  testGenerationContextHash,
+  type CaseExecutionProgress,
+  type CaseSchedulingDecision,
+} from "@devproof/test-domain";
 import {
   BadRequestException,
   ConflictException,
@@ -10,57 +38,25 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import { runtimeGeneratedSpecCaseSchema } from "@devproof/agent-runtime-protocol";
-import {
-  generatedTestCaseDefinitionSchema,
-  executionConcurrencyPolicySchema,
-  type ExecutionConcurrencyPolicy,
-  taskExecutionCreateInputSchema,
-  taskExecutionStageTypeSchema,
-  testGenerationContextSchema,
-  type ExecutionRunCreateInput,
-  type TaskDeployment,
-  type TaskDeploymentsInput,
-  type TaskExecutionCreateInput,
-  type TaskStageRetryInput,
-} from "@devproof/contracts";
-import {
-  generateBusinessTestSpec,
-  countCaseExecutions,
-  summarizeCaseScheduling,
-  readCaseScheduling,
-  caseExecutionPhase,
-  type CaseSchedulingDecision,
-  type CaseExecutionProgress,
-  projectTaskExecution,
-  selectPrimaryPullRequest,
-  SPECIFICATION_GENERATOR,
-  specificationDefinitionHash,
-  testGenerationContextHash,
-} from "@devproof/test-domain";
 
 import { env } from "../config/env.js";
 import { GithubAccessService } from "../console/github-access.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { redactText } from "../observability/observability.service.js";
-import { TaskLogBundleService } from "../post-run-analysis/task-log-bundle.service.js";
-import {
-  enqueuePostRunAnalysis,
-  supersedePostRunAnalyses,
-} from "../post-run-analysis/post-run-analysis.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
 import { IssueContextResolverService } from "../specifications/issue-context-resolver.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
-import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
+import { ProfileReservationService } from "./profile-reservation.service.js";
+import { refreshedTaskDeadline } from "./task-deadline.js";
 import { taskDeploymentMatrix } from "./task-deployment-matrix.js";
+import { TaskLogBundleService } from "./task-log-bundle.service.js";
+import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
 import {
   enqueueTaskCompletionNotifications,
   taskNotificationContext,
   type TaskNotificationContext,
 } from "./task-waiting-notification.js";
-import { ProfileReservationService } from "./profile-reservation.service.js";
-import { refreshedTaskDeadline } from "./task-deadline.js";
 
 const ANALYSIS_WORKER = `task-analysis:${process.pid}`;
 const CASE_DISPATCH_MAX_ATTEMPTS = 3;
@@ -833,10 +829,6 @@ export class TaskExecutionService {
       }
       const nextNumber = stage.currentAttemptNumber + 1;
       await this.prisma.$transaction(async (tx) => {
-        await supersedePostRunAnalyses(tx, {
-          taskExecutionId: id,
-          teamId: current.team.id,
-        });
         await tx.taskStageAttempt.create({
           data: {
             inputSnapshot: task.inputSnapshot as Prisma.InputJsonValue,
@@ -859,7 +851,7 @@ export class TaskExecutionService {
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "QUEUED",
-            postRunAnalysisGeneration: { increment: 1 },
+            executionGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
             waitingReason: null,
@@ -896,10 +888,6 @@ export class TaskExecutionService {
       }
       const nextNumber = stage.currentAttemptNumber + 1;
       await this.prisma.$transaction(async (tx) => {
-        await supersedePostRunAnalyses(tx, {
-          taskExecutionId: id,
-          teamId: current.team.id,
-        });
         await tx.taskCaseExecution.updateMany({
           data: { dispatchStatus: "CANCELLED" },
           where: {
@@ -964,7 +952,7 @@ export class TaskExecutionService {
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "RUNNING",
-            postRunAnalysisGeneration: { increment: 1 },
+            executionGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
           },
@@ -1115,17 +1103,13 @@ export class TaskExecutionService {
           },
           where: { id: executionStage.id },
         });
-        await supersedePostRunAnalyses(tx, {
-          taskExecutionId: task.id,
-          teamId: current.team.id,
-        });
         const reopened = await tx.taskExecution.updateMany({
           data: {
             currentStage: "SPEC_EXECUTION",
             executionDisposition: null,
             finishedAt: null,
             lifecycle: "RUNNING",
-            postRunAnalysisGeneration: { increment: 1 },
+            executionGeneration: { increment: 1 },
             projectionNeededAt: now,
             verdict: null,
             waitingReason: null,
@@ -1239,9 +1223,6 @@ export class TaskExecutionService {
         }),
       });
       await this.profileResolver.releasePendingRequests(id, tx);
-      await enqueuePostRunAnalysis(tx, {
-        taskExecutionId: task.id,
-      });
     });
     for (const run of task.executionRuns) {
       if (!["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(run.lifecycle)) {
@@ -1573,11 +1554,8 @@ export class TaskExecutionService {
             verdict: projection.verdict,
           }),
         });
-        await enqueuePostRunAnalysis(tx, {
-          taskExecutionId: task.id,
-        });
         await enqueueTaskCompletionNotifications(tx, {
-          generation: task.postRunAnalysisGeneration,
+          generation: task.executionGeneration,
           counts: completionCounts,
           enableFeishu: Boolean(
             taskNotificationContext(task.notificationContext).feishu ||
@@ -2402,9 +2380,6 @@ export class TaskExecutionService {
                 { stage: "SPEC_ANALYSIS" },
               ),
             });
-            await enqueuePostRunAnalysis(tx, {
-              taskExecutionId: attempt.stage.taskExecutionId,
-            });
           }
         }
         return;
@@ -2492,9 +2467,6 @@ export class TaskExecutionService {
               stage: "SPEC_ANALYSIS",
             },
           ),
-        });
-        await enqueuePostRunAnalysis(tx, {
-          taskExecutionId: attempt.stage.taskExecutionId,
         });
       }
     });
@@ -3375,10 +3347,6 @@ function toTaskDetail(row: TaskDetailRow) {
   );
   return {
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
-    capabilities: {
-      postRunAnalysis:
-        row.kind === "ISSUE_SPEC" && env().POST_RUN_ANALYSIS_ENABLED,
-    },
     cases: caseDetails,
     counts,
     scheduling: summarizeCaseScheduling(allExecutions, row.lifecycle),

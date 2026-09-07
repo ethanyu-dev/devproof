@@ -1,19 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  RuntimePostRunAnalysisTaskLease,
   RuntimeSpecAnalysisTaskLease,
   RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
+import { ControlPlaneError } from "./control-plane.client.js";
+import { LeaseLostError } from "./lease-supervisor.js";
 import {
   AgentRuntimeWorker,
   classifyFailure,
-  classifyPostRunAnalysisFailure,
   RuntimeDeadlineController,
 } from "./worker.js";
-import { ControlPlaneError } from "./control-plane.client.js";
-import { LeaseLostError } from "./lease-supervisor.js";
 
 const task = {
   snapshot: { attemptNumber: 2 },
@@ -214,168 +212,6 @@ describe("Agent Runtime failure classification", () => {
       kind: "FATAL_FAILURE",
     });
   });
-
-  it("does not retry a deterministic post-run context overflow", () => {
-    const outcome = classifyPostRunAnalysisFailure(
-      new Error("Your input exceeds the context window of this model."),
-      { snapshot: { attemptNumber: 2 } } as RuntimePostRunAnalysisTaskLease,
-    );
-
-    expect(outcome).toMatchObject({
-      error: {
-        code: "POST_RUN_ANALYSIS_CONTEXT_EXCEEDED",
-        failureClass: "TOOL_EXECUTION",
-      },
-      executionDisposition: "AGENT_ERROR",
-      kind: "FATAL_FAILURE",
-    });
-  });
-});
-
-describe("Agent Runtime post-run outcome submission", () => {
-  it("converts a rejected completed report into a retryable terminal outcome", async () => {
-    const submitPostRunAnalysisOutcome = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new ControlPlaneError(400, {
-          message: "Invalid analysis finding runtime location",
-        }),
-      )
-      .mockResolvedValueOnce({ accepted: true, jobStatus: "READY" });
-    const controlPlane = {
-      appendPostRunAnalysisEvent: vi.fn().mockResolvedValue({ accepted: true }),
-      heartbeatPostRunAnalysis: vi.fn(),
-      submitPostRunAnalysisOutcome,
-    };
-    const worker = new AgentRuntimeWorker(
-      {
-        DEVPROOF_AGENT_TOOL_LIMIT: 10,
-        DEVPROOF_AGENT_WORKER_ID: "worker-1",
-      } as never,
-      controlPlane as never,
-      vi.fn() as never,
-    );
-    (
-      worker as unknown as {
-        postRunAnalysisExecutor: {
-          execute(): Promise<unknown>;
-        };
-      }
-    ).postRunAnalysisExecutor = {
-      execute: vi.fn().mockResolvedValue({
-        kind: "ANALYSIS_COMPLETED",
-        report: { findings: [], summary: "分析完成。" },
-      }),
-    };
-    const postRunTask = {
-      fencingToken: "3",
-      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
-      snapshot: {
-        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
-      },
-      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
-    } as RuntimePostRunAnalysisTaskLease;
-
-    await (
-      worker as unknown as {
-        executePostRunAnalysisTask(
-          task: RuntimePostRunAnalysisTaskLease,
-          signal: AbortSignal,
-          workerId: string,
-        ): Promise<void>;
-      }
-    ).executePostRunAnalysisTask(
-      postRunTask,
-      new AbortController().signal,
-      "worker-1",
-    );
-
-    expect(submitPostRunAnalysisOutcome).toHaveBeenCalledTimes(2);
-    expect(submitPostRunAnalysisOutcome.mock.calls[1]?.[1]).toMatchObject({
-      error: { code: "POST_RUN_ANALYSIS_REPORT_REJECTED" },
-      kind: "RETRYABLE_FAILURE",
-    });
-    expect(submitPostRunAnalysisOutcome.mock.calls[0]?.[2]).not.toBe(
-      submitPostRunAnalysisOutcome.mock.calls[1]?.[2],
-    );
-  });
-
-  it("drains an active analysis instead of aborting it on process shutdown", async () => {
-    let finishExecution!: (value: {
-      kind: "ANALYSIS_COMPLETED";
-      report: { findings: never[]; summary: string };
-    }) => void;
-    const execution = new Promise<{
-      kind: "ANALYSIS_COMPLETED";
-      report: { findings: never[]; summary: string };
-    }>((resolve) => {
-      finishExecution = resolve;
-    });
-    let executionSignal: AbortSignal | undefined;
-    const submitPostRunAnalysisOutcome = vi
-      .fn()
-      .mockResolvedValue({ accepted: true, jobStatus: "SUCCEEDED" });
-    const worker = new AgentRuntimeWorker(
-      {
-        DEVPROOF_AGENT_TOOL_LIMIT: 10,
-        DEVPROOF_AGENT_WORKER_ID: "worker-1",
-      } as never,
-      {
-        appendPostRunAnalysisEvent: vi.fn(),
-        heartbeatPostRunAnalysis: vi.fn(),
-        submitPostRunAnalysisOutcome,
-      } as never,
-      vi.fn() as never,
-    );
-    (
-      worker as unknown as {
-        postRunAnalysisExecutor: {
-          execute(
-            _task: unknown,
-            _lease: unknown,
-            signal: AbortSignal,
-          ): typeof execution;
-        };
-      }
-    ).postRunAnalysisExecutor = {
-      execute: vi.fn((_task, _lease, signal) => {
-        executionSignal = signal;
-        return execution;
-      }),
-    };
-    const postRunTask = {
-      fencingToken: "3",
-      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
-      snapshot: {
-        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-        taskExecutionId: "9be3dc23-9a52-4a97-b6ca-6df0af16d815",
-      },
-      taskId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
-    } as RuntimePostRunAnalysisTaskLease;
-    const shutdown = new AbortController();
-
-    const running = (
-      worker as unknown as {
-        executePostRunAnalysisTask(
-          task: RuntimePostRunAnalysisTaskLease,
-          signal: AbortSignal,
-          workerId: string,
-        ): Promise<void>;
-      }
-    ).executePostRunAnalysisTask(postRunTask, shutdown.signal, "worker-1");
-    await vi.waitFor(() => expect(executionSignal).toBeDefined());
-
-    shutdown.abort(new Error("SIGTERM"));
-    expect(executionSignal?.aborted).toBe(false);
-
-    finishExecution({
-      kind: "ANALYSIS_COMPLETED",
-      report: { findings: [], summary: "分析完成。" },
-    });
-    await running;
-    expect(submitPostRunAnalysisOutcome).toHaveBeenCalledOnce();
-  });
 });
 
 describe("Agent Runtime pool isolation", () => {
@@ -403,7 +239,6 @@ describe("Agent Runtime pool isolation", () => {
       }
     ).reconcileAllocation(
       {
-        analysisConcurrency: 0,
         browserConcurrency: 0,
         pools: ["SPEC_ANALYSIS"],
         specConcurrency: 3,
@@ -437,7 +272,6 @@ describe("Agent Runtime pool isolation", () => {
       ).reconcileAllocation(allocation, new AbortController().signal);
 
     reconcileAllocation({
-      analysisConcurrency: 0,
       browserConcurrency: 0,
       pools: ["SPEC_ANALYSIS"],
       specConcurrency: 0,
@@ -445,7 +279,6 @@ describe("Agent Runtime pool isolation", () => {
 
     expect(() =>
       reconcileAllocation({
-        analysisConcurrency: 0,
         browserConcurrency: 0,
         pools: ["BROWSER_EXECUTION"],
         specConcurrency: 0,
@@ -482,7 +315,6 @@ describe("Agent Runtime pool isolation", () => {
       }
     ).reconcileAllocation(
       {
-        analysisConcurrency: 0,
         browserConcurrency: 0,
         pools: ["SPEC_ANALYSIS"],
         specConcurrency: 5,
@@ -517,10 +349,9 @@ describe("Agent Runtime pool isolation", () => {
         }
       ).reconcileAllocation(
         {
-          analysisConcurrency: 1,
           browserConcurrency: 2,
           pools: ["BROWSER_EXECUTION"],
-          specConcurrency: 0,
+          specConcurrency: 1,
         },
         new AbortController().signal,
       ),

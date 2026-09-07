@@ -1,15 +1,10 @@
 "use client";
 
-import type {
-  ClipboardEvent,
-  CompositionEvent,
-  FormEvent,
-  KeyboardEvent,
-  PointerEvent,
-  WheelEvent,
-} from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
 import {
   CircleAlert,
   Clock3,
@@ -22,11 +17,16 @@ import {
   RotateCcw,
   ShieldCheck,
 } from "lucide-react";
-import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import type {
+  ClipboardEvent,
+  CompositionEvent,
+  FormEvent,
+  KeyboardEvent,
+  PointerEvent,
+  WheelEvent,
+} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { consoleApi } from "@/lib/api";
 import { BrowserInputQueue } from "@/lib/browser-input-queue";
@@ -61,12 +61,6 @@ interface PreviewFrame {
   width: number;
 }
 
-interface BrowserHitlProps {
-  checkpoint: { expiresAt: string; id: string; prompt: string };
-  onComplete: () => Promise<void>;
-  runId: string;
-}
-
 interface RunBrowserHitlProps {
   intervention: { expiresAt: string; id: string; prompt: string };
   onComplete: () => Promise<void>;
@@ -83,20 +77,6 @@ interface SharedBrowserHitlProps {
 const HEARTBEAT_MS = 8_000;
 const STALE_FRAME_MS = 6_000;
 const STREAM_RECONNECT_MS = 1_200;
-
-export function VerificationHitlBrowser({
-  checkpoint,
-  onComplete,
-  runId,
-}: BrowserHitlProps) {
-  return (
-    <BrowserHitl
-      base={`/verifications/${runId}/checkpoints/${checkpoint.id}/browser`}
-      checkpoint={checkpoint}
-      onComplete={onComplete}
-    />
-  );
-}
 
 export function RunHitlBrowser({
   intervention,

@@ -1,12 +1,7 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
-  BookOpen,
-  Bot,
   Cable,
   Gauge,
   LogOut,
@@ -15,6 +10,9 @@ import {
   UserRoundCheck,
   X,
 } from "lucide-react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { requestWithTimeout } from "@/lib/api";
@@ -46,12 +44,6 @@ const adminSections = [
     group: "工作区",
   },
   {
-    href: "/console/playground",
-    icon: Bot,
-    label: "任务试验场",
-    group: "管理",
-  },
-  {
     href: "/console/access",
     icon: Cable,
     label: "接入配置",
@@ -62,12 +54,6 @@ const adminSections = [
     icon: Gauge,
     label: "系统监控",
     group: "管理",
-  },
-  {
-    href: "/console",
-    icon: BookOpen,
-    label: "平台指南",
-    group: "帮助",
   },
 ] as const;
 
@@ -267,7 +253,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     );
   }
 
-  const groupedSections = ["工作区", "管理", "帮助"] as const;
+  const groupedSections = ["工作区", "管理"] as const;
 
   return (
     <div
@@ -470,7 +456,6 @@ function ConsoleNavLink({
 }
 
 function sectionIsActive(href: string, pathname: string) {
-  if (href === "/console") return pathname === href;
   if (href === "/console/runs") {
     return (
       routeIsWithin(href, pathname) ||

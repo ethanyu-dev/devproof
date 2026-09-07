@@ -1,5 +1,5 @@
-import { Injectable } from "@nestjs/common";
 import { caseExecutionPhase, readCaseScheduling } from "@devproof/test-domain";
+import { Injectable } from "@nestjs/common";
 
 import { PrismaService } from "../database/prisma.service.js";
 import { MetricsService } from "./metrics.service.js";
@@ -31,9 +31,6 @@ export class OperationalMetricsService {
       profileReservations,
       integrationEvents,
       oldestProfileWait,
-      postRunAnalyses,
-      oldestPostRunAnalysis,
-      improvementWorkItems,
     ] = await Promise.all([
       this.prisma.verificationRun.groupBy({ _count: true, by: ["status"] }),
       this.prisma.verificationRun.groupBy({
@@ -92,21 +89,6 @@ export class OperationalMetricsService {
       this.prisma.taskProfileBinding.aggregate({
         _min: { updatedAt: true },
         where: { status: "WAITING_INPUT" },
-      }),
-      this.prisma.postRunAnalysisJob.groupBy({
-        _count: true,
-        by: ["status"],
-      }),
-      this.prisma.postRunAnalysisJob.aggregate({
-        _min: { readyAt: true },
-        where: {
-          nextAttemptAt: { lte: new Date() },
-          status: "READY",
-        },
-      }),
-      this.prisma.improvementWorkItem.groupBy({
-        _count: true,
-        by: ["status"],
       }),
       this.collectExecutionScheduling(),
     ]);
@@ -174,26 +156,6 @@ export class OperationalMetricsService {
       "devproof_tool_invocations_15m",
       "Tool invocations started in the last fifteen minutes by status.",
       recentInvocations,
-    );
-    this.groupGauge(
-      "devproof_post_run_analysis_jobs",
-      "Post-run optimization analysis jobs by current status.",
-      postRunAnalyses,
-    );
-    this.groupGauge(
-      "devproof_improvement_work_items",
-      "Automatically generated improvement work items by current status.",
-      improvementWorkItems,
-    );
-    this.metrics.setGauge(
-      "devproof_post_run_analysis_oldest_ready_age_seconds",
-      "Age of the oldest post-run analysis that is ready to be claimed.",
-      oldestPostRunAnalysis._min.readyAt
-        ? Math.max(
-            0,
-            (Date.now() - oldestPostRunAnalysis._min.readyAt.getTime()) / 1_000,
-          )
-        : 0,
     );
     this.metrics.setGauge(
       "devproof_tool_invocation_oldest_started_age_seconds",

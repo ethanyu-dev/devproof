@@ -1,7 +1,7 @@
-import "reflect-metadata";
-import { randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import "reflect-metadata";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./config/env.js", () => ({
@@ -12,12 +12,12 @@ vi.mock("./config/env.js", () => ({
   }),
 }));
 
-import { ProfileReservationService } from "./task-executions/profile-reservation.service.js";
-import { RetentionWorker } from "./observability/retention-worker.service.js";
-import { leaseDigest } from "./runtime/session-recovery.state.js";
-import { RuntimeCommandDispatcher } from "./runtime/runtime-command-dispatcher.service.js";
-import { NotificationOutboxWorker } from "./verification/notification-outbox-worker.service.js";
 import { SpecAnalysisRuntimeService } from "./agent-runtime/spec-analysis-runtime.service.js";
+import { RetentionWorker } from "./observability/retention-worker.service.js";
+import { RuntimeCommandDispatcher } from "./runtime/runtime-command-dispatcher.service.js";
+import { leaseDigest } from "./runtime/session-recovery.state.js";
+import { ProfileReservationService } from "./task-executions/profile-reservation.service.js";
+import { NotificationOutboxWorker } from "./verification/notification-outbox-worker.service.js";
 
 const connectionString = process.env.DEVPROOF_CONCURRENCY_TEST_DATABASE_URL;
 if (!connectionString)
@@ -239,7 +239,7 @@ describe("durable edge cases", () => {
       where: { id: a.id },
       data: {
         lifecycle: "RUNNING",
-        postRunAnalysisGeneration: { increment: 1 },
+        executionGeneration: { increment: 1 },
       },
     });
     expect((await service.acquire(a.id)).acquired).toBe(false);
@@ -611,7 +611,7 @@ describe("durable edge cases", () => {
     const owner = await task();
     await db.taskExecution.update({
       where: { id: owner.id },
-      data: { lifecycle: "COMPLETED", postRunAnalysisGeneration: 1 },
+      data: { lifecycle: "COMPLETED", executionGeneration: 1 },
     });
     const first = await notification(owner.id, 1);
     const entered = deferred(),
@@ -641,7 +641,7 @@ describe("durable edge cases", () => {
     await entered.promise;
     await db.taskExecution.update({
       where: { id: owner.id },
-      data: { postRunAnalysisGeneration: 2 },
+      data: { executionGeneration: 2 },
     });
     const second = await notification(owner.id, 2);
     await (workerB as any).deliver(second.id);
@@ -666,7 +666,7 @@ describe("durable edge cases", () => {
     const owner = await task();
     await db.taskExecution.update({
       where: { id: owner.id },
-      data: { lifecycle: "COMPLETED", postRunAnalysisGeneration: 1 },
+      data: { lifecycle: "COMPLETED", executionGeneration: 1 },
     });
     const worker = new NotificationOutboxWorker(
       db as never,
@@ -679,7 +679,7 @@ describe("durable edge cases", () => {
     for (const generation of [1, 2]) {
       await db.taskExecution.update({
         where: { id: owner.id },
-        data: { postRunAnalysisGeneration: generation },
+        data: { executionGeneration: generation },
       });
       const row = await notification(owner.id);
       await db.notificationOutbox.update({

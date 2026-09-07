@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import type {
   RunTrajectoryPage,
   RunTrajectoryRecord,
@@ -20,23 +21,21 @@ import {
   TriangleAlert,
   XCircle,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/page-header";
 import {
-  EmptyState,
   ErrorState,
   FormMessage,
   LoadingState,
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
-import { RunHitlBrowser } from "../verifications/verification-hitl-browser";
+import { RunHitlBrowser } from "./run-hitl-browser";
 import { RunLiveBrowser } from "./run-live-browser";
-import { RunTrajectory } from "./run-trajectory";
 import { runOutcome } from "./run-outcome";
+import { RunTrajectory } from "./run-trajectory";
 
 interface RunSummary {
   createdAt: string;
@@ -163,14 +162,6 @@ function tone(
     return "warning";
   }
   return "neutral";
-}
-
-function compactRunTitle(run: RunSummary | null, limit = 108) {
-  if (!run) return "执行详情";
-  const goal = run.goal.replace(/\s+/gu, " ").trim();
-  const summary = goal.split(/(?:Preconditions|Steps|Expected):/iu)[0]?.trim();
-  const title = summary || goal;
-  return title.length > limit ? `${title.slice(0, limit).trimEnd()}…` : title;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -406,101 +397,8 @@ function hasInvalidToolSchemaFailure(failures: FailureSummary[]) {
   );
 }
 
-export function RunsClient({ initialId }: { initialId?: string }) {
-  return initialId ? <RunDetailClient id={initialId} /> : <RunListClient />;
-}
-
-function RunListClient() {
-  const [rows, setRows] = useState<RunSummary[] | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const load = useCallback(async () => {
-    setMessage(null);
-    setLoading(true);
-    try {
-      setRows(await consoleApi<RunSummary[]>("/runs"));
-    } catch (error) {
-      setMessage((error as Error).message);
-      throw error;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load().catch(() => undefined);
-  }, [load]);
-
-  return (
-    <>
-      <PageHeader
-        actions={
-          <Button
-            disabled={loading}
-            onClick={() => void load().catch(() => undefined)}
-            variant="secondary"
-          >
-            <RefreshCw />
-            {loading ? "刷新中…" : "刷新"}
-          </Button>
-        }
-        description="查看团队的全部浏览器验证执行。"
-        title="任务执行"
-      />
-      <Card className="dp-verification-list dp-verification-list-view">
-        <div className="dp-section-head">
-          <span>
-            <Activity />
-            <b>任务记录</b>
-          </span>
-          <span className="dp-count">{rows?.length ?? 0}</span>
-        </div>
-        {rows === null ? (
-          message ? (
-            <ErrorState
-              message={message}
-              onRetry={() => void load().catch(() => undefined)}
-            />
-          ) : (
-            <LoadingState />
-          )
-        ) : rows.length === 0 ? (
-          <EmptyState
-            description="创建任务后，执行记录会显示在这里。"
-            title="暂无任务记录"
-          />
-        ) : (
-          <>
-            {message ? <FormMessage message={message} tone="error" /> : null}
-            <div className="dp-list-items">
-              {rows.map((run) => (
-                <Link
-                  className="dp-list-item"
-                  href={`/console/runs/${run.id}`}
-                  key={run.id}
-                >
-                  <div>
-                    <strong title={run.goal}>
-                      {compactRunTitle(run, 120)}
-                    </strong>
-                    <Badge tone={tone(run.verdict ?? run.lifecycle)}>
-                      {displayLabel(run.verdict ?? run.lifecycle)}
-                    </Badge>
-                  </div>
-                  <small>
-                    {displayLabel(run.lifecycle)} ·{" "}
-                    {displayLabel(run.executionDisposition)} · 尝试{" "}
-                    {run.currentAttemptNumber}/{run.maxAttempts} ·{" "}
-                    {new Date(run.createdAt).toLocaleString("zh-CN")}
-                  </small>
-                </Link>
-              ))}
-            </div>
-          </>
-        )}
-      </Card>
-    </>
-  );
+export function RunsClient({ initialId }: { initialId: string }) {
+  return <RunDetailClient id={initialId} />;
 }
 
 function RunDetailClient({ id }: { id: string }) {
