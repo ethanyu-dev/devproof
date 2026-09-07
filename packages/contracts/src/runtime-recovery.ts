@@ -53,6 +53,23 @@ export const runtimeDrainAttestSchema = z
   })
   .strict();
 
+export const runtimeDrainResumeSchema = z
+  .object({
+    snapshotDigest: z.string().min(1).max(200),
+    note: recoveryNoteSchema,
+    evidenceRefs: recoveryEvidenceRefsSchema,
+    profileStoragePreserved: z.literal(true),
+  })
+  .strict();
+
+export interface RuntimeDrainResumeToken {
+  runtimeId: string;
+  drainId: string;
+  instanceKey: string;
+  pairingToken: string;
+  expiresAt: string;
+}
+
 export interface RuntimeRecoverySummary {
   id: string;
   sessionId: string;
@@ -88,6 +105,7 @@ export interface RuntimeDrainOperationSummary {
   id: string;
   snapshotDigest: string;
   state: string;
+  resumedAt: string | null;
   frozenSessions: RuntimeDrainSessionSummary[];
 }
 export interface RuntimeDrainPreview {

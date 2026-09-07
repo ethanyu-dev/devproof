@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Post,
   Query,
@@ -11,6 +12,7 @@ import { z } from "zod";
 import {
   runtimeDrainAttestSchema,
   runtimeDrainCreateSchema,
+  runtimeDrainResumeSchema,
   runtimeRecoveryRequestSchema,
   runtimeRecoveryResolveWriteOutcomeSchema,
   runtimeRecoveryRetrySchema,
@@ -115,6 +117,22 @@ export class RuntimeRecoveryController {
       parseBody(idSchema, id),
       parseBody(idSchema, drainId),
       parseBody(runtimeDrainAttestSchema, body),
+    );
+  }
+
+  @Post("runtimes/:id/drain/:drainId/resume-token")
+  @Header("Cache-Control", "no-store")
+  resumeToken(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("drainId") drainId: string,
+    @Body() body: unknown,
+  ) {
+    return this.drains.resumeToken(
+      current,
+      parseBody(idSchema, id),
+      parseBody(idSchema, drainId),
+      parseBody(runtimeDrainResumeSchema, body),
     );
   }
 }

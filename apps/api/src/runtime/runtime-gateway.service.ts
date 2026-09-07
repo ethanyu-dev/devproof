@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  Optional,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
   RUNTIME_MAX_FRAME_BYTES,
@@ -25,6 +30,12 @@ import { sessionExecutionPermit } from "./session-permit.js";
 import { quarantineSession } from "./session-resource-cleanup.js";
 
 import { SessionRecoveryService } from "./session-recovery.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import {
+  assertResumeInventory,
+  assertResumeScope,
+} from "./runtime-drain-resume.js";
+import { recoveryEnabled } from "./session-recovery.enabled.js";
 import type { AuthenticatedRuntimeContext } from "./session-closure.types.js";
 
 function hashToken(value: string) {
@@ -285,7 +296,10 @@ export class RuntimeGatewayService {
       this.reject(socket, "AUTH_FAILED", "Runtime credentials are invalid.");
       return undefined;
     }
-    if (!runtime.enabled || runtime.revokedAt) {
+    if (
+      (!runtime.enabled && runtime.drainState !== "RESUMING") ||
+      runtime.revokedAt
+    ) {
       this.reject(socket, "RUNTIME_DISABLED", "Runtime has been disabled.");
       return undefined;
     }
@@ -302,19 +316,100 @@ export class RuntimeGatewayService {
           selectedMinor >= 13,
     );
     const connected = await this.prisma.$transaction(async (tx) => {
+      if (runtime.drainState === "RESUMING")
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       await tx.$queryRaw`SELECT id FROM browser_runtimes WHERE id = ${runtime.id}::uuid FOR UPDATE`;
       const current = await tx.browserRuntime.findFirst({
         where: {
           id: runtime.id,
           tokenHash: hashToken(hello.runtimeToken),
-          enabled: true,
           revokedAt: null,
-          drainState: "NONE",
+          OR: [
+            { enabled: true, drainState: "NONE" },
+            { enabled: false, drainState: "RESUMING" },
+          ],
         },
       });
       if (!current) return null;
+      if (
+        runtime.drainState === "RESUMING" &&
+        current.drainState !== "RESUMING"
+      )
+        return null; // Another first handshake won; retry as a fresh connection.
+      if (current.drainState === "RESUMING") {
+        // A normal handshake that raced a resume cannot skip its lock protocol.
+        if (runtime.drainState !== "RESUMING" || !recoveryEnabled())
+          return null;
+        const drain = await tx.runtimeDrainAttestation.findFirst({
+          where: {
+            runtimeId: current.id,
+            teamId: current.teamId,
+            drainGeneration: current.drainGeneration,
+          },
+        });
+        if (!drain) return null;
+        try {
+          assertResumeScope(current, drain);
+          await assertResumeInventory(tx, current.id);
+        } catch (error) {
+          if (error instanceof ConflictException) return null;
+          throw error;
+        }
+        if (
+          selectedMinor < 14 ||
+          !capabilities.includes("closure-evidence-v1") ||
+          !capabilities.includes("session-permits-v1") ||
+          hello.hostInstanceId !== drain.hostInstanceId ||
+          !hello.daemonInstanceId ||
+          hello.daemonInstanceId === current.daemonInstanceId ||
+          hello.activeSessions.length !== 0
+        )
+          return null;
+        const ticket = await tx.browserRuntimePairingToken.findFirst({
+          where: {
+            resumeDrainId: drain.id,
+            resumeGeneration: drain.resumeGeneration,
+            usedAt: { not: null },
+          },
+        });
+        if (!ticket?.resumeRequestedBy) return null;
+        const operator = await tx.user.findFirst({
+          where: {
+            id: ticket.resumeRequestedBy,
+            status: "ACTIVE",
+            memberships: { some: { teamId: current.teamId, role: "ADMIN" } },
+          },
+          select: { id: true },
+        });
+        if (!operator) return null;
+        await tx.runtimeDrainAttestation.update({
+          where: { id: drain.id },
+          data: { resumedAt: new Date() },
+        });
+        await tx.auditEvent.create({
+          data: {
+            teamId: current.teamId,
+            actorUserId: operator.id,
+            entityId: drain.id,
+            entityType: "runtime_drain",
+            action: "runtime.drain.resumed",
+            metadata: {
+              runtimeId: current.id,
+              resumeGeneration: drain.resumeGeneration,
+              connectionGeneration: (
+                current.connectionGeneration + 1n
+              ).toString(),
+              hostInstanceId: hello.hostInstanceId,
+              daemonInstanceId: hello.daemonInstanceId,
+            },
+          },
+        });
+      }
       return tx.browserRuntime.update({
         data: {
+          ...(current.drainState === "RESUMING"
+            ? { enabled: true, drainState: "NONE" }
+            : {}),
           connectionId,
           connectionGeneration: { increment: 1 },
           hostInstanceId: hello.hostInstanceId ?? null,

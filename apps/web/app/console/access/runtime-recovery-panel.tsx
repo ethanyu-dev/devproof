@@ -5,6 +5,7 @@ import Link from "next/link";
 import type {
   RuntimeDrainOperationSummary,
   RuntimeDrainPreview,
+  RuntimeDrainResumeToken,
   RuntimeRecoveryDetail,
   RuntimeRecoveryPage,
   RuntimeRecoveryResolveWriteOutcome,
@@ -30,6 +31,14 @@ const evidenceRefs = (text: string) =>
     .filter(Boolean);
 const when = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "—";
+const runtimeApiUrl =
+  process.env.NEXT_PUBLIC_RUNTIME_API_URL ?? "http://localhost:4433";
+const shellQuote = (value: string) =>
+  "'" + value.replaceAll("'", "'\"'\"'") + "'";
+const resumeCommand =
+  '"$HOME/.local/bin/devproof-browser-runtime" pair --api ' +
+  shellQuote(runtimeApiUrl) +
+  " --token-stdin";
 
 export function RuntimeRecoveryPanel() {
   const [page, setPage] = useState<RuntimeRecoveryPage>({
@@ -49,6 +58,12 @@ export function RuntimeRecoveryPanel() {
   const [drainNote, setDrainNote] = useState("");
   const [drainEvidence, setDrainEvidence] = useState("");
   const [terminated, setTerminated] = useState(false);
+  const [resumeNote, setResumeNote] = useState("");
+  const [resumeEvidence, setResumeEvidence] = useState("");
+  const [profileStoragePreserved, setProfileStoragePreserved] = useState(false);
+  // A resume credential is intentionally kept only in this component's memory.
+  const [resumeToken, setResumeToken] =
+    useState<RuntimeDrainResumeToken | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +118,17 @@ export function RuntimeRecoveryPanel() {
     window.addEventListener("hashchange", openLinkedRecovery);
     return () => window.removeEventListener("hashchange", openLinkedRecovery);
   }, []);
+  useEffect(() => {
+    if (!resumeToken) return;
+    const timer = window.setTimeout(
+      () => {
+        setResumeToken(null);
+        setNotice("恢复票据已过期，请重新签发后使用。");
+      },
+      Math.max(0, new Date(resumeToken.expiresAt).getTime() - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [resumeToken]);
   async function act(action: () => Promise<void>) {
     setBusy(true);
     setError(null);
@@ -123,6 +149,10 @@ export function RuntimeRecoveryPanel() {
     setPreview(null);
     setDrain(null);
     setTerminated(false);
+    setResumeToken(null);
+    setResumeNote("");
+    setResumeEvidence("");
+    setProfileStoragePreserved(false);
   }
   async function requestRecovery() {
     const item = await consoleApi<RuntimeRecoverySummary>(
@@ -165,6 +195,14 @@ export function RuntimeRecoveryPanel() {
     setPreview(result);
     setDrain(result.existingDrain);
     setTerminated(false);
+    setResumeToken((token) =>
+      token &&
+      token.runtimeId === result.runtimeId &&
+      token.drainId === result.existingDrain?.id &&
+      ["ATTESTED", "RESUMING"].includes(result.drainState)
+        ? token
+        : null,
+    );
   }
   async function freeze() {
     if (!preview) return;
@@ -176,6 +214,7 @@ export function RuntimeRecoveryPanel() {
       },
     );
     setDrain(result);
+    setPreview({ ...preview, drainState: result.state, existingDrain: result });
     setNotice("节点已冻结新准入。请按预览范围完成基础设施排空后提交证据。");
   }
   async function attest() {
@@ -198,9 +237,30 @@ export function RuntimeRecoveryPanel() {
     );
     await load();
     await detail(selected.id);
+    await drainPreview();
     setDrainNote("");
     setDrainEvidence("");
     setNotice("排空证明已提交。节点保持冻结，未知的业务写入仍需单独核实。");
+  }
+  async function issueResumeToken() {
+    if (!preview || !drain || !profileStoragePreserved) return;
+    // An uncertain response must not leave an older, possibly revoked token visible.
+    setResumeToken(null);
+    const result = await consoleApi<RuntimeDrainResumeToken>(
+      `/runtimes/${preview.runtimeId}/drain/${drain.id}/resume-token`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          snapshotDigest: drain.snapshotDigest,
+          note: resumeNote.trim(),
+          evidenceRefs: evidenceRefs(resumeEvidence),
+          profileStoragePreserved: true,
+        }),
+      },
+    );
+    setResumeToken(result);
+    setNotice("恢复票据已签发，旧票据已废弃。请在 10 分钟内于原宿主使用。");
+    await drainPreview();
   }
   return (
     <section className="dp-form" aria-label="会话恢复">
@@ -440,19 +500,24 @@ export function RuntimeRecoveryPanel() {
             </Button>
           </form>
           <Button disabled={busy} onClick={() => void act(drainPreview)}>
-            预览节点排空影响
+            查看节点排空与恢复
           </Button>
           {preview ? (
             <section className="dp-form" aria-label="节点排空预览">
-              <h4>节点排空预览</h4>
+              <h4>节点排空与恢复</h4>
               <p>
                 节点 {preview.runtimeId} · 宿主{" "}
                 {preview.hostInstanceId ?? "尚未登记"} · 当前状态{" "}
                 {preview.drainState}
               </p>
-              <p>
-                冻结会阻止整个节点接收新任务。仍合法运行的任务需要先结束或由管理员另行取消。
-              </p>
+              <Button disabled={busy} onClick={() => void act(drainPreview)}>
+                刷新节点恢复状态
+              </Button>
+              {preview.drainState === "NONE" ? (
+                <p>
+                  节点当前未被排空流程冻结。冻结会阻止整个节点接收新任务；仍合法运行的任务需要先结束或由管理员另行取消。
+                </p>
+              ) : null}
               <ul>
                 {preview.sessions.map((session) => (
                   <li key={session.sessionId}>
@@ -463,71 +528,202 @@ export function RuntimeRecoveryPanel() {
                   </li>
                 ))}
               </ul>
-              {!drain ? (
+              {preview.drainState === "NONE" ? (
                 <Button disabled={busy} onClick={() => void act(freeze)}>
                   按此预览冻结节点准入
                 </Button>
-              ) : (
+              ) : null}
+              {drain ? (
                 <>
                   <p>
-                    排空操作 {drain.id} · {drain.state}
+                    {preview.drainState === "NONE"
+                      ? "历史排空操作"
+                      : "排空操作"}{" "}
+                    {drain.id} · {drain.state}
                   </p>
-                  <form
-                    className="dp-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void act(attest);
-                    }}
-                  >
-                    <p>
-                      请先核验原宿主对应的专用容器、服务进程范围或虚拟机已停止或销毁，并阻止自动重启。提交证明后，节点仍保持冻结。
-                    </p>
-                    <label>
-                      排空核验说明
-                      <textarea
-                        required
-                        minLength={10}
-                        maxLength={2000}
-                        value={drainNote}
-                        onChange={(event) => setDrainNote(event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      基础设施证据引用（每行一条）
-                      <textarea
-                        required
-                        value={drainEvidence}
-                        onChange={(event) =>
-                          setDrainEvidence(event.target.value)
-                        }
-                      />
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={terminated}
-                        onChange={(event) =>
-                          setTerminated(event.target.checked)
-                        }
-                        required
-                      />
-                      已核实预览中原宿主的浏览器及网络进程范围已停止或销毁，且不会自动重启。
-                    </label>
-                    <Button
-                      type="submit"
-                      disabled={
-                        busy ||
-                        drain.state !== "FROZEN" ||
-                        !terminated ||
-                        drainNote.trim().length < 10 ||
-                        !evidenceRefs(drainEvidence).length
-                      }
+                  {preview.drainState === "FROZEN" &&
+                  drain.state === "FROZEN" ? (
+                    <form
+                      className="dp-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void act(attest);
+                      }}
                     >
-                      提交管理员排空证明
-                    </Button>
-                  </form>
+                      <p>
+                        请先核验原宿主对应的专用容器、服务进程范围或虚拟机已停止或销毁，并阻止自动重启。提交证明后，节点仍保持冻结。
+                      </p>
+                      <label>
+                        排空核验说明
+                        <textarea
+                          required
+                          minLength={10}
+                          maxLength={2000}
+                          value={drainNote}
+                          onChange={(event) => setDrainNote(event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        基础设施证据引用（每行一条）
+                        <textarea
+                          required
+                          value={drainEvidence}
+                          onChange={(event) =>
+                            setDrainEvidence(event.target.value)
+                          }
+                        />
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={terminated}
+                          onChange={(event) =>
+                            setTerminated(event.target.checked)
+                          }
+                          required
+                        />
+                        已核实预览中原宿主的浏览器及网络进程范围已停止或销毁，且不会自动重启。
+                      </label>
+                      <Button
+                        type="submit"
+                        disabled={
+                          busy ||
+                          drain.state !== "FROZEN" ||
+                          !terminated ||
+                          drainNote.trim().length < 10 ||
+                          !evidenceRefs(drainEvidence).length
+                        }
+                      >
+                        提交管理员排空证明
+                      </Button>
+                    </form>
+                  ) : null}
+                  {drain.state === "ATTESTED" &&
+                  ["ATTESTED", "RESUMING"].includes(preview.drainState) ? (
+                    <section className="dp-form" aria-label="恢复原节点">
+                      <h4>恢复原节点</h4>
+                      <p>
+                        {preview.drainState === "RESUMING"
+                          ? "配对已受理，正在等待新的 Runtime 进程握手。请启动服务后刷新状态。"
+                          : "排空证明已核验，节点尚未恢复准入。可由团队管理员签发一次性票据，在原宿主重新配对。"}
+                      </p>
+                      <p>
+                        恢复节点不会自动将浏览器身份设为
+                        READY，也不会解除未知业务写入的数据保护。浏览器身份验证与业务结果核实仍须分别完成。
+                      </p>
+                      <form
+                        className="dp-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void act(issueResumeToken);
+                        }}
+                      >
+                        <p>
+                          签发前先停止原 Runtime
+                          服务并确认节点离线，保留原安装的 HOME、instanceKey 和
+                          Profile
+                          目录。重新签发会立即废弃该排空操作之前的恢复票据。
+                        </p>
+                        <label>
+                          恢复核验说明
+                          <textarea
+                            required
+                            minLength={10}
+                            maxLength={2000}
+                            value={resumeNote}
+                            onChange={(event) =>
+                              setResumeNote(event.target.value)
+                            }
+                            placeholder="说明已停止的原服务、保留的安装目录及恢复计划。"
+                          />
+                        </label>
+                        <label>
+                          原宿主与存储核验证据（每行一条）
+                          <textarea
+                            required
+                            value={resumeEvidence}
+                            onChange={(event) =>
+                              setResumeEvidence(event.target.value)
+                            }
+                            placeholder="填写运维工单、存储检查等证据引用；勿填写口令、Cookie 或令牌。"
+                          />
+                        </label>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={profileStoragePreserved}
+                            onChange={(event) =>
+                              setProfileStoragePreserved(event.target.checked)
+                            }
+                            required
+                          />
+                          已核实原宿主的 Profile 存储完整保留，将使用原安装的
+                          HOME 和 instanceKey 恢复。
+                        </label>
+                        <Button
+                          type="submit"
+                          disabled={
+                            busy ||
+                            !profileStoragePreserved ||
+                            resumeNote.trim().length < 10 ||
+                            !evidenceRefs(resumeEvidence).length
+                          }
+                        >
+                          {resumeToken || preview.drainState === "RESUMING"
+                            ? "重新签发恢复票据并废弃旧票据"
+                            : "签发一次性恢复票据"}
+                        </Button>
+                      </form>
+                      {resumeToken ? (
+                        <section
+                          className="dp-form"
+                          aria-label="一次性恢复票据"
+                        >
+                          <p>
+                            票据仅在本页面临时显示，10 分钟有效，到期时间：
+                            {when(resumeToken.expiresAt)}
+                            。刷新页面、切换详情或隐藏后无法再次查看；需要时可重新签发。
+                          </p>
+                          <p>原安装 instanceKey：{resumeToken.instanceKey}</p>
+                          <label>
+                            一次性恢复票据
+                            <textarea
+                              readOnly
+                              autoComplete="off"
+                              spellCheck={false}
+                              value={resumeToken.pairingToken}
+                            />
+                          </label>
+                          <ol>
+                            <li>
+                              在原宿主使用原服务用户，保留原
+                              HOME、DEVPROOF_RUNTIME_HOME 和
+                              instanceKey；确认旧服务已停止。
+                            </li>
+                            <li>
+                              运行下列命令，待命令读取标准输入时粘贴上方票据，以换行后
+                              Ctrl-D 结束输入。不要把票据加到命令参数或地址中。
+                              <pre>
+                                {"DEVPROOF_INSTANCE_KEY=" +
+                                  shellQuote(resumeToken.instanceKey) +
+                                  " " +
+                                  resumeCommand}
+                              </pre>
+                            </li>
+                            <li>
+                              配对成功后启动原 Runtime
+                              服务，再点击“刷新节点恢复状态”确认新进程已完成握手。
+                            </li>
+                          </ol>
+                          <Button onClick={() => setResumeToken(null)}>
+                            隐藏恢复票据
+                          </Button>
+                        </section>
+                      ) : null}
+                    </section>
+                  ) : null}
                 </>
-              )}
+              ) : null}
             </section>
           ) : null}
         </section>

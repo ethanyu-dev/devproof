@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   ConflictException,
   Injectable,
@@ -17,6 +17,10 @@ import {
   recoveryJson,
 } from "./session-recovery.state.js";
 import { requireRecoveryEnabled } from "./session-recovery.enabled.js";
+import {
+  assertResumeInventory,
+  assertResumeScope,
+} from "./runtime-drain-resume.js";
 
 type FrozenSession = {
   sessionId: string;
@@ -31,6 +35,7 @@ const drainDto = (row: RuntimeDrainAttestation) => ({
   id: row.id,
   snapshotDigest: row.snapshotDigest,
   state: row.state,
+  resumedAt: row.resumedAt?.toISOString() ?? null,
   frozenSessions: (row.frozenSessions as unknown as FrozenSession[]).map(
     visibleSession,
   ),
@@ -48,7 +53,11 @@ export class RuntimeDrainService {
     return this.prisma.$transaction(async (tx) => {
       const snapshot = await this.snapshot(tx, current.team.id, runtimeId);
       const existing = await tx.runtimeDrainAttestation.findFirst({
-        where: { runtimeId, teamId: current.team.id, state: "FROZEN" },
+        where: {
+          runtimeId,
+          teamId: current.team.id,
+          drainGeneration: snapshot.runtime.drainGeneration,
+        },
         orderBy: { drainGeneration: "desc" },
       });
       return {
@@ -74,6 +83,10 @@ export class RuntimeDrainService {
       await this.recoveries.requireAdmin(current, tx);
       await tx.$queryRaw`SELECT id FROM browser_runtimes WHERE id = ${runtimeId}::uuid FOR UPDATE`;
       const snapshot = await this.snapshot(tx, current.team.id, runtimeId);
+      if (snapshot.runtime.drainState === "RESUMING")
+        throw new ConflictException(
+          "Complete or reissue the pending Runtime recovery before starting another drain.",
+        );
       const existing = await tx.runtimeDrainAttestation.findFirst({
         where: { runtimeId, state: "FROZEN" },
         orderBy: { drainGeneration: "desc" },
@@ -251,7 +264,9 @@ export class RuntimeDrainService {
       where: {
         runtimeId,
         OR: [
-          { status: { not: "CLOSED" }, closureEvidenceId: null },
+          { status: { not: "CLOSED" } },
+          { closureEvidenceId: null },
+          { closureVerifiedAt: null },
           { resourceLeases: { some: { quarantined: true } } },
         ],
       },
@@ -273,6 +288,115 @@ export class RuntimeDrainService {
       }),
     );
     return { runtime, sessions, digest };
+  }
+
+  async resumeToken(
+    current: AuthContext,
+    runtimeId: string,
+    drainId: string,
+    input: {
+      snapshotDigest: string;
+      note: string;
+      evidenceRefs: string[];
+      profileStoragePreserved: true;
+    },
+  ) {
+    requireRecoveryEnabled();
+    const pairingToken = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(Date.now() + 10 * 60_000);
+    return this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+      await this.recoveries.requireAdmin(current, tx);
+      await tx.$queryRaw`SELECT id FROM browser_runtimes WHERE id = ${runtimeId}::uuid FOR UPDATE`;
+      const runtime = await tx.browserRuntime.findFirst({
+        where: { id: runtimeId, teamId: current.team.id },
+      });
+      const drain = await tx.runtimeDrainAttestation.findFirst({
+        where: { id: drainId, runtimeId, teamId: current.team.id },
+      });
+      if (!runtime || !drain)
+        throw new NotFoundException("Attested Runtime drain was not found.");
+      const operator = await tx.user.findFirst({
+        where: {
+          id: current.user.id,
+          status: "ACTIVE",
+          memberships: { some: { teamId: current.team.id, role: "ADMIN" } },
+        },
+        select: { id: true },
+      });
+      if (!operator)
+        throw new ConflictException(
+          "An active team administrator must issue the recovery ticket.",
+        );
+      assertResumeScope(runtime, drain);
+      if (
+        drain.snapshotDigest !== input.snapshotDigest ||
+        input.profileStoragePreserved !== true
+      )
+        throw new ConflictException(
+          "Confirm the current drain and preserved Profile storage before resuming.",
+        );
+      await assertResumeInventory(tx, runtimeId);
+      const resumeGeneration = drain.resumeGeneration + 1;
+      const connectionGeneration = runtime.connectionGeneration + 1n;
+      // Reissuing also fences credentials from a lost pair response. Until the
+      // new scoped ticket is consumed there is no usable Runtime credential.
+      await tx.browserRuntime.update({
+        where: { id: runtimeId },
+        data: {
+          drainState: "ATTESTED",
+          enabled: false,
+          status: "OFFLINE",
+          tokenHash: leaseDigest(randomBytes(32).toString("base64url")),
+          tokenHint: "revoked",
+          connectionGeneration,
+          connectionId: null,
+          gatewayInstanceId: null,
+        },
+      });
+      await tx.runtimeDrainAttestation.update({
+        where: { id: drainId },
+        data: {
+          resumeGeneration,
+          resumeConnectionGeneration: connectionGeneration,
+        },
+      });
+      await tx.browserRuntimePairingToken.updateMany({
+        where: { resumeDrainId: drainId, usedAt: null },
+        data: { expiresAt: new Date() },
+      });
+      await tx.browserRuntimePairingToken.create({
+        data: {
+          teamId: current.team.id,
+          tokenHash: leaseDigest(pairingToken),
+          expiresAt,
+          resumeDrainId: drainId,
+          resumeGeneration,
+          resumeRequestedBy: current.user.id,
+        },
+      });
+      await this.audit(
+        tx,
+        current,
+        drainId,
+        "runtime.drain.resume_token.created",
+        {
+          runtimeId,
+          resumeGeneration,
+          connectionGeneration: connectionGeneration.toString(),
+          note: input.note,
+          evidenceRefs: input.evidenceRefs,
+          profileStoragePreserved: true,
+        },
+      );
+      return {
+        runtimeId,
+        drainId,
+        instanceKey: runtime.instanceKey,
+        pairingToken,
+        expiresAt: expiresAt.toISOString(),
+      };
+    });
   }
 
   private audit(

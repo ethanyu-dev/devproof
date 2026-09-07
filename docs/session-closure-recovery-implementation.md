@@ -1,5 +1,7 @@
 **会话恢复修复：实施与上线说明**
 
+排空后保留原节点和 Profile 的接回流程已补充，见 [排空后恢复原 Browser Runtime](runtime-drain-resume.md)。下文关于节点不会自动恢复的限制仍成立；显式恢复需使用新的受控票据入口。
+
 2026-09-05。修复分支 `fix/session-closure-recovery`，事故分析基线 `d8901e6156fca742a0e89dc2b4607aa22e66d0a4`；提交 PR 前已同步 `main` 的 `d2b38ec22b35d9519e2de064217326cb786d2ebe`，并复核重叠修复。尚未部署、修改线上历史记录或重新运行原任务。
 
 **已实现的行为**
