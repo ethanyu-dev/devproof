@@ -16,7 +16,7 @@ import {
   runtimeRecoveryRequestSchema,
   runtimeRecoveryResolveWriteOutcomeSchema,
   runtimeRecoveryRetrySchema,
-  runtimeRecoveryClosureStateSchema,
+  runtimeRecoveryQuerySchema,
 } from "@devproof/contracts";
 import { AuthGuard } from "../auth/auth.guard.js";
 import { CurrentAuth } from "../auth/current-auth.decorator.js";
@@ -25,11 +25,6 @@ import { parseBody } from "../common/validation.js";
 import { SessionRecoveryService } from "./session-recovery.service.js";
 import { RuntimeDrainService } from "./runtime-drain.service.js";
 
-const querySchema = z.object({
-  cursor: z.string().uuid().optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  state: runtimeRecoveryClosureStateSchema.optional(),
-});
 const idSchema = z.string().uuid();
 @Controller("console/api")
 @UseGuards(AuthGuard)
@@ -41,12 +36,14 @@ export class RuntimeRecoveryController {
 
   @Get("runtime-recoveries")
   list(@CurrentAuth() current: AuthContext, @Query() query: unknown) {
-    const input = parseBody(querySchema, query);
-    return this.recoveries.list(current, {
-      ...(input.cursor ? { cursor: input.cursor } : {}),
-      ...(input.limit ? { limit: input.limit } : {}),
-      ...(input.state ? { state: input.state } : {}),
-    });
+    return this.recoveries.list(
+      current,
+      parseBody(runtimeRecoveryQuerySchema, query),
+    );
+  }
+  @Get("runtime-recoveries/summary")
+  summary(@CurrentAuth() current: AuthContext) {
+    return this.recoveries.summary(current);
   }
   @Get("runtime-recoveries/:id")
   detail(@CurrentAuth() current: AuthContext, @Param("id") id: string) {

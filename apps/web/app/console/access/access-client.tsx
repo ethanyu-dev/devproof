@@ -43,7 +43,15 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
-import { RuntimeRecoveryPanel } from "./runtime-recovery-panel";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import type { RuntimeRecoveryCounts } from "@devproof/contracts";
+import { useRecoveryResource } from "./use-recovery-resource";
+import {
+  RecoveryFeedback,
+  recoveryPath,
+  runtimeRecoveryPath,
+} from "./recovery-ui";
 
 type Scope =
   | "verification:read"
@@ -55,6 +63,7 @@ type Scope =
   | "run:cancel";
 
 interface BrowserRuntime {
+  drainState: string;
   capabilities: string[];
   deviceInfo: string;
   enabled: boolean;
@@ -243,6 +252,24 @@ function runtimeTone(status: BrowserRuntime["status"]) {
 }
 
 export function AccessClient() {
+  const router = useRouter();
+  const {
+    data: recoverySummary,
+    error: recoveryError,
+    refresh: refreshRecoveries,
+  } = useRecoveryResource<RuntimeRecoveryCounts>("/runtime-recoveries/summary");
+  useEffect(() => {
+    const redirect = () => {
+      const match =
+        /^#recovery-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/iu.exec(
+          window.location.hash,
+        );
+      if (match) router.replace(`${recoveryPath}/${match[1]}`);
+    };
+    redirect();
+    window.addEventListener("hashchange", redirect);
+    return () => window.removeEventListener("hashchange", redirect);
+  }, [router]);
   const [activeSection, setActiveSection] = useState<AccessSection>("browser");
   const [runtimes, setRuntimes] = useState<BrowserRuntime[] | null>(null);
   const [browserPool, setBrowserPool] = useState<BrowserPoolCapacity | null>(
@@ -332,6 +359,7 @@ export function AccessClient() {
     agentModelBaseUrl.trim().replace(/\/+$/u, "") !== editedAgentModel.baseUrl,
   );
   const load = useCallback(async () => {
+    void refreshRecoveries();
     setLoading(true);
     setLoadError(null);
     try {
@@ -378,7 +406,7 @@ export function AccessClient() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshRecoveries]);
 
   useEffect(() => {
     void load().catch(() => undefined);
@@ -993,7 +1021,35 @@ export function AccessClient() {
         <>
           {activeSection === "browser" ? (
             <section className="dp-access-module">
-              <RuntimeRecoveryPanel />
+              <div className="mb-3">
+                <RecoveryFeedback
+                  error={
+                    recoveryError ? `恢复摘要更新失败：${recoveryError}` : null
+                  }
+                />
+                <Card className="flex-row flex-wrap items-center justify-between gap-3 px-4 py-3">
+                  <div className="grid gap-1 text-xs">
+                    <strong>
+                      {recoverySummary
+                        ? recoverySummary.pending
+                          ? `有 ${recoverySummary.pending} 个会话需要处理`
+                          : "当前没有待处理的异常会话"
+                        : recoveryError
+                          ? "恢复摘要暂不可用"
+                          : "正在读取恢复摘要…"}
+                    </strong>
+                    {recoverySummary?.pending ? (
+                      <span className="text-muted-foreground">
+                        需要管理员核验 {recoverySummary.needsOperator} ·
+                        关闭后待核实业务结果 {recoverySummary.awaitingWrite}
+                      </span>
+                    ) : null}
+                  </div>
+                  <Button asChild variant="secondary">
+                    <Link href={recoveryPath}>查看恢复记录</Link>
+                  </Button>
+                </Card>
+              </div>
               {runtimeMessage ? (
                 <div className="dp-runtime-message">
                   <FormMessage
@@ -1206,6 +1262,31 @@ export function AccessClient() {
                                 </dd>
                               </div>
                             </dl>
+                            <div className="flex flex-wrap gap-2">
+                              <Button asChild variant="secondary">
+                                <Link
+                                  href={`${recoveryPath}?runtimeId=${runtime.id}`}
+                                >
+                                  恢复记录
+                                </Link>
+                              </Button>
+                              <Button
+                                asChild
+                                variant={
+                                  runtime.drainState &&
+                                  runtime.drainState !== "NONE"
+                                    ? "primary"
+                                    : "secondary"
+                                }
+                              >
+                                <Link href={runtimeRecoveryPath(runtime.id)}>
+                                  {runtime.drainState &&
+                                  runtime.drainState !== "NONE"
+                                    ? "处理节点恢复"
+                                    : "排空与恢复"}
+                                </Link>
+                              </Button>
+                            </div>
                             {runtime.status !== "REVOKED" ? (
                               <Button
                                 disabled={pendingItem !== null}

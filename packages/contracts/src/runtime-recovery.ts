@@ -17,6 +17,21 @@ export const runtimeRecoveryWriteOutcomeStateSchema = z.enum([
   "CONFIRMED",
   "RESOLVED",
 ]);
+export const runtimeRecoveryQuerySchema = z.object({
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  state: runtimeRecoveryClosureStateSchema.optional(),
+  writeState: runtimeRecoveryWriteOutcomeStateSchema.optional(),
+  runtimeId: z.string().uuid().optional(),
+  view: z.enum(["pending", "all"]).optional(),
+});
+export type RuntimeRecoveryQuery = z.infer<typeof runtimeRecoveryQuerySchema>;
+
+export interface RuntimeRecoveryCounts {
+  pending: number;
+  needsOperator: number;
+  awaitingWrite: number;
+}
 const recoveryNoteSchema = z.string().trim().min(10).max(2000);
 const recoveryEvidenceRefsSchema = z
   .array(z.string().trim().min(1).max(1000))
@@ -88,8 +103,14 @@ export interface RuntimeRecoverySummary {
   resolvedAt: string | null;
 }
 export interface RuntimeRecoveryPage {
-  items: RuntimeRecoverySummary[];
+  items: Array<
+    RuntimeRecoverySummary & {
+      runtimeName: string | null;
+      sourceRunGoal: string | null;
+    }
+  >;
   nextCursor: string | null;
+  total: number;
 }
 export interface RuntimeRecoveryDetail extends RuntimeRecoverySummary {
   evidence: unknown;
