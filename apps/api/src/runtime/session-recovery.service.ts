@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { RuntimeRecoveryQuery } from "@devproof/contracts";
+import { recoveryListWhere } from "./session-recovery-query.js";
 import {
   recoveryEnabled,
   requireRecoveryEnabled,
@@ -279,10 +281,7 @@ export class SessionRecoveryService {
     return recoveryDto(await this.request(sessionId, reason));
   }
 
-  async list(
-    current: AuthContext,
-    query: { cursor?: string; limit?: number; state?: string } = {},
-  ) {
+  async list(current: AuthContext, query: RuntimeRecoveryQuery = {}) {
     const limit = Math.min(100, Math.max(1, query.limit ?? 50));
     if (
       query.cursor &&
@@ -292,19 +291,71 @@ export class SessionRecoveryService {
       }))
     )
       throw new NotFoundException("Recovery cursor was not found.");
-    const rows = await this.prisma.runtimeSessionRecovery.findMany({
-      where: {
-        teamId: current.team.id,
-        ...(query.state ? { closureState: query.state } : {}),
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-    });
+    const where = recoveryListWhere(current.team.id, query);
+    const [rows, total] = await Promise.all([
+      this.prisma.runtimeSessionRecovery.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit + 1,
+        ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      }),
+      this.prisma.runtimeSessionRecovery.count({ where }),
+    ]);
+    const visible = rows.slice(0, limit);
+    const [runtimes, runs] = await Promise.all([
+      this.prisma.browserRuntime.findMany({
+        where: {
+          teamId: current.team.id,
+          id: { in: visible.map((row) => row.runtimeId) },
+        },
+        select: { id: true, name: true },
+      }),
+      this.prisma.executionRun.findMany({
+        where: {
+          teamId: current.team.id,
+          id: {
+            in: visible.flatMap((row) =>
+              row.sourceRunId ? [row.sourceRunId] : [],
+            ),
+          },
+        },
+        select: { id: true, goal: true },
+      }),
+    ]);
     return {
-      items: rows.slice(0, limit).map(recoveryDto),
+      items: visible.map((row) => ({
+        ...recoveryDto(row),
+        runtimeName:
+          runtimes.find((runtime) => runtime.id === row.runtimeId)?.name ??
+          null,
+        sourceRunGoal:
+          runs.find((run) => run.id === row.sourceRunId)?.goal ?? null,
+      })),
       nextCursor: rows.length > limit ? rows[limit - 1]!.id : null,
+      total,
     };
+  }
+
+  async summary(current: AuthContext) {
+    const pending = recoveryListWhere(current.team.id, { view: "pending" });
+    const [count, needsOperator, awaitingWrite] = await Promise.all([
+      this.prisma.runtimeSessionRecovery.count({ where: pending }),
+      this.prisma.runtimeSessionRecovery.count({
+        where: { AND: [pending, { closureState: "NEEDS_OPERATOR" }] },
+      }),
+      this.prisma.runtimeSessionRecovery.count({
+        where: {
+          AND: [
+            pending,
+            {
+              closureState: "VERIFIED",
+              writeOutcomeState: { in: ["UNKNOWN", "UNASSESSED"] },
+            },
+          ],
+        },
+      }),
+    ]);
+    return { pending: count, needsOperator, awaitingWrite };
   }
 
   async detail(current: AuthContext, id: string) {

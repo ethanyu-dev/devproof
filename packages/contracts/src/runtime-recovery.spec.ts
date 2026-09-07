@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  runtimeRecoveryQuerySchema,
   runtimeDrainAttestSchema,
   runtimeDrainResumeSchema,
   runtimeRecoveryResolveWriteOutcomeSchema,
@@ -75,5 +76,34 @@ describe("recovery requests", () => {
         outcome: "CLOSED",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("recovery list queries", () => {
+  it("accepts combined closure and business filters with bounded pages", () => {
+    expect(
+      runtimeRecoveryQuerySchema.parse({
+        view: "pending",
+        state: "VERIFIED",
+        writeState: "UNKNOWN",
+        limit: "10",
+      }),
+    ).toEqual({
+      view: "pending",
+      state: "VERIFIED",
+      writeState: "UNKNOWN",
+      limit: 10,
+    });
+    for (const query of [
+      { limit: 101 },
+      { limit: 0 },
+      { state: "BROKEN" },
+      { writeState: "CLOSED" },
+      { runtimeId: "not-a-uuid" },
+      { cursor: "bad-cursor" },
+      { view: "anything" },
+    ]) {
+      expect(runtimeRecoveryQuerySchema.safeParse(query).success).toBe(false);
+    }
   });
 });

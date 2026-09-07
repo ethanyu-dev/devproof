@@ -2292,7 +2292,7 @@ function SchedulingExplanation({
           {" "}
           ·{" "}
           <Link
-            href={`/console/access#recovery-${scheduling.blockedBy.recoveryId}`}
+            href={`/console/access/recoveries/${scheduling.blockedBy.recoveryId}`}
           >
             查看会话恢复
           </Link>
