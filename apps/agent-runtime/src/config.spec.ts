@@ -9,6 +9,7 @@ const managedKeys = [
   "DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST",
   "DEVPROOF_AGENT_CONTEXT_MODE",
   "DEVPROOF_AGENT_CONTEXT_MAX_BYTES",
+  "DEVPROOF_AGENT_TOOL_SURFACE_MODE",
   "DEVPROOF_AGENT_POLL_INTERVAL_MS",
   "DEVPROOF_AGENT_TOOL_LIMIT",
   "DEVPROOF_AGENT_WORKER_ID",
@@ -36,6 +37,17 @@ afterEach(() => {
 });
 
 describe("Agent Runtime configuration", () => {
+  it("groups browser tools independently of the context rollback", () => {
+    process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+    expect(runtimeConfig().DEVPROOF_AGENT_TOOL_SURFACE_MODE).toBe("GROUPED");
+    process.env.DEVPROOF_AGENT_TOOL_SURFACE_MODE = "LEGACY";
+    expect(runtimeConfig()).toMatchObject({
+      DEVPROOF_AGENT_TOOL_SURFACE_MODE: "LEGACY",
+      DEVPROOF_AGENT_CONTEXT_MODE: "BOUNDED",
+    });
+    process.env.DEVPROOF_AGENT_TOOL_SURFACE_MODE = "unknown";
+    expect(() => runtimeConfig()).toThrow(/DEVPROOF_AGENT_TOOL_SURFACE_MODE/u);
+  });
   it("bounds browser context by default and permits a segment-level rollback", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
     expect(runtimeConfig()).toMatchObject({

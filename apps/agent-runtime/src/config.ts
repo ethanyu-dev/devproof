@@ -16,6 +16,9 @@ const configSchema = z
     DEVPROOF_AGENT_CONTEXT_MODE: z
       .enum(["BOUNDED", "LEGACY"])
       .default("BOUNDED"),
+    DEVPROOF_AGENT_TOOL_SURFACE_MODE: z
+      .enum(["GROUPED", "LEGACY"])
+      .default("GROUPED"),
     DEVPROOF_AGENT_CONTEXT_MAX_BYTES: z.coerce
       .number()
       .int()
