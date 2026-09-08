@@ -590,7 +590,7 @@ export class ExecutionRunService {
 
   async events(current: ToolAuthContext, id: string, after?: bigint) {
     await this.requireRun(current.team.id, id);
-    return this.prisma.runEvent.findMany({
+    const rows = await this.prisma.runEvent.findMany({
       orderBy: { sequence: "asc" },
       take: 500,
       where: {
@@ -599,6 +599,7 @@ export class ExecutionRunService {
         ...(after === undefined ? {} : { sequence: { gt: after } }),
       },
     });
+    return rows.map((row) => ({ ...row, sequence: row.sequence.toString() }));
   }
 
   async trajectory(

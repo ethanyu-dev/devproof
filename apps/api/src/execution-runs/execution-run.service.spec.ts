@@ -43,6 +43,34 @@ const current = {
   team: { id: snapshot.teamId, name: "DevProof Team" },
 } as never;
 
+describe("ExecutionRunService events", () => {
+  it("serializes event cursors without losing precision and scopes pagination to the team", async () => {
+    const sequence = 9007199254740993n;
+    const prisma = {
+      executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      runEvent: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([{ id: "event", sequence, payload: { step: 1 } }]),
+      },
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+    const events = await service.events(current, runId, sequence - 1n);
+    expect(JSON.parse(JSON.stringify(events))[0].sequence).toBe(
+      "9007199254740993",
+    );
+    expect(prisma.runEvent.findMany).toHaveBeenCalledWith({
+      orderBy: { sequence: "asc" },
+      take: 500,
+      where: {
+        runId,
+        teamId: snapshot.teamId,
+        sequence: { gt: sequence - 1n },
+      },
+    });
+  });
+});
+
 describe("ExecutionRunService HITL resume", () => {
   it("copies the Run HITL policy into the immutable Runtime task snapshot", async () => {
     const tx = {

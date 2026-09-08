@@ -38,6 +38,14 @@ const READ_COMMANDS = new Set([
   "network.status",
   "network.wait_for_hit",
 ]);
+const FORM_INPUT_COMMANDS = new Set([
+  "frame.fill",
+  "page.fill",
+  "page.type",
+  "page.check",
+  "page.uncheck",
+  "page.select",
+]);
 const OUTPUT_BYTES = 16 * 1_024;
 const PAGE_BYTES = 12 * 1_024;
 const CAPTURE_BYTES = 256 * 1_024;
@@ -79,8 +87,14 @@ export class BrowserObservations {
   }
 
   capture(command: Command, raw: unknown) {
-    if (!READ_COMMANDS.has(command.commandType)) this.invalidate();
     const response = record(raw);
+    // Form input does not replace the Runtime's aria-ref snapshot. Keep refs
+    // already shown to the model; live element resolution remains authoritative.
+    const successfulFormInput =
+      FORM_INPUT_COMMANDS.has(command.commandType) &&
+      (response.status === "SUCCEEDED" || response.ok === true);
+    if (!READ_COMMANDS.has(command.commandType) && !successfulFormInput)
+      this.invalidate();
     const result = record(response.result);
     const snapshot = ["page.snapshot", "frame.snapshot"].includes(
       command.commandType,
@@ -192,6 +206,10 @@ export class BrowserObservations {
       result: {
         ...this.descriptor(entry),
         nextCursor: 0,
+        nextAction: {
+          tool: "read_observation",
+          arguments: { observationId: entry.id, cursor: 0 },
+        },
         contentOmitted: true,
       },
       error: source.error
@@ -332,6 +350,14 @@ export class BrowserObservations {
       content,
       cursor,
       nextCursor: next < entry.content.length ? next : null,
+      ...(next < entry.content.length
+        ? {
+            nextAction: {
+              tool: "read_observation",
+              arguments: { observationId: entry.id, cursor: next },
+            },
+          }
+        : {}),
       totalCapturedChars: entry.content.length,
       ...(omittedLine ? { omittedLine: true } : {}),
     };

@@ -1376,6 +1376,75 @@ describe("Agent Runtime browser verification executor", () => {
     expect(tracePayloads).not.toContain("sk-test-model-secret");
   });
 
+  it("redacts JSON-encoded tool outputs without changing model history", async () => {
+    const raw = {
+      status: "SUCCEEDED",
+      leaseToken: "lease-secret-value",
+      ownerFencingToken: "owner-secret-value",
+      result: {
+        title: "订单已确认",
+        content: JSON.stringify({
+          refreshToken: "refresh-secret-value",
+          password: "secret with spaces",
+          nested: JSON.stringify({ apiKey: "nested-secret-value" }),
+        }),
+      },
+    };
+    const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+    const create = vi.fn().mockImplementation(async (request) => {
+      requests.push(structuredClone(request));
+      return {
+        id: `response-${requests.length}`,
+        output: [
+          requests.length === 1
+            ? functionCall(
+                "browser_command",
+                { commandType: "page.get_title", payload: {} },
+                1,
+              )
+            : functionCall(
+                "request_human_input",
+                { prompt: "请确认订单。", summary: "等待人工确认。" },
+                2,
+              ),
+        ],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue(raw);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+      { mode: "LEGACY" },
+    );
+
+    await executor.execute(runTask, lease, new AbortController().signal);
+
+    const modelOutput = requests[1]!.input.find(
+      (item) => item.type === "function_call_output",
+    );
+    expect(JSON.parse(String(modelOutput?.output))).toEqual(raw);
+    const tracePayloads = JSON.stringify(
+      controlPlane.appendEvent.mock.calls
+        .filter((call) => String(call[1]).startsWith("agent."))
+        .map((call) => call[2]),
+    );
+    expect(tracePayloads).toContain("订单已确认");
+    expect(tracePayloads).toContain("redacted");
+    for (const secret of [
+      "lease-secret-value",
+      "owner-secret-value",
+      "refresh-secret-value",
+      "secret with spaces",
+      "nested-secret-value",
+    ]) {
+      expect(tracePayloads.includes(secret), `Trace contains ${secret}`).toBe(
+        false,
+      );
+    }
+  });
+
   it("rejects direct completion until browser work and criteria exist", async () => {
     const create = vi
       .fn()

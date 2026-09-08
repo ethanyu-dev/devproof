@@ -54,7 +54,17 @@ describe("browser observations", () => {
       expect(String(page.content)).toMatch(/\n$/u);
       expect(String(page.content)).not.toContain("�");
       joined += page.content;
-      if (page.nextCursor === null) break;
+      if (page.nextCursor === null) {
+        expect(page).not.toHaveProperty("nextAction");
+        break;
+      }
+      expect(page.nextAction).toEqual({
+        tool: "read_observation",
+        arguments: {
+          observationId: first.observationId,
+          cursor: page.nextCursor,
+        },
+      });
       page = cache.read(String(first.observationId), Number(page.nextCursor));
     }
     expect(joined).toBe(content);
@@ -68,6 +78,7 @@ describe("browser observations", () => {
   it.each([
     command("page.navigate", { url: "https://next.example.com" }),
     command("page.click", { target: { selector: "#next" } }),
+    command("page.fill", { target: { selector: "#name" }, text: "Ada" }),
     command("tab.new", { url: "https://next.example.com" }),
     command("page.get_url"),
   ])(
@@ -105,6 +116,77 @@ describe("browser observations", () => {
     cache.read(String(page.observationId));
     expect(cache.staleRef(click("e1"))).toBe(true);
     expect(cache.staleRef(click("f3e7"))).toBe(false);
+  });
+
+  it.each([
+    command("frame.fill", {
+      frame: { selector: "iframe" },
+      target: { ref: "e1" },
+      text: "Ada",
+    }),
+    command("page.fill", { target: { ref: "e1" }, text: "Ada" }),
+    command("page.type", { target: { ref: "e1" }, text: "Ada" }),
+    command("page.check", { target: { ref: "e1" } }),
+    command("page.uncheck", { target: { ref: "e1" } }),
+    command("page.select", { target: { ref: "e1" }, values: ["2"] }),
+  ])(
+    "keeps observed refs usable after successful form input (%#)",
+    (action) => {
+      const cache = new BrowserObservations();
+      const { page } = capture(
+        cache,
+        '- textbox "Name" [ref=e1]\n- button "Submit" [ref=e2]\n',
+      );
+      cache.capture(action, { status: "SUCCEEDED", result: { ok: true } });
+      expect(cache.staleRef(click("e2"))).toBe(false);
+      expect(cache.staleRef(click("e3"))).toBe(true);
+      expect(cache.read(String(page.observationId))).toMatchObject({
+        refState: "CURRENT",
+      });
+
+      cache.capture(action, { status: "FAILED", error: { code: "TIMEOUT" } });
+      expect(cache.staleRef(click("e2"))).toBe(true);
+      expect(cache.read(String(page.observationId))).toMatchObject({
+        refState: "HISTORICAL",
+      });
+    },
+  );
+
+  it("routes local continuation offsets to the cached observation rather than browser paging", () => {
+    const cache = new BrowserObservations();
+    const content = '- text "Catalog detail"\n'.repeat(800);
+    const raw = {
+      status: "SUCCEEDED",
+      result: {
+        content,
+        cursor: 90_000,
+        nextCursor: 90_000 + content.length,
+        truncated: true,
+      },
+    };
+    const original = structuredClone(raw);
+    cache.capture(command("page.snapshot", { cursor: 90_000 }), raw);
+    const { result } = cache.project(raw) as {
+      result: {
+        content: string;
+        sourceTruncated: boolean;
+        nextAction: {
+          tool: string;
+          arguments: { observationId: string; cursor: number };
+        };
+      };
+    };
+    expect(result.sourceTruncated).toBe(true);
+    expect(result.nextAction.tool).toBe("read_observation");
+    expect(result.nextAction.arguments.cursor).toBe(result.content.length);
+    expect(result.nextAction.arguments.cursor).toBeLessThan(raw.result.cursor);
+    const next = cache.read(
+      result.nextAction.arguments.observationId,
+      result.nextAction.arguments.cursor,
+    );
+    expect(result.content + next.content).toBe(content);
+    expect(next).not.toHaveProperty("nextAction");
+    expect(raw).toEqual(original);
   });
 
   it("labels shortened index metadata without mistaking it for a URL change", () => {
