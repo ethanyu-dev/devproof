@@ -12,7 +12,13 @@ interface CorrectionIssue {
 export interface ToolCorrection {
   accepted: false;
   code:
-    "INVALID_JSON" | "INVALID_ARGUMENTS" | "UNKNOWN_COMMAND" | "UNKNOWN_TOOL";
+    | "INVALID_JSON"
+    | "INVALID_ARGUMENTS"
+    | "UNKNOWN_COMMAND"
+    | "UNKNOWN_TOOL"
+    | "TOOL_GROUP_REQUIRED"
+    | "COMMAND_NOT_ALLOWED";
+  requiredGroup?: string;
   error: string;
   issues: CorrectionIssue[];
   suggestions: string[];
@@ -36,6 +42,7 @@ export function toolCorrection(
   error: string,
   options: {
     code?: ToolCorrection["code"];
+    requiredGroup?: string;
     issues?: CorrectionIssue[];
     suggestions?: string[];
     nextAction?: string;
@@ -44,6 +51,9 @@ export function toolCorrection(
   const result: ToolCorrection = {
     accepted: false,
     code: options.code ?? "INVALID_ARGUMENTS",
+    ...(options.requiredGroup
+      ? { requiredGroup: boundedText(options.requiredGroup, 40) }
+      : {}),
     error: boundedText(error, 600),
     issues: (options.issues ?? []).slice(0, 3).map((issue) => ({
       path: boundedText(issue.path, 120),

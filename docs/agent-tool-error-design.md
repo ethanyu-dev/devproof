@@ -18,7 +18,7 @@ Use a final size ceiling as a guard inside B, not as the primary design. Do not 
 
 1. Parse JSON and require an object. Return `INVALID_JSON` or `INVALID_ARGUMENTS` without echoing submitted content.
 2. Read `commandType`. If absent, return its exact path and expected type. If unknown, return `UNKNOWN_COMMAND` and at most two catalog-backed suggestions.
-3. If the optional-group design is enabled, distinguish an existing but inactive command with `TOOL_GROUP_REQUIRED`. This check is a no-op under the legacy full catalog.
+3. The [tool-module layer](agent-tool-surface-design.md) rejects platform-owned lifecycle/control commands with `COMMAND_NOT_ALLOWED`. In grouped mode it gates inactive commands with `TOOL_GROUP_REQUIRED` and `requiredGroup` before payload parsing, and redirects the `page.open` alias to `page.navigate`. Group and alias checks are a no-op under the legacy full catalog.
 4. Resolve the canonical command validator from a named registry derived from existing protocol variants. Validate the complete command, including strict properties, defaults, `timeoutSeconds`, and cross-field constraints.
 5. Validate the executor-owned `locatorRecoveryToken` with its existing rules. Run recovery handling only after validation, exactly as today.
 6. On success, forward the parsed command to the existing control plane. On failure, return one concise correction; no browser request has occurred.
@@ -82,7 +82,7 @@ This is the first recommended implementation because it is local and independent
 
 ## Implementation record
 
-- `getRuntimeActionCommandSchema` selects an existing canonical action validator. The complete advertised schema and Browser Runtime wire protocol remain unchanged.
+- `getRuntimeActionCommandSchema` selects an existing canonical action validator. This correction change initially retained the complete advertised schema. The separate tool-module change selects which variants to advertise; the Browser Runtime wire protocol remains unchanged.
 - `apps/agent-runtime/src/tool-correction.ts` produces bounded JSON corrections for malformed arguments, unknown commands/tools, command-specific validation, and the other verification tools. Unknown command names, submitted values, and unexpected key names are not echoed.
 - Corrections retain `accepted: false` and string `error`, include at most three issues and two known-command suggestions, and never exceed 2,048 serialized UTF-8 bytes. Invalid calls do not issue browser commands or count as browser execution; they still consume the tool-call budget.
 - Existing tool trace previews include the correction code, safe issue paths, and `correctionBytes`. Baseline byte comparisons are measured in fixtures rather than reconstructing the obsolete full union error on each live rejection. No raw-validation logging was added.

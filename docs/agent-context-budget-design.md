@@ -27,7 +27,7 @@ Only existing `criterionResults`, `evidence`, and `locatorRecoveryState` determi
 
 [`browser-observation.ts`](../apps/agent-runtime/src/browser-observation.ts) changes only what the model sees. The executor continues using original responses for evidence collection, locator recovery, progress detection, and existing trace previews. Outcome, diagnostics, recovery tokens, and artifact IDs/kinds remain accessible. Transport IDs, echoed payloads, and artifact storage metadata are omitted from the projection. Screenshots remain evidence metadata; this change does not send image input to the model.
 
-The browser command schema still advertises all 39 variants. Spec Analysis, Console, public MCP tools, Browser Runtime payloads, and database schemas are unchanged.
+Context compaction originally shipped with all 39 browser command variants advertised. The separate [tool-module change](agent-tool-surface-design.md) now controls that catalog independently. Spec Analysis, Console, public MCP tools, Browser Runtime payloads, and database schemas are unchanged.
 
 ## Budgets and paging
 
@@ -82,3 +82,5 @@ Validation at implementation: 141 Agent Runtime tests, repository-wide type chec
 The Browser Agent defaults to `DEVPROOF_AGENT_CONTEXT_MODE=BOUNDED`. `DEVPROOF_AGENT_CONTEXT_MAX_BYTES` defaults to `98304` and accepts 64 KiB through 1 MiB. Both are internal environment settings, with no Console settings added.
 
 For rollback, set `DEVPROOF_AGENT_CONTEXT_MODE=LEGACY` and restart the Agent Runtime after draining active segments. New segments use the original full-history/raw-output path and do not advertise `read_observation`. Configuration is not changed in the middle of an active conversation. Browser commands, artifacts, and database records need no reversal.
+
+The context switch does not change the tool catalog. To restore the complete command catalog as well, set `DEVPROOF_AGENT_TOOL_SURFACE_MODE=LEGACY` independently.

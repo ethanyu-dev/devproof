@@ -8,6 +8,7 @@ English is the canonical language for project documentation.
 - [Redundant feature removal plan](redundant-feature-removal-plan.md): implementation and retirement of Playground, post-run analysis, its Runtime pool, and unreachable legacy code
 - [Concise Agent tool corrections](agent-tool-error-design.md): command-specific validation, bounded error feedback, and regression coverage
 - [Bounded browser working context](agent-context-budget-design.md): observation paging, complete-turn compaction, request budgets, and rollback
+- [Discoverable browser tool modules](agent-tool-surface-design.md): core commands, optional groups, canonical schemas, and independent rollback
 - [Browser Runtime protocol](runtime-protocol.md): compatibility rules and capability milestones
 - [User Browser Profiles](user-browser-profiles.md): identity, authorization, retention, and privacy
 - [Runtime concurrency and recovery proposal](runtime-concurrency-recovery-design.md): isolated authenticated sessions, bounded lease recovery, and explainable scheduling

@@ -717,12 +717,12 @@ describe("browser verification argument corrections", () => {
         commandType: "page.network",
         payload: { includeResponseBodies: true },
       }),
-      code: "INVALID_ARGUMENTS",
+      code: "TOOL_GROUP_REQUIRED",
     },
     {
       name: "browser_command",
       arguments: JSON.stringify({ commandType: "session.close", payload: {} }),
-      code: "UNKNOWN_COMMAND",
+      code: "COMMAND_NOT_ALLOWED",
     },
     {
       name: "record_criterion",

@@ -141,6 +141,7 @@ export class BrowserObservations {
       "ok",
       "error",
       "code",
+      "requiredGroup",
       "issues",
       "suggestions",
       "nextAction",
