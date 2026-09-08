@@ -107,6 +107,264 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
   return { controlPlane, runTask, executor };
 }
 
+describe("browser verification argument corrections", () => {
+  const invalidCalls = [
+    {
+      name: "browser_command",
+      arguments: '{"commandType":',
+      code: "INVALID_JSON",
+    },
+    { name: "browser_command", arguments: "null", code: "INVALID_ARGUMENTS" },
+    { name: "browser_command", arguments: "[]", code: "INVALID_ARGUMENTS" },
+    {
+      name: "browser_command",
+      arguments: JSON.stringify({ commandType: "page.content", payload: {} }),
+      code: "UNKNOWN_COMMAND",
+    },
+    {
+      name: "browser_command",
+      arguments: JSON.stringify({
+        commandType: "page.click",
+        payload: { target: { ref: "bad-ref" } },
+      }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "browser_command",
+      arguments: JSON.stringify({
+        commandType: "page.navigate",
+        payload: { url: "file:///private/data" },
+      }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "browser_command",
+      arguments: JSON.stringify({
+        commandType: "page.network",
+        payload: { includeResponseBodies: true },
+      }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "browser_command",
+      arguments: JSON.stringify({ commandType: "session.close", payload: {} }),
+      code: "UNKNOWN_COMMAND",
+    },
+    {
+      name: "record_criterion",
+      arguments: JSON.stringify({ status: "made-up" }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "record_criterion",
+      arguments: JSON.stringify({
+        criterionId: "page-visible",
+        status: "PASSED",
+        summary: "页面通过。",
+        evidenceRefs: ["artifact://invented"],
+      }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "request_human_input",
+      arguments: JSON.stringify({ prompt: [], summary: "需要人工操作。" }),
+      code: "INVALID_ARGUMENTS",
+    },
+    {
+      name: "finish_verification",
+      arguments: JSON.stringify({ summary: "完成。", verdict: "made-up" }),
+      code: "INVALID_ARGUMENTS",
+    },
+    { name: "unknown_tool", arguments: "{}", code: "UNKNOWN_TOOL" },
+  ];
+
+  it.each(invalidCalls)(
+    "corrects $name ($code) without a browser side effect",
+    async (invalid) => {
+      const calls = [
+        {
+          type: "function_call",
+          call_id: "call-invalid",
+          name: invalid.name,
+          arguments: invalid.arguments,
+        },
+        functionCall(
+          "finish_verification",
+          { verdict: "PASSED", summary: "提前完成。" },
+          2,
+        ),
+        functionCall(
+          "browser_command",
+          {
+            commandType: "page.navigate",
+            payload: { url: "https://example.com" },
+          },
+          3,
+        ),
+        functionCall(
+          "record_criterion",
+          {
+            criterionId: "page-visible",
+            status: "PASSED",
+            summary: "页面当前可见。",
+            evidenceRefs: [],
+          },
+          4,
+        ),
+        functionCall(
+          "finish_verification",
+          { verdict: "PASSED", summary: "验证完成。" },
+          5,
+        ),
+      ];
+      const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+      let index = 0;
+      const create = vi.fn().mockImplementation(async (request) => {
+        requests.push(structuredClone(request));
+        return { id: `response-${index}`, output: [calls[index++]] };
+      });
+      const controlPlane = {
+        acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
+        appendEvent: vi.fn().mockResolvedValue({}),
+        browserCommand: vi.fn().mockResolvedValue({
+          status: "SUCCEEDED",
+          result: { url: "https://example.com", title: "页面" },
+        }),
+        releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
+      };
+      const executor = new BrowserVerificationExecutor(
+        modelFactory(create),
+        controlPlane as never,
+        5,
+      );
+      const outcome = await executor.execute(
+        task,
+        lease,
+        new AbortController().signal,
+      );
+      expect(outcome).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+        verdict: "PASSED",
+      });
+      expect(controlPlane.browserCommand).toHaveBeenCalledExactlyOnceWith(
+        lease,
+        {
+          commandType: "page.navigate",
+          payload: {
+            url: "https://example.com",
+            waitUntil: "domcontentloaded",
+          },
+        },
+        expect.any(AbortSignal),
+      );
+      const feedback = requests[1]!.input.find(
+        (item) =>
+          item.type === "function_call_output" &&
+          item.call_id === "call-invalid",
+      )!;
+      expect(Buffer.byteLength(String(feedback.output))).toBeLessThanOrEqual(
+        2_048,
+      );
+      expect(JSON.parse(String(feedback.output))).toMatchObject({
+        accepted: false,
+        code: invalid.code,
+        retryable: true,
+      });
+      const earlyFinish = requests[2]!.input.find(
+        (item) =>
+          item.type === "function_call_output" && item.call_id === "call-2",
+      )!;
+      expect(String(earlyFinish.output)).toContain(
+        "至少需要执行一次浏览器命令",
+      );
+      expect(create).toHaveBeenCalledTimes(5);
+      expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+      const trace = controlPlane.appendEvent.mock.calls.find(
+        ([, kind, payload]) =>
+          kind === "agent.tool.completed" && payload.callId === "call-invalid",
+      );
+      expect(trace?.[2].outputPreview.correctionBytes).toBe(
+        Buffer.byteLength(String(feedback.output)),
+      );
+    },
+  );
+
+  it("counts invalid calls toward the tool limit without claiming browser execution", async () => {
+    let index = 0;
+    const create = vi.fn().mockImplementation(async () => ({
+      id: `response-${index}`,
+      output: [
+        functionCall(
+          "browser_command",
+          { commandType: "page.content", payload: {} },
+          index++,
+        ),
+      ],
+    }));
+    const { controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      2,
+    );
+    const outcome = await executor.execute(
+      task,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "RETRYABLE_FAILURE",
+      executionDisposition: "NOT_RUN",
+      error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" },
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps transport failures separate from invalid argument corrections", async () => {
+    const calls = [
+      functionCall(
+        "browser_command",
+        {
+          commandType: "page.navigate",
+          payload: { url: "https://example.com" },
+        },
+        1,
+      ),
+      functionCall(
+        "request_human_input",
+        { prompt: "请检查浏览器连接。", summary: "等待恢复连接。" },
+        2,
+      ),
+    ];
+    const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+    let index = 0;
+    const create = vi.fn().mockImplementation(async (request) => {
+      requests.push(structuredClone(request));
+      return { id: `response-${index}`, output: [calls[index++]] };
+    });
+    const { controlPlane } = convergenceHarness(create);
+    controlPlane.browserCommand.mockRejectedValue(
+      new Error("Runtime transport unavailable"),
+    );
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      2,
+    );
+    expect(
+      await executor.execute(task, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "WAITING_HUMAN" });
+    const feedback = requests[1]!.input.find(
+      (item) => item.type === "function_call_output",
+    )!;
+    expect(JSON.parse(String(feedback.output))).toEqual({
+      accepted: false,
+      error: "Runtime transport unavailable",
+    });
+  });
+});
+
 describe("browser verification convergence", () => {
   it("shares a five-second budget across forced-finalization telemetry and a hung release", async () => {
     vi.useFakeTimers();

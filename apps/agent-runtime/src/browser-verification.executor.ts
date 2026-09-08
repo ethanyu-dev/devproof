@@ -19,6 +19,12 @@ import type {
   ControlPlaneClient,
 } from "./control-plane.client.js";
 import { VerificationProgress } from "./verification-progress.js";
+import {
+  parseBrowserCommand,
+  schemaCorrection,
+  toolCorrection,
+  type ToolCorrection,
+} from "./tool-correction.js";
 
 interface ModelFunctionCall {
   arguments: string;
@@ -35,6 +41,7 @@ export interface ModelResponse {
 
 interface ToolExecutionResult {
   browserCommandCount: number;
+  correctionBytes?: number;
   locatorRecoveryState?: LocatorRecoveryState | null;
   outcome?: RuntimeOutcome;
   output: unknown;
@@ -373,7 +380,14 @@ export class BrowserVerificationExecutor {
               durationMs: Math.max(0, Date.now() - toolStartedAt),
               inputPreview: toolInputPreview,
               name: call.name,
-              outputPreview: tracePreview(result.output),
+              outputPreview: tracePreview(
+                result.correctionBytes === undefined
+                  ? result.output
+                  : {
+                      ...(result.output as ToolCorrection),
+                      correctionBytes: result.correctionBytes,
+                    },
+              ),
               segmentId,
               sourceRefs: [],
               status: traceToolFailed(result.output) ? "FAILED" : "SUCCEEDED",
@@ -546,25 +560,32 @@ export class BrowserVerificationExecutor {
     } catch {
       return correction(
         input.browserCommandCount,
-        "工具参数必须是有效的 JSON。",
+        toolCorrection("工具参数必须是有效的 JSON。", { code: "INVALID_JSON" }),
+      );
+    }
+
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return correction(
+        input.browserCommandCount,
+        "工具参数必须是 JSON 对象。",
       );
     }
 
     if (input.call.name === "browser_command") {
-      const browserArguments = browserCommandArguments(raw);
-      if (!browserArguments.success) {
-        return correction(input.browserCommandCount, browserArguments.error);
-      }
-      const parsed = runtimeActionCommandInputSchema.safeParse(
-        browserArguments.command,
+      const browserArguments = parseBrowserCommand(
+        raw as Record<string, unknown>,
       );
-      if (!parsed.success) {
-        return correction(input.browserCommandCount, parsed.error.message);
+      if (!browserArguments.success) {
+        return correction(
+          input.browserCommandCount,
+          browserArguments.correction,
+        );
       }
+      const command = browserArguments.command;
       const activeRecovery = input.locatorRecoveryState;
       const retargetAttempt =
         activeRecovery !== null &&
-        isLocatorRetargetAttempt(activeRecovery, parsed.data);
+        isLocatorRetargetAttempt(activeRecovery, command);
       if (retargetAttempt && activeRecovery.exhausted) {
         return {
           browserCommandCount: input.browserCommandCount,
@@ -583,7 +604,7 @@ export class BrowserVerificationExecutor {
       try {
         const result = await this.controlPlane.browserCommand(
           input.lease,
-          parsed.data,
+          command,
           input.signal,
         );
         collectEvidence(result, input.evidence);
@@ -593,7 +614,7 @@ export class BrowserVerificationExecutor {
           const retargetAttempts = activeRecovery.retargetAttempts + 1;
           const acknowledged = locatorRetargetAcknowledged(
             activeRecovery,
-            parsed.data,
+            command,
             browserArguments.locatorRecoveryToken,
           );
           if (acknowledged && browserCommandSucceeded(result)) {
@@ -611,7 +632,7 @@ export class BrowserVerificationExecutor {
           const recoverySnapshot = recoveryState.exhausted
             ? { attempted: false, snapshot: null }
             : await this.captureLocatorRecoverySnapshot({
-                command: parsed.data,
+                command,
                 evidence: input.evidence,
                 lease: input.lease,
                 signal: input.signal,
@@ -635,14 +656,14 @@ export class BrowserVerificationExecutor {
         if (commandError?.code === "LOCATOR_AMBIGUOUS") {
           const recoveryState: LocatorRecoveryState = {
             exhausted: false,
-            failedCommandType: parsed.data.commandType,
-            failedFrameContext: commandFrameContext(parsed.data),
-            failedTargetSelectors: commandTargetSelectors(parsed.data),
+            failedCommandType: command.commandType,
+            failedFrameContext: commandFrameContext(command),
+            failedTargetSelectors: commandTargetSelectors(command),
             recoveryToken: input.call.call_id,
             retargetAttempts: 0,
           };
           const recoverySnapshot = await this.captureLocatorRecoverySnapshot({
-            command: parsed.data,
+            command,
             evidence: input.evidence,
             lease: input.lease,
             signal: input.signal,
@@ -678,7 +699,7 @@ export class BrowserVerificationExecutor {
           const recoverySnapshot = recoveryState.exhausted
             ? { attempted: false, snapshot: null }
             : await this.captureLocatorRecoverySnapshot({
-                command: parsed.data,
+                command,
                 evidence: input.evidence,
                 lease: input.lease,
                 signal: input.signal,
@@ -695,7 +716,7 @@ export class BrowserVerificationExecutor {
             output: locatorRecoveryOutput({
               acknowledged: locatorRetargetAcknowledged(
                 activeRecovery,
-                parsed.data,
+                command,
                 browserArguments.locatorRecoveryToken,
               ),
               error: commandError,
@@ -709,17 +730,25 @@ export class BrowserVerificationExecutor {
             }),
           };
         }
-        return correction(
-          input.browserCommandCount + 1,
-          error instanceof Error ? error.message : String(error),
-        );
+        // A command was attempted. Keep transport failures separate from
+        // argument corrections, which never issue a browser command.
+        return {
+          browserCommandCount: input.browserCommandCount + 1,
+          output: {
+            accepted: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        };
       }
     }
 
     if (input.call.name === "record_criterion") {
       const parsed = recordCriterionInputSchema.safeParse(raw);
       if (!parsed.success) {
-        return correction(input.browserCommandCount, parsed.error.message);
+        return correction(
+          input.browserCommandCount,
+          schemaCorrection(parsed.error),
+        );
       }
       const chineseError = requireChineseText(
         parsed.data.summary,
@@ -734,7 +763,7 @@ export class BrowserVerificationExecutor {
       if (!criterion) {
         return correction(
           input.browserCommandCount,
-          `未知的验收标准：${parsed.data.criterionId}。`,
+          "未知的验收标准；请使用任务中声明的 criterionId。",
         );
       }
       const unavailable = parsed.data.evidenceRefs.filter(
@@ -743,7 +772,7 @@ export class BrowserVerificationExecutor {
       if (unavailable.length > 0) {
         return correction(
           input.browserCommandCount,
-          `验收标准引用了尚未观察到的证据：${unavailable.join(", ")}。`,
+          "验收标准引用了尚未观察到的证据；请仅使用工具返回或任务提供的证据引用。",
         );
       }
       if (parsed.data.status === "PASSED") {
@@ -807,7 +836,10 @@ export class BrowserVerificationExecutor {
       }
       const parsed = humanInputSchema.safeParse(raw);
       if (!parsed.success) {
-        return correction(input.browserCommandCount, parsed.error.message);
+        return correction(
+          input.browserCommandCount,
+          schemaCorrection(parsed.error),
+        );
       }
       const chineseError =
         requireChineseText(parsed.data.prompt, "request_human_input.prompt") ??
@@ -847,7 +879,10 @@ export class BrowserVerificationExecutor {
     if (input.call.name === "finish_verification") {
       const parsed = finishInputSchema.safeParse(raw);
       if (!parsed.success) {
-        return correction(input.browserCommandCount, parsed.error.message);
+        return correction(
+          input.browserCommandCount,
+          schemaCorrection(parsed.error),
+        );
       }
       const chineseError = requireChineseText(
         parsed.data.summary,
@@ -890,7 +925,10 @@ export class BrowserVerificationExecutor {
         verdict: parsed.data.verdict,
       });
       if (!outcome.success) {
-        return correction(input.browserCommandCount, outcome.error.message);
+        return correction(
+          input.browserCommandCount,
+          schemaCorrection(outcome.error),
+        );
       }
       return {
         browserCommandCount: input.browserCommandCount,
@@ -901,15 +939,25 @@ export class BrowserVerificationExecutor {
 
     return correction(
       input.browserCommandCount,
-      `未知工具：${input.call.name}。`,
+      toolCorrection("未知工具；请使用本轮公布的工具。", {
+        code: "UNKNOWN_TOOL",
+      }),
     );
   }
 }
 
-function correction(browserCommandCount: number, message: string) {
+function correction(
+  browserCommandCount: number,
+  message: string | ToolCorrection,
+) {
+  const output =
+    typeof message === "string"
+      ? toolCorrection(redactTraceText(message))
+      : message;
   return {
     browserCommandCount,
-    output: { accepted: false, error: message },
+    correctionBytes: Buffer.byteLength(JSON.stringify(output)),
+    output,
   };
 }
 
@@ -933,41 +981,6 @@ function thrownBrowserCommandError(
     };
   }
   return { message: fallbackMessage };
-}
-
-function browserCommandArguments(raw: unknown):
-  | {
-      command: Record<string, unknown>;
-      locatorRecoveryToken?: string;
-      success: true;
-    }
-  | { error: string; success: false } {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return {
-      error: "browser_command 参数必须是 JSON 对象。",
-      success: false,
-    };
-  }
-  const record = raw as Record<string, unknown>;
-  if (
-    record.locatorRecoveryToken !== undefined &&
-    (typeof record.locatorRecoveryToken !== "string" ||
-      record.locatorRecoveryToken.length < 1 ||
-      record.locatorRecoveryToken.length > 240)
-  ) {
-    return {
-      error: "locatorRecoveryToken 必须是 1 至 240 个字符的字符串。",
-      success: false,
-    };
-  }
-  const { locatorRecoveryToken, ...command } = record;
-  return {
-    command,
-    ...(typeof locatorRecoveryToken === "string"
-      ? { locatorRecoveryToken }
-      : {}),
-    success: true,
-  };
 }
 
 function locatorRecoveryCommand(
