@@ -2,7 +2,11 @@ import type { TaskCaseExecution, TaskScheduling } from "./task-types";
 import { displayLabel } from "../../../lib/display-text";
 
 interface TaskOutcomeSource {
-  scheduling?: { state: string; reason: string | null };
+  scheduling?: {
+    state: string;
+    reason: string | null;
+    blockedBy?: { recoveryPhase?: string } | null;
+  };
   executionDisposition: string | null;
   lifecycle: string;
   verdict: string | null;
@@ -51,6 +55,15 @@ export function taskOutcomeDisplay(
       toneStatus: task.lifecycle,
     };
   }
+  if (
+    ["QUEUED", "PREPARING", "RUNNING"].includes(task.lifecycle) &&
+    task.scheduling?.blockedBy?.recoveryPhase === "NEEDS_OPERATOR"
+  )
+    return {
+      description: "自动恢复已暂停，请查看会话恢复并处理阻塞原因。",
+      label: "等待人工恢复",
+      toneStatus: "PENDING",
+    };
   if (
     ["QUEUED", "PREPARING", "RUNNING"].includes(task.lifecycle) &&
     isSchedulingWait(task.scheduling)
@@ -112,6 +125,11 @@ export function executionSchedulingLabel(execution: TaskCaseExecution) {
     return taskOutcomeDisplay(execution.run).label;
   if (execution.run?.lifecycle === "WAITING_HUMAN") return "等待人工操作";
   const scheduling = execution.scheduling;
+  if (
+    isSchedulingWait(scheduling) &&
+    scheduling?.blockedBy?.recoveryPhase === "NEEDS_OPERATOR"
+  )
+    return "等待人工恢复";
   if (scheduling?.state === "RECOVERING") return "执行恢复中";
   if (isSchedulingWait(scheduling))
     return displayLabel(scheduling?.reason ?? "WAITING");
@@ -127,6 +145,8 @@ export function schedulingWaitText(
   now = Date.now(),
 ) {
   if (!scheduling || !isSchedulingWait(scheduling)) return null;
+  if (scheduling.blockedBy?.recoveryPhase === "NEEDS_OPERATOR")
+    return "自动恢复已暂停 · 请查看会话恢复并处理阻塞原因";
   const since = scheduling.waitingSince
     ? Date.parse(scheduling.waitingSince)
     : NaN;
@@ -147,4 +167,12 @@ export function schedulingWaitText(
   return seconds === null
     ? label
     : `${label} · 已等待 ${seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`}`;
+}
+
+export function concurrencyPolicyExplanation(accessMode: string | undefined) {
+  if (!accessMode || accessMode === "UNKNOWN")
+    return "业务访问方式尚未核对，同一环境按串行执行；空闲槽位不代表可同时访问同一业务数据。";
+  if (accessMode === "READ_ONLY")
+    return "只读执行可共享业务数据，实际并发仍受节点和浏览器身份容量限制。";
+  return "写入执行按业务资源互斥；只有互不冲突的任务可以同时运行。";
 }

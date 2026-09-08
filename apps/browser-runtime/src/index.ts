@@ -23,8 +23,11 @@ import {
   RUNTIME_CAPABILITIES,
   RUNTIME_SESSION_PERMIT_MINOR,
   RUNTIME_CLOSURE_EVIDENCE_MINOR,
+  RUNTIME_NO_LAUNCH_MINOR,
+  RUNTIME_NO_LAUNCH_CAPABILITY,
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
   runtimeCommandResultSchema,
+  runtimeClientMessageSchema,
   type RuntimeSessionPermit,
   type AuthSnapshotReference,
   USER_PROFILE_INACTIVITY_TTL_SECONDS,
@@ -914,6 +917,57 @@ function matchesUrlPattern(url: string, pattern: string): boolean {
   return new RegExp(`^${expression}$`, "u").test(url);
 }
 
+export async function defaultSnapshotLocator(page: Page): Promise<Locator> {
+  const modal = page
+    .locator('dialog:modal, [role="dialog"][aria-modal="true"]:visible')
+    .last();
+  return (await modal.count()) ? modal : page.locator("body").first();
+}
+
+function normalizeRuntimeError(message: unknown): unknown {
+  if (!message || typeof message !== "object" || !("type" in message))
+    return message;
+  if (
+    message.type === "command.result" &&
+    "error" in message &&
+    message.error &&
+    typeof message.error === "object"
+  ) {
+    const error = message.error as Record<string, unknown>;
+    return {
+      ...message,
+      error: {
+        ...error,
+        code:
+          boundedUtf8Text(
+            typeof error.code === "string" ? error.code : "COMMAND_FAILED",
+            80,
+          ) || "COMMAND_FAILED",
+        message:
+          boundedUtf8Text(
+            redactText(
+              typeof error.message === "string"
+                ? error.message
+                : "Browser command failed.",
+            ),
+            2000,
+          ) || "Browser command failed.",
+      },
+    };
+  }
+  if (
+    message.type === "human.input.result" &&
+    "error" in message &&
+    typeof message.error === "string"
+  )
+    return {
+      ...message,
+      error:
+        boundedUtf8Text(redactText(message.error), 1000) || "Input failed.",
+    };
+  return message;
+}
+
 function classifyCommandError(
   error: unknown,
   commandType: RuntimeCommandType,
@@ -954,6 +1008,15 @@ function classifyCommandError(
     )
   ) {
     return { code: "NETWORK_BLOCKED", message, retryable: false };
+  }
+  if (/intercepts pointer events/iu.test(message)) {
+    return {
+      code: "ACTION_BLOCKED",
+      message:
+        "Another element is intercepting pointer events. Take a new snapshot and target the active dialog or overlay.",
+      recoveryAction: "RESNAPSHOT_AND_RETARGET" as const,
+      retryable: true,
+    };
   }
   if (typed.name === "TimeoutError" || /timeout.*exceeded/iu.test(message)) {
     return {
@@ -1125,6 +1188,7 @@ export class BrowserSessionManager {
   readonly closureJournal: SessionClosureJournal;
   private readonly processIdentity: () => Promise<RuntimeProcessIdentity>;
   private closureEvidenceEnabled = false;
+  private noLaunchEvidenceEnabled = false;
   private readonly openingSnapshotProfiles = new Map<string, number>();
   private readonly permits = new SessionPermits();
   private leaseWatchdog: NodeJS.Timeout | undefined;
@@ -1209,6 +1273,10 @@ export class BrowserSessionManager {
     this.closureEvidenceEnabled =
       minor >= RUNTIME_CLOSURE_EVIDENCE_MINOR &&
       capabilities.includes(RUNTIME_CLOSURE_EVIDENCE_CAPABILITY);
+    this.noLaunchEvidenceEnabled =
+      this.closureEvidenceEnabled &&
+      minor >= RUNTIME_NO_LAUNCH_MINOR &&
+      capabilities.includes(RUNTIME_NO_LAUNCH_CAPABILITY);
     this.permits.synchronizeClock(serverTime, roundTripMs);
   }
 
@@ -1765,7 +1833,7 @@ export class BrowserSessionManager {
       case "page.snapshot": {
         let locator = parsed.payload.target
           ? this.locator(session, parsed.payload.target)
-          : session.page.locator("body").first();
+          : await defaultSnapshotLocator(session.page);
         if (parsed.payload.target) {
           const count = await locator.count();
           if (count === 0) {
@@ -2445,6 +2513,24 @@ export class BrowserSessionManager {
       record = await this.closureJournal.read(command.sessionId);
     }
     if (
+      !record?.launch &&
+      !descriptor &&
+      !opening &&
+      this.noLaunchEvidenceEnabled &&
+      request.expectedLaunchIdentity &&
+      request.expectedLaunchDaemonInstanceId === identity.daemonInstanceId
+    ) {
+      // This daemon never recorded the registered launch. Atomically revoke it
+      // before attesting absence; a delayed session.open can no longer launch.
+      this.permits.revoke(command.sessionId);
+      await this.closureJournal.preventLaunch(
+        command,
+        identity,
+        request.expectedLaunchIdentity,
+      );
+      record = await this.closureJournal.read(command.sessionId);
+    }
+    if (
       !record?.launch ||
       record.launch.hostInstanceId !== identity.hostInstanceId
     )
@@ -2461,6 +2547,14 @@ export class BrowserSessionManager {
       throw codedError(
         "SESSION_LOST",
         "Closure targets a different browser launch.",
+      );
+    if (
+      record.closed?.method === "LAUNCH_PREVENTED" &&
+      !this.noLaunchEvidenceEnabled
+    )
+      throw codedError(
+        "CLOSURE_CAPABILITY_REQUIRED",
+        "This closure proof requires no-launch-evidence-v1.",
       );
     if (record.closed)
       return {
@@ -4213,6 +4307,9 @@ export class RuntimeClient {
   private reconnectAttempt = 0;
   private negotiatedProtocolMinor = 0;
   private connectionReady = false;
+  private readySince = 0;
+  private noLaunchEvidenceNegotiated = false;
+  private handshake: Promise<void> | undefined;
   private deliveryAcknowledgements = false;
   private readonly outbox: Array<{
     bytes: number;
@@ -4307,7 +4404,6 @@ export class RuntimeClient {
     while (!this.stopped) {
       try {
         await this.connectOnce();
-        this.reconnectAttempt = 0;
       } catch (error) {
         runtimeLog(
           "warn",
@@ -4446,6 +4542,7 @@ export class RuntimeClient {
         this.manager.stopAllPreviews();
         this.socket = undefined;
         this.connectionReady = false;
+        this.handshake = undefined;
         this.deliveryAcknowledgements = false;
         for (const queued of this.outbox) queued.sent = false;
         runtimeLog("warn", "runtime.gateway.socket_closed", {
@@ -4466,6 +4563,28 @@ export class RuntimeClient {
 
   private async handleMessage(raw: string) {
     const message = runtimeServerMessageSchema.parse(JSON.parse(raw));
+    const socket = this.socket;
+    if (message.type === "runtime.hello.accepted") {
+      const handshake = this.handleServerMessage(message, socket);
+      this.handshake = handshake;
+      try {
+        await handshake;
+      } finally {
+        if (this.handshake === handshake) this.handshake = undefined;
+      }
+      return;
+    }
+    // Only reconciliation is a barrier. Commands, cancellation and heartbeats
+    // remain concurrent once the handshake is complete.
+    await this.handshake;
+    if (this.socket !== socket) return;
+    await this.handleServerMessage(message, socket);
+  }
+
+  private async handleServerMessage(
+    message: RuntimeServerMessage,
+    socket: WebSocket | undefined,
+  ) {
     if (message.type === "runtime.hello.rejected") {
       runtimeLog("warn", "runtime.gateway.hello_rejected", {
         code: message.code,
@@ -4479,6 +4598,9 @@ export class RuntimeClient {
     if (message.type === "runtime.hello.accepted") {
       this.negotiatedProtocolMinor = message.protocol.minor;
       this.deliveryAcknowledgements = message.protocol.minor >= 3;
+      this.noLaunchEvidenceNegotiated =
+        message.protocol.minor >= RUNTIME_NO_LAUNCH_MINOR &&
+        message.capabilities.includes(RUNTIME_NO_LAUNCH_CAPABILITY);
       this.manager.configureProtocol(
         message.protocol.minor,
         message.serverTime,
@@ -4487,7 +4609,9 @@ export class RuntimeClient {
       );
       this.applyNetworkPolicy(message.networkAllowlist, "gateway_handshake");
       await this.manager.applyReconcile(message.reconcile);
+      if (this.socket !== socket) return;
       this.connectionReady = true;
+      this.readySince = Date.now();
       void this.manager.cleanupExpiredProfiles();
       await this.restoreRuntimeDiagnosticEvents();
       if (
@@ -4498,6 +4622,7 @@ export class RuntimeClient {
           await runtimeProcessIdentity(),
         ))
           this.send(result);
+      if (this.socket !== socket) return;
       runtimeLog("info", "runtime.gateway.online", {
         protocolMajor: message.protocol.major,
         protocolMinor: message.protocol.minor,
@@ -4536,6 +4661,8 @@ export class RuntimeClient {
           performance.now() - sentAt,
         );
       }
+      if (this.connectionReady && Date.now() - this.readySince >= 30_000)
+        this.reconnectAttempt = 0;
       for (const sessionId of message.closeSessions) {
         await this.manager.close(sessionId);
       }
@@ -4729,7 +4856,18 @@ export class RuntimeClient {
   }
 
   private send(message: unknown) {
-    message = fitRuntimeMessage(message);
+    message = fitRuntimeMessage(normalizeRuntimeError(message));
+    const parsed = runtimeClientMessageSchema.safeParse(message);
+    if (!parsed.success) {
+      runtimeLog("error", "runtime.message.validation_failed", {
+        issues: parsed.error.issues
+          .slice(0, 20)
+          .map(({ path, code }) => ({ path, code })),
+      });
+      this.recordDrop("invalid", "schema_validation");
+      return;
+    }
+    message = parsed.data;
     const serialized = JSON.stringify(message);
     const type =
       message && typeof message === "object" && "type" in message
@@ -4831,6 +4969,14 @@ export class RuntimeClient {
     let sentMessages = 0;
     for (const queued of [...this.outbox]) {
       if (this.socket.readyState !== WebSocket.OPEN || queued.sent) continue;
+      const result = queued.message as {
+        result?: { closureEvidence?: { method?: string } };
+      };
+      if (
+        result.result?.closureEvidence?.method === "LAUNCH_PREVENTED" &&
+        !this.noLaunchEvidenceNegotiated
+      )
+        continue;
       try {
         this.socket.send(JSON.stringify(queued.message));
         sentMessages += 1;

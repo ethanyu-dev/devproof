@@ -1988,6 +1988,17 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       });
       errorCode = String(record(closed?.error).code ?? errorCode);
     } catch (error) {
+      if (error instanceof ConflictException) {
+        const response = error.getResponse();
+        if (
+          typeof response === "object" &&
+          "code" in response &&
+          ["RECOVERY_NEEDS_OPERATOR", "RECOVERY_BACKOFF"].includes(
+            String(response.code),
+          )
+        )
+          return null;
+      }
       errorCode = error instanceof Error ? "CLOSE_FAILED" : errorCode;
     }
     const current = await this.prisma.browserRuntimeSession.findUnique({

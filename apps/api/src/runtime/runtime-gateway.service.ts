@@ -122,6 +122,20 @@ export class RuntimeGatewayService {
                 "Runtime message is invalid.",
                 {
                   runtimeId,
+                  messageType:
+                    raw &&
+                    typeof raw === "object" &&
+                    "type" in raw &&
+                    typeof raw.type === "string"
+                      ? raw.type.slice(0, 80)
+                      : "unknown",
+                  frameBytes: Buffer.byteLength(data.toString()),
+                  issues: parsed.error.issues
+                    .slice(0, 20)
+                    .map(({ path, code }) => ({
+                      path,
+                      code,
+                    })),
                 },
               );
             }
@@ -137,7 +151,14 @@ export class RuntimeGatewayService {
               );
               return;
             }
-            context = await this.handleHello(socket, message);
+            context = await this.handleHello(
+              socket,
+              message,
+              (authenticated) => {
+                context = authenticated;
+                runtimeId = authenticated.runtimeId;
+              },
+            );
             runtimeId = context?.runtimeId;
             if (runtimeId) {
               deliveryAcknowledgements = message.protocol.minor >= 3;
@@ -277,6 +298,7 @@ export class RuntimeGatewayService {
       ReturnType<typeof runtimeClientMessageSchema.parse>,
       { type: "runtime.hello" }
     >,
+    onAuthenticated?: (context: AuthenticatedRuntimeContext) => void,
   ) {
     if (hello.protocol.major !== RUNTIME_PROTOCOL.major) {
       this.reject(
@@ -310,10 +332,13 @@ export class RuntimeGatewayService {
     );
     const connectionId = randomUUID();
     const capabilities = (hello.capabilities ?? []).filter((value) =>
-      value === "closure-evidence-v1"
-        ? selectedMinor >= 14
-        : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
-          selectedMinor >= 13,
+      value === "no-launch-evidence-v1"
+        ? selectedMinor >= 15 &&
+          hello.capabilities?.includes("closure-evidence-v1")
+        : value === "closure-evidence-v1"
+          ? selectedMinor >= 14
+          : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
+            selectedMinor >= 13,
     );
     const connected = await this.prisma.$transaction(async (tx) => {
       if (runtime.drainState === "RESUMING")
@@ -419,7 +444,7 @@ export class RuntimeGatewayService {
           lastSeenAt: new Date(),
           protocolMajor: RUNTIME_PROTOCOL.major,
           protocolMinor: selectedMinor,
-          status: "ONLINE",
+          status: "OFFLINE",
           ...(hello.version ? { version: hello.version } : {}),
           capabilities: [
             ...new Set([
@@ -433,6 +458,7 @@ export class RuntimeGatewayService {
                     "auth-snapshot-v1",
                     "session-permits-v1",
                     "closure-evidence-v1",
+                    "no-launch-evidence-v1",
                   ].includes(capability),
               ),
               ...capabilities,
@@ -461,32 +487,15 @@ export class RuntimeGatewayService {
         ? { daemonInstanceId: hello.daemonInstanceId }
         : {}),
     };
-    this.hub.register(runtime.id, socket, context.connectionGeneration);
-    await this.redis.disconnectOlderGateways(
-      runtime.id,
-      context.connectionGeneration,
-    );
-    await this.redis.markRuntimeOnline(
-      runtime.id,
-      context.connectionGeneration,
-    );
-    this.metrics?.increment(
-      "devproof_runtime_gateway_connections_total",
-      "Accepted Browser Runtime gateway connections.",
-      { protocol_minor: selectedMinor },
-    );
-    this.observability?.log("info", "runtime.gateway.connected", {
-      protocolMajor: RUNTIME_PROTOCOL.major,
-      protocolMinor: selectedMinor,
-      runtimeId: runtime.id,
-    });
-
+    // The close handler must know this epoch even if reconciliation fails.
+    onAuthenticated?.(context);
     const reconcile = await this.reconcile(
       runtime.id,
       hello.activeSessions,
       selectedMinor,
       context,
     );
+    if (socket.readyState !== WebSocket.OPEN) return undefined;
     socket.send(
       JSON.stringify({
         capabilities,
@@ -499,11 +508,59 @@ export class RuntimeGatewayService {
         type: "runtime.hello.accepted",
       }),
     );
+    if (socket.readyState !== WebSocket.OPEN) return undefined;
+    this.hub.register(runtime.id, socket, context.connectionGeneration);
+    await this.redis.disconnectOlderGateways(
+      runtime.id,
+      context.connectionGeneration,
+    );
+    await this.redis.markRuntimeOnline(
+      runtime.id,
+      context.connectionGeneration,
+    );
+    const ready = await this.prisma.browserRuntime.updateMany({
+      where: {
+        id: runtime.id,
+        connectionId,
+        connectionGeneration: context.connectionGeneration,
+        enabled: true,
+        revokedAt: null,
+        drainState: "NONE",
+      },
+      data: { status: "ONLINE" },
+    });
+    if (ready.count !== 1 || socket.readyState !== WebSocket.OPEN) {
+      if (socket.readyState === WebSocket.OPEN)
+        socket.close(4001, "Runtime ownership changed during handshake.");
+      await this.prisma.browserRuntime.updateMany({
+        where: { id: runtime.id, connectionId },
+        data: { status: "OFFLINE" },
+      });
+      return undefined;
+    }
+    this.metrics?.increment(
+      "devproof_runtime_gateway_connections_total",
+      "Accepted Browser Runtime gateway connections.",
+      { protocol_minor: selectedMinor },
+    );
+    this.observability?.log("info", "runtime.gateway.connected", {
+      protocolMajor: RUNTIME_PROTOCOL.major,
+      protocolMinor: selectedMinor,
+      runtimeId: runtime.id,
+    });
+
     if (
       env().RUNTIME_SESSION_RECOVERY_ENABLED &&
       capabilities.includes("closure-evidence-v1")
     )
       await this.recovery?.wakeRuntime(runtime.id);
+    if (socket.readyState !== WebSocket.OPEN) {
+      await this.prisma.browserRuntime.updateMany({
+        where: { id: runtime.id, connectionId },
+        data: { status: "OFFLINE", gatewayInstanceId: null },
+      });
+      return undefined;
+    }
     return context;
   }
 

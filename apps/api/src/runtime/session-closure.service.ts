@@ -13,6 +13,7 @@ import type {
   SessionClosureFailure,
 } from "./session-closure.types.js";
 import {
+  MAX_CLOSURE_ATTEMPTS,
   emitRecoveryChanged,
   ensureRecovery,
   leaseDigest,
@@ -45,7 +46,11 @@ export class SessionClosureService {
       ![
         "LIVE_SESSION_TERMINATED",
         "IDENTIFIED_PROCESS_SET_TERMINATED",
+        "LAUNCH_PREVENTED",
       ].includes(proof.method) ||
+      (proof.method === "LAUNCH_PREVENTED" &&
+        (context.negotiatedMinor < 15 ||
+          !context.capabilities.has("no-launch-evidence-v1"))) ||
       proof.launchIdentityVersion < 1
     )
       throw new ConflictException(
@@ -85,7 +90,7 @@ export class SessionClosureService {
         throw new ConflictException(
           "Closure evidence does not match the session epoch or launch host.",
         );
-      const recovery = await tx.runtimeSessionRecovery.findUnique({
+      let recovery = await tx.runtimeSessionRecovery.findUnique({
         where: { id: proof.recoveryId },
       });
       if (
@@ -106,6 +111,7 @@ export class SessionClosureService {
           recoveryId?: string;
           requestId?: string;
           expectedLaunchIdentity?: string;
+          expectedLaunchDaemonInstanceId?: string;
         };
       } | null;
       if (
@@ -128,6 +134,38 @@ export class SessionClosureService {
         throw new ConflictException(
           "Identified-process closure requires a previously registered launch identity.",
         );
+      if (proof.method === "LAUNCH_PREVENTED") {
+        const identity = session.launchIdentity as {
+          id?: string;
+          intentDaemonInstanceId?: string;
+        } | null;
+        if (
+          !identity?.id ||
+          !identity.intentDaemonInstanceId ||
+          identity.id !== payload.recovery.expectedLaunchIdentity ||
+          identity.intentDaemonInstanceId !==
+            payload.recovery.expectedLaunchDaemonInstanceId ||
+          session.launchHostInstanceId !== proof.hostInstanceId ||
+          session.openedAt ||
+          session.ownerTaskId ||
+          (await tx.browserRuntimeCommand.count({
+            where: {
+              sessionId: session.id,
+              commandType: { notIn: ["session.open", "session.close"] },
+            },
+          }))
+        )
+          throw new ConflictException(
+            "No-launch evidence requires an unused, previously registered launch intent.",
+          );
+        recovery = await tx.runtimeSessionRecovery.update({
+          where: { id: recovery.id },
+          data: {
+            writeOutcomeState: "NO_WRITE_VERIFIED",
+            version: { increment: 1 },
+          },
+        });
+      }
       return this.commitEvidence(tx, session, recovery, {
         evidenceId: proof.evidenceId,
         requestId: proof.requestId,
@@ -136,7 +174,10 @@ export class SessionClosureService {
         daemonInstanceId: proof.daemonInstanceId,
         launchIdentityVersion: proof.launchIdentityVersion ?? null,
         method: proof.method,
-        capabilityVersion: "closure-evidence-v1",
+        capabilityVersion:
+          proof.method === "LAUNCH_PREVENTED"
+            ? "no-launch-evidence-v1"
+            : "closure-evidence-v1",
         summary: {
           networkRevoked: true,
           closureCompletedAt: proof.closureCompletedAt,
@@ -413,13 +454,15 @@ export class SessionClosureService {
         (input.claimToken && recovery.claimToken !== input.claimToken)
       )
         return { changed: false };
+      if (recovery.closureState === "NEEDS_OPERATOR") return { changed: false };
       const now = new Date();
       const needsOperator =
         [
           "CLOSURE_UNVERIFIED",
           "LAUNCH_IDENTITY_UNAVAILABLE",
           "UNSUPPORTED_CLOSURE_EVIDENCE",
-        ].includes(input.errorCode) || recovery.attempts >= 6;
+        ].includes(input.errorCode) ||
+        recovery.attempts >= MAX_CLOSURE_ATTEMPTS;
       const offline = input.errorCode === "RUNTIME_OFFLINE";
       const delay =
         [5, 15, 30, 60, 120][Math.min(recovery.attempts, 4)]! * 1000;

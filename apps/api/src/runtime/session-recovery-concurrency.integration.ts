@@ -285,7 +285,7 @@ async function observedWriter() {
         data: {
           status: "SUCCEEDED",
           completionId: randomUUID(),
-          result: { kind: "VERIFICATION_COMPLETED" },
+          result: { kind: "VERIFICATION_COMPLETED", verdict: "PASSED" },
           fencingToken: fence,
           leaseOwner: null,
           leaseToken: null,
@@ -936,5 +936,199 @@ describe("verified session recovery against real PostgreSQL", () => {
       await db.browserRuntimeSession.findUnique({ where: { id: session.id } }),
     ).toMatchObject({ status: "LOST", closureVerifiedAt: null });
     await expectAdmissionBlocked();
+  });
+});
+
+describe("Runtime incident recovery regressions", () => {
+  it("settles a never-launched registered intent with durable proof and releases its guard", async () => {
+    const daemonInstanceId = randomUUID();
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: {
+        protocolMinor: 15,
+        daemonInstanceId,
+        capabilities: ["closure-evidence-v1", "no-launch-evidence-v1"],
+      },
+    });
+    const session = await legacySession();
+    const launchId = randomUUID();
+    await db.browserRuntimeSession.update({
+      where: { id: session.id },
+      data: {
+        closedAt: null,
+        launchIdentityVersion: 1,
+        launchIdentity: {
+          id: launchId,
+          version: 1,
+          intentDaemonInstanceId: daemonInstanceId,
+        },
+      },
+    });
+    const evidence = {
+      ...(await closeProof(session)),
+      method: "LAUNCH_PREVENTED" as const,
+      daemonInstanceId,
+    };
+    const auth = {
+      ...context,
+      negotiatedMinor: 15,
+      daemonInstanceId,
+      capabilities: new Set(["closure-evidence-v1", "no-launch-evidence-v1"]),
+    };
+    await closures.acceptRuntimeEvidence(auth, evidence);
+    await closures.acceptRuntimeEvidence(auth, evidence);
+    expect(
+      await db.runtimeSessionRecovery.findUnique({
+        where: { id: evidence.recoveryId },
+      }),
+    ).toMatchObject({
+      closureState: "VERIFIED",
+      writeOutcomeState: "NO_WRITE_VERIFIED",
+    });
+    expect(
+      await db.executionResourceLease.count({
+        where: { sessionId: session.id },
+      }),
+    ).toBe(0);
+    expect(
+      await db.sessionClosureEvidence.count({
+        where: { sessionId: session.id, method: "LAUNCH_PREVENTED" },
+      }),
+    ).toBe(1);
+  });
+
+  it.each(["legacy", "opened", "command history", "wrong intent"])(
+    "rejects no-launch proof for %s without clearing guards",
+    async (reason) => {
+      const daemonInstanceId = randomUUID();
+      await db.browserRuntime.update({
+        where: { id: runtimeId },
+        data: { protocolMinor: 15, daemonInstanceId },
+      });
+      const session = await legacySession();
+      if (reason !== "legacy")
+        await db.browserRuntimeSession.update({
+          where: { id: session.id },
+          data: {
+            launchIdentityVersion: 1,
+            launchIdentity: {
+              id: randomUUID(),
+              version: 1,
+              intentDaemonInstanceId: daemonInstanceId,
+            },
+            ...(reason === "opened" ? { openedAt: new Date() } : {}),
+          },
+        });
+      const evidence = {
+        ...(await closeProof(session)),
+        method: "LAUNCH_PREVENTED" as const,
+        daemonInstanceId,
+      };
+      if (reason === "wrong intent")
+        await db.browserRuntimeSession.update({
+          where: { id: session.id },
+          data: {
+            launchIdentity: {
+              id: randomUUID(),
+              intentDaemonInstanceId: daemonInstanceId,
+            },
+          },
+        });
+      if (reason === "command history")
+        await db.browserRuntimeCommand.create({
+          data: {
+            sessionId: session.id,
+            commandType: "page.click",
+            source: "AGENT",
+            payload: {},
+            leaseToken: session.leaseToken,
+            fencingToken: session.fencingToken,
+            deadlineAt: new Date(),
+          },
+        });
+      await expect(
+        closures.acceptRuntimeEvidence(
+          {
+            ...context,
+            negotiatedMinor: 15,
+            daemonInstanceId,
+            capabilities: new Set([
+              "closure-evidence-v1",
+              "no-launch-evidence-v1",
+            ]),
+          },
+          evidence,
+        ),
+      ).rejects.toThrow();
+      expect(
+        await db.executionResourceLease.count({
+          where: { sessionId: session.id, quarantined: true },
+        }),
+      ).toBe(1);
+      expect(await db.sessionClosureEvidence.count()).toBe(0);
+    },
+  );
+
+  it("counts direct close attempts, preserves backoff and stops all automatic paths after six failures", async () => {
+    const session = await legacySession();
+    let recoveryId = "";
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const request = await recoveries.prepareClose(
+        session.id,
+        randomUUID(),
+        15,
+      );
+      recoveryId = request.recoveryId;
+      const command = await db.browserRuntimeCommand.findUniqueOrThrow({
+        where: { id: request.requestId },
+      });
+      expect(
+        command.deadlineAt.getTime() - command.createdAt.getTime(),
+      ).toBeLessThanOrEqual(15_100);
+      await db.browserRuntimeCommand.update({
+        where: { id: command.id },
+        data: { status: "TIMED_OUT" },
+      });
+      await closures.recordFailure({
+        sessionId: session.id,
+        expectedLeaseToken: session.leaseToken,
+        expectedFencingToken: session.fencingToken.toString(),
+        requestId: command.id,
+        errorCode: "CLOSE_TIMEOUT",
+      });
+      expect(
+        await db.runtimeSessionRecovery.findUnique({
+          where: { id: recoveryId },
+        }),
+      ).toMatchObject({ attempts: attempt });
+      await expect(
+        recoveries.prepareClose(session.id, randomUUID()),
+      ).rejects.toThrow();
+      if (attempt < 6)
+        await db.runtimeSessionRecovery.update({
+          where: { id: recoveryId },
+          data: { nextAttemptAt: new Date(0) },
+        });
+    }
+    const worker = new SessionRecoveryWorker(
+      db as never,
+      recoveries,
+      closures,
+      {} as never,
+    );
+    expect(await worker.claim(20)).toHaveLength(0);
+    expect(
+      await db.browserRuntimeCommand.count({
+        where: { sessionId: session.id },
+      }),
+    ).toBe(6);
+    const row = await db.runtimeSessionRecovery.findUniqueOrThrow({
+      where: { id: recoveryId },
+    });
+    expect(row.closureState).toBe("NEEDS_OPERATOR");
+    await recoveries.retry(admin, row.id, row.version);
+    expect(
+      await db.runtimeSessionRecovery.findUnique({ where: { id: row.id } }),
+    ).toMatchObject({ closureState: "REQUESTED", attempts: 0 });
   });
 });

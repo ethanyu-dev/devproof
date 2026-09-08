@@ -328,7 +328,7 @@ describe("attested Runtime resume with disposable PostgreSQL", () => {
       undefined,
       recoveries,
     );
-    const socket = { send: vi.fn(), close: vi.fn() };
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn() };
     const handleHello = Reflect.get(gateway, "handleHello") as (
       connection: typeof socket,
       message: ReturnType<typeof runtimeClientMessageSchema.parse>,

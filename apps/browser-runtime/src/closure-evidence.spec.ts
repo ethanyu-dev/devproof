@@ -681,3 +681,70 @@ describe("challenge-bound durable closure evidence", () => {
     await expect(f.close()).rejects.toThrow();
   });
 });
+
+describe("registered launches that never reached the daemon", () => {
+  function negotiate(manager: BrowserSessionManager) {
+    manager.configureProtocol(15, new Date().toISOString(), 0, [
+      "closure-evidence-v1",
+      "no-launch-evidence-v1",
+    ]);
+  }
+  it("durably prevents a delayed open and replays proof across daemon restart", async () => {
+    const f = await fixture();
+    negotiate(f.manager);
+    const request = {
+      ...f.request,
+      expectedLaunchIdentity: randomUUID(),
+      expectedLaunchDaemonInstanceId: identity.daemonInstanceId,
+    };
+    const first: any = await f.close(f.manager, request);
+    expect(first.result.closureEvidence.method).toBe("LAUNCH_PREVENTED");
+    await expect(
+      f.journal.recordLaunch(
+        f.command,
+        identity,
+        "marker",
+        request.expectedLaunchIdentity,
+      ),
+    ).rejects.toMatchObject({ code: "SESSION_PERMIT_EXPIRED" });
+    const restarted = f.create(randomUUID());
+    negotiate(restarted);
+    const replay: any = await f.close(restarted, {
+      ...request,
+      requestId: randomUUID(),
+    });
+    expect(replay.result.closureEvidence.method).toBe("LAUNCH_PREVENTED");
+    expect(replay.result.closureEvidence.requestId).not.toBe(request.requestId);
+  });
+  it.each(["missing intent", "different daemon", "unnegotiated capability"])(
+    "refuses to infer no launch from an empty inventory with %s",
+    async (reason) => {
+      const f = await fixture();
+      if (reason !== "unnegotiated capability") negotiate(f.manager);
+      const request = {
+        ...f.request,
+        expectedLaunchIdentity: randomUUID(),
+        ...(reason === "missing intent"
+          ? {}
+          : {
+              expectedLaunchDaemonInstanceId:
+                reason === "different daemon"
+                  ? randomUUID()
+                  : identity.daemonInstanceId,
+            }),
+      };
+      await expect(f.close(f.manager, request)).rejects.toMatchObject({
+        code: "CLOSURE_UNVERIFIED",
+      });
+      expect(await f.journal.read(f.command.sessionId)).toBeUndefined();
+    },
+  );
+  it("cannot replace an existing launch with no-launch proof", async () => {
+    const f = await fixture();
+    await f.journal.recordLaunch(f.command, identity, "marker", randomUUID());
+    await expect(
+      f.journal.preventLaunch(f.command, identity, randomUUID()),
+    ).rejects.toMatchObject({ code: "CLOSURE_UNVERIFIED" });
+    expect((await f.journal.read(f.command.sessionId))?.closed).toBeUndefined();
+  });
+});

@@ -229,6 +229,41 @@ export class SessionClosureJournal {
     });
   }
 
+  /** Only an exact intent assigned to this still-running daemon may use this path. */
+  preventLaunch(
+    epoch: SessionEpoch,
+    identity: RuntimeProcessIdentity,
+    launchIdentityId: string,
+  ) {
+    return this.serialize(async () => {
+      const existing = await this.read(epoch.sessionId);
+      if (existing) {
+        this.assertEpoch(existing, epoch);
+        if (existing.launch)
+          throw closureError(
+            "CLOSURE_UNVERIFIED",
+            "A launch was recorded while revoking the intent.",
+          );
+      }
+      const now = new Date().toISOString();
+      await durableJsonWrite(this.sessionPath(epoch.sessionId), {
+        version: 1,
+        sessionId: epoch.sessionId,
+        leaseToken: epoch.leaseToken,
+        fencingToken: epoch.fencingToken,
+        revokedAt: now,
+        launch: {
+          ...identity,
+          version: 1,
+          id: launchIdentityId,
+          marker: "unlaunched",
+        },
+        closed: { method: "LAUNCH_PREVENTED", completedAt: now },
+        evidence: [],
+      });
+    });
+  }
+
   revoke(epoch: SessionEpoch) {
     return this.serialize(async () => {
       const record = (await this.read(epoch.sessionId)) ?? {

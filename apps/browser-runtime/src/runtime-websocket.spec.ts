@@ -156,7 +156,7 @@ describe("RuntimeClient native WebSocket lifecycle", () => {
     const state = {
       gatewayUrl: server.url,
       runtimeId: randomUUID(),
-      runtimeToken: "test-only-runtime-token",
+      runtimeToken: "test-only-runtime-token".repeat(2),
       sessions: [],
       revokedSessionIds: [],
     };

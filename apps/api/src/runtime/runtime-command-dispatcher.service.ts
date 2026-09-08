@@ -164,6 +164,7 @@ export class RuntimeCommandDispatcher {
         const recovery = await this.recovery.prepareClose(
           session.id,
           commandId,
+          timeoutSeconds,
         );
         commandId = recovery.requestId;
         command = await this.prisma.browserRuntimeCommand.findUniqueOrThrow({
@@ -268,6 +269,14 @@ export class RuntimeCommandDispatcher {
             data: {
               launchIdentity: asJson({
                 ...identity,
+                // Never reassign an existing intent to a new daemon on reconnect.
+                ...(!identity.id &&
+                (currentRuntime.protocolMinor ?? 0) >= 15 &&
+                Array.isArray(currentRuntime.capabilities) &&
+                currentRuntime.capabilities.includes("no-launch-evidence-v1") &&
+                currentRuntime.daemonInstanceId
+                  ? { intentDaemonInstanceId: currentRuntime.daemonInstanceId }
+                  : {}),
                 version: 1,
                 id: launchIdentityId,
               }),
@@ -295,6 +304,18 @@ export class RuntimeCommandDispatcher {
     // Recheck immediately before dispatch; expired epochs never gain a fresh permit.
     if (input.owner) await this.requireOwner(input.owner, session);
 
+    const wirePayload = { ...record(command.payload) };
+    if (
+      input.commandType === "session.close" &&
+      wirePayload.recovery &&
+      ((runtime.protocolMinor ?? 0) < 15 ||
+        !Array.isArray(runtime.capabilities) ||
+        !runtime.capabilities.includes("no-launch-evidence-v1"))
+    ) {
+      const recovery = { ...record(wirePayload.recovery) };
+      delete recovery.expectedLaunchDaemonInstanceId;
+      wirePayload.recovery = recovery;
+    }
     await this.hub.send(
       session.runtimeId,
       {
@@ -303,7 +324,7 @@ export class RuntimeCommandDispatcher {
         deadlineAt: deadlineAt.toISOString(),
         fencingToken: session.fencingToken.toString(),
         leaseToken: session.leaseToken,
-        payload: record(command.payload),
+        payload: wirePayload,
         sessionId: session.id,
         type: "command.execute",
         ...(permit ? { permit } : {}),
