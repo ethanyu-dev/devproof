@@ -26,7 +26,9 @@
     "prisma:deploy": "pnpm --filter @devproof/api prisma:deploy",
     "prisma:migrate": "pnpm --filter @devproof/api prisma:migrate",
     "stats": "node scripts/code-stats.mjs",
-    "test": "pnpm -r --if-present test && node --test scripts/dev-process-tree.spec.mjs",
+    "test": "pnpm -r --if-present test && node --test scripts/dev-process-tree.spec.mjs scripts/local-browser/*.spec.mjs",
+    "test:browser-comparison": "node scripts/browser-comparison.mjs",
+    "test:browser-comparison-unit": "node --test scripts/local-browser/*.spec.mjs",
     "typecheck": "pnpm prisma:generate && pnpm build:packages && pnpm -r --if-present typecheck"
   },
   "devDependencies": {

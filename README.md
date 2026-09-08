@@ -124,6 +124,8 @@ Web listens on `http://localhost:3344` and API on `http://localhost:4433` by def
 
 Production deployments can replace local object storage with Cloudflare R2 through its S3-compatible endpoint. Set `OBJECT_STORAGE_REGION=auto`, use a pre-created `OBJECT_STORAGE_BUCKET`, provide an R2 Access Key and Secret, and keep `OBJECT_STORAGE_FORCE_PATH_STYLE=true`. Step screenshots and final WebM videos use the same upload path.
 
+For the current Task/Run smoke and real-model comparisons of context and tool-surface modes, see [Local browser comparison](docs/local-browser-comparison.md).
+
 The local `DATABASE_URL` should use port 55432 shown above. If you intentionally use an existing host PostgreSQL instance, do not also treat the Docker database as the active data source, and ensure the PostgreSQL session timezone is UTC. Use `pnpm prisma:migrate` only to create a new development migration; after pulling existing migrations, use `pnpm prisma:deploy`.
 
 ## Observability
