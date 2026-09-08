@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskLease } from "@devproof/agent-runtime-protocol";
 
 import { BrowserVerificationExecutor } from "./browser-verification.executor.js";
+import { jsonBytes } from "./model-context.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -106,6 +107,579 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
   );
   return { controlPlane, runTask, executor };
 }
+
+describe("browser verification bounded context", () => {
+  type Request = {
+    input: Array<Record<string, unknown>>;
+    tools: Array<Record<string, unknown>>;
+    model: string;
+  };
+  const state = (request: Request) => {
+    const item = request.input.find(
+      (item) =>
+        item.role === "user" &&
+        typeof item.content === "string" &&
+        item.content.startsWith('{"kind":"browser_working_state"'),
+    )!;
+    return JSON.parse(String(item.content)).data;
+  };
+  const output = (request: Request, id: number) =>
+    JSON.parse(
+      String(
+        request.input.find(
+          (item) =>
+            item.type === "function_call_output" &&
+            item.call_id === `call-${id}`,
+        )!.output,
+      ),
+    );
+
+  it("recovers an early value after compaction and retains accepted evidence without extra browser work", async () => {
+    let index = 0;
+    let observationId = "";
+    const originalRequests: Request[] = [];
+    const snapshots: Request[] = [];
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      originalRequests.push(request);
+      snapshots.push(structuredClone(request));
+      expect(jsonBytes(request)).toBeLessThanOrEqual(96 * 1_024);
+      const step = index++;
+      let name = "browser_command";
+      let args: Record<string, unknown>;
+      if (step === 0) args = { commandType: "page.snapshot", payload: {} };
+      else if (step === 1) {
+        observationId = output(request, 0).result.observationId;
+        name = "record_criterion";
+        args = {
+          criterionId: "page-visible",
+          status: "PASSED",
+          summary: "订单编号已经显示。",
+          evidenceRefs: ["artifact://proof"],
+        };
+      } else if (step < 8)
+        args = {
+          commandType: "page.get_text",
+          payload: { target: { selector: `#step-${step}` } },
+        };
+      else if (step === 8) {
+        expect(request.input.some((item) => item.call_id === "call-0")).toBe(
+          false,
+        );
+        expect(JSON.stringify(request)).not.toContain("PO-00042");
+        expect(state(request)).toMatchObject({
+          acceptedCriteria: [
+            {
+              criterionId: "page-visible",
+              status: "PASSED",
+              evidenceRefs: ["artifact://proof"],
+            },
+          ],
+          unresolvedCriterionIds: ["order-copy"],
+          evidence: [{ externalId: "artifact://proof", kind: "SCREENSHOT" }],
+        });
+        expect(state(request).observations).toContainEqual(
+          expect.objectContaining({
+            observationId,
+            commandType: "page.snapshot",
+            availability: "AVAILABLE",
+          }),
+        );
+        name = "read_observation";
+        args = { observationId };
+      } else if (step === 9) {
+        const order = String(output(request, 8).result.content).match(
+          /PO-\d+/u,
+        )![0];
+        args = {
+          commandType: "page.fill",
+          payload: { target: { selector: "#order" }, text: order },
+        };
+      } else if (step === 10) {
+        name = "record_criterion";
+        args = {
+          criterionId: "order-copy",
+          status: "PASSED",
+          summary: "已按观察到的编号填写订单。",
+          evidenceRefs: [],
+        };
+      } else {
+        name = "finish_verification";
+        args = { verdict: "PASSED", summary: "订单验证完成。" };
+      }
+      return {
+        id: `response-${step}`,
+        output: [functionCall(name, args, step)],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    runTask.snapshot.criteria = [
+      { ...task.snapshot.criteria[0]!, requiredEvidenceKinds: ["SCREENSHOT"] },
+      {
+        id: "order-copy",
+        description: "Copy the observed order number.",
+        required: true,
+        requiredEvidenceKinds: [],
+      },
+    ];
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) =>
+      command.commandType === "page.snapshot"
+        ? {
+            status: "SUCCEEDED",
+            result: { content: 'Order PO-00042\n- textbox "Order" [ref=e1]\n' },
+            artifacts: [
+              { id: "proof", kind: "SCREENSHOT", metadata: { retained: true } },
+            ],
+          }
+        : {
+            status: "SUCCEEDED",
+            result: { content: JSON.stringify(command.payload) },
+          },
+    );
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      20,
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "PASSED",
+      criteria: [
+        {
+          criterionId: "page-visible",
+          status: "PASSED",
+          evidenceRefs: ["artifact://proof"],
+        },
+        { criterionId: "order-copy", status: "PASSED" },
+      ],
+      evidence: [
+        { externalId: "artifact://proof", metadata: { retained: true } },
+      ],
+    });
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(8);
+    expect(controlPlane.browserCommand).toHaveBeenLastCalledWith(
+      lease,
+      {
+        commandType: "page.fill",
+        payload: { target: { selector: "#order" }, text: "PO-00042" },
+      },
+      expect.any(AbortSignal),
+    );
+    expect(create).toHaveBeenCalledTimes(12);
+    expect(originalRequests).toEqual(snapshots);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    const metrics = controlPlane.appendEvent.mock.calls
+      .filter((call) => call[1] === "agent.model.started")
+      .map((call) => call[2].inputPreview.context);
+    expect(metrics.at(-1).compactedTurns).toBeGreaterThan(0);
+  });
+
+  it("blocks a ref outside the returned page, allows it after local paging, and invalidates it after mutation", async () => {
+    let step = 0;
+    let observationId = "";
+    let nextCursor = 0;
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      const index = step++;
+      let name = "browser_command";
+      let args: Record<string, unknown> = {
+        commandType: "page.click",
+        payload: { target: { ref: "e900" } },
+      };
+      if (index === 0 || index === 6)
+        args = {
+          commandType: "page.snapshot",
+          payload: index === 6 ? { target: { selector: "#target" } } : {},
+        };
+      if (index === 1) {
+        observationId = output(request, 0).result.observationId;
+        nextCursor = output(request, 0).result.nextCursor;
+      }
+      if (index === 2) {
+        expect(output(request, 1)).toMatchObject({
+          accepted: false,
+          code: "INVALID_ARGUMENTS",
+        });
+        name = "read_observation";
+        args = { observationId, cursor: nextCursor };
+      }
+      if (index === 3)
+        expect(output(request, 2).result.content).toContain("[ref=e900]");
+      if (index === 4) {
+        name = "read_observation";
+        args = { observationId, cursor: nextCursor };
+      }
+      if (index === 5)
+        expect(output(request, 4).result.refState).toBe("HISTORICAL");
+      if (index === 6)
+        expect(output(request, 5)).toMatchObject({ accepted: false });
+      return {
+        id: `response-${index}`,
+        output: [functionCall(name, args, index)],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const content =
+      '- text "Padding"\n'.repeat(800) + '- button "Target" [ref=e900]\n';
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => ({
+      status: "SUCCEEDED",
+      result:
+        command.commandType === "page.snapshot"
+          ? {
+              content: command.payload.target
+                ? '- button "Target" [ref=e900]\n'
+                : content,
+            }
+          : { clicked: true },
+    }));
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      8,
+    );
+    await executor.execute(runTask, lease, new AbortController().signal);
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot", "page.click", "page.snapshot", "page.click"]);
+  });
+
+  it("keeps multi-call groups and opaque reasoning identical across provider fallback", async () => {
+    const requests: Request[] = [];
+    const reasoning = {
+      type: "reasoning",
+      id: "opaque-id",
+      encrypted_content: "opaque-provider-data",
+      summary: [],
+    };
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      requests.push(structuredClone(request));
+      if (requests.length === 1)
+        return {
+          id: "first",
+          output: [
+            reasoning,
+            functionCall(
+              "browser_command",
+              { commandType: "page.get_url", payload: {} },
+              0,
+            ),
+            functionCall(
+              "browser_command",
+              { commandType: "page.get_title", payload: {} },
+              1,
+            ),
+          ],
+        };
+      if (requests.length === 2) {
+        request.input.splice(0);
+        request.tools.splice(0);
+        throw new Error("primary unavailable");
+      }
+      return {
+        id: "last",
+        output: [
+          functionCall(
+            "request_human_input",
+            { prompt: "请完成访问确认。", summary: "等待人工确认。" },
+            2,
+          ),
+        ],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates = [
+      task.snapshot.modelCandidates![0]!,
+      { ...task.snapshot.modelCandidates![0]!, modelId: "fallback-long-name" },
+    ];
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "WAITING_HUMAN" });
+    expect(requests[2]!.input).toEqual(requests[1]!.input);
+    expect(requests[2]!.tools).toEqual(requests[1]!.tools);
+    expect(requests[2]!.input).toContainEqual(reasoning);
+    const group = requests[2]!.input.filter(
+      (item) => typeof item.call_id === "string",
+    );
+    expect(group.map((item) => [item.type, item.call_id])).toEqual([
+      ["function_call", "call-0"],
+      ["function_call", "call-1"],
+      ["function_call_output", "call-0"],
+      ["function_call_output", "call-1"],
+    ]);
+  });
+
+  it("starts a fresh cache on the next segment after human intervention", async () => {
+    let index = 0;
+    let observationId = "";
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      const step = index++;
+      if (step === 0)
+        return {
+          id: "first",
+          output: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.snapshot", payload: {} },
+              0,
+            ),
+          ],
+        };
+      if (step === 1) observationId = output(request, 0).result.observationId;
+      if (step === 2) {
+        expect(state(request).observations).toEqual([]);
+        expect(JSON.stringify(request.input)).toContain("人工已完成登录");
+        return {
+          id: "resumed",
+          output: [functionCall("read_observation", { observationId }, 2)],
+        };
+      }
+      if (step === 3)
+        expect(output(request, 2)).toMatchObject({
+          accepted: false,
+          error: expect.stringContaining("当前执行段"),
+        });
+      return {
+        id: "human",
+        output: [
+          functionCall(
+            "request_human_input",
+            { prompt: "请完成登录。", summary: "等待人工登录。" },
+            step,
+          ),
+        ],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "WAITING_HUMAN" });
+    const resumedTask = structuredClone(runTask);
+    resumedTask.snapshot.executionPolicy.resume = {
+      response: { message: "人工已完成登录" },
+    };
+    expect(
+      await executor.execute(
+        resumedTask,
+        { ...lease, fencingToken: "5" },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ kind: "WAITING_HUMAN" });
+    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports insufficient initial capacity before any model or browser command", async () => {
+    const create = vi.fn();
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+      { maxBytes: 1_000 },
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "NOT_RUN",
+      error: {
+        code: "AGENT_CONTEXT_BUDGET_EXCEEDED",
+        details: { maxBytes: 1_000 },
+      },
+    });
+    expect(outcome).not.toHaveProperty("verdict");
+    expect(create).not.toHaveBeenCalled();
+    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("retains accepted criteria and evidence when the latest provider group exceeds capacity", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "observe",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            0,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "record",
+        output: [
+          { type: "reasoning", encrypted_content: "x".repeat(100_000) },
+          functionCall(
+            "record_criterion",
+            {
+              criterionId: "page-visible",
+              status: "PASSED",
+              summary: "页面可见。",
+              evidenceRefs: ["artifact://proof"],
+            },
+            1,
+          ),
+        ],
+      });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content: "页面可见" },
+      artifacts: [{ id: "proof", kind: "SCREENSHOT" }],
+    });
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "FATAL_FAILURE",
+      executionDisposition: "AGENT_ERROR",
+      error: {
+        code: "AGENT_CONTEXT_BUDGET_EXCEEDED",
+        details: {
+          acceptedCriteria: [
+            {
+              criterionId: "page-visible",
+              status: "PASSED",
+              evidenceRefs: ["artifact://proof"],
+            },
+          ],
+          evidence: [{ externalId: "artifact://proof", kind: "SCREENSHOT" }],
+        },
+      },
+    });
+    expect(outcome).not.toHaveProperty("verdict");
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("does not replay a partial multi-call response when the tool budget is exhausted", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "multiple",
+      output: [0, 1].map((id) =>
+        functionCall(
+          "browser_command",
+          { commandType: "page.get_url", payload: {} },
+          id,
+        ),
+      ),
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      1,
+    );
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" } });
+    expect(create).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("stops a partially executed response immediately on cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("lease cancelled");
+    const create = vi.fn().mockResolvedValue({
+      id: "multiple",
+      output: [0, 1].map((id) =>
+        functionCall(
+          "browser_command",
+          { commandType: "page.get_url", payload: {} },
+          id,
+        ),
+      ),
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async () => {
+      controller.abort(reason);
+      return { status: "SUCCEEDED", result: { url: "https://example.com" } };
+    });
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+    await expect(
+      executor.execute(runTask, lease, controller.signal),
+    ).rejects.toBe(reason);
+    expect(create).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back to raw outputs and full history without advertising the local read tool", async () => {
+    let index = 0;
+    const requests: Request[] = [];
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      requests.push(request);
+      const step = index++;
+      return {
+        id: `response-${step}`,
+        output: [
+          functionCall(
+            "browser_command",
+            {
+              commandType: "page.get_text",
+              payload: { target: { selector: `#row-${step}` } },
+            },
+            step,
+          ),
+        ],
+      };
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const raw = {
+      status: "SUCCEEDED",
+      commandId: "transport-id",
+      result: { content: "原始观察" },
+    };
+    controlPlane.browserCommand.mockResolvedValue(raw);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      7,
+      { mode: "LEGACY", maxBytes: 1_000 },
+    );
+    await executor.execute(runTask, lease, new AbortController().signal);
+    expect(
+      requests.at(-1)!.tools.some((tool) => tool.name === "read_observation"),
+    ).toBe(false);
+    expect(JSON.stringify(requests[0]!.input)).not.toContain(
+      "browser_working_state",
+    );
+    expect(
+      requests
+        .at(-1)!
+        .input.filter((item) => item.type === "function_call_output"),
+    ).toHaveLength(6);
+    expect(output(requests.at(-1)!, 0)).toEqual(raw);
+  });
+});
 
 describe("browser verification argument corrections", () => {
   const invalidCalls = [

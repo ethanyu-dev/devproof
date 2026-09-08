@@ -7,6 +7,8 @@ const managedKeys = [
   "DEVPROOF_AGENT_RUNTIME_TOKEN",
   "DEVPROOF_AGENT_RUNTIME_POOL",
   "DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST",
+  "DEVPROOF_AGENT_CONTEXT_MODE",
+  "DEVPROOF_AGENT_CONTEXT_MAX_BYTES",
   "DEVPROOF_AGENT_POLL_INTERVAL_MS",
   "DEVPROOF_AGENT_TOOL_LIMIT",
   "DEVPROOF_AGENT_WORKER_ID",
@@ -34,6 +36,17 @@ afterEach(() => {
 });
 
 describe("Agent Runtime configuration", () => {
+  it("bounds browser context by default and permits a segment-level rollback", () => {
+    process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+    expect(runtimeConfig()).toMatchObject({
+      DEVPROOF_AGENT_CONTEXT_MODE: "BOUNDED",
+      DEVPROOF_AGENT_CONTEXT_MAX_BYTES: 98_304,
+    });
+    process.env.DEVPROOF_AGENT_CONTEXT_MODE = "LEGACY";
+    expect(runtimeConfig().DEVPROOF_AGENT_CONTEXT_MODE).toBe("LEGACY");
+    process.env.DEVPROOF_AGENT_CONTEXT_MAX_BYTES = "1";
+    expect(() => runtimeConfig()).toThrow(/DEVPROOF_AGENT_CONTEXT_MAX_BYTES/u);
+  });
   it("uses the Agent Runtime environment names", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
     process.env.DEVPROOF_AGENT_RUNTIME_POOL = "BROWSER_EXECUTION";
