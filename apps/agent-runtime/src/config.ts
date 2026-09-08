@@ -13,6 +13,15 @@ const configSchema = z
       .optional(),
     DEVPROOF_AGENT_RUNTIME_TOKEN: z.string().min(16),
     DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST: z.string().default(""),
+    DEVPROOF_AGENT_CONTEXT_MODE: z
+      .enum(["BOUNDED", "LEGACY"])
+      .default("BOUNDED"),
+    DEVPROOF_AGENT_CONTEXT_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(64 * 1_024)
+      .max(1_024 * 1_024)
+      .default(96 * 1_024),
     DEVPROOF_AGENT_POLL_INTERVAL_MS: z.coerce
       .number()
       .int()

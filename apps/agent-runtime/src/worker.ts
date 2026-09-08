@@ -233,6 +233,10 @@ export class AgentRuntimeWorker {
             this.modelClient,
             this.controlPlane,
             this.config.DEVPROOF_AGENT_TOOL_LIMIT,
+            {
+              mode: this.config.DEVPROOF_AGENT_CONTEXT_MODE,
+              maxBytes: this.config.DEVPROOF_AGENT_CONTEXT_MAX_BYTES,
+            },
           );
         }
         outcome = await this.executor.execute(task, lease, controller.signal);
