@@ -1108,7 +1108,7 @@ const runtimeActionCommandInputVariants =
     return variant.description
       ? extended.describe(variant.description)
       : extended;
-  }) as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]];
+  });
 
 type RuntimeActionCommandInputValue = Exclude<
   RuntimeCommandInputValue,
@@ -1122,6 +1122,21 @@ type RuntimeActionCommandInputValue = Exclude<
       | "human.release";
   }
 >;
+
+const runtimeActionCommandSchemas = new Map<
+  string,
+  z.ZodType<RuntimeActionCommandInputValue>
+>(
+  runtimeActionCommandInputVariants.map((schema, index) => [
+    runtimeActionCommandPayloadVariants[index]!.shape.commandType.value,
+    schema as z.ZodType<RuntimeActionCommandInputValue>,
+  ]),
+);
+
+/** Select the canonical validator without expanding unrelated union errors. */
+export function getRuntimeActionCommandSchema(commandType: string) {
+  return runtimeActionCommandSchemas.get(commandType);
+}
 
 /** Browser actions exposed to Agents and console callers after acquisition. */
 export const runtimeActionCommandInputSchema = z
