@@ -53,7 +53,9 @@ Results are written to a new private temporary directory (or `--output PATH`): a
 
 ## Interpret results
 
-Compare verdict and criterion correctness first, then request bytes, provider-reported input/output/total tokens, cached input tokens, model calls, browser tool attempts, module enables, observation reads, corrections, and wall time. A missing or incomplete usage report is `null`, not zero. Request byte metrics include tools but are not token estimates. Browser tool attempts include calls rejected before browser dispatch. Input token totals include cached tokens and do not directly measure billed cost.
+Compare verdict and criterion correctness first, then request bytes, provider-reported input/output/total tokens, cached input tokens, model calls, browser attempts, module enables, observation reads, corrections, and wall time. A missing or incomplete usage report is `null`, not zero. Request byte metrics include tools but are not token estimates. `browserToolCalls` includes runtime-owned initial navigation and model-selected attempts, including local rejections; `runtimeNavigationCalls` and `modelBrowserToolCalls` separate those components. Input token totals include cached tokens and do not directly measure billed cost.
+
+The [navigation and completion changes](browser-execution-reliability.md) add HTTP attempt and retry observations. Compare `modelDurationMs` with complete `modelHttpDurationMs`, `modelHttpAttempts`, and `modelRetries`; missing or in-flight transport observations remain unknown. Automatic initial navigation participates in the exact target-URL check. It does not count as a model tool call or prove a criterion passed.
 
 The automated evidence check verifies that criterion references resolve and required evidence kinds are present. It does not replace inspecting the actual screenshots, DOM, or network artifacts against the criterion. One pass is a smoke comparison, not a reliable success-rate or latency estimate; repeat before drawing performance conclusions.
 
