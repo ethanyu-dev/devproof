@@ -88,7 +88,7 @@ function harness(
         },
       ],
       goal: "Verify the page.",
-      environment: { targetUrl: "https://example.com" },
+      environment: {},
       deadlineAt: new Date(Date.now() + 120_000).toISOString(),
       executionPolicy: {},
       modelCandidates: [

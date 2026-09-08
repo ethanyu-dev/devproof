@@ -24,7 +24,7 @@ const task: RuntimeTaskLease = {
       },
     ],
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-    environment: { targetUrl: "https://example.com" },
+    environment: {},
     executionPolicy: {},
     goal: "Verify the page.",
     modelCandidates: [
@@ -89,7 +89,7 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
   const runTask: RuntimeTaskLease = {
     ...task,
     snapshot: {
-      ...task.snapshot,
+      ...structuredClone(task.snapshot),
       deadlineAt: new Date(Date.now() + 120_000).toISOString(),
       executionPolicy: {
         deadline: {
@@ -107,6 +107,367 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
   );
   return { controlPlane, runTask, executor };
 }
+
+describe("runtime navigation and combined finalization", () => {
+  const criterion = {
+    criterionId: "page-visible",
+    status: "PASSED",
+    summary: "页面可见。",
+    evidenceRefs: ["artifact://proof"],
+  };
+  const finish = (criteria = [criterion]) => ({
+    id: "finish",
+    output: [
+      functionCall(
+        "finish_verification",
+        {
+          verdict: "PASSED",
+          summary: "验证完成。",
+          criteria,
+        },
+        2,
+      ),
+    ],
+  });
+
+  it("navigates the exact task URL before the model and accepts evidence with the final result", async () => {
+    const url =
+      "https://example.com/form?trial=57a0c843-9959-4d3c-be24-931b8a7ed37e";
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "observe",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.dom", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce(finish());
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.environment = { targetUrl: url };
+    runTask.snapshot.criteria[0] = {
+      ...runTask.snapshot.criteria[0]!,
+      requiredEvidenceKinds: ["DOM"],
+    };
+    controlPlane.browserCommand
+      .mockResolvedValueOnce({ status: "SUCCEEDED", result: { url } })
+      .mockResolvedValueOnce({
+        status: "SUCCEEDED",
+        artifacts: [{ id: "proof", kind: "DOM" }],
+      });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "PASSED",
+      criteria: [criterion],
+    });
+    expect(controlPlane.browserCommand.mock.calls[0]![1]).toEqual({
+      commandType: "page.navigate",
+      payload: { url },
+    });
+    expect(
+      controlPlane.browserCommand.mock.invocationCallOrder[0],
+    ).toBeLessThan(create.mock.invocationCallOrder[0]!);
+    const bootstrap = create.mock.calls[0]![0].input.find(
+      (item: Record<string, unknown>) =>
+        typeof item.content === "string" &&
+        item.content.includes('"kind":"runtime_initial_navigation"'),
+    );
+    expect(JSON.parse(bootstrap.content)).toMatchObject({
+      command: { payload: { url } },
+      result: { status: "SUCCEEDED" },
+    });
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the current page on human resume even when a target URL exists", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "human",
+      output: [
+        functionCall(
+          "request_human_input",
+          { prompt: "请确认接管状态。", summary: "等待人工确认。" },
+          1,
+        ),
+      ],
+    });
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.environment = { targetUrl: "https://example.com" };
+    runTask.snapshot.executionPolicy.resume = {
+      interventionId: "resume-1",
+      response: {},
+    };
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome.kind).toBe("WAITING_HUMAN");
+    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
+  });
+
+  it("exposes a failed initial navigation instead of claiming the page loaded", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "finish",
+      output: [
+        functionCall(
+          "finish_verification",
+          {
+            verdict: "INCONCLUSIVE",
+            summary: "目标页面未能加载。",
+            criteria: [
+              { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
+            ],
+          },
+          1,
+        ),
+      ],
+    });
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.environment = { targetUrl: "https://example.com" };
+    controlPlane.browserCommand.mockRejectedValue(
+      new Error("navigation timeout"),
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
+    const bootstrap = create.mock.calls[0]![0].input.find(
+      (item: Record<string, unknown>) =>
+        typeof item.content === "string" &&
+        item.content.includes('"kind":"runtime_initial_navigation"'),
+    );
+    expect(JSON.parse(bootstrap.content).result).toMatchObject({
+      accepted: false,
+      error: "navigation timeout",
+    });
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("releases the browser when cancelled during initial navigation", async () => {
+    const controller = new AbortController();
+    const create = vi.fn();
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.environment = { targetUrl: "https://example.com" };
+    controlPlane.browserCommand.mockImplementation(async () => {
+      controller.abort(new Error("cancel bootstrap"));
+      throw controller.signal.reason;
+    });
+    await expect(
+      executor.execute(runTask, lease, controller.signal),
+    ).rejects.toThrow("cancel bootstrap");
+    expect(create).not.toHaveBeenCalled();
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["unknown criterion", [{ ...criterion, criterionId: "unknown" }]],
+    [
+      "unknown evidence",
+      [{ ...criterion, evidenceRefs: ["artifact://missing"] }],
+    ],
+    ["missing required evidence", [{ ...criterion, evidenceRefs: [] }]],
+    ["duplicate criterion", [criterion, criterion]],
+    ["non-Chinese summary", [{ ...criterion, summary: "Page visible." }]],
+  ])("rejects a combined result with %s", async (_label, criteria) => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "observe",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.dom", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce(finish(criteria))
+      .mockResolvedValueOnce(finish());
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.criteria[0] = {
+      ...runTask.snapshot.criteria[0]!,
+      requiredEvidenceKinds: ["DOM"],
+    };
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      artifacts: [{ id: "proof", kind: "DOM" }],
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({ verdict: "PASSED" });
+    const rejection = create.mock.calls[2]![0].input.find(
+      (item: Record<string, unknown>) =>
+        item.type === "function_call_output" && item.call_id === "call-2",
+    );
+    expect(JSON.parse(rejection.output).accepted).toBe(false);
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not partially accept an invalid combined submission", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "observe",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.dom", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce(
+        finish([criterion, { ...criterion, criterionId: "unknown" }]),
+      )
+      .mockResolvedValueOnce({
+        id: "empty-finish",
+        output: [
+          functionCall(
+            "finish_verification",
+            { verdict: "PASSED", summary: "验证完成。" },
+            3,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce(finish());
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      artifacts: [{ id: "proof", kind: "DOM" }],
+    });
+    await executor.execute(runTask, lease, new AbortController().signal);
+    const rejection = create.mock.calls[3]![0].input.find(
+      (item: Record<string, unknown>) =>
+        item.type === "function_call_output" && item.call_id === "call-3",
+    );
+    expect(JSON.parse(rejection.output)).toMatchObject({ accepted: false });
+    expect(rejection.output).toContain("page-visible");
+  });
+
+  it("retains the locator-recovery guard in combined finalization", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "click",
+        output: [
+          functionCall(
+            "browser_command",
+            {
+              commandType: "page.click",
+              payload: { target: { selector: "button" } },
+            },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "wrong-finish",
+        output: [
+          functionCall(
+            "finish_verification",
+            {
+              verdict: "FAILED",
+              summary: "产品操作失败。",
+              criteria: [{ ...criterion, status: "FAILED", evidenceRefs: [] }],
+            },
+            2,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "finish",
+        output: [
+          functionCall(
+            "finish_verification",
+            {
+              verdict: "INCONCLUSIVE",
+              summary: "定位仍不明确。",
+              criteria: [
+                { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
+              ],
+            },
+            3,
+          ),
+        ],
+      });
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValueOnce({
+      status: "FAILED",
+      error: { code: "LOCATOR_AMBIGUOUS", message: "multiple buttons" },
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
+    const rejection = create.mock.calls[2]![0].input.find(
+      (item: Record<string, unknown>) =>
+        item.type === "function_call_output" && item.call_id === "call-2",
+    );
+    expect(rejection.output).toContain("LOCATOR_AMBIGUOUS");
+  });
+
+  it.each([false, true])(
+    "records HTTP attempt metadata on model completion/failure (%s)",
+    async (fails) => {
+      const create = vi.fn().mockImplementation(async (_request, options) => {
+        options.onRequestAttempt({
+          attempt: 1,
+          startedAt: Date.now() - 20,
+          durationMs: 20,
+          status: fails ? 400 : 200,
+          outcome: "RESPONSE",
+        });
+        if (fails) throw new Error("provider failed");
+        return {
+          id: "human",
+          output: [
+            functionCall(
+              "request_human_input",
+              { prompt: "请确认状态。", summary: "等待确认。" },
+              1,
+            ),
+          ],
+        };
+      });
+      const { runTask, controlPlane, executor } = convergenceHarness(create);
+      const execution = executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      if (fails) await expect(execution).rejects.toThrow("provider failed");
+      else await execution;
+      const event = controlPlane.appendEvent.mock.calls.find(
+        (call) =>
+          call[1] === (fails ? "agent.model.failed" : "agent.model.completed"),
+      );
+      expect(event![2].inputPreview.transport).toMatchObject({
+        attemptCount: 1,
+        retryCount: 0,
+        attempts: [{ durationMs: 20, status: fails ? 400 : 200 }],
+      });
+      expect(create.mock.calls[0]![0]).not.toHaveProperty("transport");
+    },
+  );
+});
 
 describe("browser verification bounded context", () => {
   type Request = {

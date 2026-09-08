@@ -16,16 +16,19 @@ export function browserResourcesReleased(executions) {
 export function initialNavigationMatches(events, targetUrl) {
   const navigation = events.find(
     (event) =>
-      event.kind === "agent.tool.started" &&
-      event.payload.name === "browser_command" &&
-      ["page.navigate", "page.open"].includes(
-        event.payload.inputPreview?.commandType,
-      ),
+      event.kind === "executor.navigation.started" ||
+      (event.kind === "agent.tool.started" &&
+        event.payload.name === "browser_command" &&
+        ["page.navigate", "page.open"].includes(
+          event.payload.inputPreview?.commandType,
+        )),
   );
   try {
     return (
-      new URL(navigation?.payload.inputPreview?.payload?.url).href ===
-      new URL(targetUrl).href
+      new URL(
+        navigation?.payload.command?.payload?.url ??
+          navigation?.payload.inputPreview?.payload?.url,
+      ).href === new URL(targetUrl).href
     );
   } catch {
     return false;
@@ -43,11 +46,30 @@ export function summarizeEvents(events) {
   const finishedTools = events.filter(
     (event) => event.kind === "agent.tool.completed",
   );
+  const modelFinished = events.filter((event) =>
+    ["agent.model.completed", "agent.model.failed"].includes(event.kind),
+  );
+  const navigationCalls = events.filter(
+    (event) => event.kind === "executor.navigation.started",
+  ).length;
+  const modelBrowserCalls = tools.filter(
+    (event) => event.payload.name === "browser_command",
+  ).length;
   const sum = (values) => values.reduce((total, value) => total + value, 0);
   const completeSum = (values) =>
     values.length && values.every(Number.isFinite) ? sum(values) : null;
   const usageComplete =
     started.length > 0 && started.length === completed.length;
+  const transportComplete =
+    started.length > 0 &&
+    started.length === modelFinished.length &&
+    modelFinished.every(
+      (event) =>
+        event.payload.inputPreview?.transport?.attempts?.length > 0 &&
+        event.payload.inputPreview.transport.attempts.every(
+          (attempt) => attempt.outcome !== "RUNNING",
+        ),
+    );
   const tokenTotal = (key) =>
     usageComplete
       ? completeSum(completed.map((event) => event.payload.usage?.[key]))
@@ -56,6 +78,33 @@ export function summarizeEvents(events) {
     modelCalls: started.length,
     modelFailures: events.filter((event) => event.kind === "agent.model.failed")
       .length,
+    modelDurationMs:
+      started.length === modelFinished.length
+        ? completeSum(modelFinished.map((event) => event.payload.durationMs))
+        : null,
+    modelHttpAttempts: transportComplete
+      ? sum(
+          modelFinished.map(
+            (event) => event.payload.inputPreview.transport.attemptCount,
+          ),
+        )
+      : null,
+    modelRetries: transportComplete
+      ? sum(
+          modelFinished.map(
+            (event) => event.payload.inputPreview.transport.retryCount,
+          ),
+        )
+      : null,
+    modelHttpDurationMs: transportComplete
+      ? completeSum(
+          modelFinished.flatMap((event) =>
+            event.payload.inputPreview.transport.attempts.map(
+              (attempt) => attempt.durationMs,
+            ),
+          ),
+        )
+      : null,
     models: [...new Set(started.map((event) => event.payload.model))],
     requestBytes: completeSum(
       started.map((event) => event.payload.inputPreview?.context?.requestBytes),
@@ -73,9 +122,9 @@ export function summarizeEvents(events) {
     outputTokens: tokenTotal("output_tokens"),
     totalTokens: tokenTotal("total_tokens"),
     toolCalls: tools.length,
-    browserToolCalls: tools.filter(
-      (event) => event.payload.name === "browser_command",
-    ).length,
+    browserToolCalls: modelBrowserCalls + navigationCalls,
+    modelBrowserToolCalls: modelBrowserCalls,
+    runtimeNavigationCalls: navigationCalls,
     enableCalls: tools.filter(
       (event) => event.payload.name === "enable_browser_tools",
     ).length,

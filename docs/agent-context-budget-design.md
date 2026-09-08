@@ -1,6 +1,6 @@
 # Design 1: bounded browser working context
 
-Date: 2026-09-08. Status: implemented locally and regression-tested. Live model evaluation and deployment have not been performed.
+Date: 2026-09-08. Status: implemented and regression-tested, with an initial isolated live comparison completed. The small sample does not establish an overall reliability or latency gain. See the [comparison procedure](local-browser-comparison.md) and [execution follow-up](browser-execution-reliability.md).
 
 ## Problem and decision
 
@@ -59,7 +59,7 @@ The most recent successful snapshot is the only source of usable refs, and a ref
 
 Validity is based on actions and observations available to this executor. The browser command response does not expose a control generation; this layer cannot detect every asynchronous DOM update or concurrent manual action. Browser Runtime validation remains authoritative. Formal HITL resume creates a fresh segment with the existing `humanResume` input and an empty cache. Cache IDs cannot survive a new lease, process loss, or another task.
 
-Opaque provider items are preserved within retained groups. Mocked Responses replay and fallback formats are tested; live gateway compatibility still needs evaluation. Existing trace previews remain bounded previews, not full transcript storage.
+Opaque provider items are preserved within retained groups. Mocked Responses replay and fallback formats are tested, and the initial live comparison exercised one approved gateway/model combination. Broader gateway compatibility remains unverified. Existing trace previews remain bounded previews, not full transcript storage.
 
 ## Verification
 

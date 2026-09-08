@@ -10,6 +10,56 @@ import {
   summarizeEvents,
 } from "./metrics.mjs";
 
+test("runtime navigation is included in URL checks and browser totals", () => {
+  const expected = "https://fixture.example/form?trial=exact";
+  const events = [
+    {
+      kind: "executor.navigation.started",
+      payload: {
+        command: { commandType: "page.navigate", payload: { url: expected } },
+      },
+    },
+  ];
+  assert.equal(initialNavigationMatches(events, expected), true);
+  assert.equal(initialNavigationMatches(events, expected + "-wrong"), false);
+  assert.equal(summarizeEvents(events).browserToolCalls, 1);
+  assert.equal(summarizeEvents(events).modelBrowserToolCalls, 0);
+  assert.equal(summarizeEvents(events).runtimeNavigationCalls, 1);
+});
+
+test("retry metrics require complete transport observations, including failed requests", () => {
+  const start = { kind: "agent.model.started", payload: {} };
+  const end = {
+    kind: "agent.model.failed",
+    payload: {
+      durationMs: 100,
+      inputPreview: {
+        transport: {
+          attemptCount: 2,
+          retryCount: 1,
+          attempts: [
+            { durationMs: 20, outcome: "RESPONSE", status: 429 },
+            { durationMs: 30, outcome: "ERROR", status: null },
+          ],
+        },
+      },
+    },
+  };
+  const metrics = summarizeEvents([start, end]);
+  assert.equal(metrics.modelRetries, 1);
+  assert.equal(metrics.modelHttpAttempts, 2);
+  assert.equal(metrics.modelDurationMs, 100);
+  assert.equal(metrics.modelHttpDurationMs, 50);
+  assert.equal(summarizeEvents([start]).modelRetries, null);
+  assert.equal(
+    summarizeEvents([start, { kind: "agent.model.completed", payload: {} }])
+      .modelHttpAttempts,
+    null,
+  );
+  end.payload.inputPreview.transport.attempts[1].outcome = "RUNNING";
+  assert.equal(summarizeEvents([start, end]).modelHttpDurationMs, null);
+});
+
 test("incomplete provider usage stays unknown instead of appearing as a token saving", () => {
   const started = {
     kind: "agent.model.started",

@@ -1,5 +1,3 @@
-import OpenAI from "openai";
-import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses";
 import type { RuntimeModelCandidate } from "@devproof/agent-runtime-protocol";
 
 import { runtimeConfig } from "./config.js";
@@ -9,7 +7,7 @@ import {
   parseModelHostAllowlist,
 } from "./model-network-policy.js";
 import { AgentRuntimeWorker } from "./worker.js";
-import type { ModelResponse } from "./browser-verification.executor.js";
+import { createResponsesClient } from "./model-client.js";
 
 const config = runtimeConfig();
 const controlPlane = new ControlPlaneClient(
@@ -23,32 +21,8 @@ const modelFetch = createModelFetch(
 const worker = new AgentRuntimeWorker(
   config,
   controlPlane,
-  (candidate: RuntimeModelCandidate) => {
-    const client = new OpenAI({
-      apiKey: candidate.apiKey,
-      baseURL: candidate.baseUrl,
-      fetch: modelFetch,
-    });
-    return {
-      responses: {
-        create: async (request, options) => {
-          const response = await client.responses.create(
-            request as ResponseCreateParamsNonStreaming,
-            options,
-          );
-          return {
-            id: response.id,
-            output: response.output as ModelResponse["output"],
-            ...(response.usage
-              ? {
-                  usage: response.usage as unknown as Record<string, unknown>,
-                }
-              : {}),
-          };
-        },
-      },
-    };
-  },
+  (candidate: RuntimeModelCandidate) =>
+    createResponsesClient(candidate, modelFetch),
 );
 const controller = new AbortController();
 
