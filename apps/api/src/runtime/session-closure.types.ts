@@ -19,7 +19,10 @@ export interface RuntimeClosureProof {
   hostInstanceId: string;
   daemonInstanceId: string;
   launchIdentityVersion: number;
-  method: "LIVE_SESSION_TERMINATED" | "IDENTIFIED_PROCESS_SET_TERMINATED";
+  method:
+    | "LIVE_SESSION_TERMINATED"
+    | "IDENTIFIED_PROCESS_SET_TERMINATED"
+    | "LAUNCH_PREVENTED";
   networkRevoked: true;
   closureCompletedAt: string;
 }

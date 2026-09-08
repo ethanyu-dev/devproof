@@ -43,6 +43,7 @@ import { retainedProfilePolicy } from "./profile-policy";
 import { RunTrajectory } from "./run-trajectory";
 import {
   executionSchedulingLabel,
+  concurrencyPolicyExplanation,
   schedulingWaitText,
   taskOutcomeDisplay,
   verificationVerdictLabel,
@@ -1509,6 +1510,9 @@ function CaseExecutionLink({ execution }: { execution: TaskCaseExecution }) {
           {content}
         </Link>
         <SchedulingExplanation scheduling={execution.scheduling} />
+        <small>
+          {concurrencyPolicyExplanation(execution.executionPolicy?.accessMode)}
+        </small>
       </div>
     );
   }
@@ -1576,7 +1580,8 @@ function SchedulingExplanation({
           </Link>
         </>
       ) : null}
-      {scheduling.nextRetryAt
+      {scheduling.nextRetryAt &&
+      scheduling.blockedBy?.recoveryPhase !== "NEEDS_OPERATOR"
         ? ` · 下次重试 ${new Date(scheduling.nextRetryAt).toLocaleTimeString("zh-CN")}`
         : ""}
     </small>

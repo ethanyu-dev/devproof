@@ -1,6 +1,6 @@
 {
   "name": "@devproof/browser-runtime",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "private": false,
   "type": "module",
   "bin": {

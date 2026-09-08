@@ -1,5 +1,16 @@
 # @devproof/runtime-protocol
 
+Protocol v1.15 adds `no-launch-evidence-v1`. New launch intents remember the daemon
+they were assigned to before dispatch. A close challenge may include
+`expectedLaunchDaemonInstanceId` alongside `expectedLaunchIdentity`. Only that
+same daemon, with no launch record or live/opening/persisted session, can atomically
+revoke the intent and persist `LAUNCH_PREVENTED` evidence. A delayed open is then
+rejected by the durable journal. The API verifies the registered intent, host,
+epoch, challenge and absence of any browser use before recording `NO_WRITE_VERIFIED`.
+Empty inventories, legacy sessions, and missing journals after a daemon change
+remain insufficient. Durable tombstones can be re-challenged on the same host.
+The new challenge field and proof method require explicit v1.15 negotiation.
+
 Protocol v1.14 adds the explicitly negotiated `closure-evidence-v1` capability.
 Hello carries OS-derived `hostInstanceId` and process-lifetime `daemonInstanceId`;
 accepted hello returns only capabilities negotiated on that connection.

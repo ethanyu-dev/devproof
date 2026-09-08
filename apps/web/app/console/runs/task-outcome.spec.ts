@@ -4,6 +4,7 @@ import type { TaskCaseExecution, TaskScheduling } from "./task-types";
 import {
   executionDispositionLabel,
   executionSchedulingLabel,
+  concurrencyPolicyExplanation,
   schedulingWaitText,
   taskOutcomeDisplay,
   verificationVerdictLabel,
@@ -122,4 +123,34 @@ it("explains the recovery behind a queued identity holder", () => {
       },
     }),
   ).toContain("前一个执行正在等待会话恢复");
+});
+
+it("explains an operator-blocked recovery without suggesting that it is running", () => {
+  const scheduling: TaskScheduling = {
+    state: "RECOVERING",
+    reason: "LEASE_RECOVERY",
+    waitingSince: null,
+    evaluatedAt: new Date().toISOString(),
+    blockedBy: { recoveryPhase: "NEEDS_OPERATOR", resourceType: "SESSION" },
+    queue: null,
+    nextRetryAt: null,
+  };
+  expect(
+    executionSchedulingLabel({
+      scheduling,
+      run: { lifecycle: "RUNNING" },
+    } as TaskCaseExecution),
+  ).toBe("等待人工恢复");
+  expect(
+    taskOutcomeDisplay({
+      lifecycle: "RUNNING",
+      verdict: null,
+      executionDisposition: null,
+      scheduling,
+    }),
+  ).toMatchObject({ label: "等待人工恢复", toneStatus: "PENDING" });
+  expect(schedulingWaitText(scheduling)).toContain("自动恢复已暂停");
+  expect(concurrencyPolicyExplanation("UNKNOWN")).toContain(
+    "同一环境按串行执行",
+  );
 });

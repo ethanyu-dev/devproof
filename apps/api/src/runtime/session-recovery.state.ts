@@ -15,6 +15,8 @@ import {
   TERMINAL_RUN_STATES,
 } from "./session-closure.types.js";
 
+export const MAX_CLOSURE_ATTEMPTS = 6;
+
 export const leaseDigest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const recoveryJson = (value: unknown): Prisma.InputJsonValue =>
@@ -134,6 +136,49 @@ export async function materializeRecoveryGuards(
   });
 }
 
+async function hasConfirmedWriteOutcome(
+  tx: Prisma.TransactionClient,
+  session: BrowserRuntimeSession,
+) {
+  if (!session.ownerTaskId || session.ownerFencingToken === null) return false;
+  const owner = await tx.agentRuntimeTask.findUnique({
+    where: { id: session.ownerTaskId },
+  });
+  const result = owner?.result as { kind?: string; verdict?: string } | null;
+  if (
+    !owner ||
+    owner.fencingToken !== session.ownerFencingToken ||
+    owner.status !== "SUCCEEDED" ||
+    !owner.completionId ||
+    owner.recoveryStatus === "WRITE_OUTCOME_UNKNOWN" ||
+    result?.kind !== "VERIFICATION_COMPLETED" ||
+    !["PASSED", "FAILED"].includes(result.verdict ?? "")
+  )
+    return false;
+  return (
+    (await tx.browserRuntimeCommand.count({
+      where: {
+        sessionId: session.id,
+        leaseToken: session.leaseToken,
+        fencingToken: session.fencingToken,
+        status: { not: "SUCCEEDED" },
+        commandType: {
+          notIn: [
+            "session.open",
+            "session.close",
+            "page.snapshot",
+            "page.get_text",
+            "page.get_url",
+            "page.get_title",
+            "page.screenshot",
+            "page.wait",
+          ],
+        },
+      },
+    })) === 0
+  );
+}
+
 export async function initialWriteState(
   tx: Prisma.TransactionClient,
   session: BrowserRuntimeSession,
@@ -148,21 +193,13 @@ export async function initialWriteState(
       session.ownerFencingToken !== null &&
       owner.fencingToken === session.ownerFencingToken;
     if (matchingOwner && owner.recoveryStatus === "RESOLVED") return "RESOLVED";
-    const result = owner?.result as { kind?: string } | null;
-    if (
-      matchingOwner &&
-      owner.status === "SUCCEEDED" &&
-      owner.recoveryStatus !== "WRITE_OUTCOME_UNKNOWN" &&
-      owner.completionId &&
-      result?.kind === "VERIFICATION_COMPLETED"
-    )
-      return "CONFIRMED";
   }
   const leases = await tx.executionResourceLease.findMany({
     where: { sessionId: session.id },
   });
   if (leases.length && leases.every((lease) => lease.mode === "READ"))
     return "NOT_APPLICABLE";
+  if (await hasConfirmedWriteOutcome(tx, session)) return "CONFIRMED";
   return "UNKNOWN";
 }
 
@@ -178,19 +215,7 @@ export async function refreshRecoveryWriteOutcome(
     session.ownerFencingToken === null
   )
     return recovery;
-  const owner = await tx.agentRuntimeTask.findUnique({
-    where: { id: session.ownerTaskId },
-  });
-  const outcome = owner?.result as { kind?: string } | null;
-  if (
-    !owner ||
-    owner.fencingToken !== session.ownerFencingToken ||
-    owner.status !== "SUCCEEDED" ||
-    !owner.completionId ||
-    owner.recoveryStatus === "WRITE_OUTCOME_UNKNOWN" ||
-    outcome?.kind !== "VERIFICATION_COMPLETED"
-  )
-    return recovery;
+  if (!(await hasConfirmedWriteOutcome(tx, session))) return recovery;
   const changed = await tx.runtimeSessionRecovery.updateMany({
     where: {
       id: recovery.id,

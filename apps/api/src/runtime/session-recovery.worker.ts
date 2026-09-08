@@ -10,7 +10,11 @@ import { RuntimeCommandDispatcher } from "./runtime-command-dispatcher.service.j
 import { SessionRecoveryService } from "./session-recovery.service.js";
 import { SessionClosureService } from "./session-closure.service.js";
 import { recoveryEnabled } from "./session-recovery.enabled.js";
-import { emitRecoveryChanged, recoveryJson } from "./session-recovery.state.js";
+import {
+  MAX_CLOSURE_ATTEMPTS,
+  emitRecoveryChanged,
+  recoveryJson,
+} from "./session-recovery.state.js";
 
 const CLAIM_TTL_MS = 120_000;
 const CLOSE_DEADLINE_MS = 90_000;
@@ -170,6 +174,19 @@ export class SessionRecoveryWorker implements OnModuleInit, OnModuleDestroy {
           previous &&
           ["PENDING", "DISPATCHED"].includes(previous.status) &&
           previous.deadlineAt > now;
+        if (!reuse && row.attempts >= MAX_CLOSURE_ATTEMPTS) {
+          await this.deferWithoutDispatch(
+            tx,
+            row,
+            "NEEDS_OPERATOR",
+            "RECOVERY_ATTEMPTS_EXHAUSTED",
+            null,
+          );
+          await tx.runtimeRecoveryPermit.deleteMany({
+            where: { runtimeId: row.runtimeId, claimToken },
+          });
+          continue;
+        }
         const commandId = reuse ? previous.id : randomUUID();
         if (!reuse) {
           const recovery = this.recoveries.closePayload(

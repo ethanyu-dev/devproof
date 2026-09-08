@@ -103,3 +103,23 @@ curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/i
 The installer refuses to switch packages while persisted sessions are active.
 Use `bash -s -- --version MAJOR.MINOR.PATCH` to pin a release, or
 `bash -s -- --force-active` only when session interruption is acceptable.
+
+### Runtime 0.2.21 recovery update
+
+Deploy the API supporting protocol v1.15 before upgrading the Runtime. No database
+migration is required. Existing nodes keep their negotiated protocol; historical
+operator-required recoveries keep their guards until explicitly reviewed and retried.
+Only new launch intents assigned to a v1.15 daemon support no-launch evidence.
+
+Outgoing messages are schema-checked before delivery; command errors are redacted
+and bounded to the wire limit so a long Playwright call log cannot poison the
+reliable outbox. Commands wait for handshake reconciliation while cancellation
+and heartbeats remain concurrent. Short-lived connections increase backoff; a
+stable acknowledged connection resets it. Default page snapshots focus on an
+active modal, and intercepted actions ask the Agent to take a fresh snapshot.
+
+Automatic close paths share a six-attempt budget and preserve backoff and
+`NEEDS_OPERATOR`. An explicit operator retry resets the budget with an audit event.
+`INCONCLUSIVE` results and unsettled browser commands do not confirm business
+writes or release their guards. Browser capacity remains an upper bound; unknown
+business access still serializes execution within an environment.

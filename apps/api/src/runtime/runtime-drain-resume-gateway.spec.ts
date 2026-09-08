@@ -77,6 +77,10 @@ function fixture() {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
     browserRuntime: {
+      updateMany: vi.fn().mockImplementation(async ({ data }) => {
+        Object.assign(runtime, data);
+        return { count: 1 };
+      }),
       findFirst: vi.fn().mockImplementation(async ({ where }) => {
         if (where.tokenHash && where.tokenHash !== runtime.tokenHash)
           return null;
@@ -138,7 +142,7 @@ function fixture() {
     markRuntimeOnline: vi.fn(),
   };
   const hub = { register: vi.fn() };
-  const socket = { send: vi.fn(), close: vi.fn() };
+  const socket = { readyState: 1, send: vi.fn(), close: vi.fn() };
   const service = new RuntimeGatewayService(
     tx as never,
     redis as never,

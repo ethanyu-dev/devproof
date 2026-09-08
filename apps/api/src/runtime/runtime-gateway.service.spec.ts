@@ -85,7 +85,7 @@ function fixture() {
     undefined,
     recovery as never,
   );
-  const socket = { send: vi.fn(), close: vi.fn() };
+  const socket = { readyState: 1, send: vi.fn(), close: vi.fn() };
   const handleHello = Reflect.get(service, "handleHello") as (
     socket: typeof socket,
     hello: ReturnType<typeof runtimeClientMessageSchema.parse>,
@@ -580,5 +580,46 @@ describe("Runtime handshake fencing", () => {
     });
     await handleHello.call(service, socket, greeting);
     expect(recovery.wakeRuntime).toHaveBeenCalledWith(context.runtimeId);
+  });
+});
+
+describe("Runtime handshake readiness", () => {
+  it("publishes only after reconciliation and sending hello accepted", async () => {
+    const f = fixture();
+    let release!: () => void;
+    vi.spyOn(f.service as any, "reconcile").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve([]);
+        }),
+    );
+    const pending = f.handleHello.call(f.service, f.socket, hello());
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(f.prisma.browserRuntime.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "OFFLINE" }),
+      }),
+    );
+    expect(f.hub.register).not.toHaveBeenCalled();
+    expect(f.socket.send).not.toHaveBeenCalled();
+    release();
+    await pending;
+    expect(f.hub.register).toHaveBeenCalledOnce();
+    expect(f.socket.send.mock.invocationCallOrder[0]).toBeLessThan(
+      f.hub.register.mock.invocationCallOrder[0]!,
+    );
+  });
+  it("never publishes a socket closed during reconciliation", async () => {
+    const f = fixture();
+    vi.spyOn(f.service as any, "reconcile").mockImplementation(async () => {
+      f.socket.readyState = 3;
+      return [];
+    });
+    await f.handleHello.call(f.service, f.socket, hello());
+    expect(f.hub.register).not.toHaveBeenCalled();
+    expect(f.socket.send).not.toHaveBeenCalled();
+    expect(f.prisma.browserRuntime.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: "ONLINE" } }),
+    );
   });
 });

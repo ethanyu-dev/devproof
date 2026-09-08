@@ -263,6 +263,50 @@ export class BrowserAdmissionService {
             });
             return false;
           }
+          const recovery = await tx.runtimeSessionRecovery.findUnique({
+            where: {
+              sessionId_expectedSessionFence: {
+                sessionId,
+                expectedSessionFence: session.fencingToken,
+              },
+            },
+          });
+          if (recovery?.closureState === "NEEDS_OPERATOR") {
+            await tx.agentRuntimeTask.update({
+              where: { id: task.id },
+              data: {
+                recoveryStatus: "STARTUP_CLOSING",
+                recoveryNextAttemptAt: retryAt,
+              },
+            });
+            await tx.taskCaseExecution.updateMany({
+              where: { runId: task.runId },
+              data: {
+                scheduling: {
+                  state: "RECOVERING",
+                  reason: "LEASE_RECOVERY",
+                  waitingSince: (
+                    execution.waitingSince ?? execution.createdAt
+                  ).toISOString(),
+                  evaluatedAt: now.toISOString(),
+                  queue: null,
+                  nextRetryAt: null,
+                  blockedBy: {
+                    resourceType: "SESSION",
+                    sessionId,
+                    recoveryId: recovery.id,
+                    recoveryPhase: "NEEDS_OPERATOR",
+                  },
+                },
+              },
+            });
+            if (task.run.taskExecutionId)
+              await tx.taskExecution.updateMany({
+                where: { id: task.run.taskExecutionId },
+                data: { projectionNeededAt: now },
+              });
+            return false;
+          }
           // Console takeover can race the scan without touching the Agent row.
           // Lock the exact observed permit before quarantine; a renewed human
           // window or changed binding is re-evaluated by the next sweep.
@@ -308,7 +352,16 @@ export class BrowserAdmissionService {
                   execution.waitingSince ?? execution.createdAt
                 ).toISOString(),
                 evaluatedAt: now.toISOString(),
-                blockedBy: { resourceType: "SESSION", sessionId },
+                blockedBy: {
+                  resourceType: "SESSION",
+                  sessionId,
+                  ...(recovery
+                    ? {
+                        recoveryId: recovery.id,
+                        recoveryPhase: recovery.closureState,
+                      }
+                    : {}),
+                },
                 queue: null,
                 nextRetryAt: retryAt.toISOString(),
               },

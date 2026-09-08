@@ -496,3 +496,52 @@ describe("administrator actions", () => {
     expect(tx.$transaction).not.toHaveBeenCalled();
   });
 });
+
+describe("shared closure retry budget", () => {
+  it.each(["NEEDS_OPERATOR", "exhausted", "backoff"])(
+    "does not dispatch another close for %s",
+    async (condition) => {
+      const { tx, session, recovery } = setup();
+      if (condition === "NEEDS_OPERATOR")
+        recovery.closureState = "NEEDS_OPERATOR";
+      if (condition === "exhausted") recovery.attempts = 6;
+      if (condition === "backoff")
+        recovery.nextAttemptAt = new Date(Date.now() + 60_000);
+      const service = new SessionRecoveryService(tx as never);
+      await expect(
+        service.prepareClose(session.id, "new-command"),
+      ).rejects.toThrow();
+      expect(tx.runtimeSessionRecovery.update).not.toHaveBeenCalled();
+    },
+  );
+  it("preserves operator-required status and the diagnostic when a generic late close failure arrives", async () => {
+    const { tx, session, recovery } = setup();
+    recovery.closureState = "NEEDS_OPERATOR";
+    await new SessionClosureService(tx as never).recordFailure({
+      sessionId: session.id,
+      expectedLeaseToken: session.leaseToken,
+      expectedFencingToken: "5",
+      errorCode: "CLOSE_FAILED",
+    });
+    expect(tx.runtimeSessionRecovery.update).not.toHaveBeenCalled();
+  });
+  it("resets exhausted attempts only on an audited operator retry", async () => {
+    const { tx, recovery } = setup();
+    recovery.closureState = "NEEDS_OPERATOR";
+    recovery.attempts = 6;
+    await new SessionRecoveryService(tx as never).retry(
+      current,
+      recovery.id,
+      1,
+    );
+    expect(tx.runtimeSessionRecovery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          attempts: 0,
+          closureState: "REQUESTED",
+        }),
+      }),
+    );
+    expect(tx.auditEvent.create).toHaveBeenCalled();
+  });
+});

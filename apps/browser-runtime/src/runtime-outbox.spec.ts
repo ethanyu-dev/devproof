@@ -7,6 +7,28 @@ import {
 } from "@devproof/runtime-protocol";
 import { fitRuntimeMessage, RuntimeClient } from "./index.js";
 
+const epoch = {
+  sessionId: randomUUID(),
+  leaseToken: randomUUID(),
+  fencingToken: "1",
+};
+const event = {
+  ...epoch,
+  kind: "PAGE_CHANGED",
+  timestamp: new Date().toISOString(),
+  payload: {},
+};
+
+const diagnostic = {
+  attempts: [],
+  code: "VIDEO_FAILED",
+  commandId: randomUUID(),
+  durationMs: 1,
+  frameCount: 1,
+  message: "Video failed",
+  runtimeVersion: "0.2.21",
+};
+
 function clientWithSocket(send: (value: string) => void) {
   const client = new RuntimeClient(
     {
@@ -62,7 +84,7 @@ describe("RuntimeClient delivery outbox", () => {
     const client = clientWithSocket(send);
     const commandId = "11111111-1111-4111-8111-111111111111";
 
-    client.send({ commandId, type: "command.result" });
+    client.send({ ...epoch, commandId, type: "command.result", ok: true });
 
     expect(send).toHaveBeenCalledOnce();
     expect(client.outbox).toEqual([expect.objectContaining({ sent: true })]);
@@ -82,6 +104,7 @@ describe("RuntimeClient delivery outbox", () => {
     });
 
     client.send({
+      ...event,
       eventId: "22222222-2222-4222-8222-222222222222",
       type: "runtime.event",
     });
@@ -120,8 +143,10 @@ describe("RuntimeClient delivery outbox", () => {
   it("prioritizes video finalization diagnostics over ordinary events", () => {
     const client = clientWithSocket(() => undefined);
     client.send({
+      ...event,
       eventId: "22222222-2222-4222-8222-222222222222",
       kind: "VIDEO_FINALIZATION_FAILED",
+      payload: diagnostic,
       type: "runtime.event",
     });
 
@@ -139,11 +164,11 @@ describe("RuntimeClient delivery outbox", () => {
     };
 
     client.negotiatedProtocolMinor = 11;
-    client.manager.emitEvent(session, "VIDEO_FINALIZATION_FAILED", {});
+    client.manager.emitEvent(session, "VIDEO_FINALIZATION_FAILED", diagnostic);
     expect(client.outbox).toHaveLength(0);
 
     client.negotiatedProtocolMinor = 12;
-    client.manager.emitEvent(session, "VIDEO_FINALIZATION_FAILED", {});
+    client.manager.emitEvent(session, "VIDEO_FINALIZATION_FAILED", diagnostic);
     expect(client.outbox).toEqual([
       expect.objectContaining({ messageType: "runtime.event", priority: 2 }),
     ]);
@@ -156,16 +181,19 @@ describe("encoded artifact delivery limits", () => {
     const client = clientWithSocket(send);
     const commandId = "11111111-1111-4111-8111-111111111111";
     client.send({
+      ...epoch,
       commandId,
       type: "command.result",
       ok: true,
       result: { closed: true },
       artifacts: [
         {
+          contentType: "video/webm",
           kind: "VIDEO",
           dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
         },
         {
+          contentType: "image/png",
           kind: "SCREENSHOT",
           dataBase64: Buffer.alloc(1024).toString("base64"),
         },
@@ -204,10 +232,12 @@ describe("encoded artifact delivery limits", () => {
       result: { closed: true, closureEvidence },
       artifacts: [
         {
+          contentType: "image/png",
           kind: "SCREENSHOT",
           dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
         },
         {
+          contentType: "video/webm",
           kind: "VIDEO",
           dataBase64: Buffer.alloc(8 * 1024 * 1024).toString("base64"),
         },

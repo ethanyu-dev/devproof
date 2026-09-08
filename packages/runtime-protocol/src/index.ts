@@ -2,17 +2,20 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 14,
+  minor: 15,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
 export const RUNTIME_CLOSURE_EVIDENCE_MINOR = 14;
+export const RUNTIME_NO_LAUNCH_MINOR = 15;
+export const RUNTIME_NO_LAUNCH_CAPABILITY = "no-launch-evidence-v1";
 export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
 export const RUNTIME_CAPABILITIES = [
   "browser",
   "auth-snapshot-v1",
   "session-permits-v1",
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
+  RUNTIME_NO_LAUNCH_CAPABILITY,
 ] as const;
 
 export const runtimeClosureRecoverySchema = z
@@ -23,6 +26,7 @@ export const runtimeClosureRecoverySchema = z
     expectedLeaseToken: z.string().uuid(),
     expectedFencingToken: z.string().regex(/^\d+$/u),
     expectedLaunchIdentity: z.string().min(1).max(160).optional(),
+    expectedLaunchDaemonInstanceId: z.string().uuid().optional(),
   })
   .strict();
 export type RuntimeClosureRecovery = z.infer<
@@ -44,6 +48,7 @@ export const runtimeClosureEvidenceSchema = z
     method: z.enum([
       "LIVE_SESSION_TERMINATED",
       "IDENTIFIED_PROCESS_SET_TERMINATED",
+      "LAUNCH_PREVENTED",
     ]),
     networkRevoked: z.literal(true),
     closureCompletedAt: z.string().datetime(),

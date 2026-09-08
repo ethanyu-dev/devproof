@@ -17,6 +17,7 @@ import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { releaseVerifiedSessionResources } from "./session-resource-cleanup.js";
 import {
+  MAX_CLOSURE_ATTEMPTS,
   emitRecoveryChanged,
   ensureRecovery,
   isHealthySession,
@@ -80,7 +81,11 @@ export class SessionRecoveryService {
     });
   }
 
-  async prepareClose(sessionId: string, proposedCommandId: string) {
+  async prepareClose(
+    sessionId: string,
+    proposedCommandId: string,
+    timeoutSeconds = 90,
+  ) {
     requireRecoveryEnabled();
     const requested = await this.request(sessionId, "EXPLICIT_CLOSE", {
       explicitClose: true,
@@ -113,6 +118,23 @@ export class SessionRecoveryService {
         prior &&
         ["PENDING", "DISPATCHED"].includes(prior.status) &&
         prior.deadlineAt > new Date();
+      if (
+        recovery.closureState === "NEEDS_OPERATOR" ||
+        (!pending && recovery.attempts >= MAX_CLOSURE_ATTEMPTS)
+      )
+        throw new ConflictException({
+          code: "RECOVERY_NEEDS_OPERATOR",
+          message: "Closure recovery needs an operator retry.",
+        });
+      if (
+        !pending &&
+        recovery.nextAttemptAt &&
+        recovery.nextAttemptAt > new Date()
+      )
+        throw new ConflictException({
+          code: "RECOVERY_BACKOFF",
+          message: "Closure recovery is waiting for its next retry.",
+        });
       const commandId = pending ? prior.id : proposedCommandId;
       const now = new Date();
       const claimToken = randomUUID();
@@ -142,7 +164,9 @@ export class SessionRecoveryService {
             payload: recoveryJson({ recovery: payload }),
             leaseToken: session.leaseToken,
             fencingToken: session.fencingToken,
-            deadlineAt: new Date(Date.now() + 90_000),
+            deadlineAt: new Date(
+              now.getTime() + Math.max(1, Math.min(timeoutSeconds, 90)) * 1000,
+            ),
           },
         });
       const updated = await tx.runtimeSessionRecovery.update({
@@ -152,6 +176,7 @@ export class SessionRecoveryService {
           claimToken,
           claimExpiresAt,
           closureState: "CLOSING",
+          attempts: { increment: pending ? 0 : 1 },
           nextAttemptAt: new Date(Date.now() + 120_000),
           version: { increment: 1 },
         },
@@ -198,6 +223,12 @@ export class SessionRecoveryService {
       expectedLeaseToken: session.leaseToken,
       expectedFencingToken: session.fencingToken.toString(),
       ...(launchId ? { expectedLaunchIdentity: launchId } : {}),
+      ...(identity &&
+      typeof identity === "object" &&
+      !Array.isArray(identity) &&
+      typeof identity.intentDaemonInstanceId === "string"
+        ? { expectedLaunchDaemonInstanceId: identity.intentDaemonInstanceId }
+        : {}),
     };
   }
 
@@ -408,6 +439,7 @@ export class SessionRecoveryService {
         },
         data: {
           closureState: "REQUESTED",
+          attempts: 0,
           nextAttemptAt: new Date(),
           version: { increment: 1 },
         },
@@ -419,7 +451,9 @@ export class SessionRecoveryService {
       const updated = await tx.runtimeSessionRecovery.findUniqueOrThrow({
         where: { id },
       });
-      await this.audit(tx, current, id, "runtime.recovery.retry", {});
+      await this.audit(tx, current, id, "runtime.recovery.retry", {
+        previousAttempts: row.attempts,
+      });
       await emitRecoveryChanged(tx, updated);
       return recoveryDto(updated);
     });

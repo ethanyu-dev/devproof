@@ -140,6 +140,7 @@ function fixture() {
       count: vi.fn(async () => (lease?.quarantined ? 1 : 0)),
     },
     browserRuntimeCommand: {
+      count: vi.fn().mockResolvedValue(0),
       findUnique: vi.fn().mockResolvedValue({
         id: "command-1",
         commandType: "session.close",
@@ -251,4 +252,27 @@ describe("normal write completion and physical closure ordering", () => {
     expect(getLease()?.quarantined).toBe(true);
     expect(owner.recoveryStatus).toBeNull();
   });
+});
+
+describe("uncertain business results", () => {
+  it.each(["INCONCLUSIVE", "missing verdict", "unsettled command"])(
+    "retains the write guard for %s even when Agent status is SUCCEEDED",
+    async (reason) => {
+      const { tx, session, owner, closure, recovery, getLease } = fixture();
+      complete(owner);
+      if (reason !== "unsettled command")
+        owner.result = {
+          kind: "VERIFICATION_COMPLETED",
+          ...(reason === "INCONCLUSIVE" ? { verdict: "INCONCLUSIVE" } : {}),
+        };
+      else tx.browserRuntimeCommand.count.mockResolvedValue(1);
+      expect(await initialWriteState(tx as never, session as never)).toBe(
+        "UNKNOWN",
+      );
+      await closure.acceptRuntimeEvidence(context, proof);
+      await releaseCompletedSessionData(tx as never, owner.id);
+      expect(recovery.writeOutcomeState).toBe("UNKNOWN");
+      expect(getLease()?.quarantined).toBe(true);
+    },
+  );
 });
