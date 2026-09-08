@@ -14,7 +14,7 @@
     "test": "vitest run",
     "test:concurrency": "node scripts/test-execution-concurrency.mjs",
     "test:data-smoke": "node scripts/test-data-smoke.mjs",
-    "test:verification-smoke": "node scripts/verification-smoke.mjs",
+    "test:task-smoke": "node scripts/task-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "test:redis-presence": "node scripts/test-runtime-presence.mjs"
   },

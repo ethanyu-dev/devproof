@@ -19,6 +19,7 @@
     "pair": "node dist/index.js pair",
     "start": "node dist/index.js start",
     "test": "vitest run src",
+    "test:comparison-fixtures": "node --test scripts/test-comparison-fixtures.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
