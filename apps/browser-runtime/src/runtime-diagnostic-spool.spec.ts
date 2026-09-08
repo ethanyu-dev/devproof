@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runtimeEventSchema } from "@devproof/runtime-protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   persistRuntimeDiagnosticEvent,
@@ -37,7 +37,15 @@ function diagnostic(timestamp: string) {
   };
 }
 
+beforeEach(() => {
+  // Persistence also prunes with the current time, so reads and writes must
+  // share the fixture clock regardless of when the suite runs.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-02T08:00:00.000Z"));
+});
+
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
@@ -59,12 +67,16 @@ describe("Runtime diagnostic spool", () => {
   it("discards diagnostics after the bounded retention period", async () => {
     const root = await mkdtemp(join(tmpdir(), "devproof-diagnostic-"));
     roots.push(root);
-    const now = new Date("2026-09-02T08:00:00.000Z");
-    const event = diagnostic("2026-08-20T08:00:00.000Z");
+    const event = diagnostic(new Date().toISOString());
 
     await persistRuntimeDiagnosticEvent(root, event);
+    expect(await readPendingRuntimeDiagnosticEvents(root)).toEqual([event]);
 
-    expect(await readPendingRuntimeDiagnosticEvents(root, now)).toEqual([]);
+    vi.setSystemTime(new Date("2026-09-09T08:00:00.000Z"));
+    expect(await readPendingRuntimeDiagnosticEvents(root)).toEqual([event]);
+
+    vi.setSystemTime(new Date("2026-09-09T08:00:00.001Z"));
+    expect(await readPendingRuntimeDiagnosticEvents(root)).toEqual([]);
   });
 
   it("keeps only the newest 64 diagnostics", async () => {
@@ -78,10 +90,7 @@ describe("Runtime diagnostic spool", () => {
       await persistRuntimeDiagnosticEvent(root, event);
     }
 
-    const pending = await readPendingRuntimeDiagnosticEvents(
-      root,
-      new Date("2026-09-02T08:00:00.000Z"),
-    );
+    const pending = await readPendingRuntimeDiagnosticEvents(root);
     expect(pending).toHaveLength(64);
     expect(pending[0]?.eventId).toBe(events[1]?.eventId);
     expect(pending.at(-1)?.eventId).toBe(events.at(-1)?.eventId);
