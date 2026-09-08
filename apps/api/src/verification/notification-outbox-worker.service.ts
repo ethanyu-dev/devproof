@@ -1,17 +1,17 @@
 import { createHmac, randomUUID } from "node:crypto";
 
-import { Injectable, Logger, Optional } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { env } from "../config/env.js";
+import { GithubAccessService } from "../console/github-access.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { FeishuIntegrationService } from "../integrations/feishu-integration.service.js";
 import { buildFeishuTaskCard } from "../integrations/feishu-task-card.js";
-import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { redactText } from "../observability/observability.service.js";
+import { WorkerMonitorService } from "../observability/worker-monitor.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
-import { GithubAccessService } from "../console/github-access.service.js";
 import { taskNotificationContext } from "../task-executions/task-waiting-notification.js";
 
 export function signFeishuWebhook(timestamp: string, secret: string): string {
@@ -246,7 +246,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
         taskExecution: {
           select: {
             notificationContext: true,
-            postRunAnalysisGeneration: true,
+            executionGeneration: true,
             lifecycle: true,
             title: true,
             traceId: true,
@@ -298,7 +298,7 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       if (
         row.taskExecution &&
         payload.notificationKind === "TASK_COMPLETED" &&
-        (generation !== row.taskExecution.postRunAnalysisGeneration ||
+        (generation !== row.taskExecution.executionGeneration ||
           !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
             row.taskExecution.lifecycle,
           ))

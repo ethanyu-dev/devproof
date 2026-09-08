@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  caseExecutionMatrix,
   executionCounts,
+  profileRootBlocker,
   taskDeadlineElapsed,
   TaskExecutionService,
   validateCaseDependencyGraph,
-  caseExecutionMatrix,
-  profileRootBlocker,
 } from "./task-execution.service.js";
-import { resetEnvForTests } from "../config/env.js";
 
 describe("executionCounts", () => {
   it("keeps queued, running and blocked counts mutually meaningful", () => {
@@ -61,21 +60,16 @@ describe("executionCounts", () => {
   });
 });
 
-describe("TaskExecutionService post-run analysis enqueue", () => {
-  it("enqueues analysis in the same transaction that cancels an Issue task", async () => {
-    const previousEnabled = process.env.POST_RUN_ANALYSIS_ENABLED;
-    process.env.POST_RUN_ANALYSIS_ENABLED = "true";
-    resetEnvForTests();
-    const createMany = vi.fn().mockResolvedValue({ count: 1 });
+describe("TaskExecutionService cancellation", () => {
+  it("cancels an Issue task without any analysis storage dependency", async () => {
     const transactionClient = {
-      postRunAnalysisJob: { createMany },
       taskCaseExecution: {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
       taskExecution: {
         findUnique: vi.fn().mockResolvedValue({
           kind: "ISSUE_SPEC",
-          postRunAnalysisGeneration: 1,
+          executionGeneration: 1,
           teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
         }),
         update: vi.fn().mockResolvedValue({}),
@@ -93,7 +87,7 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
       id: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
       kind: "ISSUE_SPEC",
       lifecycle: "RUNNING",
-      postRunAnalysisGeneration: 1,
+      executionGeneration: 1,
       teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
     };
     const releasePendingRequests = vi.fn().mockResolvedValue(1);
@@ -115,37 +109,18 @@ describe("TaskExecutionService post-run analysis enqueue", () => {
     );
     vi.spyOn(service, "detail").mockResolvedValue({ id: task.id } as never);
 
-    try {
-      await service.cancel(
-        {
-          credential: { id: "credential-1" },
-          team: { id: task.teamId },
-        } as never,
-        task.id,
-      );
+    await service.cancel(
+      {
+        credential: { id: "credential-1" },
+        team: { id: task.teamId },
+      } as never,
+      task.id,
+    );
 
-      expect(createMany).toHaveBeenCalledWith({
-        data: [
-          expect.objectContaining({
-            generation: task.postRunAnalysisGeneration,
-            taskExecutionId: task.id,
-            teamId: task.teamId,
-          }),
-        ],
-        skipDuplicates: true,
-      });
-      expect(releasePendingRequests).toHaveBeenCalledWith(
-        task.id,
-        transactionClient,
-      );
-    } finally {
-      if (previousEnabled === undefined) {
-        delete process.env.POST_RUN_ANALYSIS_ENABLED;
-      } else {
-        process.env.POST_RUN_ANALYSIS_ENABLED = previousEnabled;
-      }
-      resetEnvForTests();
-    }
+    expect(releasePendingRequests).toHaveBeenCalledWith(
+      task.id,
+      transactionClient,
+    );
   });
 });
 
@@ -169,7 +144,7 @@ describe("TaskExecutionService Spec completion before profile resolution", () =>
       kind: "ISSUE_SPEC",
       lifecycle: "RUNNING",
       notificationContext: {},
-      postRunAnalysisGeneration: 1,
+      executionGeneration: 1,
       profileBinding: { status: "PENDING" },
       sourceRef: "ENG-123",
       specificationSnapshots: [],
@@ -189,9 +164,6 @@ describe("TaskExecutionService Spec completion before profile resolution", () =>
     };
     const tx = {
       notificationOutbox: {
-        createMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      postRunAnalysisJob: {
         createMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       taskCaseExecution: {
@@ -1105,7 +1077,6 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
     const taskExecutionUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const taskExecutionEventCreate = vi.fn().mockResolvedValue({});
     const tx = {
-      postRunAnalysisJob: { findMany: vi.fn().mockResolvedValue([]) },
       taskCaseExecution: { create: taskCaseExecutionCreate },
       taskExecution: {
         findFirst: taskExecutionFindFirst,
@@ -1167,7 +1138,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
         data: expect.objectContaining({
           currentStage: "SPEC_EXECUTION",
           lifecycle: "RUNNING",
-          postRunAnalysisGeneration: { increment: 1 },
+          executionGeneration: { increment: 1 },
           verdict: null,
         }),
       }),

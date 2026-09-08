@@ -3,11 +3,8 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 
 import {
   runtimeOutcomeSchema,
-  runtimePostRunAnalysisOutcomeSchema,
   runtimeSpecAnalysisOutcomeSchema,
   type RuntimeOutcome,
-  type RuntimePostRunAnalysisOutcome,
-  type RuntimePostRunAnalysisTaskLease,
   type RuntimePool,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
@@ -18,15 +15,14 @@ import type {
   BrowserVerificationExecutor,
   ResponsesClientFactory,
 } from "./browser-verification.executor.js";
+import type { RuntimeConfig } from "./config.js";
 import {
   activeLease,
   ControlPlaneClient,
   ControlPlaneError,
 } from "./control-plane.client.js";
-import type { RuntimeConfig } from "./config.js";
-import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
-import type { PostRunAnalysisExecutor } from "./post-run-analysis.executor.js";
 import { LeaseLostError, LeaseSupervisor } from "./lease-supervisor.js";
+import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 
 export class AgentRuntimeWorker {
   private readonly eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -38,7 +34,6 @@ export class AgentRuntimeWorker {
     { draining: boolean; promise: Promise<void> }
   >();
   private specExecutor: SpecAnalysisExecutor | undefined;
-  private postRunAnalysisExecutor: PostRunAnalysisExecutor | undefined;
 
   constructor(
     private readonly config: RuntimeConfig,
@@ -81,9 +76,8 @@ export class AgentRuntimeWorker {
 
   private reconcileAllocation(
     allocation: {
-      analysisConcurrency: number;
       browserConcurrency: number;
-      pools: Array<"SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS">;
+      pools: Array<"SPEC_ANALYSIS" | "BROWSER_EXECUTION">;
       specConcurrency: number;
     },
     signal: AbortSignal,
@@ -107,24 +101,15 @@ export class AgentRuntimeWorker {
       });
     }
     const assignments = {
-      POST_RUN_ANALYSIS: {
-        desired: allocation.analysisConcurrency,
-        lane: "analysis" as const,
-        unexpected:
-          allocation.browserConcurrency > 0 || allocation.specConcurrency > 0,
-      },
       BROWSER_EXECUTION: {
         desired: allocation.browserConcurrency,
         lane: "browser" as const,
-        unexpected:
-          allocation.analysisConcurrency > 0 || allocation.specConcurrency > 0,
+        unexpected: allocation.specConcurrency > 0,
       },
       SPEC_ANALYSIS: {
         desired: allocation.specConcurrency,
         lane: "spec" as const,
-        unexpected:
-          allocation.analysisConcurrency > 0 ||
-          allocation.browserConcurrency > 0,
+        unexpected: allocation.browserConcurrency > 0,
       },
     } as const;
     const assignment = assignments[assignedPool];
@@ -137,7 +122,7 @@ export class AgentRuntimeWorker {
   }
 
   private reconcileLanes(
-    pool: "spec" | "browser" | "analysis",
+    pool: "spec" | "browser",
     desired: number,
     signal: AbortSignal,
   ) {
@@ -162,7 +147,7 @@ export class AgentRuntimeWorker {
   }
 
   private async runLane(
-    pool: "spec" | "browser" | "analysis",
+    pool: "spec" | "browser",
     index: number,
     lane: { draining: boolean },
     signal: AbortSignal,
@@ -180,15 +165,6 @@ export class AgentRuntimeWorker {
           const task = await this.controlPlane.claim(workerId, signal);
           if (task) {
             await this.executeTask(task, signal, workerId);
-            continue;
-          }
-        } else {
-          const task = await this.controlPlane.claimPostRunAnalysis(
-            workerId,
-            signal,
-          );
-          if (task) {
-            await this.executePostRunAnalysisTask(task, signal, workerId);
             continue;
           }
         }
@@ -388,116 +364,6 @@ export class AgentRuntimeWorker {
     }
   }
 
-  private async executePostRunAnalysisTask(
-    task: RuntimePostRunAnalysisTaskLease,
-    _shutdown: AbortSignal,
-    workerId: string,
-  ) {
-    const lease = activeLease(task, workerId);
-    const controller = new AbortController();
-    const deadline = new RuntimeDeadlineController(
-      controller,
-      task.snapshot.deadlineAt,
-    );
-    const heartbeat = setInterval(() => {
-      void this.controlPlane
-        .heartbeatPostRunAnalysis(lease)
-        .then((response) => {
-          if (response.deadlineAt) deadline.rearm(response.deadlineAt);
-          if (response.directive === "CANCEL") {
-            controller.abort(
-              new Error("Post-run analysis cancellation requested."),
-            );
-          }
-        })
-        .catch((error: unknown) => controller.abort(error));
-    }, 15_000);
-
-    try {
-      let outcome: RuntimePostRunAnalysisOutcome;
-      try {
-        if (!this.postRunAnalysisExecutor) {
-          const { PostRunAnalysisExecutor } =
-            await import("./post-run-analysis.executor.js");
-          this.postRunAnalysisExecutor = new PostRunAnalysisExecutor(
-            this.modelClient,
-            this.controlPlane,
-            this.config.DEVPROOF_POST_RUN_ANALYSIS_TOOL_LIMIT,
-          );
-        }
-        outcome = await this.postRunAnalysisExecutor.execute(
-          task,
-          lease,
-          controller.signal,
-        );
-      } catch (error) {
-        if (controller.signal.aborted && isCancellation(error)) {
-          log("runtime.post_run_analysis.cancelled", { taskId: task.taskId });
-          return;
-        }
-        outcome = classifyPostRunAnalysisFailure(error, task);
-      }
-      try {
-        await this.submitPostRunAnalysisOutcomeReliably(lease, outcome);
-        log("runtime.post_run_analysis.completed", {
-          kind: outcome.kind,
-          taskExecutionId: task.snapshot.taskExecutionId,
-          taskId: task.taskId,
-        });
-      } catch (submitError) {
-        let effectiveSubmitError = submitError;
-        if (
-          outcome.kind === "ANALYSIS_COMPLETED" &&
-          submitError instanceof ControlPlaneError &&
-          submitError.status === 400
-        ) {
-          const fallback = runtimePostRunAnalysisOutcomeSchema.parse({
-            error: {
-              code: "POST_RUN_ANALYSIS_REPORT_REJECTED",
-              details: { controlPlaneResponse: submitError.body },
-              failureClass: "TOOL_EXECUTION",
-              message:
-                "The generated post-run analysis report failed control-plane validation.",
-              phase: "post_run_analysis.report_validation",
-            },
-            executionDisposition: "AGENT_ERROR",
-            kind: "RETRYABLE_FAILURE",
-            summary:
-              "自动优化分析报告未通过运行定位校验，已安排使用修正后的上下文重试。",
-          });
-          try {
-            await this.submitPostRunAnalysisOutcomeReliably(lease, fallback);
-            log("runtime.post_run_analysis.completed", {
-              kind: fallback.kind,
-              taskExecutionId: task.snapshot.taskExecutionId,
-              taskId: task.taskId,
-            });
-            return;
-          } catch (fallbackError) {
-            effectiveSubmitError = fallbackError;
-          }
-        }
-        const message = errorMessage(effectiveSubmitError);
-        try {
-          await this.controlPlane.appendPostRunAnalysisEvent(
-            lease,
-            "analysis.outcome.submit_failed",
-            { message },
-          );
-        } catch {
-          // A stale lease can prevent diagnostic persistence; stdout remains.
-        }
-        log("runtime.post_run_analysis.outcome.failed", {
-          error: message,
-          taskId: task.taskId,
-        });
-      }
-    } finally {
-      clearInterval(heartbeat);
-      deadline.dispose();
-    }
-  }
-
   private async submitOutcomeReliably(
     lease: ReturnType<typeof activeLease>,
     outcome: RuntimeOutcome,
@@ -540,29 +406,6 @@ export class AgentRuntimeWorker {
         lastError = error;
         if (error instanceof ControlPlaneError && error.status < 500)
           throw error;
-      }
-    }
-    throw lastError;
-  }
-
-  private async submitPostRunAnalysisOutcomeReliably(
-    lease: ReturnType<typeof activeLease>,
-    outcome: RuntimePostRunAnalysisOutcome,
-  ) {
-    const completionId = randomUUID();
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        return await this.controlPlane.submitPostRunAnalysisOutcome(
-          lease,
-          outcome,
-          completionId,
-        );
-      } catch (error) {
-        lastError = error;
-        if (error instanceof ControlPlaneError && error.status < 500) {
-          throw error;
-        }
       }
     }
     throw lastError;
@@ -712,57 +555,6 @@ export function classifySpecFailure(
         : "AGENT_ERROR",
     kind: deadline ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
     summary: `第 ${task.snapshot.attemptNumber} 次 Spec 分析未生成有效 Spec。`,
-  });
-}
-
-export function classifyPostRunAnalysisFailure(
-  error: unknown,
-  task: RuntimePostRunAnalysisTaskLease,
-): RuntimePostRunAnalysisOutcome {
-  const message = errorMessage(error);
-  const deadline = /deadline|timed? out|timeout/iu.test(message);
-  const contextWindow =
-    /context window|context length|maximum context|too many tokens|input.*too (?:large|long)/iu.test(
-      message,
-    );
-  const provider = /openai|provider|response|rate limit|429/iu.test(message);
-  const staleLease =
-    error instanceof ControlPlaneError && error.status === 409
-      ? /lease|terminal|no longer accepts/iu.test(JSON.stringify(error.body))
-      : false;
-  return runtimePostRunAnalysisOutcomeSchema.parse({
-    error: {
-      code: deadline
-        ? "POST_RUN_ANALYSIS_DEADLINE_EXCEEDED"
-        : contextWindow
-          ? "POST_RUN_ANALYSIS_CONTEXT_EXCEEDED"
-          : provider
-            ? "PROVIDER_FAILED"
-            : staleLease
-              ? "RUNTIME_LEASE_LOST"
-              : "POST_RUN_ANALYSIS_FAILED",
-      details: {},
-      failureClass: deadline
-        ? "TIMEOUT"
-        : contextWindow
-          ? "TOOL_EXECUTION"
-          : provider
-            ? "PROVIDER"
-            : staleLease
-              ? "RUNTIME_LOST"
-              : "TOOL_EXECUTION",
-      message,
-      phase: "post_run_analysis",
-    },
-    executionDisposition: contextWindow
-      ? "AGENT_ERROR"
-      : provider
-        ? "PROVIDER_ERROR"
-        : staleLease
-          ? "RUNTIME_LOST"
-          : "AGENT_ERROR",
-    kind: deadline || contextWindow ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
-    summary: `第 ${task.snapshot.attemptNumber} 次运行后分析未生成有效报告。`,
   });
 }
 

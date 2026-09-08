@@ -97,7 +97,7 @@
     <rect x="174" y="247" width="104" height="29" fill="#f2f4f7" stroke="#e4e7ec" />
     <text x="194" y="266" class="mono small" fill="#344054">Claude</text>
     <rect x="68" y="286" width="96" height="29" fill="#f2f4f7" stroke="#e4e7ec" />
-    <text x="83" y="305" class="mono small" fill="#344054">Playground</text>
+    <text x="83" y="305" class="mono small" fill="#344054">HTTP API</text>
     <rect x="174" y="286" width="104" height="29" fill="#f2f4f7" stroke="#e4e7ec" />
     <text x="193" y="305" class="mono small" fill="#344054">API Client</text>
 

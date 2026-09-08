@@ -5,7 +5,7 @@ English is the canonical language for project documentation.
 - [Architecture](architecture.md): system boundaries, state ownership, and execution invariants
 - [Upgrading](upgrading.md): database-safe upgrades and clean repository transfer
 - [Observability and operations](observability.md): health, metrics, logs, retention, and runbooks
-- [Post-run optimization analysis](post-run-analysis.md): terminal log capture, Agent analysis, findings, and generated work items
+- [Redundant feature removal plan](redundant-feature-removal-plan.md): implementation and retirement of Playground, post-run analysis, its Runtime pool, and unreachable legacy code
 - [Browser Runtime protocol](runtime-protocol.md): compatibility rules and capability milestones
 - [User Browser Profiles](user-browser-profiles.md): identity, authorization, retention, and privacy
 - [Runtime concurrency and recovery proposal](runtime-concurrency-recovery-design.md): isolated authenticated sessions, bounded lease recovery, and explainable scheduling

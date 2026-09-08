@@ -1,3 +1,4 @@
+import type { RuntimePool } from "@devproof/agent-runtime-protocol";
 import type { ToolCredentialScope } from "@devproof/contracts";
 
 export interface ToolAuthContext {
@@ -5,8 +6,7 @@ export interface ToolAuthContext {
     id: string;
     kind?: "AGENT_RUNTIME" | "TOOL";
     name: string;
-    pool?:
-      "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS" | "MIXED";
+    pool?: RuntimePool;
     scopes: ToolCredentialScope[];
   };
   team: {

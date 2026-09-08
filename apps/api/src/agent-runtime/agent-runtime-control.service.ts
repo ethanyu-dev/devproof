@@ -1,10 +1,9 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
 import {
   RUNTIME_PROTOCOL,
   runtimeCommandMinimumMinor,
 } from "@devproof/runtime-protocol";
+import { BadRequestException, Injectable } from "@nestjs/common";
 
-import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
@@ -23,8 +22,7 @@ export class AgentRuntimeControlService {
   async register(
     current: ToolAuthContext,
     input: {
-      pool?:
-        "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS" | undefined;
+      pool?: "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | undefined;
       protocol: { minor: number };
       workerId: string;
     },
@@ -35,9 +33,9 @@ export class AgentRuntimeControlService {
       );
     }
     const pool = current.credential.pool ?? "MIXED";
-    if (pool === "MIXED") {
+    if (pool !== "SPEC_ANALYSIS" && pool !== "BROWSER_EXECUTION") {
       throw new BadRequestException(
-        "Legacy MIXED Agent Runtime credentials are disabled; provision pool-specific Agent Runtime credentials.",
+        "This Agent Runtime pool is retired or unsupported; provision a SPEC_ANALYSIS or BROWSER_EXECUTION credential.",
       );
     }
     if (input.pool && pool !== input.pool) {
@@ -81,9 +79,6 @@ export class AgentRuntimeControlService {
       );
     }
     return {
-      analysisConcurrency: pools.includes("POST_RUN_ANALYSIS")
-        ? env().POST_RUN_ANALYSIS_CONCURRENCY
-        : 0,
       browserConcurrency,
       pools: [...pools],
       refreshAfterMs: 5_000,

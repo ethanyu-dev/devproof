@@ -27,14 +27,14 @@ DevProof 将这些问题收敛到一个统一控制面：调用方只需要描�
 
 整体由四层组成：
 
-1. **Task Producer**：Codex、Claude、Playground 或其他客户端通过 MCP/HTTP 创建任务并读取结果，不直接管理浏览器会话和底层执行生命周期。
+1. **Task Producer**：Codex、Claude 或其他客户端通过 MCP/HTTP 创建任务并读取结果，不直接管理浏览器会话和底层执行生命周期。
 2. **Control Plane**：DevProof API 是任务状态的唯一权威，负责 Spec 分析、Case/Run 编排、租约、重试、取消、HITL、清理和最终聚合判定。
 3. **Agent Runtime**：独立部署的轻量 Worker，领取具体 Run，调用模型完成推理，并把高层动作发送给 Execution Runner。
 4. **Execution Runner**：提供实际受控环境。Browser Runtime 是当前第一个 Runner；协议边界允许继续扩展 HTTP、Shell 和 Container Runner。
 
 执行产生的 Screenshot、DOM、Console、Network、视频和结构化事件统一回传控制面，形成从任务输入、执行轨迹到最终结论的完整证据链。Console 在同一控制面上提供配置、可观测性和人工接管能力。
 
-Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户可见的 `TaskExecution` 是聚合根：Issue 任务固定包含“Spec 分析生成”“Profile 解析”和“Spec 执行”三个阶段；原 `ExecutionRun` 保留为 Case 级实际执行与证据载体。Web Playground 只是任务创建入口，不再拥有独立模型循环或任务状态。
+Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户可见的 `TaskExecution` 是聚合根：Issue 任务固定包含“Spec 分析生成”“Profile 解析”和“Spec 执行”三个阶段；原 `ExecutionRun` 保留为 Case 级实际执行与证据载体。
 
 ## 技术基线
 
@@ -55,7 +55,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 
 - DevProof API：唯一控制面，负责 Task、Stage、Spec Snapshot、Case、Run、重试、取消、HITL、清理与聚合判定
 - Agent Runtime：无业务状态的租约 Worker，负责模型推理和高层 Browser Verification Executor
-- Task Producer：Codex、Claude、Playground 或其他创建任务的调用方
+- Task Producer：Codex、Claude 或其他创建任务的调用方
 - Execution Runner：Browser、HTTP、Shell、Container 等具体受控执行环境
 
 ## 当前范围
@@ -68,7 +68,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 - `/v2/tasks` 用户任务 API、Case 级 `/v2/runs` API 与高层 Task MCP 工具
 - Browser Runtime 的 `ExecutionRunner` Adapter、能力发现、证据自动关联与终态清理
 - 事件驱动 HITL Coordinator、超时策略和飞书通知 Outbox
-- 统一执行 Playground：Issue → Task → Spec 分析生成 → Profile 解析 → Spec 执行；直接任务跳过前两个阶段
+- 统一任务执行流程：Issue → Task → Spec 分析生成 → Profile 解析 → Spec 执行；直接任务跳过前两个阶段
 - Linear/GitHub/Knowledge 上下文解析、任务级不可变 Spec Snapshot、确定性 Case 与派发重试
 - 团队级 Browser Runtime、Profile 与 HITL 设置
 - 基于精确域名或 `*.` 通配域名的 Runtime 执行路由策略
@@ -114,11 +114,9 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
        pnpm prisma:deploy
        pnpm dev
 
-5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS`、`BROWSER_EXECUTION` 和 `POST_RUN_ANALYSIS` 三个池的有序模型列表。模型不会在池之间隐式共享，每个池拥有独立的故障下沉与恢复优先级；升级时迁移会把原共享列表复制到三个池，便于上线后再分别调整。三个池使用独立的 Agent Runtime 身份，分别执行 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>`。本地开发时，将三个仅显示一次的 Token 分别配置为 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN`、`DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN` 和 `DEVPROOF_POST_RUN_ANALYSIS_RUNTIME_TOKEN`；独立部署的 Runtime 进程将对应 Token 配置为 `DEVPROOF_AGENT_RUNTIME_TOKEN`，并建议配置 `DEVPROOF_AGENT_RUNTIME_POOL` 作为显式断言。省略 Pool 变量时，Runtime 会在首次注册时绑定到凭证携带的唯一 Pool；声明值与凭证池不一致时注册会被拒绝。如需访问私网或 HTTP 模型网关，由部署管理员通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置精确主机名或 IP。
+5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS` 和 `BROWSER_EXECUTION` 两个池的有序模型列表。每个部署使用独立凭证，通过 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>` 签发。本地开发读取 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` 和 `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`；独立部署使用 `DEVPROOF_AGENT_RUNTIME_TOKEN`，可用 `DEVPROOF_AGENT_RUNTIME_POOL` 显式声明池。省略时从凭证绑定池，声明不匹配则拒绝注册。浏览器 Worker 并发跟随 Console 配置的在线 Browser 节点容量。私网或 HTTP 模型网关通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置。
 
 6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
-
-7. 运行后自动优化分析默认关闭。第三个 Runtime 池就绪后设置 `POST_RUN_ANALYSIS_ENABLED=true`，终态 Issue Task 会捕获脱敏且不可变的 `devproof.task-logs.v2` 日志包，在不改变原始测试结论的前提下生成带证据的问题分析，并把高置信度问题去重汇总为内部改进任务。完整状态机与上线步骤见 [运行后自动优化分析](docs/post-run-analysis.md)。
 
 安全迁移会撤销原先通过 Console 签发的 Runtime Token，需要使用上述运维命令重新签发。旧的 Runtime Token 环境变量名、Worker ID、轮询间隔和工具上限环境变量名在迁移期间仍可读取；模型 API Key 与 Base URL 只在 Console 管理，新的 Runtime 参数统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。
 
@@ -201,7 +199,7 @@ MCP 地址为 `http://localhost:4433/mcp`，使用同一 Bearer Token。Agent Ru
 
 MCP 只提供统一 Task 控制面：`get_integration_status`、`create_task`、`get_task`、`list_tasks`、`set_task_deployment_target`、`retry_task_stage` 和 `cancel_task`。需要下钻 Case Runtime 时再使用 `get_run`、`resolve_run_intervention` 和 `read_run_evidence`。旧 Spec、Verification、Browser command、Profile 清理及 `create_run` 兼容工具均不再发布；调用方不获取 Browser Session，也不调用 command/complete/release 等低层生命周期工具。只读发现资源为 `devproof://task-tools`。
 
-Console 的 Playground 是端到端集成入口。Issue 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
+通过 HTTP 或 MCP 创建任务，在 Console 查看执行详情。Issue 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
 
 当 Agent 在仍然存活的 Browser Session 上请求 HITL 时，“任务执行”详情会显示 Browser Human Handoff：人工接管 Agent 的原页面完成登录、验证码或 MFA，释放控制后将结构化响应写回同一个 Runtime Task，再由新的 fencing lease 恢复执行。实时 JPEG 和鼠标/键盘输入只走受租约保护的瞬时通道，不写入 Prompt、Trace、数据库或对象存储。完整 Browser 数据面、SSRF 与故障注入能力要求 Browser Runtime protocol v1.2；控制面物理清理要求 v1.6；增强证据采集要求 v1.7；用户 Profile 30 天自动清理与生命周期回报要求 v1.8；逐步截图和操作视频要求 v1.10；结构化定位恢复诊断要求 v1.11；带确认、有限且脱敏的视频收尾诊断要求 v1.12。升级代码后需重新构建并重启 Runtime。
 
@@ -232,7 +230,7 @@ Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制
 - Browser Execution Runtime：`/railway.agent-runtime.json`
 - Post-run Analysis Runtime：`/railway.agent-runtime.json`
 
-API、Web 和 Agent Runtime 使用各自的 Dockerfile。API 每次部署都会在新版本启动前执行 `pnpm prisma:deploy`；迁移失败时 Railway 会终止本次部署。三个 Agent Runtime Service 分别使用池专属 Token 独立部署和伸缩。
+API、Web 和 Agent Runtime 使用各自的 Dockerfile。API 每次部署都会在新版本启动前执行 `pnpm prisma:deploy`；迁移失败时 Railway 会终止本次部署。两个 Agent Runtime Service 分别使用池专属 Token 独立部署和伸缩。
 
 API Service 至少需要配置 PostgreSQL、Redis、对象存储、飞书、`CREDENTIAL_ENCRYPTION_KEY`、`API_PUBLIC_URL`、`WEB_ORIGIN` 和 `RUNTIME_GATEWAY_WS_URL`。Issue 解析按需配置 Linear、GitHub 与 Knowledge 凭据。Web Service 运行时需要配置 `API_BASE_URL`，推荐使用 Railway API Service 的私网 HTTP 地址；构建时需要配置供外部 Runtime 使用的 `NEXT_PUBLIC_RUNTIME_API_URL`。公网生产地址必须使用 HTTPS，Runtime Gateway 必须使用 WSS。
 

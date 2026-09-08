@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
 
-import { Injectable, Logger } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { env } from "../config/env.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
-import { POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD } from "../post-run-analysis/task-log-bundle.service.js";
 import {
   leaseDigest,
   writeSettled,
@@ -50,7 +49,6 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
       for (const stage of [
         this.purgeVerificationTrace,
         this.purgeRuntimeData,
-        this.purgePostRunAnalysisBundles,
         this.purgeUnlinkedToolInvocations,
         this.purgeAuditEvents,
         this.purgeObjectStorageDeletions,
@@ -344,49 +342,6 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async purgePostRunAnalysisBundles() {
-    const cutoff = new Date(
-      Date.now() - env().RUNTIME_DATA_RETENTION_DAYS * 86_400_000,
-    );
-    const jobs = await this.prisma.postRunAnalysisJob.findMany({
-      orderBy: { finishedAt: "asc" },
-      select: { id: true, inputManifest: true, inputStorageKey: true },
-      take: 100,
-      where: {
-        finishedAt: { lte: cutoff },
-        inputStorageKey: { not: null },
-        status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] },
-      },
-    });
-    for (const job of jobs) {
-      if (!job.inputStorageKey) continue;
-      const manifest = recordValue(job.inputManifest);
-      const archiveStorageKey =
-        manifest[POST_RUN_ANALYSIS_EVIDENCE_STORAGE_KEY_FIELD];
-      const evidenceStorageKey =
-        typeof archiveStorageKey === "string" ? archiveStorageKey : null;
-      await this.prisma.$transaction(async (tx) => {
-        const detached = await tx.postRunAnalysisJob.updateMany({
-          data: {
-            analysisCheckpoint: {},
-            inputManifest: {},
-            inputStorageKey: null,
-          },
-          where: {
-            id: job.id,
-            inputStorageKey: job.inputStorageKey,
-            status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] },
-          },
-        });
-        if (detached.count !== 1) return;
-        await this.enqueueObjectDeletions(tx, [
-          job.inputStorageKey!,
-          ...(evidenceStorageKey ? [evidenceStorageKey] : []),
-        ]);
-      });
-    }
-  }
-
   private async purgeObjectStorageDeletions() {
     const tasks = await this.prisma.objectStorageDeletionTask.findMany({
       orderBy: { nextAttemptAt: "asc" },
@@ -416,36 +371,22 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
           },
         });
         if (result.count !== 1) return false;
-        const [
-          runtimeReferences,
-          testRunReferences,
-          verificationReferences,
-          postRunAnalysisReferences,
-        ] = await Promise.all([
-          tx.browserRuntimeArtifact.count({
-            where: { storageKey: task.storageKey },
-          }),
-          tx.testRunArtifact.count({
-            where: { storageKey: task.storageKey },
-          }),
-          tx.verificationArtifact.count({
-            where: { storageKey: task.storageKey },
-          }),
-          tx.postRunAnalysisJob.count({
-            where: {
-              OR: [
-                { inputStorageKey: task.storageKey },
-                { captureStorageKey: task.storageKey },
-                { captureEvidenceStorageKey: task.storageKey },
-              ],
-            },
-          }),
-        ]);
+        const [runtimeReferences, testRunReferences, verificationReferences] =
+          await Promise.all([
+            tx.browserRuntimeArtifact.count({
+              where: { storageKey: task.storageKey },
+            }),
+            tx.testRunArtifact.count({
+              where: { storageKey: task.storageKey },
+            }),
+            tx.verificationArtifact.count({
+              where: { storageKey: task.storageKey },
+            }),
+          ]);
         if (
           runtimeReferences > 0 ||
           testRunReferences > 0 ||
-          verificationReferences > 0 ||
-          postRunAnalysisReferences > 0
+          verificationReferences > 0
         ) {
           await tx.objectStorageDeletionTask.deleteMany({
             where: { id: task.id, leaseToken },
@@ -522,10 +463,4 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
       },
     });
   }
-}
-
-function recordValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }

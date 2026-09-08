@@ -1,13 +1,13 @@
 "use client";
 
-import {
-  type FormEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
+import { Toggle } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import {
   ArrowDown,
   ArrowUp,
@@ -26,14 +26,14 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/native-select";
-import { Toggle } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -43,15 +43,15 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
+import type { RuntimeRecoveryCounts } from "@devproof/contracts";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { RuntimeRecoveryCounts } from "@devproof/contracts";
-import { useRecoveryResource } from "./use-recovery-resource";
 import {
   RecoveryFeedback,
   recoveryPath,
   runtimeRecoveryPath,
 } from "./recovery-ui";
+import { useRecoveryResource } from "./use-recovery-resource";
 
 type Scope =
   | "verification:read"
@@ -132,13 +132,11 @@ interface AgentModelConfiguration {
   updatedAt: string;
 }
 
-type AgentModelPool =
-  "SPEC_ANALYSIS" | "BROWSER_EXECUTION" | "POST_RUN_ANALYSIS";
+type AgentModelPool = "SPEC_ANALYSIS" | "BROWSER_EXECUTION";
 
 const agentModelPoolLabels: Record<AgentModelPool, string> = {
   SPEC_ANALYSIS: "Spec 分析 Runtime",
   BROWSER_EXECUTION: "浏览器执行 Runtime",
-  POST_RUN_ANALYSIS: "运行后分析 Runtime",
 };
 
 const agentModelPoolTabs: Array<{
@@ -155,11 +153,6 @@ const agentModelPoolTabs: Array<{
     icon: MonitorUp,
     id: "BROWSER_EXECUTION",
     label: agentModelPoolLabels.BROWSER_EXECUTION,
-  },
-  {
-    icon: ShieldCheck,
-    id: "POST_RUN_ANALYSIS",
-    label: agentModelPoolLabels.POST_RUN_ANALYSIS,
   },
 ];
 

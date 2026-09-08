@@ -48,7 +48,7 @@ The opt-in validation probes four independent authenticated contexts. Some sites
 
 Case execution declarations come from explicit request policy or Console review, not generated test prose. `READ_ONLY` work may share data locks; `MUTATING` work locks its declared resource scopes; unknown work locks the backend environment exclusively. Root/collection scopes conflict with their descendants. Set `BROWSER_EXECUTION_ENVIRONMENTS_JSON` for hostname aliases backed by the same server state. Distinct users, Profiles, or Task deployment IDs do not partition those locks.
 
-Issue requests can provide `caseExecutionPolicies` keyed by generated Case ID or one-based position. Set `casePolicyReviewRequired=true` (also available in Playground) to pause after generation and review each Case's access mode, resource scopes, and dependencies before creating its immutable Run. Existing automatic Tasks default to conservative unknown/exclusive behavior.
+Issue requests can provide `caseExecutionPolicies` keyed by generated Case ID or one-based position. Set `casePolicyReviewRequired=true` to pause after generation and review each Case's access mode, resource scopes, and dependencies before creating its immutable Run. Existing automatic Tasks default to conservative unknown/exclusive behavior.
 
 Snapshots include cookies, localStorage and IndexedDB. SessionStorage, device binding, single-session accounts and refresh-token rotation can make a site incompatible; use serial execution or accounts with genuinely isolated backend data in that case. A Context's changed authentication state is never merged back. Snapshots are immutable generations inside the bound Profile directory, protected by local retention, purge and live-generation pinning.
 

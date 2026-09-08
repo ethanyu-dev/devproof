@@ -11,7 +11,6 @@ it("removes delay listeners during long-running registration and shutdown", asyn
       pools: ["SPEC_ANALYSIS"],
       specConcurrency: 0,
       browserConcurrency: 0,
-      analysisConcurrency: 0,
       refreshAfterMs: 10,
     }),
   };

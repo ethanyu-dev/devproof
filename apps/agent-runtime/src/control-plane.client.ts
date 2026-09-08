@@ -3,9 +3,6 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_RUNTIME_PROTOCOL,
   runtimeBrowserAcquireOutputSchema,
-  runtimePostRunAnalysisClaimOutputSchema,
-  runtimePostRunAnalysisTaskOutcomeOutputSchema,
-  runtimePostRunAnalysisToolOutputSchema,
   runtimeRegistrationOutputSchema,
   runtimeSpecAnalysisClaimOutputSchema,
   runtimeSpecAnalysisTaskOutcomeOutputSchema,
@@ -16,8 +13,6 @@ import {
   type RuntimeBrowserAcquireInput,
   type RuntimeBrowserCommandInput,
   type RuntimeOutcome,
-  type RuntimePostRunAnalysisOutcome,
-  type RuntimePostRunAnalysisTaskLease,
   type RuntimePool,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
@@ -76,17 +71,6 @@ export class ControlPlaneClient {
       : null;
   }
 
-  async claimPostRunAnalysis(workerId: string, signal?: AbortSignal) {
-    const result = await this.request(
-      "/internal/v2/runtime/post-run-analysis-tasks/claim",
-      {
-        body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
-        ...(signal ? { signal } : {}),
-      },
-    );
-    return runtimePostRunAnalysisClaimOutputSchema.parse(result).task;
-  }
-
   async heartbeat(lease: ActiveLease, signal?: AbortSignal) {
     const started = performance.now();
     const result = await this.request(
@@ -109,14 +93,6 @@ export class ControlPlaneClient {
       runtimeTaskHeartbeatOutputSchema.parse(result),
       performance.now() - started,
     );
-  }
-
-  async heartbeatPostRunAnalysis(lease: ActiveLease, signal?: AbortSignal) {
-    const result = await this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/heartbeat`,
-      { body: this.identity(lease), ...(signal ? { signal } : {}) },
-    );
-    return runtimeTaskHeartbeatOutputSchema.parse(result);
   }
 
   async appendEvent(
@@ -158,88 +134,6 @@ export class ControlPlaneClient {
         },
       },
     );
-  }
-
-  async appendPostRunAnalysisEvent(
-    lease: ActiveLease,
-    kind: string,
-    payload: Record<string, unknown>,
-  ) {
-    return this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/events`,
-      {
-        body: {
-          ...this.identity(lease),
-          event: {
-            eventId: randomUUID(),
-            kind,
-            occurredAt: new Date().toISOString(),
-            payload,
-          },
-        },
-      },
-    );
-  }
-
-  async readPostRunAnalysisBundle(
-    lease: ActiveLease,
-    input: {
-      analysisSummary: string;
-      cursor: number;
-      maxBytes: number;
-      name: "read_analysis_bundle";
-    },
-    signal?: AbortSignal,
-  ) {
-    const result = await this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/tools`,
-      {
-        body: { ...this.identity(lease), ...input },
-        ...(signal ? { signal } : {}),
-      },
-    );
-    return runtimePostRunAnalysisToolOutputSchema.parse(result);
-  }
-
-  async readPostRunAnalysisManifest(
-    lease: ActiveLease,
-    input: {
-      analysisSummary: string;
-      cursor: number;
-      maxBytes: number;
-      name: "read_analysis_manifest";
-    },
-    signal?: AbortSignal,
-  ) {
-    const result = await this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/tools`,
-      {
-        body: { ...this.identity(lease), ...input },
-        ...(signal ? { signal } : {}),
-      },
-    );
-    return runtimePostRunAnalysisToolOutputSchema.parse(result);
-  }
-
-  async readPostRunAnalysisEvidence(
-    lease: ActiveLease,
-    input: {
-      analysisSummary: string;
-      cursor: number;
-      evidenceRef: string;
-      maxBytes: number;
-      name: "read_analysis_evidence";
-    },
-    signal?: AbortSignal,
-  ) {
-    const result = await this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/tools`,
-      {
-        body: { ...this.identity(lease), ...input },
-        ...(signal ? { signal } : {}),
-      },
-    );
-    return runtimePostRunAnalysisToolOutputSchema.parse(result);
   }
 
   async executeSpecTool(
@@ -334,25 +228,6 @@ export class ControlPlaneClient {
     return runtimeSpecAnalysisTaskOutcomeOutputSchema.parse(result);
   }
 
-  async submitPostRunAnalysisOutcome(
-    lease: ActiveLease,
-    outcome: RuntimePostRunAnalysisOutcome,
-    completionId = randomUUID(),
-  ) {
-    const result = await this.request(
-      `/internal/v2/runtime/post-run-analysis-tasks/${lease.taskId}/outcome`,
-      {
-        body: {
-          ...this.identity(lease),
-          completedAt: new Date().toISOString(),
-          completionId,
-          outcome,
-        },
-      },
-    );
-    return runtimePostRunAnalysisTaskOutcomeOutputSchema.parse(result);
-  }
-
   private identity(lease: ActiveLease) {
     return {
       fencingToken: lease.fencingToken,
@@ -427,10 +302,7 @@ function safeJson(text: string): unknown {
 }
 
 export function activeLease(
-  task:
-    | RuntimeTaskLease
-    | RuntimeSpecAnalysisTaskLease
-    | RuntimePostRunAnalysisTaskLease,
+  task: RuntimeTaskLease | RuntimeSpecAnalysisTaskLease,
   workerId: string,
 ): ActiveLease {
   return {

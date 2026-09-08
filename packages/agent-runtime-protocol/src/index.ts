@@ -1,13 +1,11 @@
-import { z } from "zod";
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
+import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
   minor: 11,
   name: "devproof-agent-runtime",
 } as const;
-
-export const POST_RUN_ANALYSIS_REPORT_MAX_BYTES = 512 * 1_024;
 
 function utf8ByteLength(value: string): number {
   let byteLength = 0;
@@ -76,14 +74,9 @@ export const runtimeFailureClassSchema = z.enum([
 export const runtimeCapabilitySchema = z.enum([
   "BROWSER_VERIFICATION",
   "ISSUE_ANALYSIS",
-  "POST_RUN_ANALYSIS",
 ]);
 
-export const runtimePoolSchema = z.enum([
-  "SPEC_ANALYSIS",
-  "BROWSER_EXECUTION",
-  "POST_RUN_ANALYSIS",
-]);
+export const runtimePoolSchema = z.enum(["SPEC_ANALYSIS", "BROWSER_EXECUTION"]);
 
 export const agentProviderSchema = z.enum([
   "OPENAI",
@@ -243,72 +236,6 @@ export const runtimeSpecAnalysisClaimOutputSchema = z.object({
   task: runtimeSpecAnalysisTaskLeaseSchema.nullable(),
 });
 
-export const runtimePostRunAnalysisCheckpointSchema = z.object({
-  analysisSummary: z
-    .string()
-    .trim()
-    .min(1)
-    .max(16_000)
-    .nullable()
-    .default(null),
-  bundleComplete: z.boolean().default(false),
-  bundleCursor: z.number().int().nonnegative().default(0),
-  evidenceRefs: z
-    .array(z.string().trim().min(1).max(500))
-    .max(500)
-    .default([])
-    .transform((values) => Array.from(new Set(values))),
-  updatedAt: z.string().datetime().nullable().default(null),
-});
-
-export const runtimePostRunAnalysisTaskSnapshotSchema = z.object({
-  analysisId: z.string().uuid(),
-  analyzerVersion: z.string().trim().min(1).max(160),
-  attemptNumber: z.number().int().positive(),
-  checkpoint: runtimePostRunAnalysisCheckpointSchema.optional(),
-  deadlineAt: z.string().datetime(),
-  input: z.object({
-    byteSize: z.number().int().nonnegative(),
-    completeness: z.record(z.string(), z.unknown()).default({}),
-    manifest: z.record(z.string(), z.unknown()).default({}),
-    schemaVersion: z.literal("devproof.task-logs.v2"),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  }),
-  modelCandidates: z.array(runtimeModelCandidateSchema).max(10),
-  sourceRef: z.string().trim().max(500).nullable(),
-  taskExecutionId: z.string().uuid(),
-  teamId: z.string().uuid(),
-  title: z.string().trim().min(1).max(500),
-  traceId: z.string().regex(/^[a-f0-9]{32}$/u),
-});
-
-export const runtimePostRunAnalysisTaskLeaseSchema = z.object({
-  fencingToken: z.string().regex(/^\d+$/u),
-  leaseExpiresAt: z.string().datetime(),
-  leaseToken: z.string().uuid(),
-  snapshot: runtimePostRunAnalysisTaskSnapshotSchema,
-  taskId: z.string().uuid(),
-});
-
-export const runtimePostRunAnalysisClaimInputSchema = z.object({
-  protocol: runtimeProtocolVersionSchema,
-  workerId: z.string().trim().min(1).max(200),
-});
-
-export const runtimePostRunAnalysisClaimOutputSchema = z.object({
-  task: runtimePostRunAnalysisTaskLeaseSchema.nullable(),
-});
-
-export const runtimePostRunAnalysisToolOutputSchema = z.object({
-  body: z.string(),
-  contentType: z.string().trim().min(1).max(200),
-  evidenceRef: z.string().trim().min(1).max(500).optional(),
-  nextCursor: z.number().int().nonnegative().nullable(),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  totalBytes: z.number().int().nonnegative(),
-  truncated: z.boolean(),
-});
-
 export const runtimeSpecAnalysisToolNameSchema = z.enum([
   "linear_get_issue",
   "github_get_pull_request",
@@ -380,9 +307,8 @@ export const runtimeRegistrationInputSchema = z.object({
 });
 
 export const runtimeRegistrationOutputSchema = z.object({
-  analysisConcurrency: z.number().int().min(0).max(64).default(0),
   browserConcurrency: z.number().int().min(0).max(1_024),
-  pools: z.array(runtimePoolSchema).min(1).max(3),
+  pools: z.array(runtimePoolSchema).length(1),
   refreshAfterMs: z.number().int().min(1_000).max(60_000),
   specConcurrency: z.number().int().min(0).max(64),
 });
@@ -392,40 +318,6 @@ const leasedTaskInputSchema = z.object({
   leaseToken: z.string().uuid(),
   workerId: z.string().trim().min(1).max(200),
 });
-
-const runtimePostRunAnalysisReadBundleInputSchema =
-  leasedTaskInputSchema.extend({
-    analysisSummary: z.string().trim().min(1).max(16_000),
-    cursor: z.number().int().nonnegative().default(0),
-    maxBytes: z.number().int().min(1_024).max(128_000).default(32_000),
-    name: z.literal("read_analysis_bundle"),
-  });
-
-const runtimePostRunAnalysisReadManifestInputSchema =
-  leasedTaskInputSchema.extend({
-    analysisSummary: z.string().trim().min(1).max(16_000),
-    cursor: z.number().int().nonnegative().default(0),
-    maxBytes: z.number().int().min(1_024).max(128_000).default(32_000),
-    name: z.literal("read_analysis_manifest"),
-  });
-
-const runtimePostRunAnalysisReadEvidenceInputSchema =
-  leasedTaskInputSchema.extend({
-    analysisSummary: z.string().trim().min(1).max(16_000),
-    cursor: z.number().int().nonnegative().default(0),
-    evidenceRef: z.string().trim().min(1).max(500),
-    maxBytes: z.number().int().min(1_024).max(128_000).default(32_000),
-    name: z.literal("read_analysis_evidence"),
-  });
-
-export const runtimePostRunAnalysisToolInputSchema = z.discriminatedUnion(
-  "name",
-  [
-    runtimePostRunAnalysisReadBundleInputSchema,
-    runtimePostRunAnalysisReadManifestInputSchema,
-    runtimePostRunAnalysisReadEvidenceInputSchema,
-  ],
-);
 
 export const runtimeSpecAnalysisToolInputSchema = leasedTaskInputSchema.extend({
   arguments: z.record(z.string(), z.unknown()),
@@ -745,67 +637,12 @@ export const runtimePostRunFindingSchema = z
     }
   });
 
-export const runtimePostRunAnalysisCoverageSchema = z.object({
-  bundleBytesRead: z.number().int().nonnegative(),
-  bundleFullyScanned: z.boolean(),
-  candidateCount: z.number().int().nonnegative(),
-  evidenceBytesRead: z.number().int().nonnegative(),
-  evidenceReadCount: z.number().int().nonnegative(),
-  manifestBytesRead: z.number().int().nonnegative(),
-  manifestFullyScanned: z.boolean(),
-  strategy: z.enum(["failure-first-v1", "full-manifest-fallback"]),
-});
-
-export const runtimePostRunAnalysisReportSchema = z
-  .object({
-    coverage: runtimePostRunAnalysisCoverageSchema.optional(),
-    findings: z.array(runtimePostRunFindingSchema).max(100),
-    summary: z.string().trim().min(1).max(12_000),
-  })
-  .superRefine((report, context) => {
-    const byteSize = utf8ByteLength(JSON.stringify(report));
-    if (byteSize > POST_RUN_ANALYSIS_REPORT_MAX_BYTES) {
-      context.addIssue({
-        code: "custom",
-        message: `Post-run analysis report exceeds ${POST_RUN_ANALYSIS_REPORT_MAX_BYTES} UTF-8 bytes.`,
-      });
-    }
-  });
-
 const retryableFailureOutcomeSchema = failureBaseSchema.extend({
   kind: z.literal("RETRYABLE_FAILURE"),
 });
 
 const fatalFailureOutcomeSchema = failureBaseSchema.extend({
   kind: z.literal("FATAL_FAILURE"),
-});
-
-const postRunAnalysisCompletedOutcomeSchema = z.object({
-  kind: z.literal("ANALYSIS_COMPLETED"),
-  report: runtimePostRunAnalysisReportSchema,
-});
-
-export const runtimePostRunAnalysisOutcomeSchema = z.discriminatedUnion(
-  "kind",
-  [
-    postRunAnalysisCompletedOutcomeSchema,
-    retryableFailureOutcomeSchema,
-    fatalFailureOutcomeSchema,
-  ],
-);
-
-export const runtimePostRunAnalysisTaskOutcomeInputSchema =
-  leasedTaskInputSchema.extend({
-    completedAt: z.string().datetime(),
-    completionId: z.string().uuid(),
-    outcome: runtimePostRunAnalysisOutcomeSchema,
-  });
-
-export const runtimePostRunAnalysisTaskOutcomeOutputSchema = z.object({
-  accepted: z.boolean(),
-  jobStatus: z.enum(["READY", "SUCCEEDED", "FAILED", "CANCELLED"]),
-  nextAttemptScheduled: z.boolean(),
-  workItemId: z.string().uuid().nullable(),
 });
 
 const specGeneratedOutcomeSchema = z.object({
@@ -908,21 +745,6 @@ export type RuntimeSpecAnalysisToolInput = z.infer<
   typeof runtimeSpecAnalysisToolInputSchema
 >;
 export type RuntimeSpecSourceRef = z.infer<typeof runtimeSpecSourceRefSchema>;
-export type RuntimePostRunAnalysisOutcome = z.infer<
-  typeof runtimePostRunAnalysisOutcomeSchema
->;
-export type RuntimePostRunAnalysisReport = z.infer<
-  typeof runtimePostRunAnalysisReportSchema
->;
-export type RuntimePostRunAnalysisTaskLease = z.infer<
-  typeof runtimePostRunAnalysisTaskLeaseSchema
->;
-export type RuntimePostRunAnalysisTaskOutcomeInput = z.infer<
-  typeof runtimePostRunAnalysisTaskOutcomeInputSchema
->;
-export type RuntimePostRunAnalysisToolInput = z.infer<
-  typeof runtimePostRunAnalysisToolInputSchema
->;
 export type RuntimeTaskClaimInput = z.infer<typeof runtimeTaskClaimInputSchema>;
 export type RuntimeTaskLease = z.infer<typeof runtimeTaskLeaseSchema>;
 export type RuntimeTaskOutcomeInput = z.infer<

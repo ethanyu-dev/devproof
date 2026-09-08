@@ -46,6 +46,7 @@ describe("tool authentication", () => {
       expiresAt: null,
       id: "runtime-1",
       name: "Production Runtime",
+      pool: "BROWSER_EXECUTION",
       revokedAt: null,
       team: { id: "team-1", name: "Team", slug: "default" },
     };
@@ -66,10 +67,35 @@ describe("tool authentication", () => {
         id: "runtime-1",
         kind: "AGENT_RUNTIME",
         name: "Production Runtime",
+        pool: "BROWSER_EXECUTION",
         scopes: ["runtime:lease"],
       },
       team: runtimeCredential.team,
     });
     expect(prisma.toolCredential.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("retired Runtime authentication", () => {
+  it("rejects the retired pool before updating its activity", async () => {
+    const update = vi.fn();
+    const service = new ToolAuthService(
+      {
+        agentRuntimeCredential: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "retired",
+            pool: "POST_RUN_ANALYSIS",
+            expiresAt: null,
+            revokedAt: null,
+          }),
+          update,
+        },
+      } as never,
+      {} as never,
+    );
+    await expect(service.authenticate("Bearer dvp_rt_retired")).rejects.toThrow(
+      "retired or unsupported",
+    );
+    expect(update).not.toHaveBeenCalled();
   });
 });
