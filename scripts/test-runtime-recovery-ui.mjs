@@ -128,9 +128,6 @@ try {
     viewport: { width: 1440, height: 1000 },
     locale: "zh-CN",
   });
-  await context.addInitScript(() =>
-    localStorage.setItem("devproof.admin", "true"),
-  );
   await context.route("**/auth/me", (route) =>
     route.fulfill({
       json: {

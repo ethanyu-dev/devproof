@@ -6,19 +6,16 @@ import {
   Gauge,
   LogOut,
   Menu,
-  ShieldCheck,
   UserRoundCheck,
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { requestWithTimeout } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-export const DEVPROOF_ADMIN_STORAGE_KEY = "devproof.admin";
 
 interface Session {
   team: { id: string; name: string; slug: string };
@@ -57,28 +54,12 @@ const adminSections = [
   },
 ] as const;
 
-// Browser identity is kept as a contextual sub-flow because a waiting task can
-// send its owner there directly. It is not exposed in the member navigation.
-const memberPaths = [
-  "/console/runs",
-  "/console/executions",
-  "/console/profiles",
-];
-
 export function ConsoleShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    setIsAdmin(
-      window.localStorage.getItem(DEVPROOF_ADMIN_STORAGE_KEY) === "true",
-    );
-  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -104,16 +85,6 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
       mounted = false;
     };
   }, [sessionAttempt]);
-
-  const memberPathAllowed = memberPaths.some((path) =>
-    routeIsWithin(path, pathname),
-  );
-
-  useEffect(() => {
-    if (isAdmin === false && !memberPathAllowed) {
-      router.replace("/console/runs");
-    }
-  }, [isAdmin, memberPathAllowed, router]);
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -144,20 +115,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     window.location.href = "/login";
   }
 
-  function changeConsoleRole(nextIsAdmin: boolean) {
-    if (nextIsAdmin === isAdmin) return;
-
-    if (nextIsAdmin) {
-      window.localStorage.setItem(DEVPROOF_ADMIN_STORAGE_KEY, "true");
-    } else {
-      window.localStorage.removeItem(DEVPROOF_ADMIN_STORAGE_KEY);
-    }
-
-    setIsAdmin(nextIsAdmin);
-    setMobileNavOpen(false);
-  }
-
-  if (!session || isAdmin === null) {
+  if (!session) {
     if (sessionError) {
       return (
         <main className="grid min-h-svh place-items-center bg-muted/30 p-6">
@@ -193,66 +151,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!isAdmin && !memberPathAllowed) {
-    return (
-      <main className="grid min-h-svh place-items-center bg-background text-sm text-muted-foreground">
-        正在打开任务执行…
-      </main>
-    );
-  }
-
   const name = session.user.name ?? session.user.email ?? "公司成员";
-
-  if (!isAdmin) {
-    return (
-      <div className="min-h-svh bg-muted/30" data-console-role="member">
-        <header className="sticky top-0 z-40 border-b border-border/80 bg-background/95 backdrop-blur">
-          <div className="mx-auto flex h-14 max-w-[1440px] items-center justify-between gap-3 px-4 sm:px-5 lg:px-6">
-            <Link className="flex items-center gap-2.5" href="/console/runs">
-              <span className="grid size-8 place-items-center rounded-lg bg-primary text-xs font-bold tracking-tight text-primary-foreground">
-                DP
-              </span>
-              <span>
-                <strong className="block text-sm font-semibold leading-none">
-                  DevProof
-                </strong>
-                <small className="mt-1 block text-[11px] text-muted-foreground">
-                  {session.team.name}
-                </small>
-              </span>
-            </Link>
-            <div className="flex items-center gap-2">
-              <ConsoleRoleSwitcher
-                isAdmin={isAdmin}
-                onChange={changeConsoleRole}
-              />
-              <div className="hidden text-right md:block">
-                <strong className="block max-w-40 truncate text-xs font-medium">
-                  {name}
-                </strong>
-                <small className="block max-w-40 truncate text-[11px] text-muted-foreground">
-                  {session.user.email ?? "飞书公司成员"}
-                </small>
-              </div>
-              <Button
-                aria-label="退出登录"
-                onClick={logout}
-                size="icon"
-                variant="ghost"
-              >
-                <LogOut />
-              </Button>
-            </div>
-          </div>
-        </header>
-        <main className="mx-auto w-full max-w-[1440px] px-4 py-4 sm:px-5 lg:px-6 lg:py-5">
-          {children}
-        </main>
-        <div id="dp-console-workspace-overlay" />
-      </div>
-    );
-  }
-
   const groupedSections = ["工作区", "管理"] as const;
 
   return (
@@ -319,7 +218,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
                 {name}
               </strong>
               <small className="block truncate text-[10px] text-muted-foreground">
-                本地管理员视图
+                {session.user.email ?? "飞书公司成员"}
               </small>
             </span>
             <Button
@@ -353,7 +252,6 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               </p>
             </div>
           </div>
-          <ConsoleRoleSwitcher isAdmin={isAdmin} onChange={changeConsoleRole} />
         </header>
 
         {mobileNavOpen ? (
@@ -383,48 +281,6 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         </main>
         <div id="dp-console-workspace-overlay" />
       </div>
-    </div>
-  );
-}
-
-function ConsoleRoleSwitcher({
-  isAdmin,
-  onChange,
-}: {
-  isAdmin: boolean;
-  onChange: (isAdmin: boolean) => void;
-}) {
-  const options = [
-    { icon: UserRoundCheck, isAdmin: false, label: "普通用户" },
-    { icon: ShieldCheck, isAdmin: true, label: "管理员" },
-  ] as const;
-
-  return (
-    <div
-      aria-label="控制台视图"
-      className="inline-flex shrink-0 items-center rounded-md border border-border bg-muted/50 p-0.5"
-      role="group"
-    >
-      {options.map((option) => {
-        const selected = option.isAdmin === isAdmin;
-        const Icon = option.icon;
-
-        return (
-          <button
-            aria-pressed={selected}
-            className={cn(
-              "inline-flex h-6 cursor-pointer items-center gap-1 rounded-sm px-2 text-[10px] font-medium text-muted-foreground outline-none transition-[color,background-color,box-shadow] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30",
-              selected && "bg-background text-foreground shadow-xs",
-            )}
-            key={option.label}
-            onClick={() => onChange(option.isAdmin)}
-            type="button"
-          >
-            <Icon className="size-3" />
-            {option.label}
-          </button>
-        );
-      })}
     </div>
   );
 }
