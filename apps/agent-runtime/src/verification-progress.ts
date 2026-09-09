@@ -30,6 +30,7 @@ const VOLATILE_KEYS = new Set([
   "backendNodeId",
   "byteSize",
   "dataBase64",
+  "visualObservationId",
 ]);
 const OBSERVATION_KEYS = new Set([
   "content",
@@ -183,7 +184,9 @@ function fingerprint(value: unknown) {
 
 function stable(value: unknown): unknown {
   if (typeof value === "string")
-    return value.replace(/\s*\[ref=(?:f\d+)?e\d+\]/gu, "");
+    return value
+      .replace(/\s*\[ref=(?:f\d+)?e\d+\]/gu, "")
+      .replace(/DOM viewport scope f\d+/gu, "DOM viewport scope");
   if (Array.isArray(value)) return value.map(stable);
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(

@@ -130,6 +130,77 @@ describe("runtime navigation and combined finalization", () => {
     ],
   });
 
+  it("delivers actual image parts to the model, replaces stale images, and omits bytes from traces", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "observe",
+        output: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            1,
+          ),
+        ],
+      })
+      .mockResolvedValueOnce(finish());
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.environment = { targetUrl: "https://example.com" };
+    const visual = (bytes: string) => ({
+      artifactId: "3a6cbe48-f36c-4b48-bae1-d8d5e50f4ce0",
+      observationId: "6730b25a-d1d3-4a10-a0c1-69fd4d74643a",
+      capturedAt: new Date().toISOString(),
+      viewport: { width: 1280, height: 720 },
+      contentType: "image/jpeg",
+      dataBase64: Buffer.from(bytes).toString("base64"),
+    });
+    const first = visual("first private screenshot");
+    const second = visual("second private screenshot");
+    controlPlane.browserCommand
+      .mockResolvedValueOnce({
+        status: "SUCCEEDED",
+        visualObservation: first,
+        result: { url: "https://example.com" },
+      })
+      .mockResolvedValueOnce({
+        status: "SUCCEEDED",
+        visualObservation: second,
+        result: { content: '- <div> "页面可见" [ref=f1e1]' },
+        artifacts: [{ id: "proof", kind: "SCREENSHOT" }],
+      });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED", verdict: "PASSED" });
+    const requests = create.mock.calls.map((call) => call[0]);
+    expect(requests[0].input.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text" },
+        {
+          type: "input_image",
+          image_url: `data:image/jpeg;base64,${first.dataBase64}`,
+        },
+      ],
+    });
+    expect(requests[1].input.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text" },
+        {
+          type: "input_image",
+          image_url: `data:image/jpeg;base64,${second.dataBase64}`,
+        },
+      ],
+    });
+    expect(JSON.stringify(requests[1])).not.toContain(first.dataBase64);
+    const traces = JSON.stringify(controlPlane.appendEvent.mock.calls);
+    expect(traces).not.toContain(first.dataBase64);
+    expect(traces).not.toContain(second.dataBase64);
+    expect(
+      controlPlane.acquireBrowser.mock.calls[0]![1].requiredCapabilities,
+    ).toContain("dom-vision-v1");
+  });
+
   it("navigates the exact task URL before the model and accepts evidence with the final result", async () => {
     const url =
       "https://example.com/form?trial=57a0c843-9959-4d3c-be24-931b8a7ed37e";
@@ -643,6 +714,7 @@ describe("browser verification bounded context", () => {
     let step = 0;
     let observationId = "";
     let nextCursor = 0;
+    let recoveryToken = "";
     const create = vi.fn().mockImplementation(async (request: Request) => {
       const index = step++;
       let name = "browser_command";
@@ -675,8 +747,11 @@ describe("browser verification bounded context", () => {
       }
       if (index === 5)
         expect(output(request, 4).result.refState).toBe("HISTORICAL");
-      if (index === 6)
+      if (index === 6) {
         expect(output(request, 5)).toMatchObject({ accepted: false });
+        recoveryToken = output(request, 5).locatorRecovery.recoveryToken;
+      }
+      if (index === 7) args.locatorRecoveryToken = recoveryToken;
       return {
         id: `response-${index}`,
         output: [functionCall(name, args, index)],
@@ -704,7 +779,13 @@ describe("browser verification bounded context", () => {
     await executor.execute(runTask, lease, new AbortController().signal);
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
-    ).toEqual(["page.snapshot", "page.click", "page.snapshot", "page.click"]);
+    ).toEqual([
+      "page.snapshot",
+      "page.click",
+      "page.snapshot",
+      "page.snapshot",
+      "page.click",
+    ]);
   });
 
   it("keeps multi-call groups and opaque reasoning identical across provider fallback", async () => {

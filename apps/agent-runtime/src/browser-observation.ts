@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
+import {
+  visualObservationSchema,
+  type VisualObservation,
+  type runtimeActionCommandInputSchema,
+} from "@devproof/runtime-protocol";
 import { z } from "zod";
 import { jsonBytes } from "./model-context.js";
 
@@ -64,12 +68,14 @@ export class BrowserObservations {
   private currentSnapshot: string | null = null;
   private currentSnapshotUrl: string | undefined;
   private readonly exposedRefs = new Set<string>();
+  private visual: VisualObservation | undefined;
   private order = 0;
   private bytes = 0;
 
   constructor(private readonly cacheBytes = 4 * 1_024 * 1_024) {}
 
   invalidate() {
+    this.visual = undefined;
     this.currentSnapshot = null;
     this.currentSnapshotUrl = undefined;
     this.exposedRefs.clear();
@@ -86,9 +92,24 @@ export class BrowserObservations {
     });
   }
 
+  unreadRef(command: Command): boolean {
+    const content = this.currentSnapshot
+      ? this.entries.get(this.currentSnapshot)?.content
+      : undefined;
+    const payload = command.payload as Record<string, unknown>;
+    return [payload.target, payload.source, payload.frame].some((target) => {
+      const ref = record(target).ref;
+      return (
+        typeof ref === "string" &&
+        !this.exposedRefs.has(ref) &&
+        content?.includes(`[ref=${ref}]`)
+      );
+    });
+  }
+
   capture(command: Command, raw: unknown) {
     const response = record(raw);
-    // Form input does not replace the Runtime's aria-ref snapshot. Keep refs
+    // Form input need not replace the observed DOM nodes. Keep refs
     // already shown to the model; live element resolution remains authoritative.
     const successfulFormInput =
       FORM_INPUT_COMMANDS.has(command.commandType) &&
@@ -106,6 +127,22 @@ export class BrowserObservations {
     )
       this.invalidate();
     if (snapshot) this.invalidate();
+    // Images are kept outside text pagination/history and replaced after every
+    // state-changing action, including inputs that preserve DOM references.
+    if (
+      !READ_COMMANDS.has(command.commandType) ||
+      snapshot ||
+      command.commandType === "page.screenshot"
+    )
+      this.visual = undefined;
+    const visual = visualObservationSchema.safeParse(
+      response.visualObservation,
+    );
+    if (
+      visual.success &&
+      (response.status === "SUCCEEDED" || response.ok === true)
+    )
+      this.visual = visual.data;
     if (!response.result || typeof response.result !== "object") return;
     const entry = this.save(
       typeof result.content === "string"
@@ -124,6 +161,15 @@ export class BrowserObservations {
           typeof result.url === "string" ? result.url : undefined;
       }
     }
+  }
+
+  currentVisual() {
+    if (
+      this.visual &&
+      Date.now() - Date.parse(this.visual.capturedAt) > 120_000
+    )
+      this.visual = undefined;
+    return this.visual;
   }
 
   index() {
@@ -145,7 +191,39 @@ export class BrowserObservations {
     return this.page(entry, cursor);
   }
 
-  project(raw: unknown): unknown {
+  project(raw: unknown, bounded = true): unknown {
+    if (!bounded) {
+      const source = record(raw);
+      const entry =
+        source.result && typeof source.result === "object"
+          ? this.capturedResults.get(source.result)
+          : undefined;
+      if (
+        entry?.id === this.currentSnapshot &&
+        typeof record(source.result).content === "string"
+      ) {
+        for (const match of String(record(source.result).content).matchAll(
+          /\[ref=((?:f\d+)?e\d+)\]/gu,
+        ))
+          this.exposedRefs.add(match[1]!);
+      }
+      const { dataBase64: _bytes, ...metadata } = record(
+        source.visualObservation,
+      );
+      const recovery = record(source.locatorRecovery);
+      return {
+        ...source,
+        ...(source.visualObservation ? { visualObservation: metadata } : {}),
+        ...(source.locatorRecovery
+          ? {
+              locatorRecovery: {
+                ...recovery,
+                snapshot: this.project(recovery.snapshot, false),
+              },
+            }
+          : {}),
+      };
+    }
     const previouslyExposedRefs = new Set(this.exposedRefs);
     const source = record(raw);
     const projected: Record<string, unknown> = {};
@@ -160,8 +238,14 @@ export class BrowserObservations {
       "suggestions",
       "nextAction",
       "retryable",
+      "visualObservationError",
     ]) {
       if (key in source) projected[key] = source[key];
+    }
+    const visual = visualObservationSchema.safeParse(source.visualObservation);
+    if (visual.success) {
+      const { dataBase64: _bytes, ...metadata } = visual.data;
+      projected.visualObservation = metadata;
     }
     const result = source.result;
     if (result && typeof result === "object") {
@@ -262,7 +346,8 @@ export class BrowserObservations {
       snapshot,
       content: prefix,
       bytes: Buffer.byteLength(prefix),
-      captureTruncated: prefix.length < content.length,
+      captureTruncated:
+        prefix.length < content.length || source.captureTruncated === true,
       sourceTruncated: source.truncated === true,
       cursors: new Set([0]),
     };

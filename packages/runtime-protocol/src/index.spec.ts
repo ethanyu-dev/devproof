@@ -149,7 +149,7 @@ describe("Runtime protocol", () => {
 
     expect(publicSchema).toContain("不存在 element.click");
     expect(publicSchema).toContain("不存在 page.content");
-    expect(publicSchema).toContain("仅用于观察，不会创建持久化 DOM 证据");
+    expect(publicSchema).toContain("实际节点 ref 及当前视口截图");
     expect(publicSchema).toContain("创建持久化的 NETWORK 证据");
   });
 
@@ -185,7 +185,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(15);
+    expect(RUNTIME_PROTOCOL.minor).toBe(16);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");

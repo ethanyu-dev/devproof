@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { DomObservations } from "./dom-observation.js";
+import { VisualObservations } from "./visual-observation.js";
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -242,6 +244,8 @@ const VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR = 12;
 const MAX_STEP_VIDEO_ATTEMPT_DURATION_MS = 24_000;
 const MAX_STEP_VIDEO_FRAME_DURATION_MS = 750;
 const STEP_SCREENSHOT_COMMANDS = new Set<RuntimeCommandType>([
+  "page.snapshot",
+  "frame.snapshot",
   "page.open",
   "page.navigate",
   "page.back",
@@ -917,13 +921,6 @@ function matchesUrlPattern(url: string, pattern: string): boolean {
   return new RegExp(`^${expression}$`, "u").test(url);
 }
 
-export async function defaultSnapshotLocator(page: Page): Promise<Locator> {
-  const modal = page
-    .locator('dialog:modal, [role="dialog"][aria-modal="true"]:visible')
-    .last();
-  return (await modal.count()) ? modal : page.locator("body").first();
-}
-
 function normalizeRuntimeError(message: unknown): unknown {
   if (!message || typeof message !== "object" || !("type" in message))
     return message;
@@ -1175,6 +1172,8 @@ export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
 }
 
 export class BrowserSessionManager {
+  private readonly domObservations = new DomObservations();
+  private readonly visualObservations = new VisualObservations();
   private readonly sessions = new Map<string, LiveSession>();
   private readonly openingProfileKeys = new Set<string>();
   private readonly openingSessions = new Set<string>();
@@ -1488,7 +1487,15 @@ export class BrowserSessionManager {
   }
 
   async execute(command: RuntimeCommand) {
-    const result = (await this.executeCommand(command)) ?? {};
+    let result;
+    try {
+      result = (await this.executeCommand(command)) ?? {};
+    } finally {
+      if (STEP_SCREENSHOT_COMMANDS.has(command.commandType)) {
+        const page = this.sessions.get(command.sessionId)?.page;
+        if (page) this.visualObservations.invalidate(page);
+      }
+    }
     if (
       !["session.close", "session.open", "profile.purge"].includes(
         command.commandType,
@@ -1833,8 +1840,8 @@ export class BrowserSessionManager {
       case "page.snapshot": {
         let locator = parsed.payload.target
           ? this.locator(session, parsed.payload.target)
-          : await defaultSnapshotLocator(session.page);
-        if (parsed.payload.target) {
+          : undefined;
+        if (locator) {
           const count = await locator.count();
           if (count === 0) {
             throw codedError(
@@ -1852,17 +1859,16 @@ export class BrowserSessionManager {
             );
           }
         }
-        const snapshot = redactText(
-          await locator.ariaSnapshot({
-            boxes: parsed.payload.includeBoxes ?? false,
-            depth: parsed.payload.depth ?? 12,
-            mode: "ai",
-            timeout,
-          }),
+        const snapshot = await this.domObservations.snapshot(
+          session.page,
+          locator,
+          { ...parsed.payload, timeout },
         );
         return {
           result: {
-            ...pageText(snapshot, parsed.payload),
+            format: snapshot.format,
+            captureTruncated: snapshot.captureLimited,
+            ...pageText(redactText(snapshot.content), parsed.payload),
             title: boundedUtf8Text(await session.page.title(), 1_000),
             url: safeObservedUrl(session.page.url()),
           },
@@ -1940,6 +1946,13 @@ export class BrowserSessionManager {
           artifacts: [
             this.artifact("SCREENSHOT", contentType, data, {
               inlineEligible: data.byteLength <= INLINE_SCREENSHOT_MAX_BYTES,
+              ...(!parsed.payload.fullPage
+                ? {
+                    visualObservation: await this.visualObservations.capture(
+                      session.page,
+                    ),
+                  }
+                : {}),
               url: safeObservedUrl(session.page.url()),
             }),
           ],
@@ -2041,6 +2054,12 @@ export class BrowserSessionManager {
           );
           await locator.click({ timeout });
         } else {
+          if (command.ownerTaskId || parsed.payload.visualObservationId)
+            await this.visualObservations.assertPoint(
+              session.page,
+              parsed.payload.visualObservationId,
+              parsed.payload.point,
+            );
           await session.page.mouse.click(
             parsed.payload.point.x,
             parsed.payload.point.y,
@@ -2063,15 +2082,21 @@ export class BrowserSessionManager {
         return { result: { filled: true } };
       }
       case "page.type": {
-        const locator = await this.actionableLocator(
-          session,
-          parsed.payload.target,
-          timeout,
-        );
-        await locator.pressSequentially(parsed.payload.text, {
-          delay: parsed.payload.delayMs ?? 0,
-          timeout,
-        });
+        if (parsed.payload.target) {
+          const locator = await this.actionableLocator(
+            session,
+            parsed.payload.target,
+            timeout,
+          );
+          await locator.pressSequentially(parsed.payload.text, {
+            delay: parsed.payload.delayMs ?? 0,
+            timeout,
+          });
+        } else {
+          await session.page.keyboard.type(parsed.payload.text, {
+            delay: parsed.payload.delayMs ?? 0,
+          });
+        }
         this.emitHumanInput(session, command, {
           command: "type",
           textLength: parsed.payload.text.length,
@@ -2109,9 +2134,25 @@ export class BrowserSessionManager {
         return { result: { ok: true } };
       }
       case "page.select": {
-        const values = await (
-          await this.actionableLocator(session, parsed.payload.target, timeout)
-        ).selectOption(parsed.payload.values, { timeout });
+        const locator = await this.actionableLocator(
+          session,
+          parsed.payload.target,
+          timeout,
+        );
+        if (
+          (await locator.evaluate((element) =>
+            element.tagName.toLowerCase(),
+          )) !== "select"
+        ) {
+          throw codedError(
+            "CUSTOM_SELECT_REQUIRES_CLICK",
+            "page.select only supports native <select>. Click the custom dropdown, observe DOM + screenshot, then click its visible option.",
+            true,
+          );
+        }
+        const values = await locator.selectOption(parsed.payload.values, {
+          timeout,
+        });
         return { result: { values } };
       }
       case "page.scroll": {
@@ -2250,12 +2291,19 @@ export class BrowserSessionManager {
         return { result: { activeTabId: this.pageId(session, replacement) } };
       }
       case "frame.snapshot": {
-        const content = redactText(
-          await this.frameLocator(session, parsed.payload.frame)
-            .locator("body")
-            .ariaSnapshot({ mode: "ai", timeout }),
+        const snapshot = await this.domObservations.snapshot(
+          session.page,
+          this.frameLocator(session, parsed.payload.frame).locator("body"),
+          { timeout },
         );
-        return { result: pageText(content, parsed.payload) };
+        return {
+          result: {
+            ...pageText(redactText(snapshot.content), parsed.payload),
+            format: snapshot.format,
+            captureTruncated: snapshot.captureLimited,
+            url: safeObservedUrl(session.page.url()),
+          },
+        };
       }
       case "frame.click": {
         const frame = this.frameLocator(session, parsed.payload.frame);
@@ -3446,7 +3494,8 @@ export class BrowserSessionManager {
     scope?: Page | FrameLocator,
   ): Locator {
     const root = scope ?? session.page;
-    if ("ref" in target) return root.locator(`aria-ref=${target.ref}`);
+    if ("ref" in target)
+      return this.domObservations.locator(session.page, target.ref);
     if (target.frameSelector) {
       return root.frameLocator(target.frameSelector).locator(target.selector);
     }
@@ -3458,7 +3507,9 @@ export class BrowserSessionManager {
     target: RuntimeLocator,
   ): FrameLocator {
     if ("ref" in target) {
-      return session.page.locator(`aria-ref=${target.ref}`).contentFrame();
+      return this.domObservations
+        .locator(session.page, target.ref)
+        .contentFrame();
     }
     if (target.frameSelector) {
       return session.page
@@ -3476,6 +3527,13 @@ export class BrowserSessionManager {
     scope?: Page | FrameLocator,
   ): Promise<Locator> {
     let locator = this.locator(session, target, scope);
+    if ("ref" in target && (await locator.count()) === 0) {
+      throw codedError(
+        "STALE_DOM_REFERENCE",
+        "The observed node was detached or replaced; capture a new DOM snapshot.",
+        true,
+      );
+    }
     try {
       await locator.first().waitFor({ state: "attached", timeout });
     } catch {
@@ -3673,6 +3731,7 @@ export class BrowserSessionManager {
       );
     }
     return this.artifact("SCREENSHOT", "image/jpeg", data, {
+      visualObservation: await this.visualObservations.capture(session.page),
       captureKind: "STEP",
       capturedAt: frame.capturedAt,
       commandType,
@@ -3976,6 +4035,7 @@ export class BrowserSessionManager {
     if (input.format === "png") {
       const data = await page.screenshot({
         fullPage: input.fullPage,
+        scale: "css",
         type: "png",
       });
       if (data.byteLength > RUNTIME_ARTIFACT_SAFE_MAX_BYTES) {
@@ -3988,12 +4048,14 @@ export class BrowserSessionManager {
     }
     let data = await page.screenshot({
       fullPage: input.fullPage,
+      scale: "css",
       quality: input.quality,
       type: "jpeg",
     });
     if (data.byteLength > INLINE_SCREENSHOT_MAX_BYTES && input.quality > 45) {
       data = await page.screenshot({
         fullPage: input.fullPage,
+        scale: "css",
         quality: 45,
         type: "jpeg",
       });
@@ -4001,6 +4063,7 @@ export class BrowserSessionManager {
     if (data.byteLength > INLINE_SCREENSHOT_MAX_BYTES && input.fullPage) {
       data = await page.screenshot({
         fullPage: false,
+        scale: "css",
         quality: 45,
         type: "jpeg",
       });

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import type { VerificationRequest } from "@devproof/contracts";
+import { RUNTIME_PROTOCOL } from "@devproof/runtime-protocol";
 import {
   runtimeTaskSnapshotSchema,
   type RuntimeTaskClaimInput,
@@ -107,8 +108,8 @@ beforeEach(async () => {
       tokenHash: randomUUID(),
       tokenHint: "test",
       status: "ONLINE",
-      protocolMajor: 1,
-      protocolMinor: 14,
+      protocolMajor: RUNTIME_PROTOCOL.major,
+      protocolMinor: RUNTIME_PROTOCOL.minor,
       connectionId: randomUUID(),
       connectionGeneration: 1n,
       hostInstanceId: "integration-host",
@@ -119,6 +120,7 @@ beforeEach(async () => {
         "auth-snapshot-v1",
         "session-permits-v1",
         "closure-evidence-v1",
+        "dom-vision-v1",
       ],
     },
   });
@@ -180,7 +182,7 @@ async function verifiedClose(
       runtimeId: runtime.id,
       connectionId: runtime.connectionId!,
       connectionGeneration: runtime.connectionGeneration,
-      negotiatedMinor: 14,
+      negotiatedMinor: runtime.protocolMinor!,
       capabilities: new Set(["closure-evidence-v1"]),
       hostInstanceId: runtime.hostInstanceId!,
       daemonInstanceId: runtime.daemonInstanceId!,
@@ -883,6 +885,55 @@ function openedBrowsers() {
 }
 
 describe("unclaimed browser startup recovery with PostgreSQL", () => {
+  it("requires DOM + vision before allocation and admits after the Runtime upgrades", async () => {
+    const current = await db.browserRuntime.findUniqueOrThrow({
+      where: { id: runtimeId },
+    });
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: {
+        protocolMinor: 14,
+        capabilities: (current.capabilities as string[]).filter(
+          (capability) => capability !== "dom-vision-v1",
+        ),
+      },
+    });
+    const fixture = await execution("READ_ONLY");
+    await db.browserExecution.update({
+      where: { id: fixture.row.id },
+      data: { status: "REQUESTED" },
+    });
+    const admission = new BrowserAdmissionService(db as never, runner);
+    await admission.reconcile();
+    expect(
+      await db.browserExecution.findUniqueOrThrow({
+        where: { id: fixture.row.id },
+      }),
+    ).toMatchObject({ status: "WAITING_CAPACITY", runtimeSessionId: null });
+    expect(openedBrowsers()).toHaveLength(0);
+    expect(await db.browserRuntimeSlot.count()).toBe(0);
+
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: {
+        protocolMinor: current.protocolMinor,
+        capabilities: current.capabilities as Prisma.InputJsonValue,
+      },
+    });
+    await db.browserExecution.update({
+      where: { id: fixture.row.id },
+      data: { nextAdmissionAt: new Date(0) },
+    });
+    await admission.reconcile();
+    expect(
+      await db.browserExecution.findUniqueOrThrow({
+        where: { id: fixture.row.id },
+      }),
+    ).toMatchObject({ status: "ACTIVE", runtimeSessionId: expect.any(String) });
+    expect(openedBrowsers()).toHaveLength(1);
+    expect(await db.browserRuntimeSlot.count()).toBe(1);
+  });
+
   it("skips an expired oldest session and claims the next healthy candidate without a 409", async () => {
     const oldest = await unclaimedExecution();
     const healthy = await unclaimedExecution();

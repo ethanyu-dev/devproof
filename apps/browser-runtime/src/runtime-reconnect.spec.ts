@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runtimeClientMessageSchema } from "@devproof/runtime-protocol";
-import { defaultSnapshotLocator, RuntimeClient } from "./index.js";
+import { RuntimeClient } from "./index.js";
+import { DomObservations } from "./dom-observation.js";
 
 function fixture() {
   const store = { value: () => ({ sessions: [], runtimeId: randomUUID() }) };
@@ -196,28 +197,24 @@ describe("Runtime reconnect incident regressions", () => {
   });
 });
 
-it("limits a default snapshot to the active modal while restoring the page after dismissal", async () => {
+it("observes the DOM across the page and an open modal without ARIA", async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
+    const dom = new DomObservations();
     await page.setContent(
       "<label>Background type<select><option>Legacy</option></select></label><dialog><label>Modal type<select><option>New</option></select></label></dialog>",
     );
     await page
       .locator("dialog")
       .evaluate((dialog: HTMLDialogElement) => dialog.showModal());
-    expect(await (await defaultSnapshotLocator(page)).ariaSnapshot()).toContain(
-      "Modal type",
-    );
-    expect(
-      await (await defaultSnapshotLocator(page)).ariaSnapshot(),
-    ).not.toContain("Background type");
+    const snapshot = await dom.snapshot(page);
+    expect(snapshot.content).toContain("Modal type");
+    expect(snapshot.content).toContain("Background type");
     await page
       .locator("dialog")
       .evaluate((dialog: HTMLDialogElement) => dialog.close());
-    expect(await (await defaultSnapshotLocator(page)).ariaSnapshot()).toContain(
-      "Background type",
-    );
+    expect((await dom.snapshot(page)).content).not.toContain("Modal type");
   } finally {
     await browser.close();
   }

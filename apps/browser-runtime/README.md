@@ -123,3 +123,19 @@ Automatic close paths share a six-attempt budget and preserve backoff and
 `INCONCLUSIVE` results and unsettled browser commands do not confirm business
 writes or release their guards. Browser capacity remains an upper bound; unknown
 business access still serializes execution within an environment.
+
+### Runtime 0.2.22 DOM + visual observation
+
+Protocol v1.16 advertises `dom-vision-v1`. `page.snapshot` and `frame.snapshot`
+observe actual DOM nodes, including open Shadow DOM and frames, without relying
+on ARIA snapshots or `aria-ref`. Snapshots include a viewport screenshot. Custom
+controls can be operated by node reference or current screenshot coordinates;
+`page.select` accepts only native `<select>`, and `page.type` can type into the
+focused element when `target` is omitted.
+
+Deploy the API with image delivery and capability-aware admission, then upgrade
+Browser Runtime and Agent Runtime together before resuming verification work.
+The Agent's configured model/gateway must accept Responses image inputs. Existing
+sessions on older daemons require a fresh attempt after normal closure; upgrading
+the API alone does not add visual input to an old Agent. No database migration is
+required. See [DOM + visual observations](../../docs/dom-visual-browser.md).
