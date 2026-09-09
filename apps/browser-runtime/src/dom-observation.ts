@@ -28,6 +28,9 @@ function register() {
   ));
 }
 
+// Register before any page creates Playwright's injected selector context.
+await register();
+
 export class DomObservations {
   private readonly references = new WeakMap<Page, Map<string, Locator>>();
 
@@ -59,7 +62,9 @@ export class DomObservations {
     this.references.set(page, references);
     const roots = target
       ? [target]
-      : page.frames().map((frame) => frame.locator("body"));
+      : // Microfrontends can put another <body> in an open shadow root. A
+        // piercing "body" selector then fails strict resolution for the frame.
+        page.frames().map((frame) => frame.locator(":root > body"));
     const sections: string[] = [];
     let limited = false;
     for (const root of roots) {
@@ -80,7 +85,13 @@ export class DomObservations {
             let limited = false;
             const text = (value: string | null | undefined) =>
               (value ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
-            const walk = (element: Element, depth: number) => {
+            type Clip = {
+              top: number;
+              right: number;
+              bottom: number;
+              left: number;
+            };
+            const walk = (element: Element, depth: number, clip: Clip) => {
               if (++visited > 20_000 || refs.length >= 1_500) {
                 limited = true;
                 return;
@@ -102,10 +113,15 @@ export class DomObservations {
               const visible =
                 box.width > 0 &&
                 box.height > 0 &&
-                box.bottom > 0 &&
-                box.right > 0 &&
-                box.top < view.innerHeight &&
-                box.left < view.innerWidth;
+                Math.min(box.bottom, clip.bottom) >
+                  Math.max(box.top, clip.top) &&
+                Math.min(box.right, clip.right) > Math.max(box.left, clip.left);
+              const scrollY =
+                /auto|scroll/.test(style.overflowY) &&
+                element.scrollHeight > element.clientHeight + 1;
+              const scrollX =
+                /auto|scroll/.test(style.overflowX) &&
+                element.scrollWidth > element.clientWidth + 1;
               const ownText = text(
                 Array.from(element.childNodes)
                   .filter((node) => node.nodeType === 3)
@@ -127,6 +143,8 @@ export class DomObservations {
                 visible &&
                 (ownText ||
                   interactive ||
+                  scrollY ||
+                  scrollX ||
                   /^h[1-6]$/.test(tag) ||
                   tag === "img")
               ) {
@@ -134,6 +152,18 @@ export class DomObservations {
                 refs.push(ref);
                 store.set(ref, element);
                 const attributes: string[] = [];
+                for (const axis of ["Y", "X"] as const) {
+                  if (!(axis === "Y" ? scrollY : scrollX)) continue;
+                  const position =
+                    axis === "Y" ? element.scrollTop : element.scrollLeft;
+                  const maximum =
+                    axis === "Y"
+                      ? element.scrollHeight - element.clientHeight
+                      : element.scrollWidth - element.clientWidth;
+                  attributes.push(
+                    `scroll${axis}=${Math.round(position)}/${maximum} atStart=${position <= 1} atEnd=${position >= maximum - 1}`,
+                  );
+                }
                 for (const name of [
                   "type",
                   "placeholder",
@@ -159,7 +189,7 @@ export class DomObservations {
                     attributes.push(
                       `value=${JSON.stringify(text(element.value))}`,
                     );
-                  if (element instanceof HTMLSelectElement)
+                  if (element instanceof HTMLSelectElement) {
                     attributes.push(
                       `options=${JSON.stringify(
                         Array.from(element.options)
@@ -171,6 +201,11 @@ export class DomObservations {
                           })),
                       )}`,
                     );
+                    if (element.options.length > 100) {
+                      attributes.push("optionsTruncated=true");
+                      limited = true;
+                    }
+                  }
                   if (element.disabled) attributes.push("disabled");
                   if (
                     element instanceof HTMLInputElement &&
@@ -182,7 +217,10 @@ export class DomObservations {
                   ? ` [box=${[box.x, box.y, box.width, box.height].map(Math.round).join(",")}]`
                   : "";
                 const label = text(
-                  ownText || (interactive ? element.textContent : ""),
+                  ownText ||
+                    (interactive && !scrollY && !scrollX
+                      ? element.textContent
+                      : ""),
                 );
                 lines.push(
                   `${"  ".repeat(Math.min(depth, 8))}- <${tag}${attributes.length ? " " + attributes.join(" ") : ""}> ${JSON.stringify(label)} [ref=${ref}]${coordinates}`,
@@ -193,13 +231,36 @@ export class DomObservations {
                   limited = true;
                 return;
               }
+              const childClip = { ...clip };
+              if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+                childClip.top = Math.max(clip.top, box.top + element.clientTop);
+                childClip.bottom = Math.min(
+                  clip.bottom,
+                  box.top + element.clientTop + element.clientHeight,
+                );
+              }
+              if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+                childClip.left = Math.max(
+                  clip.left,
+                  box.left + element.clientLeft,
+                );
+                childClip.right = Math.min(
+                  clip.right,
+                  box.left + element.clientLeft + element.clientWidth,
+                );
+              }
               for (const child of Array.from(element.children))
-                walk(child, depth + 1);
+                walk(child, depth + 1, childClip);
               if (element.shadowRoot)
                 for (const child of Array.from(element.shadowRoot.children))
-                  walk(child, depth + 1);
+                  walk(child, depth + 1, childClip);
             };
-            walk(body, 0);
+            walk(body, 0, {
+              top: 0,
+              left: 0,
+              right: view.innerWidth,
+              bottom: view.innerHeight,
+            });
             return { content: lines.join("\n"), refs, limited };
           },
           {
@@ -220,12 +281,18 @@ export class DomObservations {
         if (target) throw error;
         limited = true;
         sections.push(
-          "Frame DOM unavailable; use the current viewport screenshot.",
+          `Frame DOM unavailable; use the current viewport screenshot. ${String(
+            error instanceof Error ? error.message : error,
+          )
+            .split("\n")[0]!
+            .slice(0, 240)}`,
         );
       }
     }
     return {
-      content: sections.join("\n\n"),
+      content:
+        "DOM coverage: current viewport and unclipped content only. Scroll containers with atEnd=false have unseen content; absence here does not prove absence from the page or dropdown.\n\n" +
+        sections.join("\n\n"),
       captureLimited: limited,
       format: "dom",
     };

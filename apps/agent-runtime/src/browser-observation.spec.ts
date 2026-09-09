@@ -34,6 +34,45 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("keeps action screenshots transient even after later observations and cache reads", () => {
+    const cache = new BrowserObservations();
+    const immediate = {
+      status: "SUCCEEDED",
+      result: { ok: true },
+      artifacts: [{ id: "loading", kind: "SCREENSHOT" }],
+    };
+    cache.capture(
+      command("page.click", { target: { selector: "#search" } }),
+      immediate,
+    );
+    expect(cache.project(immediate)).toMatchObject({
+      observationStage: "AFTER_ACTION",
+    });
+    expect(cache.project(immediate, false)).toMatchObject({
+      observationStage: "AFTER_ACTION",
+    });
+    expect(cache.verdictEvidenceError(["artifact://loading"])).toContain(
+      "过程截图",
+    );
+    const updated = {
+      status: "SUCCEEDED",
+      result: { content: "旧版类型对应记录" },
+      artifacts: [{ id: "settled", kind: "SCREENSHOT" }],
+    };
+    cache.capture(command("page.snapshot"), updated);
+    expect(cache.verdictEvidenceError(["artifact://settled"])).toBeUndefined();
+    expect(
+      cache.verdictEvidenceError(["artifact://loading", "artifact://settled"]),
+    ).toContain("过程截图");
+    const projected = cache.project(immediate) as {
+      result: { observationId: string };
+    };
+    cache.read(projected.result.observationId);
+    expect(cache.verdictEvidenceError(["artifact://loading"])).toContain(
+      "过程截图",
+    );
+  });
+
   it("keeps image bytes out of tool text and invalidates images after mutations, failures, and full-page captures", () => {
     const cache = new BrowserObservations();
     const visual = {

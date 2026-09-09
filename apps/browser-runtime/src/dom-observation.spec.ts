@@ -26,6 +26,63 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it("observes a microfrontend with a body inside an open shadow root", async () => {
+    await page.setContent('<div id="microfrontend"></div>');
+    await page.locator("#microfrontend").evaluate((host) => {
+      const body = document.createElement("body");
+      body.innerHTML =
+        "<button onclick=\"this.textContent='已选择'\">旧版类型</button>";
+      host.attachShadow({ mode: "open" }).append(body);
+    });
+    const dom = new DomObservations();
+    const observed = await dom.snapshot(page);
+    expect(observed.captureLimited).toBe(false);
+    await dom.locator(page, ref(observed.content, "旧版类型")).click();
+    expect(await page.getByText("已选择").count()).toBe(1);
+  });
+
+  it("reports scroll coverage and excludes options clipped by the dropdown", async () => {
+    await page.setContent(`<div id="options" style="height:80px;width:200px;overflow:auto">
+      ${Array.from({ length: 12 }, (_, index) => `<div style="height:40px">类型${index}</div>`).join("")}
+      <div style="height:40px" onclick="this.textContent='已选择'">旧版类型</div>
+    </div>`);
+    const dom = new DomObservations();
+    const first = await dom.snapshot(page);
+    expect(first.content).toContain("atEnd=false");
+    expect(first.content).not.toContain("旧版类型");
+    const containerRef = ref(first.content, "scrollY=");
+    await dom
+      .locator(page, containerRef)
+      .evaluate((element) => element.scrollBy(0, 1000));
+    const last = await dom.snapshot(page);
+    expect(last.content).toContain("atEnd=true");
+    expect(last.content).not.toContain('"类型0"');
+    await dom.locator(page, ref(last.content, "旧版类型")).click();
+    expect(await page.getByText("已选择").count()).toBe(1);
+  });
+
+  it("observes the updated result only after a delayed query's loading indicator disappears", async () => {
+    await page.setContent(`<button id="search" onclick="document.querySelector('#loading').hidden=false">搜索</button>
+      <div id="loading" hidden>正在加载</div><div id="rows">合规模型映射记录</div>`);
+    const dom = new DomObservations();
+    await page.locator("#search").click();
+    const inFlight = await dom.snapshot(page);
+    expect(inFlight.content).toContain("正在加载");
+    expect(inFlight.content).toContain("合规模型映射记录");
+    // Resolve the query after its intermediate state has actually been read.
+    await page.evaluate(() => {
+      document.querySelector("#rows")!.textContent = "旧版类型记录";
+      (document.querySelector("#loading") as HTMLElement).hidden = true;
+    });
+    await dom
+      .locator(page, ref(inFlight.content, "正在加载"))
+      .waitFor({ state: "hidden" });
+    const settled = await dom.snapshot(page);
+    expect(settled.content).toContain("旧版类型记录");
+    expect(settled.content).not.toContain("合规模型映射记录");
+    expect(settled.content).not.toContain("正在加载");
+  });
+
   it("observes and selects a portalled div option, excluding the hidden duplicate", async () => {
     const dom = new DomObservations();
     await page.setContent(`<div id="toggle" onclick="document.querySelector('#options').hidden=false">白名单类型</div>
