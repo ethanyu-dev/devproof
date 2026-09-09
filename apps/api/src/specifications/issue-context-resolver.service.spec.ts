@@ -5,6 +5,38 @@ import { ContextSourceError } from "./context-source.error.js";
 import { IssueContextResolverService } from "./issue-context-resolver.service.js";
 
 describe("IssueContextResolverService", () => {
+  it("resolves a complete Issue-only context without knowledge configuration", async () => {
+    const linear = {
+      configured: () => true,
+      configuredTool: () => null,
+      mode: () => "API",
+      getIssue: async () => ({
+        issue: {
+          id: "issue-1",
+          identifier: "PAY-1",
+          title: "Refund order",
+          url: "https://linear.app/acme/issue/PAY-1",
+        },
+        pullRequestUrls: [],
+      }),
+    };
+    const service = new IssueContextResolverService(
+      linear as never,
+      { configured: async () => false } as never,
+    );
+
+    expect(await service.readiness("team-1")).toEqual({
+      github: { configured: false, mode: "TOKEN" },
+      linear: { configured: true, mode: "API", tool: null },
+      ready: true,
+    });
+    const result = await service.resolve("PAY-1", "team-1");
+    expect(result.completeness).toBe("COMPLETE");
+    expect(result.diagnostics).toEqual([]);
+    expect(result.context.knowledge).toEqual([]);
+    expect(result.context.pullRequests).toEqual([]);
+  });
+
   it("keeps a normalized placeholder when one GitHub repository is unavailable", async () => {
     const urls = [
       "https://github.com/private/web/pull/1",
@@ -55,14 +87,9 @@ describe("IssueContextResolverService", () => {
         };
       },
     };
-    const knowledge = {
-      resolve: async () => ({ diagnostics: [], items: [] }),
-    };
-
     const result = await new IssueContextResolverService(
       linear as never,
       github as never,
-      knowledge as never,
     ).resolve("PAY-1", "team-1");
 
     expect(result.completeness).toBe("PARTIAL");

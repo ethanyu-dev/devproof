@@ -62,7 +62,6 @@ import { RuntimeController } from "./runtime/runtime.controller.js";
 import { CredentialCipherService } from "./security/credential-cipher.service.js";
 import { GithubPullRequestClient } from "./specifications/github-pull-request.client.js";
 import { IssueContextResolverService } from "./specifications/issue-context-resolver.service.js";
-import { KnowledgeContextClient } from "./specifications/knowledge-context.client.js";
 import { LinearContextClient } from "./specifications/linear-context.client.js";
 import { TestSpecificationConsoleController } from "./specifications/test-specification-console.controller.js";
 import { TestSpecificationController } from "./specifications/test-specification.controller.js";
@@ -150,7 +149,6 @@ import { VerificationService } from "./verification/verification.service.js";
     FeishuOAuthClient,
     FeishuIntegrationService,
     IssueContextResolverService,
-    KnowledgeContextClient,
     LinearContextClient,
     HealthService,
     MetricsService,

@@ -19,7 +19,6 @@ import {
   type RuntimeSpecSourceRef,
 } from "@devproof/agent-runtime-protocol";
 import {
-  specificationIssueContextSchema,
   taskExecutionCreateInputSchema,
   testGenerationContextSchema,
 } from "@devproof/contracts";
@@ -38,7 +37,6 @@ import {
   assertGithubRevision,
   GithubPullRequestClient,
 } from "../specifications/github-pull-request.client.js";
-import { KnowledgeContextClient } from "../specifications/knowledge-context.client.js";
 import { LinearContextClient } from "../specifications/linear-context.client.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
 
@@ -65,10 +63,6 @@ const searchCodeToolSchema = githubToolSchema.extend({
   pathPrefix: z.string().trim().min(1).max(2_000).optional(),
   query: z.string().trim().min(2).max(500),
 });
-const knowledgeToolSchema = z.object({
-  analysisSummary: analysisSummarySchema,
-  query: z.string().trim().min(3).max(20_000),
-});
 
 type LeaseInput = {
   fencingToken: string;
@@ -87,7 +81,6 @@ export class SpecAnalysisRuntimeService {
     private readonly models: AgentModelConfigurationService,
     private readonly linear: LinearContextClient,
     private readonly github: GithubPullRequestClient,
-    private readonly knowledge: KnowledgeContextClient,
   ) {}
 
   async claim(
@@ -418,9 +411,6 @@ export class SpecAnalysisRuntimeService {
 
     const issueSource = await this.requireIssueSource(attempt.id);
     const issuePayload = sourceContent(issueSource.content);
-    const issue = specificationIssueContextSchema.parse(
-      record(issuePayload).issue,
-    );
     const allowedPullRequests = new Set(
       z.array(z.string().url()).parse(record(issuePayload).pullRequestUrls),
     );
@@ -560,34 +550,6 @@ export class SpecAnalysisRuntimeService {
           })),
           query: result.query,
           revision: result.revision,
-        },
-        sourceRefs: sources,
-      });
-    }
-
-    if (input.name === "knowledge_search") {
-      const arguments_ = knowledgeToolSchema.parse(input.arguments);
-      const result = await this.knowledge.resolve(issue, arguments_.query);
-      const sources = await this.persistSources(
-        attempt,
-        result.items.map((item) => ({
-          content: { item, query: arguments_.query },
-          excerpt: item.content.slice(0, 2_000),
-          kind: "KNOWLEDGE" as const,
-          label: item.title,
-          locator: { documentId: item.id },
-          revision: item.updatedAt,
-          uri: item.url ?? `knowledge://${encodeURIComponent(item.id)}`,
-        })),
-      );
-      return runtimeSpecAnalysisToolOutputSchema.parse({
-        result: {
-          diagnostics: result.diagnostics,
-          items: result.items.map((item, index) => ({
-            ...item,
-            sourceRef: sources[index]!.externalId,
-          })),
-          query: arguments_.query,
         },
         sourceRefs: sources,
       });
@@ -1450,10 +1412,6 @@ function buildContext(
     .filter((source) => source.kind === "GITHUB_PULL_REQUEST")
     .map((source) => record(sourceContent(source.content)).pullRequest)
     .filter(Boolean);
-  const knowledge = sources
-    .filter((source) => source.kind === "KNOWLEDGE")
-    .map((source) => record(sourceContent(source.content)).item)
-    .filter(Boolean);
   const expectedPullRequests = z
     .array(z.string().url())
     .parse(issuePayload.pullRequestUrls ?? []);
@@ -1474,7 +1432,6 @@ function buildContext(
     }));
   return testGenerationContextSchema.parse({
     issue,
-    knowledge,
     pullRequests,
     resolution: {
       completeness: diagnostics.length ? "PARTIAL" : "COMPLETE",

@@ -37,7 +37,6 @@ const service = new SpecAnalysisRuntimeService(
   } as never,
   {} as never,
   {} as never,
-  {} as never,
 );
 const releasePendingRequests = vi.fn().mockResolvedValue(0);
 const releaseTask = vi.fn().mockResolvedValue(0);

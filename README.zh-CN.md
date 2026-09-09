@@ -17,7 +17,7 @@ AI Agent 可以生成测试步骤或操作浏览器，但一次可靠的测试�
 - 登录、验证码、MFA 等场景无法安全地交给人工接管后继续执行。
 - 截图、DOM、Console、Network 和视频散落在不同工具中，结论难以审计和复现。
 - 浏览器、HTTP、Shell 或容器等执行环境与 Agent 强耦合，难以独立扩容和替换。
-- Issue、PR 和知识库中的上下文缺少稳定快照，任务重跑时输入可能已经变化。
+- Issue 和 PR 中的上下文缺少稳定快照，任务重跑时输入可能已经变化。
 
 DevProof 将这些问题收敛到一个统一控制面：调用方只需要描述目标、验收标准和执行能力，平台负责把它们组织成完整的任务生命周期，并返回结构化结论及证据。
 
@@ -69,7 +69,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 - Browser Runtime 的 `ExecutionRunner` Adapter、能力发现、证据自动关联与终态清理
 - 事件驱动 HITL Coordinator、超时策略和飞书通知 Outbox
 - 统一任务执行流程：Issue → Task → Spec 分析生成 → Profile 解析 → Spec 执行；直接任务跳过前两个阶段
-- Linear/GitHub/Knowledge 上下文解析、任务级不可变 Spec Snapshot、确定性 Case 与派发重试
+- Linear/GitHub 上下文解析、任务级不可变 Spec Snapshot、确定性 Case 与派发重试
 - 团队级 Browser Runtime、Profile 与 HITL 设置
 - 基于精确域名或 `*.` 通配域名的 Runtime 执行路由策略
 - Browser Runtime 一次性配对、outbound WebSocket、协议协商、在线判定与凭证撤销
@@ -116,7 +116,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 
 5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS` 和 `BROWSER_EXECUTION` 两个池的有序模型列表。每个部署使用独立凭证，通过 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>` 签发。本地开发读取 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` 和 `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`；独立部署使用 `DEVPROOF_AGENT_RUNTIME_TOKEN`，可用 `DEVPROOF_AGENT_RUNTIME_POOL` 显式声明池。省略时从凭证绑定池，声明不匹配则拒绝注册。浏览器 Worker 并发跟随 Console 配置的在线 Browser 节点容量。私网或 HTTP 模型网关通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置。
 
-6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。Knowledge MCP 为可选增强；连接 RAGFlow 时将 `KNOWLEDGE_MCP_TOOL` 设置为只读检索工具。
+6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。
 
 安全迁移会撤销原先通过 Console 签发的 Runtime Token，需要使用上述运维命令重新签发。旧的 Runtime Token 环境变量名、Worker ID、轮询间隔和工具上限环境变量名在迁移期间仍可读取；模型 API Key 与 Base URL 只在 Console 管理，新的 Runtime 参数统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。
 
@@ -232,7 +232,7 @@ Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制
 
 API、Web 和 Agent Runtime 使用各自的 Dockerfile。API 每次部署都会在新版本启动前执行 `pnpm prisma:deploy`；迁移失败时 Railway 会终止本次部署。两个 Agent Runtime Service 分别使用池专属 Token 独立部署和伸缩。
 
-API Service 至少需要配置 PostgreSQL、Redis、对象存储、飞书、`CREDENTIAL_ENCRYPTION_KEY`、`API_PUBLIC_URL`、`WEB_ORIGIN` 和 `RUNTIME_GATEWAY_WS_URL`。Issue 解析按需配置 Linear、GitHub 与 Knowledge 凭据。Web Service 运行时需要配置 `API_BASE_URL`，推荐使用 Railway API Service 的私网 HTTP 地址；构建时需要配置供外部 Runtime 使用的 `NEXT_PUBLIC_RUNTIME_API_URL`。公网生产地址必须使用 HTTPS，Runtime Gateway 必须使用 WSS。
+API Service 至少需要配置 PostgreSQL、Redis、对象存储、飞书、`CREDENTIAL_ENCRYPTION_KEY`、`API_PUBLIC_URL`、`WEB_ORIGIN` 和 `RUNTIME_GATEWAY_WS_URL`。Issue 解析按需配置 Linear 与 GitHub 凭据。Web Service 运行时需要配置 `API_BASE_URL`，推荐使用 Railway API Service 的私网 HTTP 地址；构建时需要配置供外部 Runtime 使用的 `NEXT_PUBLIC_RUNTIME_API_URL`。公网生产地址必须使用 HTTPS，Runtime Gateway 必须使用 WSS。
 
 Railway 会注入 `PORT`；API 与 Web 会优先使用显式服务端口变量，并在未配置时回退到 Railway 的 `PORT`。Browser Runtime 不部署到 Railway，仍在目标执行机器上以 daemon 方式运行并通过 outbound WSS 接入 API。
 

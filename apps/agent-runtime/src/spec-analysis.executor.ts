@@ -38,8 +38,7 @@ type SourceToolName =
   | "github_get_pull_request"
   | "github_list_changed_files"
   | "github_read_file"
-  | "github_search_code"
-  | "knowledge_search";
+  | "github_search_code";
 
 export class SpecAnalysisExecutor {
   constructor(
@@ -565,7 +564,6 @@ const sourceToolNames = new Set<SourceToolName>([
   "github_list_changed_files",
   "github_read_file",
   "github_search_code",
-  "knowledge_search",
 ]);
 const requiredSourceToolNames = new Set<SourceToolName>(["linear_get_issue"]);
 
@@ -655,19 +653,6 @@ function toolDefinitions(
     },
     {
       type: "function",
-      name: "knowledge_search",
-      description: "使用从 Issue 和代码分析中提炼的查询检索只读知识库。",
-      parameters: objectSchema(
-        {
-          analysisSummary,
-          query: { maxLength: 20_000, minLength: 3, type: "string" },
-        },
-        ["analysisSummary", "query"],
-      ),
-      strict: false,
-    },
-    {
-      type: "function",
       name: "finish_spec",
       description:
         "完成来源分析后提交完整、可执行的中文 Spec；每个 Case 和验收标准都必须引用实际观察到的 analysis-source。",
@@ -734,14 +719,14 @@ function stripFormats(value: unknown): unknown {
 
 function systemPrompt() {
   return `你是 DevProof 的 Spec 分析 Agent。
-请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码、相关代码和知识库内容，生成一份完整、可执行的验证 Spec。
-必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述；还要使用由 Issue 和代码分析提炼出的查询检索知识库。
+请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成一份完整、可执行的验证 Spec。
+必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
 同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Linear Issue 是后续来源的必要入口，如果它不可用，执行器会立即以明确的数据源错误终止。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。
 生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。
-只有在完成 Issue、关联 PR 代码和知识库调查后才能调用 finish_spec。绝不能泄露凭据。`;
+只有在完成 Issue 和关联 PR 代码调查后才能调用 finish_spec。绝不能泄露凭据。`;
 }
 
 function validateFinalSpec(input: {
@@ -755,12 +740,6 @@ function validateFinalSpec(input: {
   if (chineseError) return chineseError;
   if (!input.calledTools.has("linear_get_issue")) {
     return "完成 Spec 前必须读取 Linear Issue。";
-  }
-  if (
-    !input.calledTools.has("knowledge_search") &&
-    !input.unavailableTools.has("knowledge_search")
-  ) {
-    return "完成 Spec 前必须检索知识库。";
   }
   const sourceKinds = new Set(
     [...input.sources.values()].map((source) => source.kind),

@@ -93,7 +93,6 @@ function recoveryHarness(attempt = analysisAttempt()) {
     } as never,
     {} as never,
     {} as never,
-    {} as never,
   );
   return { service, tx };
 }
@@ -492,7 +491,6 @@ describe("SpecAnalysisRuntimeService", () => {
       {} as never,
       {} as never,
       github as never,
-      {} as never,
     );
     const result = await service.executeTool(teamId, attemptId, {
       ...identity,
@@ -571,7 +569,6 @@ describe("SpecAnalysisRuntimeService", () => {
       prisma as never,
       {} as never,
       { getIssue: vi.fn().mockResolvedValue(linearResult) } as never,
-      {} as never,
       {} as never,
     );
 

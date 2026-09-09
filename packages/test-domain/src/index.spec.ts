@@ -119,7 +119,6 @@ describe("generateBusinessTestSpec", () => {
       title: "下架时间支持秒级输入",
       url: "https://linear.app/acme/issue/ENG-123",
     },
-    knowledge: [],
     pullRequests: [
       {
         body: "",
@@ -155,6 +154,28 @@ describe("generateBusinessTestSpec", () => {
     expect(testGenerationContextHash(context)).toBe(
       testGenerationContextHash({ ...context }),
     );
+  });
+
+  it("ignores knowledge retained in historical contexts when generating new cases", () => {
+    const legacyContext = {
+      ...context,
+      knowledge: [
+        {
+          content: "验收标准：\n- 用户必须输入知识库专属口令。",
+          id: "legacy-rule",
+          title: "历史知识库规则",
+          updatedAt: null,
+          url: null,
+        },
+      ],
+    };
+
+    expect(generateBusinessTestSpec(legacyContext)).toEqual(
+      generateBusinessTestSpec(context),
+    );
+    expect(
+      JSON.stringify(generateBusinessTestSpec(legacyContext)),
+    ).not.toContain("知识库");
   });
 
   it("hashes generated definitions independently of object key order", () => {

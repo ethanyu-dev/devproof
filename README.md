@@ -17,7 +17,7 @@ When every agent implements these capabilities independently, the same problems 
 - Login, CAPTCHA, and MFA flows cannot be handed to a human safely and then resumed.
 - Screenshots, DOM snapshots, console logs, network traces, and video end up scattered across tools, making conclusions hard to audit or reproduce.
 - Browser, HTTP, shell, and container environments become tightly coupled to individual agents and are difficult to scale or replace independently.
-- Context from issues, pull requests, and knowledge bases has no stable snapshot, so the inputs may change between runs.
+- Context from issues and pull requests has no stable snapshot, so the inputs may change between runs.
 
 DevProof brings these concerns into a single control plane. Callers describe the goal, acceptance criteria, and required capabilities; DevProof turns them into a complete task lifecycle and returns a structured verdict with its supporting evidence.
 
@@ -69,7 +69,7 @@ This flag controls presentation in the current browser only; it is not an author
 - Browser Runtime as an `ExecutionRunner` adapter, including capability discovery, automatic evidence association, and terminal cleanup
 - Event-driven HITL coordination, timeout policies, and a durable Feishu notification outbox
 - A unified task flow: Issue → Task → AI Spec Analysis → Profile Resolution → Spec Execution; direct tasks skip the first two stages
-- Linear, GitHub, and Knowledge context resolution; immutable task-level Spec Snapshots; deterministic Cases; and dispatch retries
+- Linear and GitHub context resolution; immutable task-level Spec Snapshots; deterministic Cases; and dispatch retries
 - Team-level Browser Runtime, Profile, and HITL settings
 - Runtime routing policies based on exact domains or `*.` wildcard domains
 - One-time Browser Runtime pairing, outbound WebSocket connections, protocol negotiation, online-state detection, and credential revocation
@@ -116,7 +116,7 @@ Requirements: Node.js 24, pnpm 10, and Docker.
 
 5. In Console → Access → Agent Models, configure independent ordered model lists for the `SPEC_ANALYSIS` and `BROWSER_EXECUTION` pools. Provision one credential per deployment with `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>`. Local `pnpm dev` reads `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` and `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`; standalone deployments use `DEVPROOF_AGENT_RUNTIME_TOKEN` and may assert `DEVPROOF_AGENT_RUNTIME_POOL`. If omitted, the Runtime binds to its credential's pool on registration; a mismatch is rejected. Browser worker concurrency follows the online Browser nodes' Console-managed capacity. Approve private or HTTP model gateways with `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST`.
 
-6. Spec analysis for Issue Tasks is executed by Agent Runtime. The Agent reads the Issue, linked PR metadata, diffs, code pinned to the PR head SHA, and optional knowledge results through credential-isolated read-only control-plane tools, then submits an immutable source-cited `agent-spec-v2`. Configure `SPEC_ANALYSIS_MODE=AGENT`; use `SHADOW` to record a comparison with the legacy deterministic generator or `DETERMINISTIC` for rollback. Linear prefers the official GraphQL API through `LINEAR_API_TOKEN`, with `LINEAR_MCP_BEARER_TOKEN` as a fallback. Configure encrypted GitHub PAT entries in Console → Access and a read-only Knowledge MCP when required. Every model turn, structured analysis summary, tool call, validation correction, and final Spec is recorded in the Task trajectory; raw hidden chain-of-thought and credentials are never recorded.
+6. Spec analysis for Issue Tasks is executed by Agent Runtime. The Agent reads the Issue, linked PR metadata, diffs, and code pinned to the PR head SHA through credential-isolated read-only control-plane tools, then submits an immutable source-cited `agent-spec-v2`. Configure `SPEC_ANALYSIS_MODE=AGENT`; use `SHADOW` to record a comparison with the legacy deterministic generator or `DETERMINISTIC` for rollback. Linear prefers the official GraphQL API through `LINEAR_API_TOKEN`, with `LINEAR_MCP_BEARER_TOKEN` as a fallback. Configure encrypted GitHub PAT entries in Console → Access. Every model turn, structured analysis summary, tool call, validation correction, and final Spec is recorded in the Task trajectory; raw hidden chain-of-thought and credentials are never recorded.
 
 The security migration revokes Runtime Tokens previously issued through Console; provision a replacement with the operator command above. Legacy Runtime Token variable names, Worker ID, polling interval, and tool-limit environment variable names remain readable during migration. Provider API Keys and Base URLs are managed only in Console; new Runtime settings should use the `DEVPROOF_AGENT_*` names in `.env.example`.
 
@@ -239,7 +239,7 @@ The repository root provides Railway Config as Code files. Keep each service's R
 
 API, Web, and Agent Runtime use their respective Dockerfiles. Before each API deployment starts, Railway runs `pnpm prisma:deploy`; a failed migration stops the release. Create three Railway services from the Agent Runtime config and give each its pool-specific token. The Browser Execution service automatically reconciles its worker lanes to the sum of online Browser node capacities (for example, node A `4` plus node B `8` gives a schedulable pool of `12`). Domain-routed work waits only in its target node queue; unmatched work uses the flexible queue and prefers idle compatible nodes.
 
-The API Service requires at least PostgreSQL, Redis, object storage, Feishu, `CREDENTIAL_ENCRYPTION_KEY`, `API_PUBLIC_URL`, `WEB_ORIGIN`, and `RUNTIME_GATEWAY_WS_URL`. Configure Linear, GitHub, and Knowledge credentials only when their Issue-resolution features are needed. The Web Service needs `API_BASE_URL` at runtime, preferably the private HTTP address of the Railway API Service, and `NEXT_PUBLIC_RUNTIME_API_URL` at build time for external Runtimes. Public production URLs must use HTTPS and Runtime Gateway must use WSS.
+The API Service requires at least PostgreSQL, Redis, object storage, Feishu, `CREDENTIAL_ENCRYPTION_KEY`, `API_PUBLIC_URL`, `WEB_ORIGIN`, and `RUNTIME_GATEWAY_WS_URL`. Configure Linear and GitHub credentials only when their Issue-resolution features are needed. The Web Service needs `API_BASE_URL` at runtime, preferably the private HTTP address of the Railway API Service, and `NEXT_PUBLIC_RUNTIME_API_URL` at build time for external Runtimes. Public production URLs must use HTTPS and Runtime Gateway must use WSS.
 
 Railway injects `PORT`. API and Web prefer their explicit service port variables and fall back to Railway's `PORT` when unset. Browser Runtime is not deployed to Railway; it remains a daemon on the target execution host and connects to API over outbound WSS.
 

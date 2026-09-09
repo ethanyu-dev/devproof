@@ -31,7 +31,7 @@ Codex / Claude / custom clients
               +-----------------+
 ```
 
-The Web Console uses the same API as other clients. Feishu, Linear, GitHub, and optional knowledge sources are integrations around the control plane rather than alternative state owners.
+The Web Console uses the same API as other clients. Feishu, Linear, and GitHub are integrations around the control plane rather than alternative state owners.
 
 ## Component responsibilities
 
@@ -68,7 +68,7 @@ The runner boundary is intentionally capability-based so HTTP, shell, container,
 
 `TaskExecution` is the user-facing aggregate. An Issue Task has three durable stages:
 
-1. `SPEC_ANALYSIS` is leased to Agent Runtime with the `ISSUE_ANALYSIS` capability. Its Spec Analysis Executor adaptively reads the issue, linked pull requests, diffs, code pinned to the PR head SHA, and optional knowledge through read-only control-plane tools, then writes a source-cited immutable `agent-spec-v2` Task Specification Snapshot. Model, analysis-summary, tool, validation, and terminal events share the Task trajectory.
+1. `SPEC_ANALYSIS` is leased to Agent Runtime with the `ISSUE_ANALYSIS` capability. Its Spec Analysis Executor adaptively reads the issue, linked pull requests, diffs, and code pinned to the PR head SHA through read-only control-plane tools, then writes a source-cited immutable `agent-spec-v2` Task Specification Snapshot. Model, analysis-summary, tool, validation, and terminal events share the Task trajectory.
 2. `PROFILE_RESOLUTION` selects an ephemeral or authorized user Browser Profile without opening a browser session.
 3. `SPEC_EXECUTION` dispatches deterministic Cases as `ExecutionRun` records.
 

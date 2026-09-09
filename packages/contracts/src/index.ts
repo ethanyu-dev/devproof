@@ -1068,6 +1068,7 @@ export const specificationPullRequestContextSchema = z.object({
   url: z.string().url().max(2_000),
 });
 
+// Retained for reading immutable snapshots created before knowledge was retired.
 export const specificationKnowledgeContextSchema = z.object({
   content: z.string().trim().min(1).max(100_000),
   id: z.string().trim().min(1).max(500),

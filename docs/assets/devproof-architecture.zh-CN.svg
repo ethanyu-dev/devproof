@@ -109,9 +109,8 @@
     <text x="68" y="482" class="body" fill="#475467">解析后固化为不可变任务快照</text>
     <text x="68" y="525" class="mono body" fill="#344054">Linear</text>
     <text x="140" y="525" class="mono body" fill="#344054">GitHub</text>
-    <text x="215" y="525" class="mono body" fill="#344054">Knowledge</text>
     <path d="M 68 543 H 278" stroke="#e4e7ec" />
-    <text x="68" y="558" class="small" fill="#667085">Issue · PR · Deployment · RAG</text>
+    <text x="68" y="558" class="small" fill="#667085">Issue · PR · Deployment</text>
 
     <!-- Control plane -->
     <rect x="370" y="118" width="520" height="536" fill="#171a21" stroke="#171a21" />

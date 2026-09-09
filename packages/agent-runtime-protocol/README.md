@@ -11,7 +11,7 @@ attempt, model step, and tool call ID; preview fields must already be bounded an
 redacted before they cross the control-plane boundary.
 
 Protocol v2.3 adds leased `SPEC_ANALYSIS` work, source-cited `agent-spec-v2`
-outcomes, read-only Linear/GitHub/Knowledge tool calls, and structured
+outcomes, read-only Linear/GitHub tool calls, and structured
 `agent.analysis.*` / `agent.spec.*` events.
 
 Protocol v2.8 makes the Runtime's single declared pool part of registration.
