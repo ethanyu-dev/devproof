@@ -5,6 +5,7 @@ import type {
   RuntimeSessionRecovery,
 } from "@prisma/client";
 import {
+  businessDataLocksEnabled,
   businessEnvironmentKey,
   executionTarget,
 } from "../verification/execution-concurrency.js";
@@ -110,7 +111,11 @@ export async function materializeRecoveryGuards(
   const leases = await tx.executionResourceLease.findMany({
     where: { sessionId: session.id },
   });
-  if (!leases.length && session.purpose === "EXECUTION") {
+  if (
+    !leases.length &&
+    session.purpose === "EXECUTION" &&
+    businessDataLocksEnabled()
+  ) {
     const scope = await inferRecoveryScope(tx, session);
     await tx.executionResourceLease.create({
       data: {

@@ -7,7 +7,15 @@ import {
   runtimeTaskSnapshotSchema,
   type RuntimeTaskClaimInput,
 } from "@devproof/agent-runtime-protocol";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 // This suite must never read application dotenv files or create a production client.
 vi.mock("../config/env.js", () => ({
@@ -19,6 +27,7 @@ vi.mock("../config/env.js", () => ({
 }));
 
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
 import { SessionClosureService } from "../runtime/session-closure.service.js";
 import { BrowserExecutionRunner } from "./browser-execution-runner.service.js";
 import { BrowserAdmissionService } from "./browser-admission.service.js";
@@ -44,6 +53,7 @@ const db = new PrismaClient({
   adapter: new PrismaPg({ connectionString, max: 20 }),
 });
 const previousRecoveryEnabled = process.env.RUNTIME_SESSION_RECOVERY_ENABLED;
+afterEach(() => vi.unstubAllEnvs());
 const recoveries = new SessionRecoveryService(db as never);
 const closures = new SessionClosureService(db as never);
 const commands = { execute: vi.fn(verifiedCommand) };
@@ -284,7 +294,10 @@ async function execution(
   };
 }
 
-async function assertAtomicInventory(expected: number) {
+async function assertAtomicInventory(
+  expected: number,
+  expectedResources = expected,
+) {
   const [sessions, slots, resources, bound] = await Promise.all([
     db.browserRuntimeSession.findMany(),
     db.browserRuntimeSlot.findMany(),
@@ -295,7 +308,7 @@ async function assertAtomicInventory(expected: number) {
   ]);
   expect(sessions).toHaveLength(expected);
   expect(slots).toHaveLength(expected);
-  expect(resources).toHaveLength(expected);
+  expect(resources).toHaveLength(expectedResources);
   expect(bound).toHaveLength(expected);
   expect(new Set(slots.map((slot) => slot.slotNumber)).size).toBe(expected);
   for (const session of sessions) {
@@ -340,6 +353,169 @@ async function recordTimedOutCommand(
 }
 
 describe("PostgreSQL browser admission transactions", () => {
+  it("allows manual and automatic executions to share capacity without classifying active sessions as quarantined", async () => {
+    const first = await execution("UNKNOWN");
+    await first.acquire();
+    const current = {
+      sessionId: randomUUID(),
+      team: await db.team.findUniqueOrThrow({ where: { id: teamId } }),
+      user: await db.user.findUniqueOrThrow({
+        where: { id: profiles[0]!.ownerUserId },
+      }),
+    };
+    const sessions = new RuntimeSessionsService(
+      db as never,
+      { isRuntimeOnline: async () => true } as never,
+      commands as never,
+      {} as never,
+      { record: vi.fn() } as never,
+      recoveries,
+      closures,
+    );
+    const input = {
+      runtimeId,
+      profileMode: "EPHEMERAL" as const,
+      purpose: "EXECUTION" as const,
+    };
+    await expect(sessions.create(current, input)).rejects.toThrow(
+      "exclusive business access",
+    );
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const manual = await Promise.all([
+      sessions.create(current, input),
+      sessions.create(current, input),
+    ]);
+    expect(manual).toHaveLength(2);
+    const next = await execution("UNKNOWN");
+    await next.acquire();
+    expect(await db.browserRuntimeSlot.count()).toBe(4);
+    expect(await db.executionResourceLease.count()).toBe(1);
+    expect(await sessions.listQuarantines(current)).toHaveLength(0);
+  });
+
+  it.each(["UNKNOWN", "MUTATING"] as const)(
+    "admits four simultaneous %s executions on the same backend by default without exceeding capacity",
+    async (accessMode) => {
+      vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+      const work = await Promise.all(
+        Array.from({ length: 6 }, () => execution(accessMode)),
+      );
+      const results = await Promise.allSettled(
+        work.map((item) => item.acquire()),
+      );
+      expect(
+        results.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(4);
+      for (const result of results)
+        if (result.status === "rejected")
+          expect(["NO_AVAILABLE_SLOT", "IDENTITY_CAPACITY"]).toContain(
+            result.reason.reason,
+          );
+      await assertAtomicInventory(4, 0);
+    },
+  );
+
+  it("ignores existing quarantined data guards on both the original and another Runtime in parallel mode", async () => {
+    const writer = await execution("UNKNOWN");
+    const lease = await writer.acquire();
+    await recordTimedOutCommand(lease.leaseId, "page.click");
+    await verifiedClose(lease.leaseId);
+    const recovery = await db.runtimeSessionRecovery.findFirstOrThrow();
+    expect(recovery.writeOutcomeState).toBe("UNKNOWN");
+    expect(await db.executionResourceLease.findMany()).toMatchObject([
+      { quarantined: true, mode: "WRITE" },
+    ]);
+    const originalRuntime = await db.browserRuntime.findUniqueOrThrow({
+      where: { id: runtimeId },
+    });
+    const otherRuntime = await db.browserRuntime.create({
+      data: {
+        teamId,
+        instanceKey: randomUUID(),
+        name: "Other Runtime",
+        tokenHash: randomUUID(),
+        tokenHint: "test",
+        status: "ONLINE",
+        protocolMajor: originalRuntime.protocolMajor,
+        protocolMinor: originalRuntime.protocolMinor,
+        capabilities: originalRuntime.capabilities as Prisma.InputJsonValue,
+        connectionId: randomUUID(),
+        connectionGeneration: 1n,
+        hostInstanceId: "other-host",
+        daemonInstanceId: "other-daemon",
+        maxConcurrency: 4,
+      },
+    });
+    await db.userBrowserProfile.update({
+      where: { id: profiles[1]!.id },
+      data: { assignedRuntimeId: otherRuntime.id },
+    });
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
+    const first = await execution("UNKNOWN", 0);
+    const second = await execution("MUTATING", 1);
+    const admitted = await Promise.all([first.acquire(), second.acquire()]);
+    const sessions = await db.browserRuntimeSession.findMany({
+      where: { id: { in: admitted.map((item) => item.leaseId) } },
+    });
+    expect(new Set(sessions.map((item) => item.runtimeId))).toEqual(
+      new Set([runtimeId, otherRuntime.id]),
+    );
+    expect(await db.browserRuntimeSlot.count()).toBe(2);
+    expect(await db.executionResourceLease.count()).toBe(1);
+    expect(
+      await db.runtimeSessionRecovery.findUniqueOrThrow({
+        where: { id: recovery.id },
+      }),
+    ).toMatchObject({ writeOutcomeState: "UNKNOWN", resolvedAt: null });
+  });
+
+  it("keeps an unclosed browser's physical slot while filling other slots in parallel mode", async () => {
+    const old = await execution("UNKNOWN", 0);
+    const lease = await old.acquire();
+    await db.$transaction((tx: Prisma.TransactionClient) =>
+      quarantineSession(tx, lease.leaseId, "INTEGRATION_LOST"),
+    );
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const next = await Promise.all(
+      Array.from({ length: 4 }, () => execution("UNKNOWN", 1)),
+    );
+    const results = await Promise.allSettled(
+      next.map((item) => item.acquire()),
+    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(3);
+    expect(await db.browserRuntimeSlot.count()).toBe(4);
+    expect(
+      await db.browserRuntimeSlot.findFirst({
+        where: { sessionId: lease.leaseId },
+      }),
+    ).not.toBeNull();
+    expect(
+      await db.browserRuntimeSession.findUniqueOrThrow({
+        where: { id: lease.leaseId },
+      }),
+    ).toMatchObject({ status: "LOST", closureVerifiedAt: null });
+  });
+
+  it("does not create a new global guard when a parallel execution closes with an unknown outcome", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const writer = await execution("UNKNOWN");
+    const lease = await writer.acquire();
+    await recordTimedOutCommand(lease.leaseId, "page.click");
+    await verifiedClose(lease.leaseId);
+    expect(await db.runtimeSessionRecovery.findFirstOrThrow()).toMatchObject({
+      closureState: "VERIFIED",
+      writeOutcomeState: "UNKNOWN",
+      resolvedAt: null,
+    });
+    expect(await db.executionResourceLease.count()).toBe(0);
+    expect(await db.browserRuntimeSlot.count()).toBe(0);
+    const next = await execution("UNKNOWN");
+    await next.acquire();
+    expect(await db.browserRuntimeSlot.count()).toBe(1);
+  });
+
   it.each(["LOST", "CLOSED"] as const)(
     "rejects a late open ACK after the Session became %s",
     async (status) => {

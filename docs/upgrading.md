@@ -90,6 +90,10 @@ Task/notification/model/credential data:
 
 ## Concurrency and recovery upgrade
 
+Current admission defaults to parallel business access (`BROWSER_EXECUTION_DATA_LOCKS_ENABLED=false`, also the unset default). Update all API replicas consistently. Existing normal and quarantined business-data leases stop blocking other executions without deleting recovery evidence or claiming that an unknown write was resolved. New executions do not acquire business-data leases or materialize recovery guards in this mode. Runtime slots, persistent Profile exclusion, identity concurrency limits, explicit dependencies, and closure proof remain enforced. The failed execution itself still requires its own recovery decision.
+
+The serialized business-access behavior described below is opt-in via `BROWSER_EXECUTION_DATA_LOCKS_ENABLED=true`. Before re-enabling it, drain concurrent executions across all replicas; sessions admitted without resource leases are treated as legacy holders in serialized mode.
+
 Apply `20260904103000_runtime_concurrency_recovery` with the existing migration chain. It adds nullable/version-compatible scheduling, ownership and execution-budget fields, Profile isolation settings, and backend resource leases. Keep `BROWSER_ISOLATED_AUTH_ENABLED=false` while updating API/Web, Agent Runtime protocol v2.10, and Browser Runtime 0.2.17 / protocol v1.13. Drain old sessions before restarting Runtime daemons; expired/LOST browsers must be reconciled, not treated as free slots.
 
 After compatible daemons reconnect, set the trusted backend alias registry (`BROWSER_EXECUTION_ENVIRONMENTS_JSON`), enable the isolation feature, and prepare/verify the pilot Profile with the explicit parallel-authentication preparation option. Ordinary serial verification does not run cloned authentication probes. The owner then selects isolated execution and its concurrency limit in Console. Use explicitly reviewed independent readers for the four-slot smoke test. Keep existing nonterminal Tasks on their original mode and deadline policy. Old/direct execution paths participate conservatively in the same business locks.

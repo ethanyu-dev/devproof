@@ -9,6 +9,11 @@ export interface ResourceClaim {
   mode: "READ" | "WRITE";
 }
 
+/** Business-data serialization is opt-in; Runtime and identity capacity always apply. */
+export function businessDataLocksEnabled(): boolean {
+  return process.env.BROWSER_EXECUTION_DATA_LOCKS_ENABLED === "true";
+}
+
 /** Only deployment configuration can alias origins which share backend state. */
 export function businessEnvironmentKey(
   targetUrl?: string,
