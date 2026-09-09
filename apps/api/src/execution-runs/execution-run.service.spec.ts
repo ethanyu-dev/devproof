@@ -249,6 +249,59 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
+  it.each([null, 123, "   ", "a".repeat(201)])(
+    "rejects invalid test accounts without requeuing (%s)",
+    async (account) => {
+      const tx = transactionClient();
+      tx.humanIntervention.findFirst.mockResolvedValue(
+        intervention({ kind: "TEST_ACCOUNT", browserControlLease: null }),
+      );
+      const service = new ExecutionRunService(
+        {
+          $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
+        } as never,
+        {} as never,
+      );
+      await expect(
+        service.resolveIntervention(current, runId, interventionId, {
+          response: { account },
+        }),
+      ).rejects.toThrow("请提供有效的测试账号");
+      expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it("resumes TEST_ACCOUNT from a text answer without browser human control", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({ kind: "TEST_ACCOUNT", browserControlLease: null }),
+    );
+    const prisma = {
+      $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
+      executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { account: "  test-user-uuid  " },
+    });
+    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "PENDING",
+          snapshot: expect.objectContaining({
+            executionPolicy: expect.objectContaining({
+              resume: expect.objectContaining({
+                kind: "TEST_ACCOUNT",
+                response: { account: "test-user-uuid" },
+              }),
+            }),
+          }),
+        }),
+        where: { id: taskId },
+      }),
+    );
+  });
+
   it("queues an update for the original Feishu card after human completion", async () => {
     const tx = transactionClient();
     tx.humanIntervention.findFirst.mockResolvedValue(

@@ -13,6 +13,7 @@ export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
 export const RUNTIME_CAPABILITIES = [
   "browser",
   "dom-vision-v1",
+  "action-feedback-v1",
   "auth-snapshot-v1",
   "session-permits-v1",
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,

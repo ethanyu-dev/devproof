@@ -1106,6 +1106,7 @@ function RunDetailClient({ id }: { id: string }) {
               intervention={{
                 expiresAt: pendingIntervention.expiresAt!,
                 id: pendingIntervention.id,
+                kind: pendingIntervention.kind,
                 prompt: pendingIntervention.prompt,
               }}
               onComplete={() => load("foreground")}

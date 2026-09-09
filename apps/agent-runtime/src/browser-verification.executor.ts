@@ -28,6 +28,7 @@ import type {
 import { VerificationProgress } from "./verification-progress.js";
 import {
   BrowserObservations,
+  READ_COMMANDS,
   readObservationInputSchema,
 } from "./browser-observation.js";
 import {
@@ -244,7 +245,9 @@ export class BrowserVerificationExecutor {
             lease,
             reason === "FINALIZATION_RESERVE_REACHED"
               ? "executor.deadline.finalized"
-              : "executor.stagnation.finalized",
+              : reason === "TOOL_LIMIT_REACHED"
+                ? "executor.budget.finalized"
+                : "executor.stagnation.finalized",
             { reason, deadlineAt: task.snapshot.deadlineAt },
           ),
           finalizationBudgetMs(),
@@ -344,6 +347,8 @@ export class BrowserVerificationExecutor {
               })),
               locatorRecovery: locatorRecoveryState,
               observations: observations?.index() ?? [],
+              latestActionFeedback: observations.latestActionFeedback(),
+              remainingToolCalls: this.toolLimit - callCount,
               browserTools: toolSurface,
             },
             observations.currentVisual(),
@@ -544,6 +549,7 @@ export class BrowserVerificationExecutor {
               advertisedGroups,
               signal,
               task,
+              remainingToolCalls: this.toolLimit - callCount + 1,
             });
           } catch (error) {
             await this.appendTraceEvent(lease, {
@@ -636,18 +642,7 @@ export class BrowserVerificationExecutor {
           context.completeTurn(response.output, toolOutputs);
       }
 
-      return runtimeOutcomeSchema.parse({
-        error: {
-          code: "AGENT_TOOL_LIMIT_EXCEEDED",
-          failureClass: "TOOL_EXECUTION",
-          message: `浏览器验证超过 ${this.toolLimit} 次工具调用上限。`,
-          phase: "browser_verification",
-        },
-        executionDisposition:
-          browserCommandCount > 0 ? "AGENT_ERROR" : "NOT_RUN",
-        kind: "RETRYABLE_FAILURE",
-        summary: "Agent 未能在工具调用预算内完成验证。",
-      });
+      return await finalize("TOOL_LIMIT_REACHED");
     } catch (error) {
       segmentErrorMessage = traceErrorMessage(error);
       throw error;
@@ -783,6 +778,7 @@ export class BrowserVerificationExecutor {
     advertisedGroups: readonly BrowserToolGroup[];
     signal: AbortSignal;
     task: RuntimeTaskLease;
+    remainingToolCalls?: number;
   }): Promise<ToolExecutionResult> {
     let raw: unknown;
     try {
@@ -848,6 +844,23 @@ export class BrowserVerificationExecutor {
         );
       }
       const command = browserArguments.command;
+      if (
+        this.toolLimit >= 3 &&
+        (input.remainingToolCalls ?? Infinity) < 3 &&
+        !READ_COMMANDS.has(command.commandType)
+      ) {
+        return correction(
+          input.browserCommandCount,
+          toolCorrection(
+            "工具预算已进入收尾阶段，请只读核对最近操作、记录验收结果并结束；不能再发起新操作。",
+            {
+              code: "COMMAND_NOT_ALLOWED",
+              nextAction:
+                "只读核对最近操作，调用 record_criterion 或 finish_verification 收尾。",
+            },
+          ),
+        );
+      }
       const activeRecovery = input.locatorRecoveryState;
       const retargetAttempt =
         activeRecovery !== null &&
@@ -1177,7 +1190,17 @@ export class BrowserVerificationExecutor {
             ).toISOString(),
             kind: parsed.data.kind,
             prompt: parsed.data.prompt,
-            responseSchema: parsed.data.responseSchema,
+            responseSchema:
+              parsed.data.kind === "TEST_ACCOUNT"
+                ? {
+                    type: "object",
+                    properties: {
+                      account: { type: "string", minLength: 1, maxLength: 200 },
+                    },
+                    required: ["account"],
+                    additionalProperties: false,
+                  }
+                : parsed.data.responseSchema,
           },
           kind: "WAITING_HUMAN",
           summary: parsed.data.summary,
@@ -1690,7 +1713,10 @@ function readDeadlinePolicy(
 }
 
 type FinalizationReason =
-  "FINALIZATION_RESERVE_REACHED" | "REPEATED_OPERATIONS" | "TEXT_ONLY_LOOP";
+  | "FINALIZATION_RESERVE_REACHED"
+  | "REPEATED_OPERATIONS"
+  | "TEXT_ONLY_LOOP"
+  | "TOOL_LIMIT_REACHED";
 
 function finalizationReserveMs(policy: RuntimeDeadlinePolicy) {
   return policy.mode === "ADAPTIVE"
@@ -1722,6 +1748,7 @@ function finalizationOutcome(input: {
       "重复操作持续未产生新的页面观察或验收进展，已停止自动执行。",
     TEXT_ONLY_LOOP:
       "模型连续四轮只返回文本，未调用工具继续验证，已停止自动执行。",
+    TOOL_LIMIT_REACHED: "工具调用预算已用尽，已停止继续操作并保留验收结果。",
   }[input.reason];
   const missing = input.task.snapshot.criteria.filter(
     (criterion) => !input.criterionResults.has(criterion.id),
@@ -1732,9 +1759,11 @@ function finalizationOutcome(input: {
       executionDisposition: "NOT_RUN",
       error: {
         code:
-          input.reason === "FINALIZATION_RESERVE_REACHED"
-            ? "VERIFICATION_BUDGET_EXHAUSTED"
-            : "AGENT_NO_PROGRESS",
+          input.reason === "TOOL_LIMIT_REACHED"
+            ? "AGENT_TOOL_LIMIT_EXCEEDED"
+            : input.reason === "FINALIZATION_RESERVE_REACHED"
+              ? "VERIFICATION_BUDGET_EXHAUSTED"
+              : "AGENT_NO_PROGRESS",
         failureClass: "TOOL_EXECUTION",
         message: reason,
         phase: "browser_verification",
@@ -1777,6 +1806,7 @@ function finalizationOutcome(input: {
     evidence: [...input.evidence.values()],
     executionDisposition: "EXECUTED",
     kind: "VERIFICATION_COMPLETED",
+    termination: { reason: input.reason },
     summary,
     verdict,
   });
@@ -2028,6 +2058,9 @@ DOM 快照仅覆盖当前视口与未被滚动容器裁剪的内容；captureTru
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE 或 STALE_VISUAL_OBSERVATION 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
+正向业务验证需要已有测试账号时，只使用任务或 humanResume.response.account 明确提供的账号；不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。缺少账号，或提交后明确观察到该账号不存在/不可用时，调用现有 request_human_input，kind="TEST_ACCOUNT"，用简体中文请求一个当前环境可用于本次测试的账号（页面支持手机号或 UUID 时说明即可），context 中保留字段、原始错误与证据引用。用户只需提供账号，不需要接管浏览器。恢复后先重新观察保留的页面，用 humanResume.response.account 填写并核对结果；不要因为任务正文中的旧示例而覆盖用户答复。HITL 禁用时将缺数据的标准记为 INCONCLUSIVE，不盲目试号。若验收目标就是无效账号应被拒绝，则保留负向测试输入，按实际错误验证，不索取有效账号。
+result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。
+remainingToolCalls 不足 3 次时进入收尾，不发起新的提交；优先核对最近操作并提交已完成标准，剩余标准记录 INCONCLUSIVE。范围标签 fN 不是元素 ref，不要将它当作 frame.snapshot 的引用；恢复过的无效方法不要重复尝试。
 只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并提供所有必需验收标准后，才能完成验证。
 所有用户可见的生成内容必须使用简体中文，包括验收标准摘要、HITL 提示、等待摘要和最终验证摘要。标识符、URL、代码符号、API 路径、工具名、枚举值和 evidence reference 保持原样，不要翻译。
 绝不能调用会话生命周期操作，也绝不能泄露凭据。`;

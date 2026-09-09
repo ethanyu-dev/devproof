@@ -707,6 +707,20 @@ export class ExecutionRunService {
           `Human intervention is already ${intervention.status.toLowerCase()}.`,
         );
       }
+      if (
+        intervention.kind === "TEST_ACCOUNT" &&
+        (typeof input.response.account !== "string" ||
+          !input.response.account.trim() ||
+          input.response.account.length > 200)
+      ) {
+        throw new BadRequestException(
+          "请提供有效的测试账号（最多 200 个字符）。",
+        );
+      }
+      const response =
+        intervention.kind === "TEST_ACCOUNT"
+          ? { account: (input.response.account as string).trim() }
+          : input.response;
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
         throw new ConflictException("The run is not waiting for human input.");
       }
@@ -777,7 +791,8 @@ export class ExecutionRunService {
           ...snapshot.executionPolicy,
           resume: {
             interventionId,
-            response: input.response,
+            kind: intervention.kind,
+            response,
             resolvedAt: now.toISOString(),
           },
         },
@@ -823,7 +838,7 @@ export class ExecutionRunService {
         data: {
           resolvedAt: now,
           resolvedBy: current.credential.id,
-          response: json(input.response),
+          response: json(response),
           status: "RESOLVED",
         },
         where: {

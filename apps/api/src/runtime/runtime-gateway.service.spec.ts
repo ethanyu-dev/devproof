@@ -198,8 +198,8 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
   });
 });
 
-describe("RuntimeGatewayService DOM + vision negotiation", () => {
-  it("acknowledges and persists the capabilities advertised by Browser Runtime 0.2.22", async () => {
+describe("RuntimeGatewayService DOM + vision and action feedback negotiation", () => {
+  it("acknowledges and persists the capabilities advertised by the current Browser Runtime", async () => {
     const { handleHello, prisma, service, socket } = fixture();
     prisma.browserRuntime.findFirst.mockResolvedValue({
       id: context.runtimeId,
@@ -233,7 +233,7 @@ describe("RuntimeGatewayService DOM + vision negotiation", () => {
   });
 
   it.each([
-    { protocolMinor: 15, advertised: ["dom-vision-v1"] },
+    { protocolMinor: 15, advertised: ["dom-vision-v1", "action-feedback-v1"] },
     { protocolMinor: 16, advertised: [] },
     { protocolMinor: 16, advertised: undefined },
   ])(
@@ -244,7 +244,12 @@ describe("RuntimeGatewayService DOM + vision negotiation", () => {
         id: context.runtimeId,
         enabled: true,
         revokedAt: null,
-        capabilities: ["browser", "persistent-profile", "dom-vision-v1"],
+        capabilities: [
+          "browser",
+          "persistent-profile",
+          "dom-vision-v1",
+          "action-feedback-v1",
+        ],
       } as never);
       const greeting = runtimeClientMessageSchema.parse({
         ...hello(undefined, protocolMinor),
@@ -254,6 +259,7 @@ describe("RuntimeGatewayService DOM + vision negotiation", () => {
       const accepted = await handleHello.call(service, socket, greeting);
 
       expect(accepted?.capabilities.has("dom-vision-v1")).toBe(false);
+      expect(accepted?.capabilities.has("action-feedback-v1")).toBe(false);
       expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
         type: "runtime.hello.accepted",
         capabilities: [],

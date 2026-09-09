@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 11,
+  minor: 12,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -541,6 +541,16 @@ export const runtimeCriterionResultSchema = z.object({
 
 const verificationCompletedOutcomeSchema = z
   .object({
+    termination: z
+      .object({
+        reason: z.enum([
+          "FINALIZATION_RESERVE_REACHED",
+          "REPEATED_OPERATIONS",
+          "TEXT_ONLY_LOOP",
+          "TOOL_LIMIT_REACHED",
+        ]),
+      })
+      .optional(),
     criteria: z.array(runtimeCriterionResultSchema).min(1).max(100),
     evidence: z.array(runtimeEvidenceRefSchema).max(200).default([]),
     executionDisposition: z.literal("EXECUTED"),

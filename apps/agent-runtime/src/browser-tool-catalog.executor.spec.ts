@@ -576,7 +576,7 @@ describe("browser tool module execution", () => {
         new AbortController().signal,
       ),
     ).toMatchObject({
-      kind: "RETRYABLE_FAILURE",
+      kind: "FATAL_FAILURE",
       executionDisposition: "NOT_RUN",
       error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" },
     });

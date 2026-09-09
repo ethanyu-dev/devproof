@@ -39,6 +39,17 @@ async function fixtureServer() {
       );
       return;
     }
+    if (request.url === "/save-account") {
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.statusCode = 400;
+      response.end(
+        JSON.stringify({
+          code: "USER_NOT_FOUND",
+          token: "secret-account-token",
+        }),
+      );
+      return;
+    }
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end(`<!doctype html>
       <button onclick="document.querySelector('#count').textContent='1'">Increment</button>
@@ -67,6 +78,10 @@ async function fixtureServer() {
       <footer><a href="/solution/ai">人工智能解决方案</a></footer>
       <div id="custom-select" onclick="this.textContent='展开选项'">自定义下拉</div>
       <canvas style="position:fixed;left:850px;top:20px;width:120px;height:80px" onclick="document.querySelector('#count').textContent='canvas clicked'"></canvas>
+      <form onsubmit="event.preventDefault();fetch('/save-account',{method:'POST'}).then(r=>r.json()).then(body=>document.querySelector('#save-error').textContent=body.code)">
+        <input name="account" value="invalid-example">
+        <button id="save-account">Save account</button><span id="save-error"></span>
+      </form>
       <div id="shadow-host"></div>
       <iframe src="/frame"></iframe>
       <script>
@@ -172,7 +187,7 @@ describe("BrowserSessionManager E2E", () => {
         text: "DevProof",
       });
 
-      await execute("page.click", { target: { selector: "input" } });
+      await execute("page.click", { target: { selector: "label input" } });
       await execute("page.type", { text: " 中文" });
       const typed = (await execute("page.snapshot", {})) as {
         result: { content: string };
@@ -205,10 +220,10 @@ describe("BrowserSessionManager E2E", () => {
       expect(png.readUInt32BE(20)).toBe(
         image.metadata.visualObservation.viewport.height,
       );
-      await execute("page.click", {
+      const canvasClick = (await execute("page.click", {
         point: { x: 900, y: 50 },
         visualObservationId: image.metadata.visualObservation.observationId,
-      });
+      })) as { result: { interaction: unknown } };
       expect(
         (
           (await execute("page.get_text", {
@@ -222,6 +237,18 @@ describe("BrowserSessionManager E2E", () => {
           visualObservationId: image.metadata.visualObservation.observationId,
         }),
       ).rejects.toMatchObject({ code: "STALE_VISUAL_OBSERVATION" });
+      const freshCanvas = (await execute("page.screenshot", {
+        format: "png",
+      })) as typeof screenshot;
+      const nearbyCanvasClick = (await execute("page.click", {
+        point: { x: 905, y: 53 },
+        visualObservationId:
+          freshCanvas.artifacts[0]!.metadata.visualObservation.observationId,
+      })) as typeof canvasClick;
+      expect(canvasClick.result.interaction).toBeDefined();
+      expect(nearbyCanvasClick.result.interaction).toEqual(
+        canvasClick.result.interaction,
+      );
 
       const panelSnapshot = (await execute("page.snapshot", {
         target: { selector: '[role="tabpanel"]' },
@@ -374,6 +401,56 @@ describe("BrowserSessionManager E2E", () => {
         responseBodyCount: 1,
         urlIncludes: "/api-json",
       });
+
+      const firstSave = (await execute("page.click", {
+        target: { selector: "#save-account" },
+      })) as {
+        result: { interaction: { targetKey: string; stateKey: string } };
+      };
+      await execute("page.wait", {
+        kind: "text",
+        text: "USER_NOT_FOUND",
+        timeoutMs: 5000,
+      });
+      const saveObservation = (await execute("page.snapshot", {})) as {
+        result: {
+          actionFeedback: { requests: Array<{ responseSummary: string }> };
+        };
+        artifacts: Array<{ kind: string }>;
+      };
+      expect(saveObservation.result.actionFeedback).toMatchObject({
+        inputCompleted: true,
+        association: "temporal",
+        requests: [expect.objectContaining({ method: "POST", status: 400 })],
+      });
+      expect(
+        saveObservation.result.actionFeedback.requests[0]?.responseSummary,
+      ).toContain("USER_NOT_FOUND");
+      expect(
+        JSON.stringify(saveObservation.result.actionFeedback),
+      ).not.toContain("secret-account-token");
+      expect(
+        saveObservation.artifacts.some(
+          (artifact) => artifact.kind === "NETWORK",
+        ),
+      ).toBe(true);
+      const sameSave = (await execute("page.click", {
+        target: { selector: "#save-account" },
+      })) as typeof firstSave;
+      expect(sameSave.result.interaction).toEqual(firstSave.result.interaction);
+      await execute("page.fill", {
+        target: { selector: "input[name=account]" },
+        text: "provided-test-account",
+      });
+      const correctedSave = (await execute("page.click", {
+        target: { selector: "#save-account" },
+      })) as typeof firstSave;
+      expect(correctedSave.result.interaction.targetKey).toBe(
+        firstSave.result.interaction.targetKey,
+      );
+      expect(correctedSave.result.interaction.stateKey).not.toBe(
+        firstSave.result.interaction.stateKey,
+      );
 
       await execute("network.arm", {
         action: "FULFILL_STATUS",
