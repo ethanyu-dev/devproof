@@ -159,7 +159,11 @@ sessions on older daemons require a fresh attempt after normal closure; upgradin
 the API alone does not add visual input to an old Agent. No database migration is
 required. See [DOM + visual observations](../../docs/dom-visual-browser.md).
 
-### Action feedback (unreleased)
+### Runtime 0.2.23 observation and action feedback
+
+DOM snapshots expose clipped scroll regions and distinguish active observations
+from automatic post-action screenshots. Open Shadow DOM and frame observations
+remain available without requiring ARIA or changes to the target website.
 
 `action-feedback-v1` adds bounded fetch/XHR request candidates to action results
 and subsequent observations. Request-start sequence and page identity exclude
