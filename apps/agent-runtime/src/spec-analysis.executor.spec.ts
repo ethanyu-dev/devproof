@@ -135,7 +135,14 @@ describe("SpecAnalysisExecutor", () => {
       id: "response-1",
       output: [
         call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
-        call("knowledge_search", { analysisSummary: "查询知识。" }, "call-2"),
+        call(
+          "github_get_pull_request",
+          {
+            analysisSummary: "读取关联 PR。",
+            pullRequestUrl: "https://github.com/acme/web/pull/42",
+          },
+          "call-2",
+        ),
       ],
     });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
@@ -156,7 +163,7 @@ describe("SpecAnalysisExecutor", () => {
     expect(appendSpecEvent.mock.calls.at(-1)?.[1]).toBe("agent.tool.started");
   });
 
-  it("records every analysis, model and tool step and returns a cited Spec", async () => {
+  it("records every analysis step and completes an Issue-only Spec without knowledge", async () => {
     const spec = {
       cases: [
         {
@@ -211,19 +218,6 @@ describe("SpecAnalysisExecutor", () => {
         ],
       })
       .mockResolvedValueOnce({
-        id: "response-2",
-        output: [
-          call(
-            "knowledge_search",
-            {
-              analysisSummary: "检查相关退款业务规则。",
-              query: "refund order state",
-            },
-            "call-2",
-          ),
-        ],
-      })
-      .mockResolvedValueOnce({
         id: "response-3",
         output: [
           call(
@@ -264,19 +258,13 @@ describe("SpecAnalysisExecutor", () => {
         ],
       });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
-    const executeSpecTool = vi
-      .fn()
-      .mockResolvedValueOnce({
-        result: {
-          issue: { identifier: "ENG-123", title: "Refund flow" },
-          pullRequestUrls: [],
-        },
-        sourceRefs: [source],
-      })
-      .mockResolvedValueOnce({
-        result: { diagnostics: [], items: [] },
-        sourceRefs: [],
-      });
+    const executeSpecTool = vi.fn().mockResolvedValueOnce({
+      result: {
+        issue: { identifier: "ENG-123", title: "Refund flow" },
+        pullRequestUrls: [],
+      },
+      sourceRefs: [source],
+    });
     const executor = new SpecAnalysisExecutor(
       () => ({ responses: { create } }) as never,
       { appendSpecEvent, executeSpecTool } as never,
@@ -290,20 +278,20 @@ describe("SpecAnalysisExecutor", () => {
     );
 
     expect(outcome.kind).toBe("SPEC_GENERATED");
-    expect(executeSpecTool).toHaveBeenCalledTimes(2);
+    expect(executeSpecTool).toHaveBeenCalledTimes(1);
     const kinds = appendSpecEvent.mock.calls.map((arguments_) => arguments_[1]);
     expect(
       kinds.filter((kind) => kind === "agent.model.completed"),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(
       kinds.filter((kind) => kind === "agent.analysis.completed"),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(kinds.filter((kind) => kind === "agent.tool.started")).toHaveLength(
-      5,
+      4,
     );
     expect(
       kinds.filter((kind) => kind === "agent.tool.completed"),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(
       appendSpecEvent.mock.calls.find(
         (arguments_) =>
@@ -331,6 +319,10 @@ describe("SpecAnalysisExecutor", () => {
       ),
     ).toBe(true);
     expect(JSON.stringify(firstRequest.tools)).not.toContain(source.externalId);
+    expect(JSON.stringify(firstRequest.tools)).not.toContain(
+      "knowledge_search",
+    );
+    expect(firstRequest.input[0]?.content).not.toContain("知识库");
 
     const secondRequest = create.mock.calls[1]?.[0] as {
       tools: Array<{ name: string; parameters: unknown }>;
@@ -346,7 +338,7 @@ describe("SpecAnalysisExecutor", () => {
       JSON.stringify({ enum: [source.externalId] }).slice(1, -1),
     );
 
-    const finalRequest = create.mock.calls[4]?.[0] as {
+    const finalRequest = create.mock.calls[3]?.[0] as {
       input: Array<{ call_id?: string; output?: string; type?: string }>;
     };
     const correctionOutput = finalRequest.input.find(
@@ -424,121 +416,159 @@ describe("SpecAnalysisExecutor", () => {
     expect(executeSpecTool).toHaveBeenCalledTimes(2);
   });
 
-  it("removes an unavailable optional source and completes with remaining evidence", async () => {
-    const spec = {
-      cases: [
-        {
-          criteria: [
-            {
-              description: "订单显示为已退款状态。",
-              id: "refunded-state",
-              requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
-              sourceRefs: [source.externalId],
-            },
-          ],
-          name: "退款状态",
-          preconditions: ["已存在一笔已支付订单。"],
-          rationale: "覆盖 Issue 中的退款要求。",
-          sourceRefs: [source.externalId],
-          steps: [
-            {
-              action: "发起退款。",
-              expectedObservation: "订单状态变为已退款。",
-              order: 1,
-            },
-          ],
-        },
-      ],
-      risks: ["知识库数据源不可用，规格仅基于 Linear Issue。"],
-      scope: { inScope: ["退款状态"] },
-      summary: "验证退款行为。",
-    };
-    const create = vi
-      .fn()
-      .mockResolvedValueOnce({
-        id: "response-1",
-        output: [
-          call(
-            "linear_get_issue",
-            { analysisSummary: "读取权威 Issue。" },
-            "call-1",
-          ),
+  it.each([false, true])(
+    "requires linked PR metadata, diffs and code without knowledge (search unavailable: %s)",
+    async (searchUnavailable) => {
+      const spec = {
+        cases: [
+          {
+            criteria: [
+              {
+                description: "订单显示为已退款状态。",
+                id: "refunded-state",
+                requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
+                sourceRefs: [source.externalId],
+              },
+            ],
+            name: "退款状态",
+            preconditions: ["已存在一笔已支付订单。"],
+            rationale: "覆盖 Issue 中的退款要求。",
+            sourceRefs: [source.externalId],
+            steps: [
+              {
+                action: "发起退款。",
+                expectedObservation: "订单状态变为已退款。",
+                order: 1,
+              },
+            ],
+          },
         ],
-      })
-      .mockResolvedValueOnce({
-        id: "response-2",
-        output: [
-          call(
-            "knowledge_search",
-            {
-              analysisSummary: "检索退款业务知识。",
-              query: "refund order state",
-            },
-            "call-2",
-          ),
-        ],
-      })
-      .mockResolvedValueOnce({
-        id: "response-3",
-        output: [
-          call(
-            "knowledge_search",
-            {
-              analysisSummary: "知识库暂时失败，再重试一次。",
-              query: "refund order state",
-            },
-            "call-3",
-          ),
-        ],
-      })
-      .mockResolvedValueOnce({
-        id: "response-4",
-        output: [
-          call(
-            "finish_spec",
-            {
-              analysisSummary: "知识库不可用，使用剩余来源完成规格。",
-              spec,
-            },
-            "call-4",
-          ),
-        ],
+        risks: searchUnavailable
+          ? ["GitHub 代码检索不可用，已读取变更文件和实现代码。"]
+          : [],
+        scope: { inScope: ["退款状态"] },
+        summary: "验证退款行为。",
+      };
+      const pullRequestUrl = "https://github.com/acme/web/pull/42";
+      const githubArguments = {
+        analysisSummary: "检查退款实现。",
+        pullRequestUrl,
+      };
+      const finishArguments = {
+        analysisSummary: "提交已核对来源的规格。",
+        spec,
+      };
+      const calls = [
+        call(
+          "linear_get_issue",
+          { analysisSummary: "读取权威 Issue。" },
+          "issue",
+        ),
+        call("finish_spec", finishArguments, "before-pr"),
+        call("github_get_pull_request", githubArguments, "pr"),
+        call("github_list_changed_files", githubArguments, "diff"),
+        call("finish_spec", finishArguments, "before-code"),
+        call(
+          "github_read_file",
+          { ...githubArguments, path: "src/refund.ts" },
+          "file",
+        ),
+        ...(searchUnavailable
+          ? [
+              call(
+                "github_search_code",
+                { ...githubArguments, query: "refund" },
+                "search-1",
+              ),
+              call(
+                "github_search_code",
+                { ...githubArguments, query: "refund" },
+                "search-2",
+              ),
+            ]
+          : []),
+        call("finish_spec", finishArguments, "finish"),
+      ];
+      const responses = calls.map((toolCall, index) => ({
+        id: `response-${index + 1}`,
+        output: [toolCall],
+      }));
+      const create = vi.fn().mockImplementation(async () => {
+        const response = responses.shift();
+        if (!response) throw new Error("Unexpected extra model request");
+        return response;
       });
-    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
-    const executeSpecTool = vi
-      .fn()
-      .mockResolvedValueOnce({
-        result: {
-          issue: { identifier: "ENG-123", title: "Refund flow" },
-          pullRequestUrls: [],
-        },
-        sourceRefs: [source],
-      })
-      .mockRejectedValueOnce(
-        new ControlPlaneError(500, { message: "Internal server error" }),
-      )
-      .mockRejectedValueOnce(
-        new ControlPlaneError(500, { message: "Internal server error" }),
+      const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+      const executeSpecTool = vi
+        .fn()
+        .mockImplementation(async (_lease, input) => {
+          if (input.name === "linear_get_issue") {
+            return {
+              result: {
+                issue: { identifier: "ENG-123", title: "Refund flow" },
+                pullRequestUrls: [pullRequestUrl],
+              },
+              sourceRefs: [source],
+            };
+          }
+          if (input.name === "github_search_code") {
+            throw new ControlPlaneError(500, {
+              message: "Internal server error",
+            });
+          }
+          const kinds: Record<string, RuntimeSpecSourceRef["kind"]> = {
+            github_get_pull_request: "GITHUB_PULL_REQUEST",
+            github_list_changed_files: "GITHUB_DIFF",
+            github_read_file: "GITHUB_FILE",
+          };
+          const kind = kinds[input.name];
+          if (!kind) throw new Error(`Unexpected source tool: ${input.name}`);
+          return {
+            result: { pullRequestUrl },
+            sourceRefs: [
+              {
+                ...source,
+                externalId: `${source.externalId}-${kind}`,
+                kind,
+                revision: "head-sha",
+                uri: pullRequestUrl,
+              },
+            ],
+          };
+        });
+      const executor = new SpecAnalysisExecutor(
+        () => ({ responses: { create } }) as never,
+        { appendSpecEvent, executeSpecTool } as never,
+        12,
       );
-    const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
-      { appendSpecEvent, executeSpecTool } as never,
-      10,
-    );
 
-    const outcome = await executor.execute(
-      task,
-      lease,
-      new AbortController().signal,
-    );
+      const outcome = await executor.execute(
+        task,
+        lease,
+        new AbortController().signal,
+      );
 
-    expect(outcome.kind).toBe("SPEC_GENERATED");
-    expect(executeSpecTool).toHaveBeenCalledTimes(3);
-    const fourthRequest = create.mock.calls[3]?.[0] as {
-      tools: Array<{ name: string }>;
-    };
-    expect(fourthRequest.tools.map((tool) => tool.name)).not.toContain(
-      "knowledge_search",
-    );
-  });
+      expect(outcome.kind).toBe("SPEC_GENERATED");
+      expect(executeSpecTool.mock.calls.map((args) => args[1].name)).toEqual([
+        "linear_get_issue",
+        "github_get_pull_request",
+        "github_list_changed_files",
+        "github_read_file",
+        ...(searchUnavailable
+          ? ["github_search_code", "github_search_code"]
+          : []),
+      ]);
+      expect(
+        appendSpecEvent.mock.calls.filter(
+          (args) => args[1] === "agent.spec.validation_failed",
+        ),
+      ).toHaveLength(2);
+      const finalRequest = create.mock.calls.at(-1)?.[0] as {
+        tools: Array<{ name: string }>;
+      };
+      const toolNames = finalRequest.tools.map((tool) => tool.name);
+      expect(toolNames).not.toContain("knowledge_search");
+      expect(toolNames.includes("github_search_code")).toBe(!searchUnavailable);
+    },
+  );
 });

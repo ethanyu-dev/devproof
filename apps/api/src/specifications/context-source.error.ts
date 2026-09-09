@@ -1,4 +1,4 @@
-export type SpecificationContextSource = "LINEAR" | "GITHUB" | "KNOWLEDGE";
+export type SpecificationContextSource = "LINEAR" | "GITHUB";
 
 export class ContextSourceError extends Error {
   constructor(

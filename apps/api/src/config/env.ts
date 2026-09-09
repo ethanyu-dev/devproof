@@ -58,28 +58,6 @@ const envSchema = z
     ),
     GITHUB_API_URL: z.string().url().default("https://api.github.com"),
     GITHUB_API_VERSION: z.string().min(1).default("2022-11-28"),
-    KNOWLEDGE_MCP_BEARER_TOKEN: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().min(1).optional(),
-    ),
-    KNOWLEDGE_MCP_STATIC_ARGUMENTS: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().optional(),
-    ),
-    KNOWLEDGE_MCP_TIMEOUT_MS: z.coerce
-      .number()
-      .int()
-      .min(1_000)
-      .max(120_000)
-      .default(15_000),
-    KNOWLEDGE_MCP_TOOL: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().min(1).optional(),
-    ),
-    KNOWLEDGE_MCP_URL: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().url().optional(),
-    ),
     LINEAR_MCP_BEARER_TOKEN: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
@@ -230,17 +208,6 @@ const envSchema = z
         message:
           "AGENT_RESUME_WEBHOOK_URL and AGENT_RESUME_WEBHOOK_SECRET must be configured together.",
         path: ["AGENT_RESUME_WEBHOOK_URL"],
-      });
-    }
-    if (
-      value.NODE_ENV === "production" &&
-      value.KNOWLEDGE_MCP_URL &&
-      new URL(value.KNOWLEDGE_MCP_URL).protocol !== "https:"
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "KNOWLEDGE_MCP_URL must use HTTPS in production.",
-        path: ["KNOWLEDGE_MCP_URL"],
       });
     }
     if (

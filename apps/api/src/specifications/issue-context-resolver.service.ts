@@ -11,7 +11,6 @@ import {
   GithubPullRequestClient,
   parsePullRequestUrl,
 } from "./github-pull-request.client.js";
-import { KnowledgeContextClient } from "./knowledge-context.client.js";
 import { LinearContextClient } from "./linear-context.client.js";
 
 export interface ResolvedIssueContext {
@@ -25,7 +24,6 @@ export class IssueContextResolverService {
   constructor(
     private readonly linear: LinearContextClient,
     private readonly github: GithubPullRequestClient,
-    private readonly knowledge: KnowledgeContextClient,
   ) {}
 
   async readiness(teamId: string) {
@@ -34,12 +32,6 @@ export class IssueContextResolverService {
       github: {
         configured: await this.github.configured(teamId),
         mode: "TOKEN" as const,
-      },
-      knowledge: {
-        configured: this.knowledge.configured(),
-        mode: "MCP" as const,
-        optional: true as const,
-        tool: this.knowledge.configuredTool(),
       },
       linear: {
         configured: linear,
@@ -87,8 +79,6 @@ export class IssueContextResolverService {
         }
       }),
     );
-    const knowledge = await this.knowledge.resolve(linear.issue);
-    diagnostics.push(...knowledge.diagnostics);
     const completeness = diagnostics.some(
       (diagnostic) =>
         diagnostic.level === "WARNING" || diagnostic.level === "ERROR",
@@ -97,7 +87,6 @@ export class IssueContextResolverService {
       : "COMPLETE";
     const context = testGenerationContextSchema.parse({
       issue: linear.issue,
-      knowledge: knowledge.items,
       pullRequests,
       resolution: { completeness, diagnostics },
     });

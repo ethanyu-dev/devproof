@@ -11,11 +11,27 @@ import {
   runtimeRegistrationOutputSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeSpecAnalysisTaskLeaseSchema,
+  runtimeSpecAnalysisToolNameSchema,
   runtimeTaskSnapshotSchema,
   runtimeTraceEventSchema,
 } from "./index.js";
 
 describe("agent runtime protocol", () => {
+  it("rejects the retired knowledge tool while accepting Issue and GitHub tools", () => {
+    expect(
+      runtimeSpecAnalysisToolNameSchema.safeParse("knowledge_search").success,
+    ).toBe(false);
+    for (const name of [
+      "linear_get_issue",
+      "github_get_pull_request",
+      "github_list_changed_files",
+      "github_read_file",
+      "github_search_code",
+    ]) {
+      expect(runtimeSpecAnalysisToolNameSchema.parse(name)).toBe(name);
+    }
+  });
+
   it("keeps Spec lease clock metadata optional during rolling upgrades", () => {
     const clockFields = runtimeSpecAnalysisTaskLeaseSchema.pick({
       leaseExpiresAt: true,

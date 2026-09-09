@@ -742,7 +742,6 @@ describe("durable edge cases", () => {
       {} as never,
       {} as never,
       {} as never,
-      {} as never,
     );
     const input = {
       content: {},

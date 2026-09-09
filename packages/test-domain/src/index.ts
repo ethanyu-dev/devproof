@@ -323,13 +323,6 @@ export interface SpecificationGenerationContext {
     title: string;
     url: string;
   };
-  knowledge: Array<{
-    content: string;
-    id: string;
-    title: string;
-    updatedAt: string | null;
-    url: string | null;
-  }>;
   pullRequests: Array<{
     body: string;
     changedFiles: string[];
@@ -381,7 +374,6 @@ export function generateBusinessTestSpec(
       pullRequest.title,
       pullRequest.body,
     ]),
-    ...context.knowledge.map((item) => item.content),
   ];
   const extracted = unique(
     sourceTexts.flatMap((source) => extractBusinessExpectations(source)),
@@ -398,7 +390,6 @@ export function generateBusinessTestSpec(
   const comparisonSources = [
     "Issue",
     ...(context.pullRequests.length ? ["Pull Request"] : []),
-    ...(context.knowledge.length ? ["知识库规则"] : []),
   ].join("、");
 
   const cases = expectations.map((expected, index) => {
@@ -408,11 +399,6 @@ export function generateBusinessTestSpec(
     ];
     if (primaryPullRequest?.deploymentUrl) {
       preconditions[0] = `GitHub PR ${primaryPullRequest.repository}#${primaryPullRequest.number} 的部署产物可访问`;
-    }
-    if (context.knowledge[0]) {
-      preconditions.push(
-        `以知识库「${context.knowledge[0].title}」中的规则作为判断依据`,
-      );
     }
     const scopeHint = changedAreas.length
       ? `，重点覆盖 ${changedAreas.join("、")}`
@@ -454,9 +440,6 @@ export function generateBusinessTestSpec(
       : context.pullRequests.length > 1
         ? [`${context.pullRequests.length} 个 GitHub PR`]
         : []),
-    ...(context.knowledge.length
-      ? [`${context.knowledge.length} 条知识库内容`]
-      : []),
   ];
   return {
     cases,
@@ -547,7 +530,7 @@ function inferEvidence(
     );
   }
   evidence.push({
-    description: "关联 Issue、Pull Request 或知识库中的对应业务规则",
+    description: "关联 Issue 或 Pull Request 中的对应业务规则",
     kind: "BUSINESS_REFERENCE",
   });
   return uniqueBy(evidence, (item) => item.kind);

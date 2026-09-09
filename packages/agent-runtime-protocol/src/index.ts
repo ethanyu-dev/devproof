@@ -150,7 +150,7 @@ export const runtimeSpecSourceRefSchema = z.object({
     "GITHUB_PULL_REQUEST",
     "GITHUB_DIFF",
     "GITHUB_FILE",
-    "KNOWLEDGE",
+    "KNOWLEDGE", // Retained for historical analysis sources.
   ]),
   label: z.string().trim().min(1).max(500),
   locator: z.record(z.string(), z.unknown()).default({}),
@@ -242,7 +242,6 @@ export const runtimeSpecAnalysisToolNameSchema = z.enum([
   "github_list_changed_files",
   "github_read_file",
   "github_search_code",
-  "knowledge_search",
 ]);
 
 export const runtimeSpecAnalysisToolOutputSchema = z.object({

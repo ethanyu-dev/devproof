@@ -194,6 +194,42 @@ describe("DevProof contracts", () => {
     expect(context.pullRequests[0]?.changedFiles).toEqual(["a.ts", "z.ts"]);
   });
 
+  it("keeps historical knowledge snapshots and diagnostics readable", () => {
+    const legacyContext = {
+      issue: {
+        id: "issue-1",
+        identifier: "ENG-1",
+        title: "Release",
+        url: "https://linear.app/acme/issue/ENG-1",
+      },
+      knowledge: [
+        {
+          content: "Historical acceptance rule.",
+          id: "rule-1",
+          title: "Release rules",
+          updatedAt: null,
+          url: null,
+        },
+      ],
+      resolution: {
+        completeness: "PARTIAL",
+        diagnostics: [
+          {
+            code: "KNOWLEDGE_MCP_RESOLUTION_FAILED",
+            level: "WARNING",
+            message: "Historical source warning.",
+            reference: null,
+            source: "KNOWLEDGE",
+          },
+        ],
+      },
+    };
+
+    expect(testGenerationContextSchema.parse(legacyContext)).toMatchObject(
+      legacyContext,
+    );
+  });
+
   it("accepts an asynchronous Issue task with execution defaults", () => {
     const task = taskExecutionCreateInputSchema.parse({
       idempotencyKey: "issue-task:ENG-1:1",
