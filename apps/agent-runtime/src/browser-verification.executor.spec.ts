@@ -866,7 +866,7 @@ describe("browser verification bounded context", () => {
     const executor = new BrowserVerificationExecutor(
       modelFactory(create),
       controlPlane as never,
-      8,
+      10,
     );
     await executor.execute(runTask, lease, new AbortController().signal);
     expect(
@@ -1129,10 +1129,111 @@ describe("browser verification bounded context", () => {
     );
     expect(
       await executor.execute(runTask, lease, new AbortController().signal),
-    ).toMatchObject({ error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" } });
+    ).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "TOOL_LIMIT_REACHED" },
+    });
     expect(create).toHaveBeenCalledOnce();
     expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
+  it("reserves the last calls for observation and preserves completed criteria on tool exhaustion", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "budget",
+      output: [
+        functionCall(
+          "browser_command",
+          { commandType: "page.snapshot", payload: {} },
+          0,
+        ),
+        functionCall(
+          "record_criterion",
+          {
+            criterionId: "page-visible",
+            status: "PASSED",
+            summary: "页面验证通过。",
+            evidenceRefs: [],
+          },
+          1,
+        ),
+        functionCall(
+          "browser_command",
+          {
+            commandType: "page.click",
+            payload: { target: { selector: "button" } },
+          },
+          2,
+        ),
+        functionCall(
+          "browser_command",
+          { commandType: "page.get_url", payload: {} },
+          3,
+        ),
+      ],
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      4,
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot", "page.get_url"]);
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      termination: { reason: "TOOL_LIMIT_REACHED" },
+      criteria: [{ criterionId: "page-visible", status: "PASSED" }],
+    });
+  });
+
+  it("requests a test account through the existing HITL outcome with a canonical text schema", async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: "account",
+      output: [
+        functionCall(
+          "request_human_input",
+          {
+            kind: "TEST_ACCOUNT",
+            prompt: "请提供当前环境可用的测试账号。",
+            summary: "账号不存在，需要人工提供测试账号。",
+            context: { observedError: "USER_NOT_FOUND" },
+            responseSchema: { required: ["password"] },
+          },
+          0,
+        ),
+      ],
+    });
+    const { runTask, controlPlane } = convergenceHarness(create);
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      10,
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "WAITING_HUMAN",
+      intervention: {
+        kind: "TEST_ACCOUNT",
+        context: { observedError: "USER_NOT_FOUND" },
+        responseSchema: {
+          required: ["account"],
+          properties: { account: { type: "string" } },
+        },
+      },
+    });
+    expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
   });
 
   it("stops a partially executed response immediately on cancellation", async () => {
@@ -1425,7 +1526,7 @@ describe("browser verification argument corrections", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({
-      kind: "RETRYABLE_FAILURE",
+      kind: "FATAL_FAILURE",
       executionDisposition: "NOT_RUN",
       error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" },
     });
@@ -2377,9 +2478,11 @@ describe("Agent Runtime browser verification executor", () => {
         ...task.snapshot,
         executionPolicy: {
           resume: {
+            kind: "TEST_ACCOUNT",
             interventionId: "d63bd843-b89d-48ea-90c9-caad5b51d526",
             resolvedAt: "2026-08-19T07:00:00.000Z",
             response: {
+              account: "test-account-from-human",
               approved: true,
               note: "MFA completed in the preserved browser session.",
             },
@@ -2420,6 +2523,8 @@ describe("Agent Runtime browser verification executor", () => {
     }>;
     const userPrompt = input.find((item) => item.role === "user")?.content;
     expect(userPrompt).toContain("MFA completed");
+    expect(userPrompt).toContain("test-account-from-human");
+    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
   });
 
   it("supplies business references and rejects passing criteria with missing evidence kinds", async () => {

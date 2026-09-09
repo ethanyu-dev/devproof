@@ -34,6 +34,24 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("retains the latest action feedback independently of observation history and preserves it when paging DOM", () => {
+    const cache = new BrowserObservations();
+    const actionFeedback = {
+      commandId: "save",
+      requests: [{ status: 400, responseSummary: "USER_NOT_FOUND" }],
+    };
+    const raw = { result: { content: "表单\n".repeat(8000), actionFeedback } };
+    cache.capture(command("page.snapshot"), raw);
+    expect(cache.project(raw)).toMatchObject({ result: { actionFeedback } });
+    for (let index = 0; index < 10; index++)
+      capture(cache, `读取页面 ${index}`);
+    expect(cache.latestActionFeedback()).toEqual(actionFeedback);
+    const update = {
+      result: { actionFeedback: { ...actionFeedback, pending: false } },
+    };
+    cache.capture(command("page.network"), update);
+    expect(cache.latestActionFeedback()).toEqual(update.result.actionFeedback);
+  });
   it("keeps action screenshots transient even after later observations and cache reads", () => {
     const cache = new BrowserObservations();
     const immediate = {

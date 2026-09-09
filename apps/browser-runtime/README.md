@@ -158,3 +158,14 @@ The Agent's configured model/gateway must accept Responses image inputs. Existin
 sessions on older daemons require a fresh attempt after normal closure; upgrading
 the API alone does not add visual input to an old Agent. No database migration is
 required. See [DOM + visual observations](../../docs/dom-visual-browser.md).
+
+### Action feedback (unreleased)
+
+`action-feedback-v1` adds bounded fetch/XHR request candidates to action results
+and subsequent observations. Request-start sequence and page identity exclude
+older requests and other pages; temporal association is not proof of causality.
+Same-origin JSON bodies reuse existing redaction and size limits. Pending,
+omitted and truncated feedback remains explicit. Click targets and field-state
+hashes support repetition detection without exposing field values in diagnostics.
+No ARIA or target-site changes are required. See [account HITL and action feedback](../../docs/browser-runtime-data-and-feedback-plan.md)
+for coordinated API, Agent and Browser Runtime rollout order.

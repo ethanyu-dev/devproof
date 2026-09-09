@@ -53,6 +53,11 @@ export class VerificationProgress {
   private readonly operations = new Set<string>();
   private readonly observations = new Set<string>();
   private readonly criteria = new Set<string>();
+  private readonly formActions = new Map<
+    string,
+    { count: number; startedAt: number }
+  >();
+  private readonly semanticObservations = new Set<string>();
   private repeatedSteps = 0;
   private textOnlySteps = 0;
   private lastProgressAt: number;
@@ -82,7 +87,15 @@ export class VerificationProgress {
       const key = fingerprint(criterion);
       if (!this.criteria.has(key)) {
         this.criteria.add(key);
+        this.formActions.clear();
         progress = true;
+      }
+    }
+    for (const observation of pageObservations(input.output, false)) {
+      const key = fingerprint(observation);
+      if (!this.semanticObservations.has(key)) {
+        this.semanticObservations.add(key);
+        this.formActions.clear();
       }
     }
     for (const observation of pageObservations(input.output)) {
@@ -107,6 +120,27 @@ export class VerificationProgress {
       argumentsValue !== null && typeof argumentsValue === "object"
         ? (argumentsValue as Record<string, unknown>).criterionId
         : undefined;
+    const result = record(record(input.output).result);
+    const interaction = record(result.interaction);
+    const hasTarget =
+      typeof interaction.targetKey === "string" &&
+      typeof interaction.stateKey === "string";
+    if (hasTarget) {
+      const key = fingerprint(interaction);
+      const action = this.formActions.get(key) ?? {
+        count: 0,
+        startedAt: this.now(),
+      };
+      action.count += 1;
+      this.formActions.set(key, action);
+      // Intervening screenshots may animate without any form or business change.
+      if (
+        action.count > MAX_REPEATED_STEPS ||
+        (action.count > REPEATED_STEPS &&
+          this.now() - action.startedAt >= POLLING_GRACE_MS)
+      )
+        return true;
+    }
     const operation = fingerprint({
       name: input.name,
       // Rejected calls made no progress regardless of how their invalid
@@ -119,7 +153,12 @@ export class VerificationProgress {
                 ? input.criteria.find(
                     (criterion) => criterion.criterionId === criterionId,
                   )
-                : argumentsValue,
+                : hasTarget
+                  ? {
+                      commandType: record(argumentsValue).commandType,
+                      interaction,
+                    }
+                  : argumentsValue,
           }),
     });
     const repeated = this.operations.has(operation);
@@ -140,7 +179,7 @@ export class VerificationProgress {
   }
 }
 
-function pageObservations(output: unknown): unknown[] {
+function pageObservations(output: unknown, includeVisual = true): unknown[] {
   if (!output || typeof output !== "object" || Array.isArray(output)) return [];
   const record = output as Record<string, unknown>;
   const result = record.result;
@@ -151,7 +190,12 @@ function pageObservations(output: unknown): unknown[] {
     );
     if (Object.keys(content).length > 0) observations.push(content);
   }
-  if (Array.isArray(record.artifacts)) {
+  // Action screenshots contain animations and cursor changes, not proof of progress.
+  if (
+    includeVisual &&
+    !(result as Record<string, unknown> | undefined)?.interaction &&
+    Array.isArray(record.artifacts)
+  ) {
     for (const artifact of record.artifacts) {
       if (
         artifact &&
@@ -170,10 +214,19 @@ function pageObservations(output: unknown): unknown[] {
   const recovery = record.locatorRecovery;
   if (recovery && typeof recovery === "object") {
     observations.push(
-      ...pageObservations((recovery as Record<string, unknown>).snapshot),
+      ...pageObservations(
+        (recovery as Record<string, unknown>).snapshot,
+        includeVisual,
+      ),
     );
   }
   return observations;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function fingerprint(value: unknown) {

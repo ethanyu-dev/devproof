@@ -62,7 +62,12 @@ interface PreviewFrame {
 }
 
 interface RunBrowserHitlProps {
-  intervention: { expiresAt: string; id: string; prompt: string };
+  intervention: {
+    expiresAt: string;
+    id: string;
+    kind?: string;
+    prompt: string;
+  };
   onComplete: () => Promise<void>;
   runId: string;
 }
@@ -83,6 +88,15 @@ export function RunHitlBrowser({
   onComplete,
   runId,
 }: RunBrowserHitlProps) {
+  if (intervention.kind === "TEST_ACCOUNT") {
+    return (
+      <TestAccountInput
+        intervention={intervention}
+        onComplete={onComplete}
+        runId={runId}
+      />
+    );
+  }
   return (
     <BrowserHitl
       base={`/runs/${runId}/interventions/${intervention.id}/browser`}
@@ -90,6 +104,59 @@ export function RunHitlBrowser({
       floating
       onComplete={onComplete}
     />
+  );
+}
+
+function TestAccountInput({
+  intervention,
+  onComplete,
+  runId,
+}: RunBrowserHitlProps) {
+  const [account, setAccount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!account.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await consoleApi(
+        `/runs/${runId}/interventions/${intervention.id}/resolve`,
+        {
+          method: "POST",
+          body: JSON.stringify({ response: { account: account.trim() } }),
+        },
+      );
+      await onComplete();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="dp-browser-handoff">
+      <header>
+        <b>提供测试账号</b>
+      </header>
+      <p>{intervention.prompt}</p>
+      <form onSubmit={(event) => void submit(event)}>
+        <Field label="测试账号">
+          <Input
+            autoComplete="off"
+            maxLength={200}
+            onChange={(event) => setAccount(event.target.value)}
+            required
+            value={account}
+          />
+        </Field>
+        {error ? <p role="alert">{error}</p> : null}
+        <Button disabled={busy || !account.trim()} type="submit">
+          {busy ? "正在提交…" : "提交并继续执行"}
+        </Button>
+      </form>
+    </section>
   );
 }
 

@@ -25,7 +25,7 @@ interface Observation {
   cursors: Set<number>;
 }
 
-const READ_COMMANDS = new Set([
+export const READ_COMMANDS = new Set([
   "page.snapshot",
   "frame.snapshot",
   "page.get_text",
@@ -79,6 +79,11 @@ export class BrowserObservations {
   >();
   private order = 0;
   private bytes = 0;
+  private feedback: unknown;
+
+  latestActionFeedback() {
+    return this.feedback;
+  }
 
   constructor(private readonly cacheBytes = 4 * 1_024 * 1_024) {}
 
@@ -136,6 +141,8 @@ export class BrowserObservations {
     if (!READ_COMMANDS.has(command.commandType) && !successfulFormInput)
       this.invalidate();
     const result = record(response.result);
+    if (result.actionFeedback && jsonBytes(result.actionFeedback) <= 16 * 1024)
+      this.feedback = structuredClone(result.actionFeedback);
     const snapshot = ["page.snapshot", "frame.snapshot"].includes(
       command.commandType,
     );
@@ -293,7 +300,17 @@ export class BrowserObservations {
     const result = source.result;
     if (result && typeof result === "object") {
       const entry = this.capturedResults.get(result);
-      projected.result = entry ? this.page(entry, 0) : result;
+      projected.result = entry
+        ? {
+            ...this.page(entry, 0),
+            ...(record(result).actionFeedback
+              ? { actionFeedback: record(result).actionFeedback }
+              : {}),
+            ...(record(result).interaction
+              ? { interaction: record(result).interaction }
+              : {}),
+          }
+        : result;
     }
     if (Array.isArray(source.artifacts))
       projected.artifacts = source.artifacts.map((artifact) => {

@@ -1094,10 +1094,14 @@ export class AgentRuntimeTaskService {
         this.requireLease(task, input, now);
         await this.lockCurrentLease(tx, taskId, input, now);
         let outcome = input.outcome;
+        const completedVerification =
+          outcome.kind === "VERIFICATION_COMPLETED" ? outcome : null;
         let writeOutcomeUnknown = false;
         if (
           outcome.kind === "RETRYABLE_FAILURE" ||
-          outcome.kind === "FATAL_FAILURE"
+          outcome.kind === "FATAL_FAILURE" ||
+          (outcome.kind === "VERIFICATION_COMPLETED" &&
+            outcome.termination !== undefined)
         ) {
           const session = await tx.browserRuntimeSession.findFirst({
             where: {
@@ -1159,18 +1163,37 @@ export class AgentRuntimeTaskService {
           }
           if (uncertain) {
             writeOutcomeUnknown = true;
+            const originalError =
+              outcome.kind === "VERIFICATION_COMPLETED"
+                ? {
+                    code: outcome.termination!.reason,
+                    failureClass: "TOOL_EXECUTION" as const,
+                    message: outcome.summary,
+                    phase: "browser_verification",
+                  }
+                : outcome.error;
             outcome = {
               kind: "FATAL_FAILURE",
               executionDisposition: "BLOCKED",
               error: {
                 code: "WRITE_OUTCOME_UNKNOWN",
-                failureClass: "RUNTIME_LOST",
+                failureClass: originalError.failureClass,
                 message:
                   "Browser execution stopped after a possible write; reconcile the affected state before retrying.",
                 phase: "browser_verification",
-                details: {},
+                details: {
+                  originalError,
+                  ...(completedVerification
+                    ? {
+                        verification: {
+                          criteria: completedVerification.criteria,
+                          verdict: completedVerification.verdict,
+                        },
+                      }
+                    : {}),
+                },
               },
-              summary: "写操作结果尚未确认，当前执行等待状态核对。",
+              summary: `${originalError.message.slice(0, 7000)}\n写操作结果尚未确认，当前执行等待状态核对。`,
             };
             await tx.executionResourceLease.updateMany({
               data: { quarantined: true },
@@ -1192,7 +1215,7 @@ export class AgentRuntimeTaskService {
           throw new ConflictException("The run no longer accepts outcomes.");
         }
 
-        if (outcome.kind === "VERIFICATION_COMPLETED") {
+        if (completedVerification) {
           const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
           const persisted = await tx.runEvidence.findMany({
             select: {
@@ -1205,7 +1228,7 @@ export class AgentRuntimeTaskService {
           });
           const validationError = completedOutcomeEvidenceError(
             snapshot,
-            outcome,
+            completedVerification,
             persisted,
           );
           if (validationError) throw new ConflictException(validationError);
@@ -1264,9 +1287,9 @@ export class AgentRuntimeTaskService {
           where: { id: task.attemptId },
         });
 
-        if (outcome.kind === "VERIFICATION_COMPLETED") {
+        if (completedVerification) {
           await tx.runCriterionResult.createMany({
-            data: outcome.criteria.map((criterion) => ({
+            data: completedVerification.criteria.map((criterion) => ({
               attemptId: task.attemptId,
               criterionId: criterion.criterionId,
               evidenceRefs: criterion.evidenceRefs,
@@ -1276,9 +1299,9 @@ export class AgentRuntimeTaskService {
               teamId,
             })),
           });
-          if (outcome.evidence.length > 0) {
+          if (completedVerification.evidence.length > 0) {
             await tx.runEvidence.createMany({
-              data: outcome.evidence.map((evidence) => ({
+              data: completedVerification.evidence.map((evidence) => ({
                 attemptId: task.attemptId,
                 externalId: evidence.externalId,
                 kind: evidence.kind,
@@ -1412,7 +1435,7 @@ export class AgentRuntimeTaskService {
             finishedAt:
               projection.nextAttemptScheduled || isWaiting ? null : completedAt,
             lifecycle: projection.lifecycle,
-            verdict: projection.verdict,
+            verdict: completedVerification?.verdict ?? projection.verdict,
             ...(pausedDeadlineAt ? { deadlineAt: pausedDeadlineAt } : {}),
           },
           where: { id: task.runId },
@@ -1427,6 +1450,9 @@ export class AgentRuntimeTaskService {
               executionDisposition: outcome.executionDisposition,
               nextAttemptScheduled: projection.nextAttemptScheduled,
               summary: outcome.summary,
+              ...(completedVerification?.termination
+                ? { termination: completedVerification.termination }
+                : {}),
             }),
             runId: task.runId,
             taskId: task.id,

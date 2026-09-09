@@ -332,7 +332,7 @@ export class RuntimeGatewayService {
     );
     const connectionId = randomUUID();
     const capabilities = (hello.capabilities ?? []).filter((value) =>
-      value === "dom-vision-v1"
+      ["dom-vision-v1", "action-feedback-v1"].includes(value)
         ? selectedMinor >= 16
         : value === "no-launch-evidence-v1"
           ? selectedMinor >= 15 &&
@@ -458,6 +458,7 @@ export class RuntimeGatewayService {
                   typeof capability === "string" &&
                   ![
                     "dom-vision-v1",
+                    "action-feedback-v1",
                     "auth-snapshot-v1",
                     "session-permits-v1",
                     "closure-evidence-v1",

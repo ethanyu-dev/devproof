@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { DomObservations } from "./dom-observation.js";
 import { VisualObservations } from "./visual-observation.js";
+import {
+  ActionFeedbackTracker,
+  actionTarget,
+  FEEDBACK_ACTIONS,
+} from "./action-feedback.js";
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -138,6 +143,7 @@ interface LiveSession extends PersistedSession {
   consoleEntries: Array<Record<string, unknown>>;
   context: BrowserContext;
   networkEntries: Array<Record<string, unknown>>;
+  actionFeedback: ActionFeedbackTracker;
   pendingNetworkCaptures: Map<Promise<void>, string>;
   networkFaultHits: Array<{
     action: string;
@@ -1487,9 +1493,18 @@ export class BrowserSessionManager {
   }
 
   async execute(command: RuntimeCommand) {
+    const active = this.sessions.get(command.sessionId);
+    if (active && FEEDBACK_ACTIONS.has(command.commandType))
+      active.actionFeedback.begin(
+        command.commandId,
+        command.commandType,
+        this.pageId(active, active.page),
+      );
     let result;
     try {
       result = (await this.executeCommand(command)) ?? {};
+      if (active && FEEDBACK_ACTIONS.has(command.commandType))
+        active.actionFeedback.completed(command.commandId);
     } finally {
       if (STEP_SCREENSHOT_COMMANDS.has(command.commandType)) {
         const page = this.sessions.get(command.sessionId)?.page;
@@ -1516,22 +1531,23 @@ export class BrowserSessionManager {
           command.ownerFencingToken ?? command.permit?.ownerFencingToken,
       });
     }
-    if (!STEP_SCREENSHOT_COMMANDS.has(command.commandType)) return result;
+    if (!STEP_SCREENSHOT_COMMANDS.has(command.commandType))
+      return this.withActionFeedback(command, result);
     try {
       const stepArtifact = await this.captureStepArtifact(
         command.sessionId,
         command.commandType,
       );
-      if (!stepArtifact) return result;
+      if (!stepArtifact) return this.withActionFeedback(command, result);
       const artifacts = (result as { artifacts?: RuntimeArtifactPayload[] })
         .artifacts;
-      return {
+      return this.withActionFeedback(command, {
         ...result,
         artifacts: [
           ...(Array.isArray(artifacts) ? artifacts : []),
           stepArtifact,
         ],
-      };
+      });
     } catch (error) {
       runtimeLog(
         "warn",
@@ -1543,8 +1559,37 @@ export class BrowserSessionManager {
         },
         error,
       );
-      return result;
+      return this.withActionFeedback(command, result);
     }
+  }
+
+  private withActionFeedback(command: RuntimeCommand, output: object) {
+    const session = this.sessions.get(command.sessionId);
+    const feedback = session?.actionFeedback.snapshot(
+      this.pageId(session, session.page),
+    );
+    if (!feedback) return output;
+    const result = output as {
+      result?: Record<string, unknown>;
+      artifacts?: RuntimeArtifactPayload[];
+    };
+    return {
+      ...result,
+      result: { ...result.result, actionFeedback: feedback },
+      artifacts: [
+        ...(result.artifacts ?? []),
+        ...(feedback.requests.length
+          ? [
+              this.artifact(
+                "NETWORK",
+                "application/json",
+                Buffer.from(JSON.stringify(feedback)),
+                { commandId: feedback.commandId, association: "temporal" },
+              ),
+            ]
+          : []),
+      ],
+    };
   }
 
   private async executeCommand(command: RuntimeCommand) {
@@ -2046,12 +2091,14 @@ export class BrowserSessionManager {
         };
       }
       case "page.click": {
+        let interaction: Awaited<ReturnType<typeof actionTarget>> | undefined;
         if ("target" in parsed.payload) {
           const locator = await this.actionableLocator(
             session,
             parsed.payload.target,
             timeout,
           );
+          interaction = await actionTarget(locator).catch(() => undefined);
           await locator.click({ timeout });
         } else {
           if (command.ownerTaskId || parsed.payload.visualObservationId)
@@ -2060,13 +2107,35 @@ export class BrowserSessionManager {
               parsed.payload.visualObservationId,
               parsed.payload.point,
             );
+          const point = parsed.payload.point;
+          // Resolve the actual element under the observed point, including open shadow roots.
+          const hit = await session.page
+            .evaluateHandle(({ x, y }) => {
+              let element = document.elementFromPoint(x, y);
+              let next = element?.shadowRoot?.elementFromPoint(x, y);
+              while (next && next !== element) {
+                element = next;
+                next = element.shadowRoot?.elementFromPoint(x, y);
+              }
+              return element;
+            }, point)
+            .catch(() => null);
+          const element = hit?.asElement();
+          if (element)
+            interaction = await actionTarget(element).catch(() => undefined);
+          await hit?.dispose().catch(() => undefined);
           await session.page.mouse.click(
             parsed.payload.point.x,
             parsed.payload.point.y,
           );
         }
         this.emitHumanInput(session, command, { command: "click" });
-        return { result: { url: safeObservedUrl(session.page.url()) } };
+        return {
+          result: {
+            url: safeObservedUrl(session.page.url()),
+            ...(interaction ? { interaction } : {}),
+          },
+        };
       }
       case "page.fill": {
         const locator = await this.actionableLocator(
@@ -2104,19 +2173,30 @@ export class BrowserSessionManager {
         return { result: { typed: true } };
       }
       case "page.press": {
+        let interaction: Awaited<ReturnType<typeof actionTarget>> | undefined;
         if (parsed.payload.target) {
-          await (
-            await this.actionableLocator(
-              session,
-              parsed.payload.target,
-              timeout,
-            )
-          ).press(parsed.payload.key, { timeout });
+          const locator = await this.actionableLocator(
+            session,
+            parsed.payload.target,
+            timeout,
+          );
+          if (parsed.payload.key === "Enter")
+            interaction = await actionTarget(locator).catch(() => undefined);
+          await locator.press(parsed.payload.key, { timeout });
         } else {
+          if (parsed.payload.key === "Enter")
+            interaction = await actionTarget(
+              session.page.locator(":focus"),
+            ).catch(() => undefined);
           await session.page.keyboard.press(parsed.payload.key);
         }
         this.emitHumanInput(session, command, { key: parsed.payload.key });
-        return { result: { pressed: parsed.payload.key } };
+        return {
+          result: {
+            pressed: parsed.payload.key,
+            ...(interaction ? { interaction } : {}),
+          },
+        };
       }
       case "page.check":
       case "page.uncheck":
@@ -2313,8 +2393,11 @@ export class BrowserSessionManager {
           timeout,
           frame,
         );
+        const interaction = await actionTarget(locator).catch(() => undefined);
         await locator.click({ timeout });
-        return { result: { clicked: true } };
+        return {
+          result: { clicked: true, ...(interaction ? { interaction } : {}) },
+        };
       }
       case "frame.fill": {
         const frame = this.frameLocator(session, parsed.payload.frame);
@@ -3152,6 +3235,7 @@ export class BrowserSessionManager {
         consoleEntries: [],
         context,
         networkEntries: [],
+        actionFeedback: new ActionFeedbackTracker(),
         pendingNetworkCaptures: new Map(),
         networkFaultHits: [],
         networkFaultPolicies: new Map(),
@@ -3289,6 +3373,20 @@ export class BrowserSessionManager {
         this.emitEvent(session, "CONSOLE_ERROR", entry);
       }
     });
+    page.on("request", (request) => {
+      if (!["fetch", "xhr"].includes(request.resourceType())) return;
+      let frameUrl: string | undefined;
+      try {
+        frameUrl = safeObservedUrl(request.frame().url());
+      } catch {
+        /* Service-worker requests may not have a frame. */
+      }
+      session.actionFeedback.request(request, this.pageId(session, page), {
+        method: request.method(),
+        url: safeObservedUrl(request.url()),
+        frameUrl,
+      });
+    });
     page.on("response", (response) => {
       const entry = redactValue({
         method: response.request().method(),
@@ -3297,6 +3395,8 @@ export class BrowserSessionManager {
         url: safeObservedUrl(response.url()),
       }) as Record<string, unknown>;
       session.networkEntries.push(entry);
+      entry.bodyPending = true;
+      session.actionFeedback.response(response.request(), entry);
       session.networkEntries.splice(
         0,
         Math.max(0, session.networkEntries.length - 2000),
@@ -3308,9 +3408,10 @@ export class BrowserSessionManager {
         entry,
       );
       session.pendingNetworkCaptures.set(capture, response.url());
-      void capture.finally(() =>
-        session.pendingNetworkCaptures.delete(capture),
-      );
+      void capture.finally(() => {
+        entry.bodyPending = false;
+        session.pendingNetworkCaptures.delete(capture);
+      });
     });
     page.on("requestfailed", (request) => {
       const entry = redactValue({
@@ -3323,6 +3424,7 @@ export class BrowserSessionManager {
         url: safeObservedUrl(request.url()),
       }) as Record<string, unknown>;
       session.networkEntries.push(entry);
+      session.actionFeedback.response(request, entry);
       this.emitEvent(session, "NETWORK_ERROR", entry);
     });
     page.on("close", () => {
@@ -3356,6 +3458,7 @@ export class BrowserSessionManager {
         responseUrl.origin !== pageUrl.origin ||
         !/(?:application|text)\/(?:[a-z0-9.+-]*\+)?json\b/iu.test(contentType)
       ) {
+        entry.responseBodyOmitted = "origin_or_content_type";
         return;
       }
       const declaredLength = Number(response.headers()["content-length"]);
@@ -3393,6 +3496,7 @@ export class BrowserSessionManager {
       entry.responseContentType = boundedUtf8Text(contentType, 200);
       trimNetworkResponseBodies(session.networkEntries);
     } catch {
+      entry.responseBodyOmitted = "capture_failed";
       // Response bodies are optional evidence enrichment. Metadata remains usable.
     }
   }

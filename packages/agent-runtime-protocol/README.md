@@ -35,6 +35,12 @@ abort source tools, trace requests, and outcome submission when ownership is
 lost. The metadata remains optional for rolling upgrades; older control planes
 use the conservative local expiry fallback and older workers can still drain.
 
+Protocol v2.12 adds optional `termination.reason` to forced verification completion.
+The control plane audits uncertain writes on these outcomes, preserves partial
+criteria, and retains the original stop reason if execution is blocked. Deploy
+the API before the new Agent; older APIs may discard this field and cannot safely
+process the new forced-completion path. See [account HITL and action feedback](../../docs/browser-runtime-data-and-feedback-plan.md).
+
 The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.
 The retired optimization pool, its routes, capabilities and concurrency field
 are removed. Existing workers for the two retained pools accept the registration

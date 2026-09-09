@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ActionFeedbackTracker } from "./action-feedback.js";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +48,8 @@ describe("user Browser Profile inactivity retention", () => {
       Record<string, unknown>
     >;
     sessions.set("profile-session", {
+      actionFeedback: new ActionFeedbackTracker(),
+      pageIds: new Map(),
       fencingToken: "1",
       leaseToken: "11111111-1111-4111-8111-111111111111",
       page,

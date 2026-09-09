@@ -17,6 +17,65 @@ function snapshot(content: string, index: number) {
 }
 
 describe("verification progress", () => {
+  it("bounds the same target with unchanged fields despite coordinate jitter and interleaved animated screenshots", () => {
+    let now = 0;
+    const progress = new VerificationProgress(() => now);
+    let stopped = false;
+    for (let index = 0; index < 12 && !stopped; index++) {
+      now = index * 10_000;
+      progress.tool({
+        ...snapshot("表单", index),
+        output: {
+          artifacts: [{ kind: "SCREENSHOT", sha256: `animation-${index}` }],
+        },
+      });
+      stopped = progress.tool({
+        name: "browser_command",
+        criteria: [],
+        arguments: JSON.stringify({
+          commandType: "page.click",
+          payload: { point: { x: 800 + index, y: 600 } },
+        }),
+        output: {
+          result: {
+            interaction: {
+              targetKey: "save",
+              stateKey: "same-fields",
+              hasFormInputs: true,
+            },
+          },
+          artifacts: [{ kind: "SCREENSHOT", sha256: `cursor-${index}` }],
+        },
+      });
+      if (index < 8) expect(stopped).toBe(false);
+    }
+    expect(stopped).toBe(true);
+  });
+
+  it("allows corrected inputs and repeated actions with observed business progress", () => {
+    const progress = new VerificationProgress(() => 120_000);
+    for (let index = 0; index < 35; index++) {
+      expect(progress.tool(snapshot(`已创建 ${index} 条记录`, index))).toBe(
+        false,
+      );
+      expect(
+        progress.tool({
+          name: "browser_command",
+          criteria: [],
+          arguments: JSON.stringify({ commandType: "page.click" }),
+          output: {
+            result: {
+              interaction: {
+                targetKey: "save",
+                stateKey: index % 2 ? "corrected" : "original",
+                hasFormInputs: true,
+              },
+            },
+          },
+        }),
+      ).toBe(false);
+    }
+  });
   it("ignores prose and artifact-id rewrites when the recorded criterion has not changed", () => {
     const progress = new VerificationProgress(() => 0);
     const criteria = [
