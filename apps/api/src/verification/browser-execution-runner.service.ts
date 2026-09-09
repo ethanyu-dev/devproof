@@ -24,6 +24,7 @@ import {
   releaseVerifiedSessionResources,
 } from "../runtime/session-resource-cleanup.js";
 import {
+  businessDataLocksEnabled,
   concurrencyPolicy,
   ExecutionAdmissionBlocked,
   executionTarget,
@@ -1679,7 +1680,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           }
         }
         const claims =
-          input.purpose === "PROFILE_PURGE"
+          input.purpose === "PROFILE_PURGE" || !businessDataLocksEnabled()
             ? []
             : resourceClaims(input.targetUrl, execution?.run.concurrencyPolicy);
         const existingLeases = claims.length

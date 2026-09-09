@@ -16,6 +16,12 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    env: { NODE_ENV: "test", BROWSER_ISOLATED_AUTH_ENABLED: "true" },
+    env: {
+      NODE_ENV: "test",
+      BROWSER_ISOLATED_AUTH_ENABLED: "true",
+      // Existing serialization suites exercise the opt-in policy. Parallel
+      // admission cases explicitly unset this to exercise the production default.
+      BROWSER_EXECUTION_DATA_LOCKS_ENABLED: "true",
+    },
   },
 });

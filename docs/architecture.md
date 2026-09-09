@@ -98,7 +98,7 @@ Only the API may transition Task or Run state, schedule a retry, or perform term
 - Session results must match the current session ID, lease token, and fencing token.
 - Resuming a session rotates the lease token and increments the fencing token.
 - Runtime restart reconciles persisted session descriptors and terminates orphaned browser processes before reporting verified closure. A revoked session cannot resume by heartbeat; safe execution recovery uses a bounded new Attempt.
-- Session expiry revokes permission and quarantines occupied slots/identity permits until browser closure is verified. An uncertain write retains its business-data lock until its outcome is reconciled, even after the browser closes. Completed outcomes release verified-closed resources.
+- Session expiry revokes permission and quarantines occupied slots/identity permits until browser closure is verified. Business-data locks are disabled by default, so an uncertain write does not block other executions. With `BROWSER_EXECUTION_DATA_LOCKS_ENABLED=true`, an uncertain write retains its business-data lock until its outcome is reconciled, even after the browser closes. Completed outcomes release verified-closed resources.
 - Runtime-wide SSRF policy governs navigation, redirects, subresources, and WebSockets. Profile authorization does not replace network policy.
 
 Domain routing evaluates the hostname in `execution.targetUrl`. Exact and `*.` wildcard rules may restrict a task to selected Runtimes. When no rule matches, the API selects from online, capability-compatible Runtimes.

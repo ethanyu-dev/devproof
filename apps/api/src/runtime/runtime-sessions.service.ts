@@ -22,6 +22,7 @@ import type { AuthContext } from "../auth/auth.types.js";
 import { env } from "../config/env.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import { businessDataLocksEnabled } from "../verification/execution-concurrency.js";
 import {
   quarantineSession,
   releaseVerifiedSessionResources,
@@ -342,6 +343,7 @@ export class RuntimeSessionsService {
               );
             if (
               input.purpose === "EXECUTION" &&
+              businessDataLocksEnabled() &&
               ((await tx.executionResourceLease.count()) ||
                 (await tx.browserRuntimeSession.count({
                   where: {
@@ -423,7 +425,7 @@ export class RuntimeSessionsService {
                 },
               });
             }
-            if (input.purpose === "EXECUTION")
+            if (input.purpose === "EXECUTION" && businessDataLocksEnabled())
               await tx.executionResourceLease.create({
                 data: {
                   sessionId: created.id,
@@ -631,7 +633,9 @@ export class RuntimeSessionsService {
             purpose: "EXECUTION",
             closureVerifiedAt: null,
             status: { not: "CLOSED" },
-            resourceLeases: { none: {} },
+            ...(businessDataLocksEnabled()
+              ? { resourceLeases: { none: {} } }
+              : { quarantinedAt: { not: null } }),
           },
         ],
       },

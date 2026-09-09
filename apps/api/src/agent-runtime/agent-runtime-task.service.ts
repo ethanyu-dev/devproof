@@ -1170,7 +1170,7 @@ export class AgentRuntimeTaskService {
                 phase: "browser_verification",
                 details: {},
               },
-              summary: "写操作结果尚未确认，相关资源已隔离，等待状态核对。",
+              summary: "写操作结果尚未确认，当前执行等待状态核对。",
             };
             await tx.executionResourceLease.updateMany({
               data: { quarantined: true },

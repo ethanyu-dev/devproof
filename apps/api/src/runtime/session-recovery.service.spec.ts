@@ -152,10 +152,26 @@ const proof: RuntimeClosureProof = {
   closureCompletedAt: new Date().toISOString(),
 };
 
-beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
+beforeEach(() => {
+  vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true");
+  vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "true");
+});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("recovery classification and business protection", () => {
+  it("records unknown outcomes without creating a global guard in parallel mode", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const { tx, session, recovery } = setup();
+    await materializeRecoveryGuards(
+      tx as never,
+      session as never,
+      recovery as never,
+    );
+    expect(tx.executionResourceLease.create).not.toHaveBeenCalled();
+    expect(await initialWriteState(tx as never, session as never)).toBe(
+      "UNKNOWN",
+    );
+  });
   it("materializes a wildcard WRITE guard for an unscoped, ownerless legacy execution", async () => {
     const { tx, session, recovery } = setup();
     await materializeRecoveryGuards(
