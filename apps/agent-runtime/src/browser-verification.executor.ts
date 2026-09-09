@@ -139,7 +139,7 @@ export class BrowserVerificationExecutor {
     await this.acquireBrowserWithPolicy(task, lease, signal, {
       availabilityPolicy: browserPolicy.availabilityPolicy,
       profile: browserPolicy.profile,
-      requiredCapabilities: browserPolicy.requiredCapabilities,
+      requiredCapabilities: [...browserPolicy.requiredCapabilities],
       ...(targetUrl ? { targetUrl } : {}),
     });
     const modelCandidates = task.snapshot.modelCandidates ?? [];
@@ -172,9 +172,7 @@ export class BrowserVerificationExecutor {
       ],
       this.options,
     );
-    const observations = context.bounded
-      ? new BrowserObservations()
-      : undefined;
+    const observations = new BrowserObservations();
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
     const preferredModel = modelCandidates[0]!;
@@ -304,7 +302,9 @@ export class BrowserVerificationExecutor {
               content: JSON.stringify({
                 kind: "runtime_initial_navigation",
                 command,
-                result: observations ? observations.project(result) : result,
+                result: observations
+                  ? observations.project(result, context.bounded)
+                  : result,
               }),
             },
           ],
@@ -330,19 +330,23 @@ export class BrowserVerificationExecutor {
         };
         let view: ReturnType<ModelContext["build"]>;
         try {
-          view = context.build(requestBase, {
-            acceptedCriteria: [...criterionResults.values()],
-            unresolvedCriterionIds: task.snapshot.criteria
-              .filter((item) => !criterionResults.has(item.id))
-              .map((item) => item.id),
-            evidence: [...evidence.values()].map(({ externalId, kind }) => ({
-              externalId,
-              kind,
-            })),
-            locatorRecovery: locatorRecoveryState,
-            observations: observations?.index() ?? [],
-            browserTools: toolSurface,
-          });
+          view = context.build(
+            requestBase,
+            {
+              acceptedCriteria: [...criterionResults.values()],
+              unresolvedCriterionIds: task.snapshot.criteria
+                .filter((item) => !criterionResults.has(item.id))
+                .map((item) => item.id),
+              evidence: [...evidence.values()].map(({ externalId, kind }) => ({
+                externalId,
+                kind,
+              })),
+              locatorRecovery: locatorRecoveryState,
+              observations: observations?.index() ?? [],
+              browserTools: toolSurface,
+            },
+            observations.currentVisual(),
+          );
         } catch (error) {
           if (!(error instanceof ContextBudgetExceeded)) throw error;
           signal.throwIfAborted();
@@ -558,7 +562,7 @@ export class BrowserVerificationExecutor {
           }
           const modelOutput =
             observations && call.name === "browser_command"
-              ? observations.project(result.output)
+              ? observations.project(result.output, context.bounded)
               : result.output;
           await this.appendTraceEvent(lease, {
             kind: "agent.tool.completed",
@@ -862,19 +866,40 @@ export class BrowserVerificationExecutor {
           },
         };
       }
-      if (input.observations?.staleRef(command)) {
+      if (input.observations?.unreadRef(command)) {
         return correction(
           input.browserCommandCount,
-          "该 ref 未出现在当前有效的页面观察中。请重新采集 page.snapshot 或 frame.snapshot 并使用其中的完整 ref；缓存的历史内容不能恢复 ref 有效性。",
+          "该 ref 尚未在当前观察的已读页面中返回。请先按 nextAction 读取后续页，再使用其中的完整 ref。",
         );
       }
+      const staleRef = input.observations?.staleRef(command) ?? false;
+      const staleVisual =
+        command.commandType === "page.click" &&
+        "point" in command.payload &&
+        (!command.payload.visualObservationId ||
+          command.payload.visualObservationId !==
+            input.observations?.currentVisual()?.observationId);
+      const attempted = staleRef || staleVisual ? 0 : 1;
       try {
-        const result = await this.browserCommand(
-          input.lease,
-          command,
-          input.signal,
-          input.observations,
-        );
+        const result =
+          staleRef || staleVisual
+            ? {
+                status: "FAILED",
+                accepted: false,
+                error: {
+                  code: staleRef
+                    ? "STALE_DOM_REFERENCE"
+                    : "STALE_VISUAL_OBSERVATION",
+                  message:
+                    "该引用或截图不属于当前有效观察；已重新观察，请按原意图定位。",
+                },
+              }
+            : await this.browserCommand(
+                input.lease,
+                command,
+                input.signal,
+                input.observations,
+              );
         collectEvidence(result, input.evidence);
         const commandError = browserCommandError(result);
 
@@ -887,7 +912,7 @@ export class BrowserVerificationExecutor {
           );
           if (acknowledged && browserCommandSucceeded(result)) {
             return {
-              browserCommandCount: input.browserCommandCount + 1,
+              browserCommandCount: input.browserCommandCount + attempted,
               locatorRecoveryState: null,
               output: result,
             };
@@ -909,7 +934,7 @@ export class BrowserVerificationExecutor {
           return {
             browserCommandCount:
               input.browserCommandCount +
-              1 +
+              attempted +
               (recoverySnapshot.attempted ? 1 : 0),
             locatorRecoveryState: recoveryState,
             output: locatorRecoveryOutput({
@@ -922,7 +947,13 @@ export class BrowserVerificationExecutor {
           };
         }
 
-        if (commandError?.code === "LOCATOR_AMBIGUOUS") {
+        if (
+          [
+            "LOCATOR_AMBIGUOUS",
+            "STALE_DOM_REFERENCE",
+            "STALE_VISUAL_OBSERVATION",
+          ].includes(String(commandError?.code))
+        ) {
           const recoveryState: LocatorRecoveryState = {
             exhausted: false,
             failedCommandType: command.commandType,
@@ -941,7 +972,7 @@ export class BrowserVerificationExecutor {
           return {
             browserCommandCount:
               input.browserCommandCount +
-              1 +
+              attempted +
               (recoverySnapshot.attempted ? 1 : 0),
             locatorRecoveryState: recoveryState,
             output: locatorRecoveryOutput({
@@ -955,7 +986,7 @@ export class BrowserVerificationExecutor {
         }
 
         return {
-          browserCommandCount: input.browserCommandCount + 1,
+          browserCommandCount: input.browserCommandCount + attempted,
           output: result,
         };
       } catch (error) {
@@ -981,7 +1012,7 @@ export class BrowserVerificationExecutor {
           return {
             browserCommandCount:
               input.browserCommandCount +
-              1 +
+              attempted +
               (recoverySnapshot.attempted ? 1 : 0),
             locatorRecoveryState: recoveryState,
             output: locatorRecoveryOutput({
@@ -1004,7 +1035,7 @@ export class BrowserVerificationExecutor {
         // A command was attempted. Keep transport failures separate from
         // argument corrections, which never issue a browser command.
         return {
-          browserCommandCount: input.browserCommandCount + 1,
+          browserCommandCount: input.browserCommandCount + attempted,
           output: {
             accepted: false,
             error: error instanceof Error ? error.message : String(error),
@@ -1365,7 +1396,7 @@ function isLocatorRetargetAttempt(
   command: RuntimeActionCommand,
 ): boolean {
   if (command.commandType !== recoveryState.failedCommandType) return false;
-  return "target" in (command.payload as Record<string, unknown>);
+  return "target" in command.payload || "point" in command.payload;
 }
 
 function locatorRetargetAcknowledged(
@@ -1375,6 +1406,12 @@ function locatorRetargetAcknowledged(
 ): boolean {
   if (recoveryToken !== recoveryState.recoveryToken) return false;
   const payload = command.payload as Record<string, unknown>;
+  if (
+    command.commandType === "page.click" &&
+    "point" in command.payload &&
+    command.payload.visualObservationId
+  )
+    return true;
   const target = payload.target;
   if (!target || typeof target !== "object" || Array.isArray(target)) {
     return false;
@@ -1451,6 +1488,7 @@ function traceRecord(value: Record<string, unknown>): Record<string, unknown> {
 
 function tracePreview(value: unknown, depth = 0): unknown {
   if (typeof value === "string") {
+    if (/^data:image\//u.test(value)) return "[viewport image omitted]";
     // Responses tool arguments and outputs are JSON strings, including nested
     // serialized results. Apply the same key redaction before truncating them.
     if (/^\s*[\[{"]/u.test(value)) {
@@ -1487,7 +1525,7 @@ function tracePreview(value: unknown, depth = 0): unknown {
       .slice(0, TRACE_KEY_LIMIT)
       .map(([key, child]) => [
         key,
-        SENSITIVE_TRACE_KEY.test(key)
+        SENSITIVE_TRACE_KEY.test(key) || key === "dataBase64"
           ? "••••redacted••••"
           : tracePreview(child, depth + 1),
       ]),
@@ -1838,11 +1876,17 @@ function readBrowserPolicy(policy: Record<string, unknown>) {
     availabilityPolicy:
       browser.availabilityPolicy === "FAIL_FAST" ? "FAIL_FAST" : "WAIT",
     profile: { ...(key ? { key } : {}), mode },
-    requiredCapabilities: Array.isArray(browser.requiredCapabilities)
-      ? browser.requiredCapabilities.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : ["browser"],
+    requiredCapabilities: [
+      ...new Set([
+        "browser",
+        "dom-vision-v1",
+        ...(Array.isArray(browser.requiredCapabilities)
+          ? browser.requiredCapabilities.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : []),
+      ]),
+    ],
   } as const;
 }
 
@@ -1967,8 +2011,11 @@ ${groupedTools ? "browser_command 默认只公布核心操作。其他操作先�
   }观察到足够证据后，直接用 finish_verification 的 criteria 提交各条验收结果、准确证据引用和最终结论；无需为收尾重新导航或重复采集已足够的证据。长任务可用 record_criterion 保存中间结论，并更新同一条标准。证据引用必须来自实际工具输出。
 任务提供的业务引用是不可变的已观察证据；支持某条验收标准时，必须引用其准确的 externalId。
 客户端导航后要等待明确的 selector 或文本。除非确定应用最终会完全空闲，否则避免使用 networkidle。
-页面包含 wujie-app 微前端时，snapshot 和文本目标应限定在 wujie-app 内，不要使用通用 body 或 #root selector。
-browser_command 返回 LOCATOR_AMBIGUOUS 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
+page.snapshot 提供实际 DOM 节点、文本、原生标签、值和 ref，同时附带视口截图。网站不需要实现 ARIA 或特定组件语法，不依赖 accessibility role。观察整个页面及弹层，不要按框架名字预设 DOM 结构。
+current_browser_viewport 中的 input_image 才是你实际看到的图片；截图编号或文件名不代表看过图。DOM 不足（自定义控件、Canvas、封闭 Shadow DOM）时，结合截图判断，用 page.click 的 point 和该图 observationId 作为 visualObservationId 操作；不能猜坐标。滚动、导航、窗口变化或旧图失效后重新观察。图片缺失时先 page.screenshot，不能假装视觉成功。
+原生 <select> 才能使用 page.select；自定义下拉先点击展开，再观察 DOM + 图片，点击当前可见选项，最后检查显示值和业务反馈。看到隐藏、重复候选时不能 first/nth 猜测。Canvas/自绘输入先视觉点击聚焦，再启用 input 工具组用不带 target 的 page.type 输入文本，必要时 page.press；操作后验证结果。
+STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
+browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE 或 STALE_VISUAL_OBSERVATION 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
 只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并提供所有必需验收标准后，才能完成验证。
 所有用户可见的生成内容必须使用简体中文，包括验收标准摘要、HITL 提示、等待摘要和最终验证摘要。标识符、URL、代码符号、API 路径、工具名、枚举值和 evidence reference 保持原样，不要翻译。

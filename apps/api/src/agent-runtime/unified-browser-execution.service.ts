@@ -1,3 +1,8 @@
+import {
+  VISUAL_OBSERVATION_MAX_BYTES,
+  visualObservationMetadataSchema,
+} from "@devproof/runtime-protocol";
+import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { ConflictException, Injectable } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import {
@@ -24,6 +29,7 @@ export class UnifiedBrowserExecutionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly browser: BrowserExecutionRunner,
+    private readonly storage: ObjectStorageService,
   ) {}
 
   async acquire(
@@ -42,6 +48,23 @@ export class UnifiedBrowserExecutionService {
       update: { input: json(input.execution) },
       where: { attemptId: task.attemptId },
     });
+    if (execution.runtimeSessionId) {
+      const session = await this.prisma.browserRuntimeSession.findUnique({
+        where: { id: execution.runtimeSessionId },
+        select: { runtime: { select: { capabilities: true } } },
+      });
+      if (
+        !Array.isArray(session?.runtime.capabilities) ||
+        !session.runtime.capabilities.includes("dom-vision-v1")
+      ) {
+        throw new ConflictException({
+          code: "BROWSER_RUNTIME_UPGRADE_REQUIRED",
+          retryable: false,
+          message:
+            "This existing browser session does not support DOM + vision. Upgrade Browser Runtime and start a fresh attempt.",
+        });
+      }
+    }
     const request = verificationRequestSchema.parse({
       acceptanceCriteria: [
         {
@@ -57,7 +80,12 @@ export class UnifiedBrowserExecutionService {
         acquireTimeoutSeconds: 300,
         availabilityPolicy: input.execution.availabilityPolicy,
         profile: input.execution.profile,
-        requiredCapabilities: input.execution.requiredCapabilities,
+        requiredCapabilities: [
+          ...new Set([
+            ...input.execution.requiredCapabilities,
+            "dom-vision-v1",
+          ]),
+        ],
         runTimeoutSeconds: Math.max(
           120,
           Math.floor((Date.parse(snapshot.deadlineAt) - Date.now()) / 1_000),
@@ -130,7 +158,7 @@ export class UnifiedBrowserExecutionService {
         "Acquire browser execution before sending commands.",
       );
     }
-    return this.browser.executeForExecutionRun(
+    const result = await this.browser.executeForExecutionRun(
       teamId,
       execution.id,
       input.command,
@@ -143,6 +171,58 @@ export class UnifiedBrowserExecutionService {
         expiresAt: task.leaseExpiresAt!,
       },
     );
+    // Only hydrate artifacts returned by this leased task's own command. Never
+    // accept storage keys or arbitrary artifact IDs from Agent tool arguments.
+    const artifact =
+      result.status === "SUCCEEDED"
+        ? result.artifacts.findLast(
+            (item) =>
+              item.kind === "SCREENSHOT" &&
+              ["image/jpeg", "image/png"].includes(item.contentType) &&
+              visualObservationMetadataSchema.safeParse(
+                (item.metadata as Record<string, unknown> | null)
+                  ?.visualObservation,
+              ).success,
+          )
+        : undefined;
+    if (!artifact) return result;
+    if (artifact.byteSize > VISUAL_OBSERVATION_MAX_BYTES) {
+      return {
+        ...result,
+        visualObservationError:
+          "VIEWPORT_IMAGE_TOO_LARGE: reduce viewport or capture a JPEG screenshot.",
+      };
+    }
+    try {
+      const image = await this.storage.get(artifact.storageKey, {
+        start: 0,
+        end: VISUAL_OBSERVATION_MAX_BYTES,
+      });
+      if (
+        image.body.byteLength !== artifact.byteSize ||
+        image.body.byteLength > VISUAL_OBSERVATION_MAX_BYTES
+      )
+        throw new Error("Unexpected screenshot byte size.");
+      return {
+        ...result,
+        visualObservation: {
+          ...visualObservationMetadataSchema.parse(
+            (artifact.metadata as Record<string, unknown>).visualObservation,
+          ),
+          artifactId: artifact.id,
+          contentType: artifact.contentType,
+          dataBase64: image.body.toString("base64"),
+        },
+      };
+    } catch {
+      // The browser action may already have succeeded. Do not turn a failed
+      // image fetch into a transport error that could replay a save/delete.
+      return {
+        ...result,
+        visualObservationError:
+          "VIEWPORT_IMAGE_UNAVAILABLE: capture a fresh viewport screenshot before visual interaction.",
+      };
+    }
   }
 
   async release(teamId: string, taskId: string, input: LeaseInput) {

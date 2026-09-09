@@ -34,6 +34,42 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("keeps image bytes out of tool text and invalidates images after mutations, failures, and full-page captures", () => {
+    const cache = new BrowserObservations();
+    const visual = {
+      artifactId: "3a6cbe48-f36c-4b48-bae1-d8d5e50f4ce0",
+      observationId: "6730b25a-d1d3-4a10-a0c1-69fd4d74643a",
+      capturedAt: new Date().toISOString(),
+      viewport: { width: 1280, height: 720 },
+      contentType: "image/jpeg",
+      dataBase64: Buffer.from("private image bytes").toString("base64"),
+    };
+    const raw = {
+      status: "SUCCEEDED",
+      visualObservation: visual,
+      result: { content: "- <input> [ref=f1e1]" },
+    };
+    cache.capture(command("page.snapshot"), raw);
+    expect(cache.currentVisual()).toEqual(visual);
+    expect(JSON.stringify(cache.project(raw))).not.toContain(visual.dataBase64);
+    expect(JSON.stringify(cache.project(raw, false))).not.toContain(
+      visual.dataBase64,
+    );
+    cache.capture(
+      command("page.fill", { target: { ref: "f1e1" }, text: "value" }),
+      { status: "SUCCEEDED", result: { filled: true } },
+    );
+    expect(cache.currentVisual()).toBeUndefined();
+    cache.capture(command("page.snapshot"), raw);
+    cache.capture(command("page.screenshot", { fullPage: true }), {
+      status: "SUCCEEDED",
+    });
+    expect(cache.currentVisual()).toBeUndefined();
+    cache.capture(command("page.snapshot"), raw);
+    cache.capture(click("f1e1"), { status: "FAILED" });
+    expect(cache.currentVisual()).toBeUndefined();
+  });
+
   it("pages exact captured text on complete ref lines and exposes later refs only after reading", () => {
     const cache = new BrowserObservations();
     const content = Array.from(

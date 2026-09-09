@@ -48,6 +48,44 @@ function turn(context: ModelContext, index: number, content = "observed") {
 }
 
 describe("bounded model context", () => {
+  it("sends one typed image outside the text budget, replacing it without retaining pixels in history", () => {
+    const context = new ModelContext(initial, { maxBytes: 4_096 });
+    const image = {
+      artifactId: "3a6cbe48-f36c-4b48-bae1-d8d5e50f4ce0",
+      observationId: "6730b25a-d1d3-4a10-a0c1-69fd4d74643a",
+      capturedAt: new Date().toISOString(),
+      viewport: { width: 1280, height: 720 },
+      contentType: "image/jpeg" as const,
+      dataBase64: Buffer.alloc(512_000, 42).toString("base64"),
+    };
+    const first = context.build({ model: "vision" }, {}, image);
+    expect(first.metrics).toMatchObject({ imageCount: 1, imageBytes: 512_000 });
+    expect(first.metrics.textRequestBytes).toBeLessThan(4_096);
+    expect(first.metrics.requestBytes).toBeGreaterThan(512_000);
+    expect(first.input.at(-1)).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text" },
+        {
+          type: "input_image",
+          image_url: `data:image/jpeg;base64,${image.dataBase64}`,
+          detail: "high",
+        },
+      ],
+    });
+    turn(context, 1);
+    const nextImage = {
+      ...image,
+      dataBase64: Buffer.from("next image").toString("base64"),
+    };
+    const next = context.build({ model: "vision" }, {}, nextImage);
+    expect(JSON.stringify(next.input)).not.toContain(image.dataBase64);
+    expect(JSON.stringify(next.input).match(/input_image/gu)).toHaveLength(1);
+    expect(JSON.stringify(context.build({}, {}).input)).not.toContain(
+      "input_image",
+    );
+  });
+
   it("compacts whole response groups and keeps exact requirements and accepted state", () => {
     const context = new ModelContext(initial);
     for (let index = 0; index < 9; index += 1) turn(context, index);

@@ -42,7 +42,7 @@ async function fixtureServer() {
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end(`<!doctype html>
       <button onclick="document.querySelector('#count').textContent='1'">Increment</button>
-      <label>Name <input aria-label="Name"></label>
+      <label>Name <input></label>
       <button onclick="fetch('/api').then(r => document.querySelector('#fault').textContent=String(r.status))">Fetch API</button>
       <button onclick="fetch('/api-json').then(r => r.json()).then(() => document.querySelector('#json-status').textContent='JSON loaded')">Fetch JSON</button>
       <div id="count">0</div><div id="fault"></div><div id="json-status"></div>
@@ -65,6 +65,8 @@ async function fixtureServer() {
         <button class="late-ambiguous">Visible G</button>
       </main>
       <footer><a href="/solution/ai">人工智能解决方案</a></footer>
+      <div id="custom-select" onclick="this.textContent='展开选项'">自定义下拉</div>
+      <canvas style="position:fixed;left:850px;top:20px;width:120px;height:80px" onclick="document.querySelector('#count').textContent='canvas clicked'"></canvas>
       <div id="shadow-host"></div>
       <iframe src="/frame"></iframe>
       <script>
@@ -149,10 +151,10 @@ describe("BrowserSessionManager E2E", () => {
       const snapshot = observed.result?.content ?? "";
       const incrementLine = snapshot
         .split("\n")
-        .find((line) => line.includes('button "Increment"'));
+        .find((line) => line.includes('<button> "Increment"'));
       const nameLine = snapshot
         .split("\n")
-        .find((line) => line.includes('textbox "Name"'));
+        .find((line) => line.includes('<input label="Name"'));
       const incrementRef = incrementLine?.match(
         /\[ref=((?:f\d+)?e\d+)\]/u,
       )?.[1];
@@ -169,6 +171,57 @@ describe("BrowserSessionManager E2E", () => {
         target: { ref: nameRef },
         text: "DevProof",
       });
+
+      await execute("page.click", { target: { selector: "input" } });
+      await execute("page.type", { text: " 中文" });
+      const typed = (await execute("page.snapshot", {})) as {
+        result: { content: string };
+      };
+      expect(typed.result.content).toContain('value="DevProof 中文"');
+      await expect(
+        execute("page.select", {
+          target: { selector: "#custom-select" },
+          values: ["test"],
+        }),
+      ).rejects.toMatchObject({ code: "CUSTOM_SELECT_REQUIRES_CLICK" });
+      const screenshot = (await execute("page.screenshot", {
+        format: "png",
+      })) as {
+        artifacts: Array<{
+          dataBase64: string;
+          metadata: {
+            visualObservation: {
+              observationId: string;
+              viewport: { width: number; height: number };
+            };
+          };
+        }>;
+      };
+      const image = screenshot.artifacts[0]!;
+      const png = Buffer.from(image.dataBase64, "base64");
+      expect(png.readUInt32BE(16)).toBe(
+        image.metadata.visualObservation.viewport.width,
+      );
+      expect(png.readUInt32BE(20)).toBe(
+        image.metadata.visualObservation.viewport.height,
+      );
+      await execute("page.click", {
+        point: { x: 900, y: 50 },
+        visualObservationId: image.metadata.visualObservation.observationId,
+      });
+      expect(
+        (
+          (await execute("page.get_text", {
+            target: { selector: "#count" },
+          })) as { result: { content: string } }
+        ).result.content,
+      ).toBe("canvas clicked");
+      await expect(
+        execute("page.click", {
+          point: { x: 900, y: 50 },
+          visualObservationId: image.metadata.visualObservation.observationId,
+        }),
+      ).rejects.toMatchObject({ code: "STALE_VISUAL_OBSERVATION" });
 
       const panelSnapshot = (await execute("page.snapshot", {
         target: { selector: '[role="tabpanel"]' },

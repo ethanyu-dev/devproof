@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 15,
+  minor: 16,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
@@ -12,11 +12,33 @@ export const RUNTIME_NO_LAUNCH_CAPABILITY = "no-launch-evidence-v1";
 export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
 export const RUNTIME_CAPABILITIES = [
   "browser",
+  "dom-vision-v1",
   "auth-snapshot-v1",
   "session-permits-v1",
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
   RUNTIME_NO_LAUNCH_CAPABILITY,
 ] as const;
+
+// One current viewport image travels separately from the text history budget.
+export const VISUAL_OBSERVATION_MAX_BYTES = 1_250 * 1_024;
+export const visualObservationMetadataSchema = z.object({
+  observationId: z.string().uuid(),
+  capturedAt: z.string().datetime(),
+  viewport: z.object({
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  }),
+});
+export const visualObservationSchema = visualObservationMetadataSchema.extend({
+  artifactId: z.string().uuid(),
+  contentType: z.enum(["image/jpeg", "image/png"]),
+  dataBase64: z
+    .string()
+    .min(4)
+    .max(Math.ceil(VISUAL_OBSERVATION_MAX_BYTES / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/u),
+});
+export type VisualObservation = z.infer<typeof visualObservationSchema>;
 
 export const runtimeClosureRecoverySchema = z
   .object({
@@ -546,8 +568,8 @@ const urlSchema = z
     message: "Browser navigation URLs cannot contain credentials.",
   });
 const selectorSchema = z.string().trim().min(1).max(2_048);
-// Playwright AI snapshots expose opaque aria-ref tokens. Top-level refs use
-// eN while refs scoped to a frame/page generation include an fN prefix.
+// DOM observations expose opaque node references scoped to an observation.
+// Keep the legacy eN format accepted for older Runtime clients.
 // Consumers must preserve the complete token returned by the snapshot.
 export const elementRefSchema = z.string().regex(/^(?:f\d+)?e\d+$/u);
 const cursorSchema = z.coerce.number().int().min(0).default(0);
@@ -589,8 +611,8 @@ const pagedTextPayloadSchema = z
 const snapshotPayloadSchema = z
   .object({
     cursor: cursorSchema.optional(),
-    depth: z.coerce.number().int().min(1).max(50).default(12).optional(),
-    includeBoxes: z.boolean().default(false).optional(),
+    depth: z.coerce.number().int().min(1).max(50).default(40).optional(),
+    includeBoxes: z.boolean().default(true).optional(),
     maxChars: maxCharsSchema.optional(),
     target: runtimeLocatorSchema.optional(),
   })
@@ -708,7 +730,7 @@ const runtimeActionCommandPayloadVariants = [
       payload: snapshotPayloadSchema,
     })
     .describe(
-      "为 Agent 采集临时的无障碍上下文和不透明 ref。此命令仅用于观察，不会创建持久化 DOM 证据；需要证据产物时使用 page.dom。",
+      "采集可见 DOM（含开放 Shadow DOM 和 iframe）、实际节点 ref 及当前视口截图。无需 ARIA。需要完整 DOM 证据时使用 page.dom。",
     ),
   z
     .object({
@@ -768,7 +790,9 @@ const runtimeActionCommandPayloadVariants = [
         })
         .strict(),
     })
-    .describe("创建持久化的 SCREENSHOT 证据产物。"),
+    .describe(
+      "创建 SCREENSHOT 证据；视口截图也作为图片输入提供给模型。全页截图不可用于视口坐标操作。",
+    ),
   ...(["page.dom", "page.console"] as const).map((commandType) =>
     z
       .object({
@@ -796,6 +820,7 @@ const runtimeActionCommandPayloadVariants = [
         targetPayloadSchema,
         z
           .object({
+            visualObservationId: z.string().uuid().optional(),
             point: z
               .object({ x: z.number().finite(), y: z.number().finite() })
               .strict(),
@@ -804,7 +829,7 @@ const runtimeActionCommandPayloadVariants = [
       ]),
     })
     .describe(
-      "点击 page.snapshot/observe_browser 返回的目标。必须保留完整的 eN/fNeN ref；不存在 element.click。",
+      "点击当前 DOM ref/selector；视觉定位可用 point（当前截图的视口 CSS 像素）和该图的 visualObservationId。不要猜坐标或复用旧图。必须保留完整 ref；不存在 element.click。",
     ),
   z.object({
     commandType: z.literal("page.fill"),
@@ -821,7 +846,7 @@ const runtimeActionCommandPayloadVariants = [
           .max(1_000)
           .default(0)
           .optional(),
-        target: runtimeLocatorSchema,
+        target: runtimeLocatorSchema.optional(),
         text: z.string().max(64 * 1_024),
       })
       .strict(),

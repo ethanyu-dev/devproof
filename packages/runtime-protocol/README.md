@@ -58,3 +58,16 @@ Protocol v1.10 adds the `VIDEO` Runtime artifact kind. Browser Runtime records a
 Protocol v1.11 adds optional structured locator recovery diagnostics to failed command results. `LOCATOR_AMBIGUOUS` errors can include bounded candidate details and the `RESNAPSHOT_AND_RETARGET` recovery action. A Runtime also accepts the sole visible match when a selector resolves to multiple DOM elements, avoiding false ambiguity from hidden duplicates. Protocol v1.10 error results remain valid during rolling upgrades.
 
 Protocol v1.12 adds the acknowledged `VIDEO_FINALIZATION_FAILED` Runtime event. The event carries a bounded, redacted summary of each encoding attempt together with the Runtime version, frame count, and close command correlation; it never carries screenshots, page content, URLs, or raw log streams. Runtimes emit it only after negotiating protocol v1.12 or newer and retain unacknowledged failure events in a bounded local spool for restart recovery.
+
+Protocol v1.16 adds the `dom-vision-v1` capability. Snapshot content is a bounded
+viewport DOM description with opaque references to actual nodes, covering open
+Shadow DOM and frames without ARIA requirements. Snapshot and action screenshot
+artifacts carry `metadata.visualObservation` with an observation ID, capture time,
+and CSS viewport size. The authenticated Agent command response may include one
+`visualObservation` containing an owned artifact ID, JPEG/PNG MIME type and bounded
+base64 image; pixels are not persisted in trace or tool text. Coordinate clicks
+can specify `visualObservationId`; Agent-owned clicks require a current image.
+`page.type.target` is optional to support keyboard input after visual focus.
+Legacy direct coordinate clients without an Agent owner remain accepted. Route
+new verification work only to the new capability and upgrade both independently
+installed runtimes. See [DOM + visual browser observations](../../docs/dom-visual-browser.md).

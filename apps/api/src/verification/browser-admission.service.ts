@@ -563,6 +563,13 @@ export class BrowserAdmissionService {
         schemaVersion: 1,
         secretRefs: {},
       });
+      // Enforce this before reserving a browser, not only after the Agent claims it.
+      request.execution.requiredCapabilities = [
+        ...new Set([
+          ...request.execution.requiredCapabilities,
+          "dom-vision-v1",
+        ]),
+      ];
       await this.browser.acquireForExecutionRun(
         execution.run.teamId,
         execution.id,
