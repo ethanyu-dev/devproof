@@ -1,4 +1,5 @@
 import {
+  RUNTIME_CAPABILITIES,
   RUNTIME_PROTOCOL,
   runtimeClientMessageSchema,
 } from "@devproof/runtime-protocol";
@@ -195,6 +196,77 @@ describe("RuntimeGatewayService Runtime version reporting", () => {
       type: "runtime.hello.accepted",
     });
   });
+});
+
+describe("RuntimeGatewayService DOM + vision negotiation", () => {
+  it("acknowledges and persists the capabilities advertised by Browser Runtime 0.2.22", async () => {
+    const { handleHello, prisma, service, socket } = fixture();
+    prisma.browserRuntime.findFirst.mockResolvedValue({
+      id: context.runtimeId,
+      enabled: true,
+      revokedAt: null,
+      capabilities: ["browser", "persistent-profile"],
+    } as never);
+    const greeting = runtimeClientMessageSchema.parse({
+      ...hello("0.2.22", 16),
+      capabilities: [...RUNTIME_CAPABILITIES],
+    });
+
+    const accepted = await handleHello.call(service, socket, greeting);
+
+    const negotiated = RUNTIME_CAPABILITIES.filter(
+      (capability) => capability !== "browser",
+    );
+    expect(accepted?.capabilities).toEqual(new Set(negotiated));
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      type: "runtime.hello.accepted",
+      protocol: { major: 1, minor: 16 },
+      capabilities: negotiated,
+    });
+    expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          capabilities: ["browser", "persistent-profile", ...negotiated],
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    { protocolMinor: 15, advertised: ["dom-vision-v1"] },
+    { protocolMinor: 16, advertised: [] },
+    { protocolMinor: 16, advertised: undefined },
+  ])(
+    "clears stale DOM + vision on reconnect with minor $protocolMinor and capabilities $advertised",
+    async ({ protocolMinor, advertised }) => {
+      const { handleHello, prisma, service, socket } = fixture();
+      prisma.browserRuntime.findFirst.mockResolvedValue({
+        id: context.runtimeId,
+        enabled: true,
+        revokedAt: null,
+        capabilities: ["browser", "persistent-profile", "dom-vision-v1"],
+      } as never);
+      const greeting = runtimeClientMessageSchema.parse({
+        ...hello(undefined, protocolMinor),
+        capabilities: advertised,
+      });
+
+      const accepted = await handleHello.call(service, socket, greeting);
+
+      expect(accepted?.capabilities.has("dom-vision-v1")).toBe(false);
+      expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+        type: "runtime.hello.accepted",
+        capabilities: [],
+      });
+      expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            capabilities: ["browser", "persistent-profile"],
+          }),
+        }),
+      );
+    },
+  );
 });
 
 describe("RuntimeGatewayService capacity ownership", () => {

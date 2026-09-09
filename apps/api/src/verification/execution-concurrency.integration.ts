@@ -1,9 +1,13 @@
 import "reflect-metadata";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import type { VerificationRequest } from "@devproof/contracts";
-import { RUNTIME_PROTOCOL } from "@devproof/runtime-protocol";
+import {
+  RUNTIME_CAPABILITIES,
+  RUNTIME_PROTOCOL,
+  runtimeClientMessageSchema,
+} from "@devproof/runtime-protocol";
 import {
   runtimeTaskSnapshotSchema,
   type RuntimeTaskClaimInput,
@@ -28,6 +32,7 @@ vi.mock("../config/env.js", () => ({
 }));
 
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { RuntimeGatewayService } from "../runtime/runtime-gateway.service.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
 import { SessionClosureService } from "../runtime/session-closure.service.js";
 import { BrowserExecutionRunner } from "./browser-execution-runner.service.js";
@@ -885,13 +890,15 @@ function openedBrowsers() {
 }
 
 describe("unclaimed browser startup recovery with PostgreSQL", () => {
-  it("requires DOM + vision before allocation and admits after the Runtime upgrades", async () => {
+  it("admits a waiting execution after an upgraded Runtime negotiates DOM + vision", async () => {
+    const runtimeToken = randomUUID();
     const current = await db.browserRuntime.findUniqueOrThrow({
       where: { id: runtimeId },
     });
     await db.browserRuntime.update({
       where: { id: runtimeId },
       data: {
+        tokenHash: createHash("sha256").update(runtimeToken).digest("hex"),
         protocolMinor: 14,
         capabilities: (current.capabilities as string[]).filter(
           (capability) => capability !== "dom-vision-v1",
@@ -913,12 +920,39 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
     expect(openedBrowsers()).toHaveLength(0);
     expect(await db.browserRuntimeSlot.count()).toBe(0);
 
-    await db.browserRuntime.update({
-      where: { id: runtimeId },
-      data: {
-        protocolMinor: current.protocolMinor,
-        capabilities: current.capabilities as Prisma.InputJsonValue,
-      },
+    const gateway = new RuntimeGatewayService(
+      db as never,
+      {
+        instanceId: "integration-gateway",
+        disconnectOlderGateways: vi.fn(),
+        markRuntimeOnline: vi.fn(),
+      } as never,
+      { register: vi.fn() } as never,
+      commands as never,
+      {} as never,
+    );
+    const socket = { readyState: 1, send: vi.fn(), close: vi.fn() };
+    await Reflect.get(gateway, "handleHello").call(
+      gateway,
+      socket,
+      runtimeClientMessageSchema.parse({
+        type: "runtime.hello",
+        runtimeId,
+        runtimeToken,
+        version: "0.2.22",
+        protocol: RUNTIME_PROTOCOL,
+        capabilities: [...RUNTIME_CAPABILITIES],
+        activeSessions: [],
+        instanceNonce: randomUUID(),
+        hostInstanceId: current.hostInstanceId,
+        daemonInstanceId: randomUUID(),
+        sentAt: new Date().toISOString(),
+      }),
+    );
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
+      type: "runtime.hello.accepted",
+      capabilities: expect.arrayContaining(["dom-vision-v1"]),
     });
     await db.browserExecution.update({
       where: { id: fixture.row.id },
