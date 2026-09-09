@@ -109,6 +109,98 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
 }
 
 describe("runtime navigation and combined finalization", () => {
+  it.each(["record_criterion", "finish_verification"])(
+    "rejects loading-time action evidence through %s, then accepts newly observed results",
+    async (tool) => {
+      const result = (status: string, evidence: string) => ({
+        criterionId: "page-visible",
+        status,
+        summary: "筛选结果已核对。",
+        evidenceRefs: [evidence],
+      });
+      const modelCall = (
+        name: string,
+        args: Record<string, unknown>,
+        index: number,
+      ) => ({
+        id: `response-${index}`,
+        output: [functionCall(name, args, index)],
+      });
+      const create = vi
+        .fn()
+        .mockResolvedValueOnce(
+          modelCall(
+            "browser_command",
+            {
+              commandType: "page.click",
+              payload: { target: { selector: "#search" } },
+            },
+            1,
+          ),
+        )
+        .mockResolvedValueOnce(
+          modelCall(
+            tool,
+            tool === "record_criterion"
+              ? result("FAILED", "artifact://loading")
+              : {
+                  verdict: "FAILED",
+                  summary: "筛选结果错误。",
+                  criteria: [result("FAILED", "artifact://loading")],
+                },
+            2,
+          ),
+        )
+        .mockResolvedValueOnce(
+          modelCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            3,
+          ),
+        )
+        .mockResolvedValueOnce(
+          modelCall(
+            "finish_verification",
+            {
+              verdict: "PASSED",
+              summary: "加载结束后筛选结果正确。",
+              criteria: [result("PASSED", "artifact://settled")],
+            },
+            4,
+          ),
+        );
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      controlPlane.browserCommand
+        .mockResolvedValueOnce({
+          status: "SUCCEEDED",
+          result: { ok: true },
+          artifacts: [{ id: "loading", kind: "SCREENSHOT" }],
+        })
+        .mockResolvedValueOnce({
+          status: "SUCCEEDED",
+          result: { content: "旧版类型对应记录" },
+          artifacts: [{ id: "settled", kind: "SCREENSHOT" }],
+        });
+      const outcome = await executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      expect(outcome).toMatchObject({
+        verdict: "PASSED",
+        criteria: [result("PASSED", "artifact://settled")],
+      });
+      expect(create).toHaveBeenCalledTimes(4);
+      expect(JSON.stringify(create.mock.calls[2]![0])).toContain(
+        "引用了操作后自动采集的过程截图",
+      );
+      expect(JSON.stringify(create.mock.calls[2]![0])).toContain(
+        "AFTER_ACTION",
+      );
+      expect(controlPlane.releaseBrowser).toHaveBeenCalledTimes(1);
+    },
+  );
+
   const criterion = {
     criterionId: "page-visible",
     status: "PASSED",
@@ -1119,7 +1211,11 @@ describe("browser verification bounded context", () => {
         .at(-1)!
         .input.filter((item) => item.type === "function_call_output"),
     ).toHaveLength(6);
-    expect(output(requests.at(-1)!, 0)).toEqual(raw);
+    expect(output(requests.at(-1)!, 0)).toEqual({
+      ...raw,
+      observationStage: "OBSERVATION",
+      observationNotice: expect.any(String),
+    });
   });
 });
 
@@ -1866,7 +1962,11 @@ describe("Agent Runtime browser verification executor", () => {
     const modelOutput = requests[1]!.input.find(
       (item) => item.type === "function_call_output",
     );
-    expect(JSON.parse(String(modelOutput?.output))).toEqual(raw);
+    expect(JSON.parse(String(modelOutput?.output))).toEqual({
+      ...raw,
+      observationStage: "OBSERVATION",
+      observationNotice: expect.any(String),
+    });
     const tracePayloads = JSON.stringify(
       controlPlane.appendEvent.mock.calls
         .filter((call) => String(call[1]).startsWith("agent."))

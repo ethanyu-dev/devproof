@@ -69,6 +69,14 @@ export class BrowserObservations {
   private currentSnapshotUrl: string | undefined;
   private readonly exposedRefs = new Set<string>();
   private visual: VisualObservation | undefined;
+  private readonly evidenceStages = new Map<
+    string,
+    "AFTER_ACTION" | "OBSERVATION"
+  >();
+  private readonly responseStages = new WeakMap<
+    object,
+    "AFTER_ACTION" | "OBSERVATION"
+  >();
   private order = 0;
   private bytes = 0;
 
@@ -109,6 +117,17 @@ export class BrowserObservations {
 
   capture(command: Command, raw: unknown) {
     const response = record(raw);
+    const stage = READ_COMMANDS.has(command.commandType)
+      ? "OBSERVATION"
+      : "AFTER_ACTION";
+    this.responseStages.set(response, stage);
+    for (const artifact of Array.isArray(response.artifacts)
+      ? response.artifacts
+      : []) {
+      const item = record(artifact);
+      if (item.kind === "SCREENSHOT" && typeof item.id === "string")
+        this.evidenceStages.set(`artifact://${item.id}`, stage);
+    }
     // Form input need not replace the observed DOM nodes. Keep refs
     // already shown to the model; live element resolution remains authoritative.
     const successfulFormInput =
@@ -172,6 +191,20 @@ export class BrowserObservations {
     return this.visual;
   }
 
+  evidenceStage(reference: string) {
+    return this.evidenceStages.get(reference);
+  }
+
+  verdictEvidenceError(references: string[]) {
+    if (
+      !references.some(
+        (reference) => this.evidenceStage(reference) === "AFTER_ACTION",
+      )
+    )
+      return;
+    return "引用了操作后自动采集的过程截图，页面可能仍在加载并显示旧结果，不能据此提交 PASSED/FAILED。先确认加载遮罩/转圈消失、查询或保存结果更新，再用 page.snapshot 或 page.screenshot 重新观察，替换为新证据；无法确认则记录 INCONCLUSIVE。";
+  }
+
   index() {
     return [...this.entries.values()].map((entry) => this.descriptor(entry));
   }
@@ -192,6 +225,13 @@ export class BrowserObservations {
   }
 
   project(raw: unknown, bounded = true): unknown {
+    const observationStage = this.responseStages.get(record(raw));
+    const observationNotice =
+      observationStage === "AFTER_ACTION"
+        ? "过程截图：操作完成不等于异步业务结果完成。检查加载状态，等待结果更新后重新观察；此截图不能用于通过/失败验收。"
+        : observationStage === "OBSERVATION"
+          ? "主动观察仍可能捕获加载中或局部内容。确认图片中无加载遮罩，并核对观察范围；未看见不等于不存在。"
+          : undefined;
     if (!bounded) {
       const source = record(raw);
       const entry =
@@ -213,6 +253,7 @@ export class BrowserObservations {
       const recovery = record(source.locatorRecovery);
       return {
         ...source,
+        ...(observationNotice ? { observationStage, observationNotice } : {}),
         ...(source.visualObservation ? { visualObservation: metadata } : {}),
         ...(source.locatorRecovery
           ? {
@@ -227,6 +268,8 @@ export class BrowserObservations {
     const previouslyExposedRefs = new Set(this.exposedRefs);
     const source = record(raw);
     const projected: Record<string, unknown> = {};
+    if (observationNotice)
+      Object.assign(projected, { observationStage, observationNotice });
     for (const key of [
       "accepted",
       "status",

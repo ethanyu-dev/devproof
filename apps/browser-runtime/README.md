@@ -75,6 +75,25 @@ diagnostic failure does not undo the saved closure proof.
 
 Browser Runtime protocol v1.10 captures a screenshot after each successful navigation or interaction and composes the frames into a WebM action video when a Session closes. Screenshots and video are returned as Runtime Artifacts; API uploads them to the configured S3-compatible object store.
 
+Interaction screenshots capture progress, including loading overlays and the
+previous query's rows. The Agent labels them `AFTER_ACTION` and rejects their
+use in `PASSED`/`FAILED` criterion results. After checking that the relevant
+loading state has ended and the result has updated, the Agent must explicitly
+observe with `page.snapshot` or `page.screenshot` and cite that new evidence.
+An explicit observation is not a guarantee of application readiness: the
+Agent still checks DOM and pixels, without assuming `domcontentloaded` means
+an asynchronous query has finished. Process screenshots remain available for
+playback and `INCONCLUSIVE` reports.
+
+DOM snapshots cover the current viewport and account for scroll-container
+clipping. Scrollable containers expose refs and `scrollY`/`scrollX` ranges,
+including `atStart` and `atEnd`, so `page.scroll.target` can move the dropdown
+instead of the background. A missing option in one viewport is insufficient
+negative evidence; the Agent must complete a supported search or inspect the
+whole range, including virtualized entries, before claiming absence. This
+works with plain DOM and open Shadow DOM, including microfrontends with their
+own `body`, without requiring ARIA or website instrumentation.
+
 Protocol v1.11 adds structured locator recovery diagnostics. When a selector matches multiple elements, Runtime automatically accepts a unique visible candidate; otherwise it returns bounded candidate details and instructs the Agent to resnapshot and retarget without guessing.
 
 Protocol v1.12 reports acknowledged `VIDEO_FINALIZATION_FAILED` events with the Runtime version, close command correlation, frame count, total duration, and bounded encoding-attempt summaries. Pending failure events are kept in a permission-restricted, 64-entry, 7-day local spool and replayed after reconnect or process restart until the control plane acknowledges them. Raw Runtime logs, screenshots, page content, and URLs are never included in these diagnostic events.

@@ -340,6 +340,7 @@ export class BrowserVerificationExecutor {
               evidence: [...evidence.values()].map(({ externalId, kind }) => ({
                 externalId,
                 kind,
+                observationStage: observations.evidenceStage(externalId),
               })),
               locatorRecovery: locatorRecoveryState,
               observations: observations?.index() ?? [],
@@ -1076,6 +1077,13 @@ export class BrowserVerificationExecutor {
           input.browserCommandCount,
           "验收标准引用了尚未观察到的证据；请仅使用工具返回或任务提供的证据引用。",
         );
+      }
+      if (parsed.data.status !== "INCONCLUSIVE") {
+        const observationError = input.observations?.verdictEvidenceError(
+          parsed.data.evidenceRefs,
+        );
+        if (observationError)
+          return correction(input.browserCommandCount, observationError);
       }
       if (parsed.data.status === "PASSED") {
         const missingKinds = missingRequiredEvidenceKinds(
@@ -1909,7 +1917,7 @@ function toolDefinitions(
       type: "function",
       name: "record_criterion",
       description:
-        "仅根据实际观察到的浏览器证据，用简体中文记录一条已声明验收标准的结果。",
+        "仅根据实际观察到的浏览器证据，用简体中文记录一条已声明验收标准的结果。PASSED/FAILED 不能引用操作后自动截图；须等待业务结果稳定后主动观察。局部列表未看到目标不能证明不存在。",
       parameters: openAiFunctionSchema(recordCriterionInputSchema),
       strict: false,
     },
@@ -2011,9 +2019,12 @@ ${groupedTools ? "browser_command 默认只公布核心操作。其他操作先�
   }观察到足够证据后，直接用 finish_verification 的 criteria 提交各条验收结果、准确证据引用和最终结论；无需为收尾重新导航或重复采集已足够的证据。长任务可用 record_criterion 保存中间结论，并更新同一条标准。证据引用必须来自实际工具输出。
 任务提供的业务引用是不可变的已观察证据；支持某条验收标准时，必须引用其准确的 externalId。
 客户端导航后要等待明确的 selector 或文本。除非确定应用最终会完全空闲，否则避免使用 networkidle。
+搜索、筛选、保存等操作成功，只代表输入事件已执行；自动附带的 AFTER_ACTION 截图可能仍是加载遮罩下的旧表格。不能用它作为 PASSED/FAILED 的验收证据。先在 DOM + 图片中检查转圈、遮罩及结果更新，使用已观察到的 selector 等待 hidden，或用 page.snapshot/page.screenshot 重新观察直到加载结束，再引用新证据。domcontentloaded 不能证明 SPA 查询完成；page.wait 的 kind=text 等待文本出现，不能用它等待 Loading 消失。加载一直不结束或无法确定结果时应 INCONCLUSIVE；不要反复点击搜索/保存。
 page.snapshot 提供实际 DOM 节点、文本、原生标签、值和 ref，同时附带视口截图。网站不需要实现 ARIA 或特定组件语法，不依赖 accessibility role。观察整个页面及弹层，不要按框架名字预设 DOM 结构。
 current_browser_viewport 中的 input_image 才是你实际看到的图片；截图编号或文件名不代表看过图。DOM 不足（自定义控件、Canvas、封闭 Shadow DOM）时，结合截图判断，用 page.click 的 point 和该图 observationId 作为 visualObservationId 操作；不能猜坐标。滚动、导航、窗口变化或旧图失效后重新观察。图片缺失时先 page.screenshot，不能假装视觉成功。
 原生 <select> 才能使用 page.select；自定义下拉先点击展开，再观察 DOM + 图片，点击当前可见选项，最后检查显示值和业务反馈。看到隐藏、重复候选时不能 first/nth 猜测。Canvas/自绘输入先视觉点击聚焦，再启用 input 工具组用不带 target 的 page.type 输入文本，必要时 page.press；操作后验证结果。
+DOM 快照仅覆盖当前视口与未被滚动容器裁剪的内容；captureTruncated/sourceTruncated/nextCursor 也表示证据尚不完整。断言选项“不存在”之前，必须在已确认支持搜索的控件中使用合理短关键词并确认搜索完成，或从列表顶部逐段滚动到末尾、观察每一段。使用带 scrollY/scrollX 的容器 ref 作为 page.scroll.target，避免滚动背景页面；atEnd=false 表示还有未见内容，到末尾一次也不代表已检查中间全部内容。无 DOM 时根据图片中的滚动条判断，在下拉内部点击聚焦后滚动，并重新截图确认选项确实变化。虚拟列表、搜索无效或范围无法穷尽时记录 INCONCLUSIVE，不能凭当前几项判 FAILED。
+下拉搜索要从实际页面文案出发：完整业务名称或内部枚举搜不到时，尝试较短关键词，再检查可见选项。连续清空并重复同一搜索而无进展时更换观察方式，不要循环。选项名称相似不能证明其内部枚举映射；要读取实际 DOM 值或对应网络证据。键盘组合使用 Control+A，不能使用 CTRL+A。
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE 或 STALE_VISUAL_OBSERVATION 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
