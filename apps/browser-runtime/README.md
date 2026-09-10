@@ -173,3 +173,16 @@ omitted and truncated feedback remains explicit. Click targets and field-state
 hashes support repetition detection without exposing field values in diagnostics.
 No ARIA or target-site changes are required. See [account HITL and action feedback](../../docs/browser-runtime-data-and-feedback-plan.md)
 for coordinated API, Agent and Browser Runtime rollout order.
+
+### Runtime 0.2.24 microfrontend DOM references
+
+Fixes references to connected nodes in microfrontends that virtualize
+`ownerDocument` or `getRootNode`. Snapshot capture and reference lookup now use
+the evaluating frame's registry and native DOM ancestry methods, so observed
+controls remain clickable across these sandbox boundaries. A Chromium regression
+test covers clicking and scoped snapshots in this configuration.
+
+The Browser Runtime protocol remains v1.16. Upgrade each Runtime host to receive
+this fix; deploying the API or Agent alone does not update the installed browser
+package. The companion Agent change that stops exhausted locator recovery ships
+separately in PR #62. See [browser reference recovery](../../docs/browser-reference-recovery.md).
