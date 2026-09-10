@@ -107,6 +107,45 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
   return { controlPlane, runTask, executor };
 }
 
+function contextData(
+  request: { messages: Array<Record<string, unknown>> },
+  kind: string,
+) {
+  return request.messages.flatMap((message) => {
+    if (message.role !== "user" || typeof message.content !== "string")
+      return [];
+    try {
+      const value = JSON.parse(message.content);
+      return value.kind === kind ? [value] : [];
+    } catch {
+      return [];
+    }
+  })[0];
+}
+function operationOutput(
+  request: { messages: Array<Record<string, unknown>> },
+  callId: string,
+) {
+  const legacy = request.messages.find(
+    (item) => item.role === "tool" && item.tool_call_id === callId,
+  );
+  if (legacy) return JSON.parse(String(legacy.content));
+  const operation = contextData(request, "recent_operations")
+    ?.turns.flat()
+    .find((item: { callId: string }) => item.callId === callId);
+  if (!operation) throw new Error(`Missing operation ${callId}`);
+  const output = structuredClone(operation.result);
+  const page = contextData(request, "current_browser_page")?.data;
+  for (const observation of [page?.snapshot, page?.latestObservation]) {
+    if (
+      observation &&
+      output.result?.observationId === observation.observationId
+    )
+      output.result = { ...output.result, ...observation };
+  }
+  return output;
+}
+
 describe("runtime navigation and combined finalization", () => {
   it.each(["record_criterion", "finish_verification"])(
     "rejects loading-time action evidence through %s, then accepts newly observed results",
@@ -173,17 +212,19 @@ describe("runtime navigation and combined finalization", () => {
           ),
         );
       const { executor, controlPlane, runTask } = convergenceHarness(create);
-      controlPlane.browserCommand
-        .mockResolvedValueOnce({
-          status: "SUCCEEDED",
-          result: { ok: true },
-          artifacts: [{ id: "loading", kind: "SCREENSHOT" }],
-        })
-        .mockResolvedValueOnce({
-          status: "SUCCEEDED",
-          result: { content: "旧版类型对应记录" },
-          artifacts: [{ id: "settled", kind: "SCREENSHOT" }],
-        });
+      controlPlane.browserCommand.mockImplementation(async (_lease, command) =>
+        command.commandType === "page.click"
+          ? {
+              status: "SUCCEEDED",
+              result: { ok: true },
+              artifacts: [{ id: "loading", kind: "SCREENSHOT" }],
+            }
+          : {
+              status: "SUCCEEDED",
+              result: { content: "旧版类型对应记录" },
+              artifacts: [{ id: "settled", kind: "SCREENSHOT" }],
+            },
+      );
       const outcome = await executor.execute(
         runTask,
         lease,
@@ -259,18 +300,19 @@ describe("runtime navigation and combined finalization", () => {
     });
     const first = visual("first private screenshot");
     const second = visual("second private screenshot");
-    controlPlane.browserCommand
-      .mockResolvedValueOnce({
-        status: "SUCCEEDED",
-        visualObservation: first,
-        result: { url: "https://example.com" },
-      })
-      .mockResolvedValueOnce({
-        status: "SUCCEEDED",
-        visualObservation: second,
-        result: { content: '- <div> "页面可见" [ref=f1e1]' },
-        artifacts: [{ id: "proof", kind: "SCREENSHOT" }],
-      });
+    let snapshotCount = 0;
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => ({
+      status: "SUCCEEDED",
+      visualObservation:
+        command.commandType === "page.navigate" || snapshotCount++ === 0
+          ? first
+          : second,
+      result: {
+        url: "https://example.com",
+        content: '- <div> "页面可见" [ref=f1e1]',
+      },
+      artifacts: [{ id: "proof", kind: "SCREENSHOT" }],
+    }));
     expect(
       await executor.execute(runTask, lease, new AbortController().signal),
     ).toMatchObject({ kind: "VERIFICATION_COMPLETED", verdict: "PASSED" });
@@ -353,16 +395,16 @@ describe("runtime navigation and combined finalization", () => {
     expect(
       controlPlane.browserCommand.mock.invocationCallOrder[0],
     ).toBeLessThan(create.mock.invocationCallOrder[0]!);
-    const bootstrap = create.mock.calls[0]![0].messages.find(
-      (item: Record<string, unknown>) =>
-        typeof item.content === "string" &&
-        item.content.includes('"kind":"runtime_initial_navigation"'),
-    );
-    expect(JSON.parse(bootstrap.content)).toMatchObject({
+    const bootstrap = contextData(create.mock.calls[0]![0], "recent_operations")
+      .turns[0][0];
+    expect({
+      command: bootstrap.arguments,
+      result: bootstrap.result,
+    }).toMatchObject({
       command: { payload: { url } },
       result: { status: "SUCCEEDED" },
     });
-    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(2);
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(3);
     expect(create).toHaveBeenCalledTimes(2);
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
@@ -394,7 +436,9 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome.kind).toBe("WAITING_HUMAN");
-    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot"]);
     expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
   });
 
@@ -430,16 +474,12 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
-    const bootstrap = create.mock.calls[0]![0].messages.find(
-      (item: Record<string, unknown>) =>
-        typeof item.content === "string" &&
-        item.content.includes('"kind":"runtime_initial_navigation"'),
-    );
-    expect(JSON.parse(bootstrap.content).result).toMatchObject({
-      accepted: false,
-      error: "navigation timeout",
+    expect(
+      contextData(create.mock.calls[0]![0], "recent_operations").turns[0][0],
+    ).toMatchObject({
+      outcome: "FAILED",
+      result: { accepted: false, error: "navigation timeout" },
     });
-    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
   it("releases the browser when cancelled during initial navigation", async () => {
@@ -501,10 +541,11 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "PASSED" });
-    const rejection = create.mock.calls[2]![0].messages.find(
-      (item: Record<string, unknown>) =>
-        item.role === "tool" && item.tool_call_id === "call-2",
-    );
+    const rejection = {
+      content: JSON.stringify(
+        operationOutput(create.mock.calls[2]![0], "call-2"),
+      ),
+    };
     expect(JSON.parse(rejection.content).accepted).toBe(false);
     expect(create).toHaveBeenCalledTimes(3);
   });
@@ -550,10 +591,11 @@ describe("runtime navigation and combined finalization", () => {
       artifacts: [{ id: "proof", kind: "DOM" }],
     });
     await executor.execute(runTask, lease, new AbortController().signal);
-    const rejection = create.mock.calls[3]![0].messages.find(
-      (item: Record<string, unknown>) =>
-        item.role === "tool" && item.tool_call_id === "call-3",
-    );
+    const rejection = {
+      content: JSON.stringify(
+        operationOutput(create.mock.calls[3]![0], "call-3"),
+      ),
+    };
     expect(JSON.parse(rejection.content)).toMatchObject({ accepted: false });
     expect(rejection.content).toContain("page-visible");
   });
@@ -619,20 +661,25 @@ describe("runtime navigation and combined finalization", () => {
         },
       });
     const { runTask, controlPlane, executor } = convergenceHarness(create);
-    controlPlane.browserCommand.mockResolvedValueOnce({
-      status: "FAILED",
-      error: { code: "LOCATOR_AMBIGUOUS", message: "multiple buttons" },
-    });
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) =>
+      command.commandType === "page.click"
+        ? {
+            status: "FAILED",
+            error: { code: "LOCATOR_AMBIGUOUS", message: "multiple buttons" },
+          }
+        : { status: "SUCCEEDED", result: { content: "页面" } },
+    );
     const outcome = await executor.execute(
       runTask,
       lease,
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
-    const rejection = create.mock.calls[2]![0].messages.find(
-      (item: Record<string, unknown>) =>
-        item.role === "tool" && item.tool_call_id === "call-2",
-    );
+    const rejection = {
+      content: JSON.stringify(
+        operationOutput(create.mock.calls[2]![0], "call-2"),
+      ),
+    };
     expect(rejection.content).toContain("LOCATOR_AMBIGUOUS");
   });
 
@@ -686,6 +733,149 @@ describe("runtime navigation and combined finalization", () => {
 });
 
 describe("browser verification bounded context", () => {
+  it("pins matching DOM and pixels through summary rotation, refreshing after clicks and fills but not cached reads", async () => {
+    let step = 0;
+    let captures = 0;
+    let value = "";
+    const visual = (index: number) => ({
+      artifactId: `3a6cbe48-f36c-4b48-bae1-d8d5e50f4ce${index}`,
+      observationId: `6730b25a-d1d3-4a10-a0c1-69fd4d74643${index}`,
+      capturedAt: new Date().toISOString(),
+      viewport: { width: 1280, height: 720 },
+      contentType: "image/jpeg",
+      dataBase64: Buffer.from(`viewport-${index}`).toString("base64"),
+    });
+    const create = vi
+      .fn()
+      .mockImplementation(
+        async (request: { messages: Array<Record<string, unknown>> }) => {
+          const index = step++;
+          const page = contextData(request, "current_browser_page").data
+            .snapshot;
+          const expectedCapture = Math.min(index + 1, 3);
+          expect(page.visualObservationId).toBe(
+            visual(expectedCapture).observationId,
+          );
+          expect(JSON.stringify(request.messages.at(-1))).toContain(
+            visual(expectedCapture).dataBase64,
+          );
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "tool" || message.role === "assistant",
+            ),
+          ).toBe(false);
+          if (index === 7) {
+            expect(
+              contextData(request, "recent_operations").turns,
+            ).toHaveLength(4);
+            expect(
+              JSON.stringify(contextData(request, "recent_operations")),
+            ).not.toContain("page.fill");
+            expect(page.content).toContain('value="001234"');
+            expect(
+              contextData(request, "browser_working_state").data,
+            ).toMatchObject({
+              acceptedCriteria: [],
+              latestActionFeedback: { pending: true, coverageIncomplete: true },
+              executionMemory: {
+                lastBrowserAction: {
+                  arguments: { commandType: "page.fill" },
+                  outcome: "SUCCEEDED",
+                },
+              },
+              automaticObservationCount: 3,
+            });
+          }
+          const ref = String(page.content).match(/\[ref=(e\d+)\]/u)![1];
+          const call =
+            index === 0
+              ? functionCall(
+                  "browser_command",
+                  { commandType: "page.click", payload: { target: { ref } } },
+                  index,
+                )
+              : index === 1
+                ? functionCall(
+                    "browser_command",
+                    {
+                      commandType: "page.fill",
+                      payload: { target: { ref }, text: "001234" },
+                    },
+                    index,
+                  )
+                : index < 7
+                  ? functionCall(
+                      "read_observation",
+                      {
+                        observationId: page.observationId,
+                        cursor: page.cursor,
+                      },
+                      index,
+                    )
+                  : functionCall(
+                      "request_human_input",
+                      {
+                        prompt: "请确认待审核的数据。",
+                        summary: "等待人工确认。",
+                      },
+                      index,
+                    );
+          return {
+            id: `response-${index}`,
+            message: {
+              role: "assistant",
+              content: "操作成功，验收通过。",
+              tool_calls: [call],
+            },
+          };
+        },
+      );
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
+      if (command.commandType === "page.snapshot") {
+        captures++;
+        return {
+          status: "SUCCEEDED",
+          visualObservation: visual(captures),
+          result: {
+            url: "https://example.com",
+            content:
+              captures === 1
+                ? '- button "新增" [ref=e1]\n'
+                : `- input "账号" value="${value}" [ref=e2]\n`,
+          },
+        };
+      }
+      expect(command.payload.target.ref).toBe(
+        command.commandType === "page.click" ? "e1" : "e2",
+      );
+      if (command.commandType === "page.fill") value = command.payload.text;
+      return {
+        status: "SUCCEEDED",
+        result: {
+          inputCompleted: true,
+          actionFeedback: { pending: true, coverageIncomplete: true },
+        },
+      };
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "WAITING_HUMAN" });
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual([
+      "page.snapshot",
+      "page.click",
+      "page.snapshot",
+      "page.fill",
+      "page.snapshot",
+    ]);
+    expect(JSON.stringify(create.mock.calls.at(-1)![0])).not.toContain(
+      "操作成功，验收通过。",
+    );
+  });
+
   type Request = {
     messages: Array<Record<string, unknown>>;
     tools: Array<{ function: Record<string, unknown> }>;
@@ -701,13 +891,7 @@ describe("browser verification bounded context", () => {
     return JSON.parse(String(item.content)).data;
   };
   const output = (request: Request, id: number) =>
-    JSON.parse(
-      String(
-        request.messages.find(
-          (item) => item.role === "tool" && item.tool_call_id === `call-${id}`,
-        )!.content,
-      ),
-    );
+    operationOutput(request, `call-${id}`);
 
   it("recovers an early value after compaction and retains accepted evidence without extra browser work", async () => {
     let index = 0;
@@ -740,7 +924,9 @@ describe("browser verification bounded context", () => {
         expect(
           request.messages.some((item) => item.tool_call_id === "call-0"),
         ).toBe(false);
-        expect(JSON.stringify(request)).not.toContain("PO-00042");
+        expect(
+          contextData(request, "current_browser_page").data.snapshot.content,
+        ).toContain("PO-00042");
         expect(state(request)).toMatchObject({
           acceptedCriteria: [
             {
@@ -839,8 +1025,8 @@ describe("browser verification bounded context", () => {
         { externalId: "artifact://proof", metadata: { retained: true } },
       ],
     });
-    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(8);
-    expect(controlPlane.browserCommand).toHaveBeenLastCalledWith(
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(10);
+    expect(controlPlane.browserCommand).toHaveBeenCalledWith(
       lease,
       {
         commandType: "page.fill",
@@ -861,7 +1047,7 @@ describe("browser verification bounded context", () => {
     let step = 0;
     let observationId = "";
     let nextCursor = 0;
-    let recoveryToken = "";
+
     const create = vi.fn().mockImplementation(async (request: Request) => {
       const index = step++;
       let name = "browser_command";
@@ -881,7 +1067,7 @@ describe("browser verification bounded context", () => {
       if (index === 2) {
         expect(output(request, 1)).toMatchObject({
           accepted: false,
-          code: "INVALID_ARGUMENTS",
+          code: "OBSERVATION_NOT_READ",
         });
         name = "read_observation";
         args = { observationId, cursor: nextCursor };
@@ -896,9 +1082,9 @@ describe("browser verification bounded context", () => {
         expect(output(request, 4).result.refState).toBe("HISTORICAL");
       if (index === 6) {
         expect(output(request, 5)).toMatchObject({ accepted: false });
-        recoveryToken = output(request, 5).locatorRecovery.recoveryToken;
+        expect(output(request, 5).code).toBe("OBSERVATION_NOT_READ");
       }
-      if (index === 7) args.locatorRecoveryToken = recoveryToken;
+
       return {
         id: `response-${index}`,
         message: {
@@ -932,14 +1118,16 @@ describe("browser verification bounded context", () => {
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
     ).toEqual([
       "page.snapshot",
+      "page.snapshot",
       "page.click",
       "page.snapshot",
       "page.snapshot",
       "page.click",
+      "page.snapshot",
     ]);
   });
 
-  it("keeps multi-call groups and opaque reasoning identical across provider fallback", async () => {
+  it("keeps multi-call summaries identical across provider fallback without replaying reasoning", async () => {
     const requests: Request[] = [];
     const reasoning = { reasoning_content: "private preserved reasoning" };
     const create = vi.fn().mockImplementation(async (request: Request) => {
@@ -1000,32 +1188,31 @@ describe("browser verification bounded context", () => {
     ).toMatchObject({ kind: "WAITING_HUMAN" });
     expect(requests[2]!.messages).toEqual(requests[1]!.messages);
     expect(requests[2]!.tools).toEqual(requests[1]!.tools);
-    expect(requests[2]!.messages).toContainEqual(
-      expect.objectContaining(reasoning),
+    expect(JSON.stringify(requests[2]!.messages)).not.toContain(
+      reasoning.reasoning_content,
     );
     expect(JSON.stringify(controlPlane.appendEvent.mock.calls)).not.toContain(
       reasoning.reasoning_content,
     );
-    const assistant = requests[2]!.messages.find(
-      (item) => item.role === "assistant",
-    )!;
-    expect(assistant.tool_calls).toEqual([
-      functionCall(
-        "browser_command",
-        { commandType: "page.get_url", payload: {} },
-        0,
-      ),
-      functionCall(
-        "browser_command",
-        { commandType: "page.get_title", payload: {} },
-        1,
-      ),
+    const operations = contextData(
+      requests[2]!,
+      "recent_operations",
+    ).turns.flat();
+    expect(operations.map((item: { callId: string }) => item.callId)).toEqual([
+      "call-0",
+      "call-1",
     ]);
     expect(
-      requests[2]!.messages
-        .filter((item) => item.role === "tool")
-        .map((item) => item.tool_call_id),
-    ).toEqual(["call-0", "call-1"]);
+      operations.map(
+        (item: { arguments: { commandType: string } }) =>
+          item.arguments.commandType,
+      ),
+    ).toEqual(["page.get_url", "page.get_title"]);
+    expect(
+      requests[2]!.messages.some(
+        (item) => item.role === "assistant" || item.role === "tool",
+      ),
+    ).toBe(false);
   });
 
   it("starts a fresh cache on the next segment after human intervention", async () => {
@@ -1050,7 +1237,12 @@ describe("browser verification bounded context", () => {
         };
       if (step === 1) observationId = output(request, 0).result.observationId;
       if (step === 2) {
-        expect(state(request).observations).toEqual([]);
+        expect(
+          state(request).observations.every(
+            (item: { observationId: string }) =>
+              item.observationId !== observationId,
+          ),
+        ).toBe(true);
         expect(JSON.stringify(request.messages)).toContain("人工已完成登录");
         return {
           id: "resumed",
@@ -1103,7 +1295,7 @@ describe("browser verification bounded context", () => {
         new AbortController().signal,
       ),
     ).toMatchObject({ kind: "WAITING_HUMAN" });
-    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(3);
     expect(controlPlane.acquireBrowser).toHaveBeenCalledTimes(2);
   });
 
@@ -1135,7 +1327,7 @@ describe("browser verification bounded context", () => {
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
-  it("retains accepted criteria and evidence when the latest provider group exceeds capacity", async () => {
+  it("retains accepted criteria and evidence while discarding oversized provider reasoning", async () => {
     const create = vi
       .fn()
       .mockResolvedValueOnce({
@@ -1171,6 +1363,20 @@ describe("browser verification bounded context", () => {
             ),
           ],
         },
+      })
+      .mockResolvedValueOnce({
+        id: "done",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { verdict: "PASSED", summary: "验证完成。" },
+              2,
+            ),
+          ],
+        },
       });
     const { runTask, controlPlane } = convergenceHarness(create);
     controlPlane.browserCommand.mockResolvedValue({
@@ -1189,24 +1395,20 @@ describe("browser verification bounded context", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({
-      kind: "FATAL_FAILURE",
-      executionDisposition: "AGENT_ERROR",
-      error: {
-        code: "AGENT_CONTEXT_BUDGET_EXCEEDED",
-        details: {
-          acceptedCriteria: [
-            {
-              criterionId: "page-visible",
-              status: "PASSED",
-              evidenceRefs: ["artifact://proof"],
-            },
-          ],
-          evidence: [{ externalId: "artifact://proof", kind: "SCREENSHOT" }],
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "PASSED",
+      criteria: [
+        {
+          criterionId: "page-visible",
+          status: "PASSED",
+          evidenceRefs: ["artifact://proof"],
         },
-      },
+      ],
     });
-    expect(outcome).not.toHaveProperty("verdict");
-    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(create.mock.calls[2]![0].messages)).not.toContain(
+      "x".repeat(100_000),
+    );
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
@@ -1254,7 +1456,7 @@ describe("browser verification bounded context", () => {
       ],
     ).toBeLessThan(controlPlane.releaseBrowser.mock.invocationCallOrder[0]!);
     expect(create).toHaveBeenCalledOnce();
-    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(2);
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
@@ -1309,7 +1511,7 @@ describe("browser verification bounded context", () => {
     );
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
-    ).toEqual(["page.snapshot", "page.get_url"]);
+    ).toEqual(["page.snapshot", "page.snapshot", "page.get_url"]);
     expect(outcome).toMatchObject({
       kind: "VERIFICATION_COMPLETED",
       termination: { reason: "TOOL_LIMIT_REACHED" },
@@ -1381,7 +1583,9 @@ describe("browser verification bounded context", () => {
       },
     });
     const { runTask, controlPlane } = convergenceHarness(create);
-    controlPlane.browserCommand.mockImplementation(async () => {
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
+      if (command.commandType === "page.snapshot")
+        return { status: "SUCCEEDED", result: { content: "页面" } };
       controller.abort(reason);
       return { status: "SUCCEEDED", result: { url: "https://example.com" } };
     });
@@ -1394,7 +1598,7 @@ describe("browser verification bounded context", () => {
       executor.execute(runTask, lease, controller.signal),
     ).rejects.toBe(reason);
     expect(create).toHaveBeenCalledOnce();
-    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(2);
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
@@ -1600,7 +1804,7 @@ describe("browser verification argument corrections", () => {
         kind: "VERIFICATION_COMPLETED",
         verdict: "PASSED",
       });
-      expect(controlPlane.browserCommand).toHaveBeenCalledExactlyOnceWith(
+      expect(controlPlane.browserCommand).toHaveBeenCalledWith(
         lease,
         {
           commandType: "page.navigate",
@@ -1611,9 +1815,9 @@ describe("browser verification argument corrections", () => {
         },
         expect.any(AbortSignal),
       );
-      const feedback = requests[1]!.messages.find(
-        (item) => item.role === "tool" && item.tool_call_id === "call-invalid",
-      )!;
+      const feedback = {
+        content: JSON.stringify(operationOutput(requests[1]!, "call-invalid")),
+      };
       expect(Buffer.byteLength(String(feedback.content))).toBeLessThanOrEqual(
         2_048,
       );
@@ -1622,12 +1826,10 @@ describe("browser verification argument corrections", () => {
         code: invalid.code,
         retryable: true,
       });
-      const earlyFinish = requests[2]!.messages.find(
-        (item) => item.role === "tool" && item.tool_call_id === "call-2",
-      )!;
-      expect(String(earlyFinish.content)).toContain(
-        "至少需要执行一次浏览器命令",
-      );
+      const earlyFinish = {
+        content: JSON.stringify(operationOutput(requests[2]!, "call-2")),
+      };
+      expect(String(earlyFinish.content)).toContain("page-visible");
       expect(create).toHaveBeenCalledTimes(5);
       expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
       const trace = controlPlane.appendEvent.mock.calls.find(
@@ -1668,12 +1870,15 @@ describe("browser verification argument corrections", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({
-      kind: "FATAL_FAILURE",
-      executionDisposition: "NOT_RUN",
-      error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" },
+      kind: "VERIFICATION_COMPLETED",
+      executionDisposition: "EXECUTED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "TOOL_LIMIT_REACHED" },
     });
     expect(create).toHaveBeenCalledTimes(2);
-    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot"]);
   });
 
   it("keeps transport failures separate from invalid argument corrections", async () => {
@@ -1717,9 +1922,9 @@ describe("browser verification argument corrections", () => {
     expect(
       await executor.execute(task, lease, new AbortController().signal),
     ).toMatchObject({ kind: "WAITING_HUMAN" });
-    const feedback = requests[1]!.messages.find(
-      (item) => item.role === "tool",
-    )!;
+    const feedback = {
+      content: JSON.stringify(operationOutput(requests[1]!, "call-1")),
+    };
     expect(JSON.parse(String(feedback.content))).toEqual({
       accepted: false,
       error: "Runtime transport unavailable",
@@ -1728,6 +1933,28 @@ describe("browser verification argument corrections", () => {
 });
 
 describe("browser verification convergence", () => {
+  it("aborts a hung automatic snapshot at the finalization reserve before calling the model", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn();
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(() => new Promise(() => {}));
+    const execution = executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await execution).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "FINALIZATION_RESERVE_REACHED" },
+    });
+    expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(controlPlane.browserCommand.mock.calls[0]![2].aborted).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+  });
+
   it("shares a five-second budget across forced-finalization telemetry and a hung release", async () => {
     vi.useFakeTimers();
     const create = vi.fn();
@@ -1862,19 +2089,17 @@ describe("browser verification convergence", () => {
       new AbortController().signal,
     );
     expect(create).toHaveBeenCalledTimes(4);
-    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot"]);
     expect(outcome).toMatchObject({
-      kind: "FATAL_FAILURE",
-      executionDisposition: "NOT_RUN",
-      error: {
-        code: "AGENT_NO_PROGRESS",
-        details: {
-          reason: "TEXT_ONLY_LOOP",
-          unverifiedCriterionIds: ["page-visible"],
-        },
-      },
+      kind: "VERIFICATION_COMPLETED",
+      executionDisposition: "EXECUTED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "TEXT_ONLY_LOOP" },
+      criteria: [{ criterionId: "page-visible", status: "INCONCLUSIVE" }],
     });
-    expect(outcome.summary).toContain("1 条验收标准未验证");
+    expect(outcome.summary).toContain("1 条尚未完成");
   });
 
   it("finalizes zero recorded criteria when browser work reaches the reserve", async () => {
@@ -1903,7 +2128,7 @@ describe("browser verification convergence", () => {
       lease,
       new AbortController().signal,
     );
-    expect(create).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({
       kind: "VERIFICATION_COMPLETED",
       verdict: "INCONCLUSIVE",
@@ -2053,8 +2278,9 @@ describe("browser verification convergence", () => {
     expect(create.mock.calls[0]![1].signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(59_999);
     expect(await execution).toMatchObject({
-      kind: "FATAL_FAILURE",
-      executionDisposition: "NOT_RUN",
+      kind: "VERIFICATION_COMPLETED",
+      executionDisposition: "EXECUTED",
+      termination: { reason: "FINALIZATION_RESERVE_REACHED" },
     });
     expect(create.mock.calls[0]![1].signal.aborted).toBe(true);
   });
@@ -2397,7 +2623,7 @@ describe("Agent Runtime browser verification executor", () => {
       kind: "VERIFICATION_COMPLETED",
       verdict: "PASSED",
     });
-    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(1);
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(3);
     expect(controlPlane.releaseBrowser).toHaveBeenCalledTimes(1);
     expect(controlPlane.appendEvent.mock.calls.map((call) => call[1])).toEqual(
       expect.arrayContaining([
@@ -2410,8 +2636,8 @@ describe("Agent Runtime browser verification executor", () => {
     const secondInput = create.mock.calls[1]?.[0].messages as unknown[];
     expect(secondInput).toContainEqual(
       expect.objectContaining({
-        content: expect.stringContaining("至少需要执行一次浏览器命令"),
-        role: "tool",
+        content: expect.stringContaining("page-visible"),
+        role: "user",
       }),
     );
   });
@@ -2560,7 +2786,9 @@ describe("Agent Runtime browser verification executor", () => {
 
     expect(outcome.kind).toBe("WAITING_HUMAN");
     expect(create).toHaveBeenCalledTimes(2);
-    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot"]);
     expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({
       intervention: {
@@ -2810,7 +3038,9 @@ describe("Agent Runtime browser verification executor", () => {
     const userPrompt = input.find((item) => item.role === "user")?.content;
     expect(userPrompt).toContain("MFA completed");
     expect(userPrompt).toContain("test-account-from-human");
-    expect(controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot"]);
   });
 
   it("supplies business references and rejects passing criteria with missing evidence kinds", async () => {
@@ -2949,7 +3179,7 @@ describe("Agent Runtime browser verification executor", () => {
     expect(create.mock.calls[2]?.[0].messages).toContainEqual(
       expect.objectContaining({
         content: expect.stringContaining("BUSINESS_REFERENCE"),
-        role: "tool",
+        role: "user",
       }),
     );
     expect(JSON.stringify(create.mock.calls[0]?.[0].messages)).toContain(
@@ -3088,7 +3318,13 @@ describe("Agent Runtime browser verification executor", () => {
     });
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
-    ).toEqual(["page.click", "page.snapshot", "page.click"]);
+    ).toEqual([
+      "page.snapshot",
+      "page.click",
+      "page.snapshot",
+      "page.click",
+      "page.snapshot",
+    ]);
     expect(JSON.stringify(create.mock.calls[1]?.[0].messages)).toContain(
       "RESNAPSHOT_AND_RETARGET",
     );
@@ -3593,16 +3829,18 @@ describe("Agent Runtime browser verification executor", () => {
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
     ).toEqual([
-      "page.click",
       "page.snapshot",
       "page.click",
       "page.snapshot",
       "page.click",
+      "page.snapshot",
+      "page.click",
+      "page.snapshot",
     ]);
-    expect(controlPlane.browserCommand.mock.calls[2]?.[1].payload).toEqual({
+    expect(controlPlane.browserCommand.mock.calls[3]?.[1].payload).toEqual({
       target: { ref: "e42" },
     });
-    expect(controlPlane.browserCommand.mock.calls[4]?.[1].payload).toEqual({
+    expect(controlPlane.browserCommand.mock.calls[5]?.[1].payload).toEqual({
       target: { ref: "e97" },
     });
     expect(JSON.stringify(create.mock.calls[3]?.[0].messages)).toContain(

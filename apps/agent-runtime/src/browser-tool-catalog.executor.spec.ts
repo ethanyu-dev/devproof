@@ -59,14 +59,7 @@ const names = (request: Request) =>
       (variant) => variant.properties.commandType.const,
     );
 const feedback = (request: Request, step: number, call = 0) =>
-  JSON.parse(
-    String(
-      request.messages.find(
-        (item) =>
-          item.role === "tool" && item.tool_call_id === `call-${step}-${call}`,
-      )!.content,
-    ),
-  );
+  operationOutput(request, `call-${step}-${call}`);
 
 function harness(
   script: Step[],
@@ -170,6 +163,45 @@ function harness(
     executor,
     run: () => executor.execute(task, lease, new AbortController().signal),
   };
+}
+
+function contextData(
+  request: { messages: Array<Record<string, unknown>> },
+  kind: string,
+) {
+  return request.messages.flatMap((message) => {
+    if (message.role !== "user" || typeof message.content !== "string")
+      return [];
+    try {
+      const value = JSON.parse(message.content);
+      return value.kind === kind ? [value] : [];
+    } catch {
+      return [];
+    }
+  })[0];
+}
+function operationOutput(
+  request: { messages: Array<Record<string, unknown>> },
+  callId: string,
+) {
+  const legacy = request.messages.find(
+    (item) => item.role === "tool" && item.tool_call_id === callId,
+  );
+  if (legacy) return JSON.parse(String(legacy.content));
+  const operation = contextData(request, "recent_operations")
+    ?.turns.flat()
+    .find((item: { callId: string }) => item.callId === callId);
+  if (!operation) throw new Error(`Missing operation ${callId}`);
+  const output = structuredClone(operation.result);
+  const page = contextData(request, "current_browser_page")?.data;
+  for (const observation of [page?.snapshot, page?.latestObservation]) {
+    if (
+      observation &&
+      output.result?.observationId === observation.observationId
+    )
+      output.result = { ...output.result, ...observation };
+  }
+  return output;
 }
 
 describe("browser tool module execution", () => {
@@ -338,7 +370,7 @@ describe("browser tool module execution", () => {
       finish,
     ]);
     expect(await fixture.run()).toMatchObject({ verdict: "PASSED" });
-    expect(fixture.controlPlane.browserCommand).toHaveBeenCalledExactlyOnceWith(
+    expect(fixture.controlPlane.browserCommand).toHaveBeenCalledWith(
       fixture.lease,
       runtimeActionCommandInputSchema.parse({
         commandType: "page.type",
@@ -376,7 +408,9 @@ describe("browser tool module execution", () => {
     ]);
     expect(await fixture.run()).toMatchObject({ verdict: "PASSED" });
     expect(
-      fixture.controlPlane.browserCommand.mock.calls.at(-1)![1],
+      fixture.controlPlane.browserCommand.mock.calls
+        .filter((call) => call[1].commandType !== "page.snapshot")
+        .at(-1)![1],
     ).toMatchObject({ commandType: "page.type" });
   });
 
@@ -415,7 +449,7 @@ describe("browser tool module execution", () => {
     expect(grouped.create.mock.calls.length).toBe(
       legacy.create.mock.calls.length + 1,
     );
-    expect(grouped.controlPlane.browserCommand).toHaveBeenCalledTimes(5);
+    expect(grouped.controlPlane.browserCommand).toHaveBeenCalledTimes(10);
     console.info("Optional module fixture", {
       groupedRounds: grouped.requests.length,
       legacyRounds: legacy.requests.length,
@@ -454,9 +488,7 @@ describe("browser tool module execution", () => {
       });
       expect(names(fixture.requests[0]!)).toContain(commandType);
       expect(names(fixture.requests[0]!)).not.toContain("network.arm");
-      expect(
-        fixture.controlPlane.browserCommand,
-      ).toHaveBeenCalledExactlyOnceWith(
+      expect(fixture.controlPlane.browserCommand).toHaveBeenCalledWith(
         fixture.lease,
         runtimeActionCommandInputSchema.parse({ commandType, payload }),
         expect.any(AbortSignal),
@@ -483,7 +515,9 @@ describe("browser tool module execution", () => {
     ]);
     expect(await fixture.run()).toMatchObject({ verdict: "PASSED" });
     expect(
-      fixture.controlPlane.browserCommand.mock.calls.map((call) => call[1]),
+      fixture.controlPlane.browserCommand.mock.calls
+        .filter((call) => call[1].commandType !== "page.snapshot")
+        .map((call) => call[1]),
     ).toEqual(
       actions.map((action) =>
         runtimeActionCommandInputSchema.parse(action.args),
@@ -528,7 +562,11 @@ describe("browser tool module execution", () => {
       code: "INVALID_ARGUMENTS",
       suggestions: ["page.navigate"],
     });
-    expect(fixture.controlPlane.browserCommand).toHaveBeenCalledOnce();
+    expect(
+      fixture.controlPlane.browserCommand.mock.calls.filter(
+        (call) => call[1].commandType !== "page.snapshot",
+      ),
+    ).toHaveLength(1);
   });
 
   it("keeps locator recovery tokens and the recovery snapshot after module activation", async () => {
@@ -540,7 +578,9 @@ describe("browser tool module execution", () => {
       }),
       (request) => {
         const recovery = feedback(request, 1).locatorRecovery;
-        expect(recovery.snapshot.result.content).toContain("[ref=f1e42]");
+        expect(
+          contextData(request, "current_browser_page").data.snapshot.content,
+        ).toContain("[ref=f1e42]");
         return [
           {
             name: "browser_command",
@@ -565,7 +605,7 @@ describe("browser tool module execution", () => {
             status: "SUCCEEDED",
             result: { content: '- button "Target" [ref=f1e42]\n' },
           };
-        if (command.payload.target.selector)
+        if (command.payload.target?.selector)
           return {
             status: "FAILED",
             error: {
@@ -582,7 +622,13 @@ describe("browser tool module execution", () => {
       fixture.controlPlane.browserCommand.mock.calls.map(
         (call) => call[1].commandType,
       ),
-    ).toEqual(["frame.click", "frame.snapshot", "frame.click"]);
+    ).toEqual([
+      "page.snapshot",
+      "frame.click",
+      "frame.snapshot",
+      "frame.click",
+      "page.snapshot",
+    ]);
     const stateItem = fixture.requests[3]!.messages.find(
       (item) =>
         typeof item.content === "string" &&
@@ -614,7 +660,11 @@ describe("browser tool module execution", () => {
     expect(fixture.requests[2]!.messages).toEqual(
       fixture.requests[1]!.messages,
     );
-    expect(fixture.controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      fixture.controlPlane.browserCommand.mock.calls.map(
+        (call) => call[1].commandType,
+      ),
+    ).toEqual(["page.snapshot"]);
   });
 
   it("resets optional modules on a new segment after HITL", async () => {
@@ -641,10 +691,14 @@ describe("browser tool module execution", () => {
         new AbortController().signal,
       ),
     ).toMatchObject({ kind: "WAITING_HUMAN" });
-    expect(fixture.controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      fixture.controlPlane.browserCommand.mock.calls.map(
+        (call) => call[1].commandType,
+      ),
+    ).toEqual(["page.snapshot", "page.snapshot"]);
   });
 
-  it("bounds repeated enables by the existing tool-call limit without browser execution", async () => {
+  it("bounds repeated enables by the existing tool-call limit after one automatic observation", async () => {
     const fixture = harness([
       enable("tabs"),
       enable("tabs"),
@@ -664,14 +718,19 @@ describe("browser tool module execution", () => {
         new AbortController().signal,
       ),
     ).toMatchObject({
-      kind: "FATAL_FAILURE",
-      executionDisposition: "NOT_RUN",
-      error: { code: "AGENT_TOOL_LIMIT_EXCEEDED" },
+      kind: "VERIFICATION_COMPLETED",
+      executionDisposition: "EXECUTED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "TOOL_LIMIT_REACHED" },
     });
     expect(feedback(fixture.requests[2]!, 1)).toEqual({
       enabledGroups: ["tabs"],
     });
-    expect(fixture.controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      fixture.controlPlane.browserCommand.mock.calls.map(
+        (call) => call[1].commandType,
+      ),
+    ).toEqual(["page.snapshot"]);
     expect(fixture.controlPlane.releaseBrowser).toHaveBeenCalledOnce();
   });
 
@@ -694,7 +753,11 @@ describe("browser tool module execution", () => {
       },
     ]);
     expect(await fixture.run()).toMatchObject({ kind: "WAITING_HUMAN" });
-    expect(fixture.controlPlane.browserCommand).not.toHaveBeenCalled();
+    expect(
+      fixture.controlPlane.browserCommand.mock.calls.map(
+        (call) => call[1].commandType,
+      ),
+    ).toEqual(["page.snapshot"]);
   });
 
   it("supports grouped discovery with legacy history and restores the alias in legacy tool mode", async () => {
@@ -725,7 +788,11 @@ describe("browser tool module execution", () => {
         (tool) => tool.function.name === "enable_browser_tools",
       ),
     ).toBe(false);
-    expect(legacy.controlPlane.browserCommand.mock.calls[0]![1]).toMatchObject({
+    expect(
+      legacy.controlPlane.browserCommand.mock.calls.find(
+        (call) => call[1].commandType === "page.open",
+      )![1],
+    ).toMatchObject({
       commandType: "page.open",
     });
   });

@@ -89,7 +89,7 @@ describe("bounded model context", () => {
     );
   });
 
-  it("compacts whole response groups and keeps exact requirements and accepted state", () => {
+  it("summarizes four complete turns and keeps exact requirements and accepted state", () => {
     const context = new ModelContext(initial);
     for (let index = 0; index < 9; index += 1) turn(context, index);
     const state = {
@@ -105,43 +105,34 @@ describe("bounded model context", () => {
     };
     const view = context.build(base, state);
     expect(view.messages.slice(0, 2)).toEqual(initial);
-    expect(view.messages[2]).toEqual({
-      role: "user",
-      content: JSON.stringify({ kind: "browser_working_state", data: state }),
+    expect(JSON.parse(String(view.messages[2]!.content))).toMatchObject({
+      kind: "browser_working_state",
+      data: state,
     });
-    expect(view.metrics).toMatchObject({ retainedTurns: 4, compactedTurns: 5 });
-    const history = view.messages.slice(3) as unknown as Array<
-      Record<string, unknown>
-    >;
-    expect(history).toHaveLength(12);
-    for (let index = 5; index < 9; index += 1) {
-      expect(history).toContainEqual(
-        expect.objectContaining({
-          role: "assistant",
-          reasoning_content: `opaque-${index}`,
-        }),
-      );
-      for (const call of [0, 1]) {
-        expect(history).toContainEqual({
-          role: "tool",
-          tool_call_id: `${index}-${call}`,
-          content: "observed",
-        });
-        expect(history).toContainEqual(
-          expect.objectContaining({
-            role: "assistant",
-            tool_calls: expect.arrayContaining([
-              {
-                type: "function",
-                id: `${index}-${call}`,
-                function: { name: "browser_command", arguments: "{}" },
-              },
-            ]),
-          }),
-        );
-      }
-    }
-    expect(JSON.stringify(history)).not.toContain("opaque-4");
+    expect(view.metrics).toMatchObject({
+      retainedTurns: 4,
+      compactedTurns: 5,
+      historyMode: "OPERATION_SUMMARIES",
+    });
+    const history = JSON.parse(String(view.messages[3]!.content));
+    expect(history.kind).toBe("recent_operations");
+    expect(history.turns).toHaveLength(4);
+    expect(
+      history.turns
+        .flat()
+        .map((operation: { callId: string }) => operation.callId),
+    ).toEqual([5, 6, 7, 8].flatMap((index) => [`${index}-0`, `${index}-1`]));
+    expect(history.turns[0][0]).toMatchObject({
+      tool: "browser_command",
+      outcome: "RETURNED",
+      result: "observed",
+    });
+    expect(
+      view.messages.some(
+        (message) => message.role === "assistant" || message.role === "tool",
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(view.messages)).not.toContain("opaque-");
   });
 
   it.each([

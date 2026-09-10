@@ -5,7 +5,7 @@ import type {
   ChatCompletionMessageParam,
 } from "openai/resources/chat/completions";
 
-/** Keep provider reasoning in memory so tool turns can replay it unchanged. */
+/** Legacy replay preserves provider reasoning; bounded decisions retain tool facts only. */
 export interface ModelAssistantMessage extends ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
 }

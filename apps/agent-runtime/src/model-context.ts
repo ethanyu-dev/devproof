@@ -7,6 +7,11 @@ import {
   type ModelAssistantMessage,
   type ModelMessage,
 } from "./model-types.js";
+import {
+  OperationMemory,
+  summarizeTurn,
+  type OperationSummary,
+} from "./operation-summary.js";
 export interface ModelContextOptions {
   mode?: "BOUNDED" | "LEGACY";
   maxBytes?: number;
@@ -21,9 +26,11 @@ export class ContextBudgetExceeded extends Error {
   }
 }
 
-/** Retain complete response groups, never a call without its output. */
+/** Bounded decisions use tool facts and a pinned page, not conversational replay. */
 export class ModelContext {
   private readonly turns: ModelMessage[][] = [];
+  private readonly summaries: OperationSummary[][] = [];
+  private readonly memory = new OperationMemory();
   private compactedTurns = 0;
   readonly bounded: boolean;
   private readonly maxBytes: number;
@@ -51,15 +58,25 @@ export class ModelContext {
     ) {
       throw new Error("Cannot retain an incomplete model/tool response group.");
     }
-    this.turns.push(
-      structuredClone([...(message ? [message] : []), ...results]),
-    );
+    if (this.bounded) {
+      const summary = summarizeTurn(message, results);
+      this.memory.record(summary);
+      this.summaries.push(summary);
+      while (this.summaries.length > 4) {
+        this.summaries.shift();
+        this.compactedTurns += 1;
+      }
+    } else
+      this.turns.push(
+        structuredClone([...(message ? [message] : []), ...results]),
+      );
   }
 
   build(
     baseRequest: Record<string, unknown>,
     state: unknown,
     image?: VisualObservation,
+    currentPage?: unknown,
   ) {
     const messages = (): ModelMessage[] => [
       ...this.initial,
@@ -69,23 +86,37 @@ export class ModelContext {
               role: "user" as const,
               content: JSON.stringify({
                 kind: "browser_working_state",
-                data: state,
+                data: {
+                  ...(state as Record<string, unknown>),
+                  executionMemory: this.memory.state(),
+                },
               }),
             },
           ]
         : []),
-      ...this.turns.flat(),
+      ...(this.bounded
+        ? [
+            {
+              role: "user" as const,
+              content: JSON.stringify({
+                kind: "recent_operations",
+                turns: this.summaries,
+              }),
+            },
+            {
+              role: "user" as const,
+              content: JSON.stringify({
+                kind: "current_browser_page",
+                data: currentPage ?? null,
+              }),
+            },
+          ]
+        : this.turns.flat()),
     ];
-    if (this.bounded) {
-      while (this.turns.length > 4) {
-        this.turns.shift();
-        this.compactedTurns += 1;
-      }
-    }
     let view = messages();
     let bytes = jsonBytes({ ...baseRequest, messages: view });
-    while (this.bounded && bytes > this.maxBytes && this.turns.length > 1) {
-      this.turns.shift();
+    while (this.bounded && bytes > this.maxBytes && this.summaries.length > 1) {
+      this.summaries.shift();
       this.compactedTurns += 1;
       view = messages();
       bytes = jsonBytes({ ...baseRequest, messages: view });
@@ -127,8 +158,9 @@ export class ModelContext {
         imageCount: image ? 1 : 0,
         imageBytes: image ? Buffer.byteLength(image.dataBase64, "base64") : 0,
         toolSchemaBytes: jsonBytes(baseRequest.tools ?? []),
-        retainedTurns: this.turns.length,
+        retainedTurns: this.bounded ? this.summaries.length : this.turns.length,
         compactedTurns: this.compactedTurns,
+        historyMode: this.bounded ? "OPERATION_SUMMARIES" : "FULL_HISTORY",
       },
     };
   }
