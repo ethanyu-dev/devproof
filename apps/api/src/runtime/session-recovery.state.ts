@@ -10,6 +10,7 @@ import {
   executionTarget,
 } from "../verification/execution-concurrency.js";
 import { sessionExecutionPermit } from "./session-permit.js";
+import { hasVerifiedObservationOnlyHistory } from "./session-write-audit.js";
 import {
   RESOLVED_WRITE_STATES,
   TERMINAL_AGENT_STATES,
@@ -101,7 +102,7 @@ export async function inferRecoveryScope(
   };
 }
 
-/** Called only under the shared resource lock. No lease/command absence proves no writes. */
+/** Called under the shared resource lock. Unverified command absence cannot establish no writes. */
 export async function materializeRecoveryGuards(
   tx: Prisma.TransactionClient,
   session: BrowserRuntimeSession,
@@ -205,10 +206,12 @@ export async function initialWriteState(
   if (leases.length && leases.every((lease) => lease.mode === "READ"))
     return "NOT_APPLICABLE";
   if (await hasConfirmedWriteOutcome(tx, session)) return "CONFIRMED";
+  if (await hasVerifiedObservationOnlyHistory(tx, session))
+    return "NO_WRITE_VERIFIED";
   return "UNKNOWN";
 }
 
-/** A final result certifies only the exact Agent epoch that owned this browser. */
+/** A trusted result or fenced launch audit can settle this browser's write assessment. */
 export async function refreshRecoveryWriteOutcome(
   tx: Prisma.TransactionClient,
   session: BrowserRuntimeSession,
@@ -220,7 +223,12 @@ export async function refreshRecoveryWriteOutcome(
     session.ownerFencingToken === null
   )
     return recovery;
-  if (!(await hasConfirmedWriteOutcome(tx, session))) return recovery;
+  const state = (await hasConfirmedWriteOutcome(tx, session))
+    ? "CONFIRMED"
+    : (await hasVerifiedObservationOnlyHistory(tx, session))
+      ? "NO_WRITE_VERIFIED"
+      : null;
+  if (!state) return recovery;
   const changed = await tx.runtimeSessionRecovery.updateMany({
     where: {
       id: recovery.id,
@@ -228,7 +236,7 @@ export async function refreshRecoveryWriteOutcome(
       writeOutcomeState: { in: ["UNKNOWN", "UNASSESSED"] },
     },
     data: {
-      writeOutcomeState: "CONFIRMED",
+      writeOutcomeState: state,
       version: { increment: 1 },
       resolvedAt:
         recovery.closureState === "VERIFIED" &&

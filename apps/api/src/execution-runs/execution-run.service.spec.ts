@@ -45,6 +45,40 @@ const current = {
 } as never;
 
 describe("ExecutionRunService events", () => {
+  it("includes team-scoped recovery links in execution details without exposing recovery credentials", async () => {
+    const recovery = {
+      id: "recovery",
+      closureState: "VERIFIED",
+      writeOutcomeState: "UNKNOWN",
+    };
+    const prisma = {
+      executionRun: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: runId,
+          executionPolicy: snapshot.executionPolicy,
+          browserProfileId: null,
+          browserExecutions: [
+            { runtimeSessionId: "session", runtimeSession: null },
+          ],
+          evidences: [],
+        }),
+      },
+      runtimeSessionRecovery: {
+        findMany: vi.fn().mockResolvedValue([recovery]),
+      },
+    };
+    const detail = await new ExecutionRunService(
+      prisma as never,
+      {} as never,
+    ).consoleDetail(current, runId);
+    expect(detail.recoveries).toEqual([recovery]);
+    expect(prisma.runtimeSessionRecovery.findMany).toHaveBeenCalledWith({
+      where: { teamId: snapshot.teamId, sessionId: { in: ["session"] } },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, closureState: true, writeOutcomeState: true },
+    });
+  });
+
   it("serializes event cursors without losing precision and scopes pagination to the team", async () => {
     const sequence = 9007199254740993n;
     const prisma = {
@@ -901,5 +935,98 @@ describe("evidence downloads", () => {
     await expect(
       service.downloadEvidence(current, runId, "evidence", "bytes=1000-"),
     ).rejects.toMatchObject({ status: 416 });
+  });
+});
+
+describe("fallback trajectory identity", () => {
+  function event(
+    id: string,
+    kind: string,
+    sequence: number,
+    payload: Record<string, unknown> = {},
+  ) {
+    return {
+      actor: "AGENT_RUNTIME",
+      id,
+      kind,
+      sequence: BigInt(sequence),
+      occurredAt: new Date(sequence * 1_000),
+      payload: {
+        segmentId: "segment",
+        step: 1,
+        model: "primary",
+        provider: "OPENAI_COMPATIBLE",
+        ...payload,
+      },
+    };
+  }
+
+  it("retains the running fallback after earlier providers fail in the same step, including legacy events", () => {
+    const rows = [
+      event("a", "agent.model.started", 1),
+      event("b", "agent.model.failed", 2, { durationMs: 1_000 }),
+      event("c", "agent.model.started", 3, { model: "second" }),
+      event("d", "agent.model.failed", 4, {
+        model: "second",
+        durationMs: 1_000,
+      }),
+      event("e", "agent.model.started", 5, { model: "third" }),
+    ];
+    const records = projectRunTrajectory(rows);
+    expect(records.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: "a", status: "FAILED" },
+      { id: "c", status: "FAILED" },
+      { id: "e", status: "RUNNING" },
+    ]);
+  });
+
+  it("does not consume a later legacy candidate with the same model and provider", () => {
+    const records = projectRunTrajectory([
+      event("a", "agent.model.started", 1),
+      event("b", "agent.model.failed", 2),
+      event("c", "agent.model.started", 3),
+    ]);
+    expect(records.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: "a", status: "FAILED" },
+      { id: "c", status: "RUNNING" },
+    ]);
+  });
+
+  it("keeps a stable ID when a completion replaces a running call or its start leaves the event page", () => {
+    const modelCallId = "4aee646d-2f02-4ec0-8123-a76c09298a79";
+    const start = event("a", "agent.model.started", 1, { modelCallId });
+    const end = event("b", "agent.model.completed", 2, {
+      modelCallId,
+      durationMs: 1_000,
+    });
+    expect(projectRunTrajectory([start])[0]?.id).toBe(modelCallId);
+    expect(projectRunTrajectory([start, end])[0]).toMatchObject({
+      id: modelCallId,
+      status: "SUCCEEDED",
+    });
+    expect(projectRunTrajectory([end], false)[0]?.id).toBe(modelCallId);
+  });
+
+  it("preserves segment errors and settles its interrupted model call", () => {
+    const records = projectRunTrajectory([
+      event("segment-start", "agent.segment.started", 1),
+      event("model-start", "agent.model.started", 2),
+      event("segment-end", "agent.segment.completed", 4, {
+        status: "FAILED",
+        durationMs: 3_000,
+        errorMessage: "Deployment interrupted execution",
+      }),
+    ]);
+    expect(records.find((r) => r.id === "model-start")).toMatchObject({
+      status: "FAILED",
+      durationMs: 2_000,
+      completedAt: new Date(4_000).toISOString(),
+      error: "Deployment interrupted execution",
+    });
+    expect(records.find((r) => r.id === "segment-end")).toMatchObject({
+      kind: "RUNTIME",
+      status: "FAILED",
+      error: "Deployment interrupted execution",
+    });
   });
 });

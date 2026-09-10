@@ -23,6 +23,8 @@ import { LeaseLostError, LeaseSupervisor } from "./lease-supervisor.js";
 import type { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
 
 export class AgentRuntimeWorker {
+  private readonly executionShutdown = new AbortController();
+  private readonly drainDeadline = new AbortController();
   private readonly eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   private boundPool: RuntimePool | undefined;
   private executor: BrowserVerificationExecutor | undefined;
@@ -64,11 +66,35 @@ export class AgentRuntimeWorker {
         }
       }
     } finally {
-      this.eventLoopDelay.disable();
       for (const lane of this.lanes.values()) lane.draining = true;
-      await Promise.allSettled(
-        [...this.lanes.values()].map((lane) => lane.promise),
+      log("runtime.draining", { activeLanes: this.lanes.size });
+      // Railway allows 120 seconds after SIGTERM. Keep renewing active leases,
+      // then reserve time for browser closure and durable outcome delivery.
+      const drainTimer = setTimeout(
+        () => this.executionShutdown.abort(new RuntimeShutdownError()),
+        60_000,
       );
+      let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(
+            [...this.lanes.values()].map((lane) => lane.promise),
+          ),
+          new Promise<void>((resolve) => {
+            stopTimer = setTimeout(() => {
+              log("runtime.drain.exhausted", { activeLanes: this.lanes.size });
+              this.drainDeadline.abort(
+                new LeaseLostError("Runtime drain deadline exceeded."),
+              );
+              resolve();
+            }, 110_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(drainTimer);
+        if (stopTimer) clearTimeout(stopTimer);
+        this.eventLoopDelay.disable();
+      }
     }
   }
 
@@ -156,13 +182,21 @@ export class AgentRuntimeWorker {
         if (pool === "spec") {
           const task = await this.controlPlane.claimSpec(workerId, signal);
           if (task) {
-            await this.executeSpecTask(task, signal, workerId);
+            await this.executeSpecTask(
+              task,
+              this.executionShutdown.signal,
+              workerId,
+            );
             continue;
           }
         } else if (pool === "browser") {
           const task = await this.controlPlane.claim(workerId, signal);
           if (task) {
-            await this.executeTask(task, signal, workerId);
+            await this.executeTask(
+              task,
+              this.executionShutdown.signal,
+              workerId,
+            );
             continue;
           }
         }
@@ -190,8 +224,15 @@ export class AgentRuntimeWorker {
       controller,
       task.snapshot.deadlineAt,
     );
-    const abortFromShutdown = () => controller.abort(shutdown.reason);
-    shutdown.addEventListener("abort", abortFromShutdown, { once: true });
+    const stopOwnership = () => {
+      controller.abort(this.drainDeadline.signal.reason);
+      deadline.dispose();
+    };
+    this.drainDeadline.signal.addEventListener("abort", stopOwnership, {
+      once: true,
+    });
+    if (this.drainDeadline.signal.aborted) stopOwnership();
+    const executionSignal = AbortSignal.any([controller.signal, shutdown]);
     const heartbeat = new LeaseSupervisor({
       initialLease: task,
       controller,
@@ -238,7 +279,7 @@ export class AgentRuntimeWorker {
             },
           );
         }
-        outcome = await this.executor.execute(task, lease, controller.signal);
+        outcome = await this.executor.execute(task, lease, executionSignal);
       } catch (error) {
         if (
           controller.signal.reason instanceof LeaseLostError ||
@@ -251,7 +292,10 @@ export class AgentRuntimeWorker {
           log("runtime.task.cancelled", { taskId: task.taskId });
           return;
         }
-        outcome = classifyFailure(error, task);
+        outcome = classifyFailure(
+          shutdown.aborted ? shutdown.reason : error,
+          task,
+        );
       }
 
       if (controller.signal.reason instanceof LeaseLostError) return;
@@ -291,7 +335,7 @@ export class AgentRuntimeWorker {
     } finally {
       heartbeat.stop();
       deadline.dispose();
-      shutdown.removeEventListener("abort", abortFromShutdown);
+      this.drainDeadline.signal.removeEventListener("abort", stopOwnership);
     }
   }
 
@@ -306,8 +350,15 @@ export class AgentRuntimeWorker {
       controller,
       task.snapshot.deadlineAt,
     );
-    const abortFromShutdown = () => controller.abort(shutdown.reason);
-    shutdown.addEventListener("abort", abortFromShutdown, { once: true });
+    const stopOwnership = () => {
+      controller.abort(this.drainDeadline.signal.reason);
+      deadline.dispose();
+    };
+    this.drainDeadline.signal.addEventListener("abort", stopOwnership, {
+      once: true,
+    });
+    if (this.drainDeadline.signal.aborted) stopOwnership();
+    const executionSignal = AbortSignal.any([controller.signal, shutdown]);
     const heartbeat = new LeaseSupervisor({
       initialLease: task,
       controller,
@@ -347,11 +398,7 @@ export class AgentRuntimeWorker {
             this.config.DEVPROOF_AGENT_TOOL_LIMIT,
           );
         }
-        outcome = await this.specExecutor.execute(
-          task,
-          lease,
-          controller.signal,
-        );
+        outcome = await this.specExecutor.execute(task, lease, executionSignal);
       } catch (error) {
         if (
           controller.signal.reason instanceof LeaseLostError ||
@@ -364,7 +411,10 @@ export class AgentRuntimeWorker {
           log("runtime.spec.cancelled", { taskId: task.taskId });
           return;
         }
-        outcome = classifySpecFailure(error, task);
+        outcome = classifySpecFailure(
+          shutdown.aborted ? shutdown.reason : error,
+          task,
+        );
       }
       if (controller.signal.reason instanceof LeaseLostError) return;
       try {
@@ -383,7 +433,7 @@ export class AgentRuntimeWorker {
     } finally {
       heartbeat.stop();
       deadline.dispose();
-      shutdown.removeEventListener("abort", abortFromShutdown);
+      this.drainDeadline.signal.removeEventListener("abort", stopOwnership);
     }
   }
 
@@ -451,6 +501,13 @@ function isLeaseConflict(error: unknown) {
   );
 }
 
+export class RuntimeShutdownError extends Error {
+  constructor() {
+    super("Runtime deployment interrupted execution after the drain window.");
+    this.name = "RuntimeShutdownError";
+  }
+}
+
 export class RuntimeDeadlineController {
   private deadlineAtMs = 0;
   private timer: NodeJS.Timeout | undefined;
@@ -489,6 +546,8 @@ export function classifyFailure(
   error: unknown,
   task: RuntimeTaskLease,
 ): RuntimeOutcome {
+  if (error instanceof RuntimeShutdownError)
+    return shutdownOutcome("browser_verification");
   const message = errorMessage(error);
   const deadline = /deadline|timed? out|timeout/iu.test(message);
   const invalidToolSchema =
@@ -552,6 +611,8 @@ export function classifySpecFailure(
   error: unknown,
   task: RuntimeSpecAnalysisTaskLease,
 ): RuntimeSpecAnalysisOutcome {
+  if (error instanceof RuntimeShutdownError)
+    return shutdownOutcome("spec_analysis");
   const message = errorMessage(error);
   const deadline = /deadline|timed? out|timeout/iu.test(message);
   const provider = /openai|provider|response|rate limit|429/iu.test(message);
@@ -587,6 +648,22 @@ export function classifySpecFailure(
     kind: deadline ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
     summary: `第 ${task.snapshot.attemptNumber} 次 Spec 分析未生成有效 Spec。`,
   });
+}
+
+function shutdownOutcome(phase: string) {
+  return {
+    kind: "RETRYABLE_FAILURE" as const,
+    executionDisposition: "RUNTIME_LOST" as const,
+    error: {
+      code: "RUNTIME_SHUTDOWN",
+      failureClass: "RUNTIME_LOST" as const,
+      phase,
+      message:
+        "Runtime deployment interrupted execution after the drain window.",
+      details: {},
+    },
+    summary: "Runtime 发布收尾时间已用尽；由控制面核对恢复条件后重试。",
+  };
 }
 
 function isCancellation(error: unknown) {

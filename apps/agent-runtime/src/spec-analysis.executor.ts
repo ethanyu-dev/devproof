@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   runtimeGeneratedSpecSchema,
   runtimeGeneratedSpecCaseSchema,
@@ -123,14 +125,17 @@ export class SpecAnalysisExecutor {
         let response: ModelCompletion | null = null;
         let selectedModel = preferredModel;
         let selectedStartedAt = Date.now();
+        let selectedModelCallId: string | undefined;
         let lastError: unknown;
 
         for (const candidate of candidates) {
           signal.throwIfAborted();
           const modelStartedAt = Date.now();
+          const modelCallId = randomUUID();
           await this.appendTrace(lease, signal, {
             kind: "agent.model.started",
             payload: {
+              modelCallId,
               attemptNumber: task.snapshot.attemptNumber,
               inputPreview,
               model: candidate.modelId,
@@ -152,6 +157,7 @@ export class SpecAnalysisExecutor {
               { signal },
             );
             selectedModel = candidate;
+            selectedModelCallId = modelCallId;
             selectedStartedAt = modelStartedAt;
             lastError = undefined;
             break;
@@ -161,6 +167,7 @@ export class SpecAnalysisExecutor {
             await this.appendTrace(lease, signal, {
               kind: "agent.model.failed",
               payload: {
+                modelCallId,
                 attemptNumber: task.snapshot.attemptNumber,
                 durationMs: Date.now() - modelStartedAt,
                 errorMessage: traceError(error),
@@ -183,6 +190,7 @@ export class SpecAnalysisExecutor {
         await this.appendTrace(lease, signal, {
           kind: "agent.model.completed",
           payload: {
+            modelCallId: selectedModelCallId,
             attemptNumber: task.snapshot.attemptNumber,
             durationMs: Date.now() - selectedStartedAt,
             inputPreview,

@@ -274,7 +274,10 @@ describe("Spec Runtime lease ownership", () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await state.running;
     expect(state.submitSpecOutcome).toHaveBeenCalledOnce();
-    expect(state.submitSpecOutcome.mock.calls[0]?.[3]).toBe(state.signal());
+    expect(state.submitSpecOutcome.mock.calls[0]?.[3]).toMatchObject({
+      aborted: true,
+      reason: state.signal().reason,
+    });
     expect(state.signal().reason).toBeInstanceOf(LeaseLostError);
   });
 });
@@ -503,4 +506,154 @@ describe("RuntimeDeadlineController", () => {
     expect(abort.signal.aborted).toBe(true);
     deadline.dispose();
   });
+});
+
+describe("deployment drain", () => {
+  afterEach(() => vi.useRealTimers());
+  function setup(
+    ignoreAbort = false,
+    pool: "BROWSER_EXECUTION" | "SPEC_ANALYSIS" = "BROWSER_EXECUTION",
+  ) {
+    vi.useFakeTimers();
+    const shutdown = new AbortController();
+    let actionSignal!: AbortSignal;
+    let finish!: () => void;
+    const outcome = {
+      kind: "VERIFICATION_COMPLETED",
+      criteria: [],
+      evidence: [],
+      verdict: "INCONCLUSIVE",
+      summary: "done",
+      executionDisposition: "EXECUTED",
+    };
+    const runningTask = {
+      taskId: "task",
+      fencingToken: "1",
+      leaseToken: "token",
+      leaseDurationMs: 60_000,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      snapshot: {
+        attemptNumber: 1,
+        runId: "run",
+        deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+      },
+    };
+    const control = {
+      register: vi.fn().mockResolvedValue({
+        browserConcurrency: pool === "BROWSER_EXECUTION" ? 1 : 0,
+        specConcurrency: pool === "SPEC_ANALYSIS" ? 1 : 0,
+        pools: [pool],
+        refreshAfterMs: 1_000,
+      }),
+      claim: vi.fn().mockResolvedValueOnce(runningTask).mockResolvedValue(null),
+      heartbeat: vi.fn(async () => ({
+        directive: "CONTINUE",
+        leaseDurationMs: 60_000,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+      submitOutcome: vi.fn().mockResolvedValue({ accepted: true }),
+      appendEvent: vi.fn().mockResolvedValue({ accepted: true }),
+    };
+    const worker = new AgentRuntimeWorker(
+      {
+        DEVPROOF_AGENT_RUNTIME_POOL: pool,
+        DEVPROOF_AGENT_WORKER_ID: "worker",
+        DEVPROOF_AGENT_POLL_INTERVAL_MS: 100,
+      } as never,
+      {
+        ...control,
+        claimSpec: control.claim,
+        heartbeatSpec: control.heartbeat,
+        submitSpecOutcome: control.submitOutcome,
+      } as never,
+      vi.fn(),
+    );
+    (worker as unknown as { executor: unknown; specExecutor: unknown })[
+      pool === "BROWSER_EXECUTION" ? "executor" : "specExecutor"
+    ] = {
+      execute: vi.fn((_task, _lease, signal: AbortSignal) => {
+        actionSignal = signal;
+        return new Promise((resolve, reject) => {
+          finish = () => resolve(outcome);
+          if (!ignoreAbort)
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+        });
+      }),
+    };
+    return {
+      running: worker.run(shutdown.signal),
+      control,
+      shutdown,
+      signal: () => actionSignal,
+      finish: () => finish(),
+    };
+  }
+
+  it.each(["BROWSER_EXECUTION", "SPEC_ANALYSIS"] as const)(
+    "stops admission but renews the in-flight lease and submits its result before exiting (%s)",
+    async (pool) => {
+      const state = setup(false, pool);
+      await vi.advanceTimersByTimeAsync(1);
+      state.shutdown.abort();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(state.signal().aborted).toBe(false);
+      expect(state.control.heartbeat).toHaveBeenCalledTimes(2);
+      expect(state.control.claim).toHaveBeenCalledOnce();
+      state.finish();
+      await state.running;
+      expect(state.control.submitOutcome).toHaveBeenCalledOnce();
+      expect(state.control.submitOutcome.mock.calls[0]?.[1]).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+      });
+      expect(state.control.claim).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["BROWSER_EXECUTION", "SPEC_ANALYSIS"] as const)(
+    "interrupts after the grace period while keeping a live lease for the shutdown outcome (%s)",
+    async (pool) => {
+      const state = setup(false, pool);
+      state.control.submitOutcome.mockImplementation(
+        async (_lease, _outcome, _completionId, signal) => {
+          expect(signal.aborted).toBe(false);
+          await new Promise((resolve) => setTimeout(resolve, 16_000));
+          return { accepted: true };
+        },
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      state.shutdown.abort();
+      await vi.advanceTimersByTimeAsync(76_000);
+      await state.running;
+      expect(state.signal().aborted).toBe(true);
+      expect(state.control.heartbeat.mock.calls.length).toBeGreaterThanOrEqual(
+        5,
+      );
+      expect(state.control.submitOutcome.mock.calls[0]?.[1]).toMatchObject({
+        kind: "RETRYABLE_FAILURE",
+        error: { code: "RUNTIME_SHUTDOWN", failureClass: "RUNTIME_LOST" },
+      });
+    },
+  );
+
+  it.each(["BROWSER_EXECUTION", "SPEC_ANALYSIS"] as const)(
+    "bounds drain even if a transport ignores abort (%s)",
+    async (pool) => {
+      const state = setup(true, pool);
+      await vi.advanceTimersByTimeAsync(1);
+      state.shutdown.abort();
+      await vi.advanceTimersByTimeAsync(110_000);
+      await state.running;
+      expect(state.signal().aborted).toBe(true);
+      expect(state.control.submitOutcome).not.toHaveBeenCalled();
+      // Settle the test transport after the bounded drain, as a late network result.
+      state.finish();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.control.submitOutcome).not.toHaveBeenCalled();
+      const heartbeats = state.control.heartbeat.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(state.control.heartbeat).toHaveBeenCalledTimes(heartbeats);
+    },
+  );
 });

@@ -459,8 +459,19 @@ export class ExecutionRunService {
     });
     if (!run) throw new NotFoundException("Run not found.");
 
+    const sessionIds = run.browserExecutions.flatMap((execution) =>
+      execution.runtimeSessionId ? [execution.runtimeSessionId] : [],
+    );
+    const recoveries = sessionIds.length
+      ? await this.prisma.runtimeSessionRecovery.findMany({
+          where: { teamId: current.team.id, sessionId: { in: sessionIds } },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, closureState: true, writeOutcomeState: true },
+        })
+      : [];
     return {
       ...run,
+      recoveries,
       executionPolicy: safeExecutionPolicy(
         run.executionPolicy,
         run.browserProfileId,
@@ -1083,27 +1094,65 @@ export function projectRunTrajectory(
   rows: TrajectoryEventRow[],
   includeRunningStarts = true,
 ): RunTrajectoryRecord[] {
-  const settled = new Map<string, TrajectoryEventRow>();
-  const started = new Set<string>();
-  for (const row of rows) {
+  const pending = new Map<string, TrajectoryEventRow>();
+  const pairs = new Map<string, TrajectoryEventRow>();
+  const pairedStarts = new Set<string>();
+  const segmentEnds = new Map<string, TrajectoryEventRow>();
+  // Match in event order. A settled candidate must not consume a later fallback
+  // start, including legacy runtimes that reuse the same model in one step.
+  for (const row of [...rows].sort((a, b) =>
+    a.sequence < b.sequence ? -1 : a.sequence > b.sequence ? 1 : 0,
+  )) {
     const payload = recordValue(row.payload);
     const startKey = trajectoryStartKey(row.kind, payload);
-    if (startKey) started.add(startKey);
+    if (startKey) pending.set(startKey, row);
     const key = trajectorySettlementKey(row.kind, payload);
-    if (key) settled.set(key, row);
+    const start = key ? pending.get(key) : undefined;
+    if (start && key) {
+      pairs.set(row.id, start);
+      pairedStarts.add(start.id);
+      pending.delete(key);
+    }
+    if (
+      row.kind === "agent.segment.completed" &&
+      typeof payload.segmentId === "string"
+    ) {
+      segmentEnds.set(payload.segmentId, row);
+    }
   }
 
   return rows.flatMap((row): RunTrajectoryRecord[] => {
     const payload = recordValue(row.payload);
     const startKey = trajectoryStartKey(row.kind, payload);
     if (startKey && row.kind !== "agent.segment.started") {
-      if (settled.has(startKey) || !includeRunningStarts) return [];
+      if (pairedStarts.has(row.id) || !includeRunningStarts) return [];
     }
-    if (row.kind === "agent.segment.completed") {
-      const key = trajectorySettlementKey(row.kind, payload);
-      return key && started.has(key) ? [] : [trajectoryRecord(row, payload)];
+    const projected = trajectoryRecord(row, payload);
+    const start = pairs.get(row.id);
+    // Stable IDs replace the in-flight row when polling, even if the start has
+    // fallen outside the current event page. Preserve legacy start IDs too.
+    if (row.kind.startsWith("agent.model.")) {
+      projected.id = stringValue(payload.modelCallId) ?? start?.id ?? row.id;
+    } else if (start && row.kind !== "agent.segment.completed") {
+      projected.id = start.id;
     }
-    return [trajectoryRecord(row, payload)];
+    if (start) projected.startedAt = start.occurredAt.toISOString();
+    if (projected.status === "RUNNING" && projected.segmentId) {
+      const end = segmentEnds.get(projected.segmentId);
+      if (end && end.sequence > row.sequence) {
+        const endPayload = recordValue(end.payload);
+        projected.status = "FAILED";
+        projected.completedAt = end.occurredAt.toISOString();
+        projected.durationMs = Math.max(
+          0,
+          end.occurredAt.getTime() - row.occurredAt.getTime(),
+        );
+        projected.error =
+          errorText(endPayload.errorMessage) ??
+          "Execution segment ended before this operation completed.";
+      }
+    }
+    return [projected];
   });
 }
 
@@ -1203,13 +1252,14 @@ function trajectoryRecord(
   }
 
   const browserCommand = row.kind.startsWith("browser.command.");
+  const segmentCompleted = row.kind === "agent.segment.completed";
   const lane: RunTrajectoryRecord["lane"] = browserCommand ? "TOOLS" : "INPUT";
   return baseTrajectoryRecord(row, {
     attemptNumber,
     callId,
     durationMs,
     input: null,
-    kind: browserCommand ? "RUNTIME" : "INPUT",
+    kind: browserCommand || segmentCompleted ? "RUNTIME" : "INPUT",
     lane,
     metadata: {},
     output: payload,
@@ -1277,7 +1327,15 @@ function trajectoryStartKey(
     return keyed("segment", payload.segmentId);
   }
   if (kind === "agent.model.started") {
-    return keyed("model", payload.segmentId, payload.step);
+    return stringValue(payload.modelCallId)
+      ? keyed("model-call", payload.modelCallId)
+      : keyed(
+          "model",
+          payload.segmentId,
+          payload.step,
+          payload.provider ?? "",
+          payload.model ?? "",
+        );
   }
   if (kind === "agent.tool.started") {
     return keyed("tool", payload.segmentId, payload.callId);
@@ -1296,7 +1354,15 @@ function trajectorySettlementKey(
     return keyed("segment", payload.segmentId);
   }
   if (kind === "agent.model.completed" || kind === "agent.model.failed") {
-    return keyed("model", payload.segmentId, payload.step);
+    return stringValue(payload.modelCallId)
+      ? keyed("model-call", payload.modelCallId)
+      : keyed(
+          "model",
+          payload.segmentId,
+          payload.step,
+          payload.provider ?? "",
+          payload.model ?? "",
+        );
   }
   if (kind === "agent.tool.completed" || kind === "agent.tool.failed") {
     return keyed("tool", payload.segmentId, payload.callId);
