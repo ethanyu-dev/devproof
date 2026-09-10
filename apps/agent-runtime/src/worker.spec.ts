@@ -17,6 +17,127 @@ const task = {
   snapshot: { attemptNumber: 2 },
 } as RuntimeTaskLease;
 
+describe("browser outcome delivery", () => {
+  afterEach(() => vi.useRealTimers());
+  function setup(
+    submitOutcome: ReturnType<typeof vi.fn>,
+    heartbeat = vi.fn().mockImplementation(async () => ({
+      directive: "CONTINUE",
+      leaseDurationMs: 60_000,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })),
+  ) {
+    const appendEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const worker = new AgentRuntimeWorker(
+      { DEVPROOF_AGENT_WORKER_ID: "browser-worker" } as never,
+      { submitOutcome, heartbeat, appendEvent } as never,
+      vi.fn() as never,
+    );
+    const internal = worker as unknown as {
+      executor: { execute: ReturnType<typeof vi.fn> };
+      executeTask(
+        task: RuntimeTaskLease,
+        signal: AbortSignal,
+        workerId: string,
+      ): Promise<void>;
+    };
+    internal.executor = {
+      execute: vi.fn().mockResolvedValue({
+        kind: "VERIFICATION_COMPLETED",
+        termination: { reason: "TOOL_LIMIT_REACHED" },
+        verdict: "INCONCLUSIVE",
+        summary: "调用预算耗尽。",
+        criteria: [],
+        evidence: [],
+        executionDisposition: "EXECUTED",
+      }),
+    };
+    const running = internal.executeTask(
+      {
+        taskId: "task",
+        fencingToken: "1",
+        leaseToken: "test-token",
+        leaseDurationMs: 60_000,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        snapshot: {
+          deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+          runId: "run",
+        },
+      } as RuntimeTaskLease,
+      new AbortController().signal,
+      "browser-worker",
+    );
+    return { running, heartbeat, appendEvent };
+  }
+
+  it("renews ownership through transient submission failures and uses one completion id", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const submit = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      if (++attempts < 3)
+        throw new ControlPlaneError(attempts === 1 ? 500 : 429, {});
+      return { accepted: true };
+    });
+    const state = setup(submit);
+    await vi.advanceTimersByTimeAsync(32_000);
+    await state.running;
+    expect(submit).toHaveBeenCalledTimes(3);
+    expect(
+      new Set(submit.mock.calls.map((args: unknown[]) => args[2])).size,
+    ).toBe(1);
+    expect(state.heartbeat).toHaveBeenCalledTimes(2);
+    expect(state.appendEvent).not.toHaveBeenCalled();
+  });
+
+  it("persists a bounded failure diagnostic without retrying a rejected verdict", async () => {
+    vi.useFakeTimers();
+    const submit = vi.fn().mockRejectedValue(
+      new ControlPlaneError(409, {
+        message: "untrusted evidence",
+        secret: "do-not-log-in-event",
+      }),
+    );
+    const state = setup(submit);
+    await state.running;
+    expect(submit).toHaveBeenCalledOnce();
+    expect(state.appendEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      "runtime.outcome.submission_failed",
+      {
+        kind: "VERIFICATION_COMPLETED",
+        status: 409,
+        termination: { reason: "TOOL_LIMIT_REACHED" },
+      },
+      expect.any(AbortSignal),
+    );
+    expect(JSON.stringify(state.appendEvent.mock.calls)).not.toContain(
+      "do-not-log-in-event",
+    );
+  });
+
+  it("does not replay an outcome after the API rejects lease ownership", async () => {
+    vi.useFakeTimers();
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValue(
+        new ControlPlaneError(409, { code: "RUNTIME_LEASE_LOST" }),
+      );
+    const submit = vi.fn(
+      (_lease, _outcome, _completionId, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const state = setup(submit, heartbeat);
+    await vi.advanceTimersByTimeAsync(16_000);
+    await state.running;
+    expect(submit).toHaveBeenCalledOnce();
+  });
+});
+
 describe("Spec Runtime lease ownership", () => {
   afterEach(() => vi.useRealTimers());
 

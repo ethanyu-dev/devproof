@@ -258,13 +258,33 @@ export class AgentRuntimeWorker {
 
       if (controller.signal.reason instanceof LeaseLostError) return;
       try {
-        await this.submitOutcomeReliably(lease, outcome);
+        await this.submitOutcomeReliably(lease, outcome, controller.signal);
         log("runtime.task.completed", {
           kind: outcome.kind,
           runId: task.snapshot.runId,
           taskId: task.taskId,
         });
       } catch (submitError) {
+        // Keep a durable, credential-free diagnostic when the event route is
+        // still available. Forced finalization already checkpointed its result.
+        await this.controlPlane
+          .appendEvent(
+            lease,
+            "runtime.outcome.submission_failed",
+            {
+              kind: outcome.kind,
+              status:
+                submitError instanceof ControlPlaneError
+                  ? submitError.status
+                  : null,
+              termination:
+                outcome.kind === "VERIFICATION_COMPLETED"
+                  ? (outcome.termination ?? null)
+                  : null,
+            },
+            AbortSignal.timeout(2_000),
+          )
+          .catch(() => undefined);
         log("runtime.outcome.failed", {
           error: errorMessage(submitError),
           taskId: task.taskId,
@@ -372,20 +392,28 @@ export class AgentRuntimeWorker {
   private async submitOutcomeReliably(
     lease: ReturnType<typeof activeLease>,
     outcome: RuntimeOutcome,
+    signal: AbortSignal,
   ) {
     const completionId = randomUUID();
     let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      signal.throwIfAborted();
       try {
         return await this.controlPlane.submitOutcome(
           lease,
           outcome,
           completionId,
+          signal,
         );
       } catch (error) {
         lastError = error;
-        if (error instanceof ControlPlaneError && error.status < 500)
+        if (
+          error instanceof ControlPlaneError &&
+          error.status < 500 &&
+          error.status !== 429
+        )
           throw error;
+        if (attempt < 3) await delay(1_000, signal);
       }
     }
     throw lastError;

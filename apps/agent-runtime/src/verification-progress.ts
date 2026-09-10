@@ -58,6 +58,9 @@ export class VerificationProgress {
     { count: number; startedAt: number }
   >();
   private readonly semanticObservations = new Set<string>();
+  private readonly rejectedSubmissions = new Map<string, number>();
+  private readonly observedRejections = new Set<string>();
+  private readonly interactions = new Map<string, Record<string, unknown>>();
   private repeatedSteps = 0;
   private textOnlySteps = 0;
   private lastProgressAt: number;
@@ -122,6 +125,42 @@ export class VerificationProgress {
         : undefined;
     const result = record(record(input.output).result);
     const interaction = record(result.interaction);
+    const feedback = record(result.actionFeedback);
+    if (
+      typeof interaction.targetKey === "string" &&
+      typeof interaction.stateKey === "string" &&
+      typeof feedback.commandId === "string"
+    )
+      this.interactions.set(feedback.commandId, interaction);
+    const feedbackInteraction =
+      typeof feedback.commandId === "string"
+        ? this.interactions.get(feedback.commandId)
+        : undefined;
+    const rejectedRequests = Array.isArray(feedback.requests)
+      ? feedback.requests.filter((request) => {
+          const entry = record(request);
+          return (
+            [400, 409, 422].includes(Number(entry.status)) &&
+            ["POST", "PUT", "PATCH", "DELETE"].includes(
+              String(entry.method).toUpperCase(),
+            )
+          );
+        })
+      : [];
+    // A later read may expose the response for the last action. Count the action
+    // once; fresh screenshots, timestamps and DOM refs cannot erase a rejection.
+    if (
+      feedbackInteraction &&
+      typeof feedback.commandId === "string" &&
+      rejectedRequests.length &&
+      !this.observedRejections.has(feedback.commandId)
+    ) {
+      this.observedRejections.add(feedback.commandId);
+      const key = fingerprint(feedbackInteraction);
+      const count = (this.rejectedSubmissions.get(key) ?? 0) + 1;
+      this.rejectedSubmissions.set(key, count);
+      if (count >= 3) return true;
+    }
     const hasTarget =
       typeof interaction.targetKey === "string" &&
       typeof interaction.stateKey === "string";

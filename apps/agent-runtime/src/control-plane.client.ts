@@ -99,8 +99,10 @@ export class ControlPlaneClient {
     lease: ActiveLease,
     kind: string,
     payload: Record<string, unknown>,
+    signal?: AbortSignal,
   ) {
     return this.request(`/internal/v2/runtime/tasks/${lease.taskId}/events`, {
+      ...(signal ? { signal } : {}),
       body: {
         ...this.identity(lease),
         event: {
@@ -192,10 +194,13 @@ export class ControlPlaneClient {
     lease: ActiveLease,
     outcome: RuntimeOutcome,
     completionId = randomUUID(),
+    signal?: AbortSignal,
   ) {
     const result = await this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/outcome`,
       {
+        timeoutMs: 10_000,
+        ...(signal ? { signal } : {}),
         body: {
           ...this.identity(lease),
           completedAt: new Date().toISOString(),

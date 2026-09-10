@@ -41,6 +41,15 @@ criteria, and retains the original stop reason if execution is blocked. Deploy
 the API before the new Agent; older APIs may discard this field and cannot safely
 process the new forced-completion path. See [account HITL and action feedback](../../docs/browser-runtime-data-and-feedback-plan.md).
 
+Protocol v2.13 adds optional criterion `basis` (source reference, verbatim quote,
+and observation target) for persisted Specs; the new Spec generator requires it.
+Forced-finalization events carry an owner-fenced `pendingOutcome` checkpoint.
+Recovery retains that checkpoint as unaccepted diagnostics in a blocked result,
+never as proof of a product verdict or a settled write. TEST_ACCOUNT resume data
+also preserves its business-subject purpose and requested usage. Deploy the API
+before both Agent pools; no database migration or Browser protocol change is
+required. See [the regression notes](../../docs/spec-data-finalization-regressions.md).
+
 The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.
 The retired optimization pool, its routes, capabilities and concurrency field
 are removed. Existing workers for the two retained pools accept the registration

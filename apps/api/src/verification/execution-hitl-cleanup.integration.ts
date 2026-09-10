@@ -1,7 +1,11 @@
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
+import {
+  runtimeTaskSnapshotSchema,
+  type RuntimeTaskOutcomeInput,
+} from "@devproof/agent-runtime-protocol";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../config/env.js", () => ({
@@ -12,9 +16,13 @@ vi.mock("../config/env.js", () => ({
 }));
 
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
+import { AgentRuntimeTaskService } from "../agent-runtime/agent-runtime-task.service.js";
 import { SessionClosureService } from "../runtime/session-closure.service.js";
 import { SessionRecoveryWorker } from "../runtime/session-recovery.worker.js";
-import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
+import {
+  ExecutionRunService,
+  reserveCaseTestAccount,
+} from "../execution-runs/execution-run.service.js";
 import { UnifiedRunCleanupWorker } from "../execution-runs/unified-run-cleanup.worker.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
 import { releaseVerifiedSessionResources } from "../runtime/session-resource-cleanup.js";
@@ -307,6 +315,240 @@ async function waitingHumanFixture(transition: string) {
 }
 
 describe("PostgreSQL uncertain writes after human intervention", () => {
+  it("atomically assigns a business account to one parallel Case and permits an independent account", async () => {
+    const { current } = await waitingHumanFixture("accounts");
+    const deadlineAt = new Date(Date.now() + 600_000);
+    const parent = await db.taskExecution.create({
+      data: {
+        teamId: current.team.id,
+        kind: "ISSUE_SPEC",
+        sourceKind: "TEST",
+        idempotencyKey: randomUUID(),
+        title: "Concurrent data fixture",
+        inputSnapshot: {},
+        traceId: randomUUID().replaceAll("-", ""),
+        deadlineAt,
+      },
+    });
+    const environment = { targetUrl: "https://test.example.com/list" };
+    const replies: Array<{
+      id: string;
+      runId: string;
+      context: Prisma.JsonValue;
+    }> = [];
+    for (let index = 0; index < 2; index++) {
+      const run = await db.executionRun.create({
+        data: {
+          teamId: current.team.id,
+          taskExecutionId: parent.id,
+          idempotencyKey: randomUUID(),
+          goal: "Data fixture",
+          criteriaSnapshot: [],
+          environmentSnapshot: environment,
+          traceId: randomUUID().replaceAll("-", ""),
+          deadlineAt,
+          initialDeadlineAt: deadlineAt,
+          hardDeadlineAt: deadlineAt,
+          attempts: { create: { number: 1, inputSnapshot: {} } },
+        },
+        include: { attempts: true },
+      });
+      const task = await db.agentRuntimeTask.create({
+        data: {
+          runId: run.id,
+          attemptId: run.attempts[0]!.id,
+          capability: "browser.verify",
+          status: "WAITING_HUMAN",
+          snapshot: {},
+          deadlineAt,
+        },
+      });
+      replies.push(
+        await db.humanIntervention.create({
+          data: {
+            teamId: current.team.id,
+            runId: run.id,
+            taskId: task.id,
+            attemptId: task.attemptId,
+            kind: "TEST_ACCOUNT",
+            prompt: "Provide an independent business account.",
+            context: { usage: "CREATE_OR_MODIFY" },
+          },
+        }),
+      );
+    }
+    const resolve = (reply: (typeof replies)[number], account: string) =>
+      db.$transaction(async (tx) => {
+        await reserveCaseTestAccount(tx, {
+          account,
+          context: reply.context,
+          environment,
+          runId: reply.runId,
+          taskExecutionId: parent.id,
+          teamId: current.team.id,
+        });
+        // Force overlap between the contenders; removing the advisory lock admits both.
+        await tx.$queryRaw`SELECT 1 FROM pg_sleep(0.05)`;
+        await tx.humanIntervention.update({
+          where: { id: reply.id },
+          data: { response: { account }, status: "RESOLVED" },
+        });
+      });
+    const results = await Promise.allSettled(
+      replies.map((reply) => resolve(reply, "fixture-business-user")),
+    );
+    expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(
+      1,
+    );
+    const pending = await db.humanIntervention.findFirstOrThrow({
+      where: { id: { in: replies.map((item) => item.id) }, status: "PENDING" },
+    });
+    await resolve(pending, "independent-business-user");
+    expect(
+      await db.humanIntervention.count({
+        where: {
+          id: { in: replies.map((item) => item.id) },
+          status: "RESOLVED",
+        },
+      }),
+    ).toBe(2);
+  });
+
+  it.each(["FINALIZATION_RESERVE_REACHED", "TOOL_LIMIT_REACHED"] as const)(
+    "persists forced %s with uncertain writes without violating the verdict constraint",
+    async (reason) => {
+      const { run, task, current } = await waitingHumanFixture("finalization");
+      const leaseToken = randomUUID();
+      const criteria = [
+        {
+          id: "type-filter",
+          description: "列表筛选隔离正确。",
+          required: true,
+          requiredEvidenceKinds: ["DOM"],
+        },
+      ];
+      const snapshot = runtimeTaskSnapshotSchema.parse({
+        attemptId: task.attemptId,
+        attemptNumber: 1,
+        runId: run.id,
+        teamId: current.team.id,
+        criteria,
+        deadlineAt: run.deadlineAt.toISOString(),
+        environment: {},
+        executionPolicy: {},
+        goal: "验证列表筛选。",
+        traceId: run.traceId,
+      });
+      await db.executionRun.update({
+        where: { id: run.id },
+        data: {
+          lifecycle: "RUNNING",
+          executionDisposition: null,
+          criteriaSnapshot: criteria,
+          executionPolicy: { retryPolicy: { maxAttempts: 1, retryOn: [] } },
+        },
+      });
+      await db.agentRuntimeTask.update({
+        where: { id: task.id },
+        data: {
+          status: "RUNNING",
+          completionId: null,
+          snapshot: snapshot as Prisma.InputJsonValue,
+          result: {},
+          leaseToken,
+          leaseOwner: "fixture-agent",
+          leaseExpiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+      // This is the exact invalid combination seen in the incident's SQLSTATE
+      // 23514. Keep the production CHECK intact and prove it rejects that row.
+      await expect(
+        db.executionRun.update({
+          where: { id: run.id },
+          data: {
+            lifecycle: "COMPLETED",
+            executionDisposition: "BLOCKED",
+            verdict: "INCONCLUSIVE",
+          },
+        }),
+      ).rejects.toThrow("execution_runs_verdict_requires_execution");
+      const input: RuntimeTaskOutcomeInput = {
+        completionId: randomUUID(),
+        completedAt: new Date().toISOString(),
+        fencingToken: "1",
+        leaseToken,
+        workerId: "fixture-agent",
+        outcome: {
+          kind: "VERIFICATION_COMPLETED",
+          executionDisposition: "EXECUTED",
+          termination: { reason },
+          summary: "执行预算已用尽。",
+          verdict: "INCONCLUSIVE",
+          evidence: [],
+          criteria: [
+            {
+              criterionId: "type-filter",
+              status: "INCONCLUSIVE",
+              summary: "尚未完成筛选验证。",
+              evidenceRefs: [],
+            },
+          ],
+        },
+      };
+      const service = new AgentRuntimeTaskService(db as never, {} as never);
+      expect(
+        await service.submitOutcome(current.team.id, task.id, input),
+      ).toMatchObject({
+        accepted: true,
+        taskStatus: "FAILED",
+        nextAttemptScheduled: false,
+      });
+      const stored = await db.agentRuntimeTask.findUniqueOrThrow({
+        where: { id: task.id },
+      });
+      expect(stored).toMatchObject({
+        completionId: input.completionId,
+        leaseToken: null,
+        result: {
+          kind: "FATAL_FAILURE",
+          executionDisposition: "BLOCKED",
+          error: {
+            code: "WRITE_OUTCOME_UNKNOWN",
+            details: { originalError: { code: reason } },
+          },
+        },
+      });
+      expect(
+        await db.runAttempt.findUniqueOrThrow({
+          where: { id: task.attemptId },
+        }),
+      ).toMatchObject({ result: stored.result });
+      expect(
+        await db.executionRun.findUniqueOrThrow({ where: { id: run.id } }),
+      ).toMatchObject({
+        lifecycle: "COMPLETED",
+        executionDisposition: "BLOCKED",
+        verdict: null,
+      });
+      expect(
+        await db.runCriterionResult.findMany({
+          where: { attemptId: task.attemptId },
+        }),
+      ).toMatchObject([{ criterionId: "type-filter", status: "INCONCLUSIVE" }]);
+      expect(await db.executionResourceLease.findFirstOrThrow()).toMatchObject({
+        quarantined: true,
+      });
+      expect(
+        await service.submitOutcome(current.team.id, task.id, input),
+      ).toMatchObject({ accepted: true });
+      expect(
+        await db.runCriterionResult.count({
+          where: { attemptId: task.attemptId },
+        }),
+      ).toBe(1);
+    },
+  );
+
   it("rolls back proof and resource release together on a transient database failure, then retries the same command", async () => {
     const { run, task, session, current } = await waitingHumanFixture("cancel");
     await new ExecutionRunService(db as never, {} as never).cancel(

@@ -171,7 +171,7 @@ export function schedulingWaitText(
 
 export function concurrencyPolicyExplanation(accessMode: string | undefined) {
   if (!accessMode || accessMode === "UNKNOWN")
-    return "业务访问方式尚未核对，同一环境按串行执行；空闲槽位不代表可同时访问同一业务数据。";
+    return "业务访问方式尚未核对；并发资格由当前调度策略和数据约束决定，空闲槽位不代表可同时访问同一业务数据。";
   if (accessMode === "READ_ONLY")
     return "只读执行可共享业务数据，实际并发仍受节点和浏览器身份容量限制。";
   return "写入执行按业务资源互斥；只有互不冲突的任务可以同时运行。";

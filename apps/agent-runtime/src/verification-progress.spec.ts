@@ -17,6 +17,54 @@ function snapshot(content: string, index: number) {
 }
 
 describe("verification progress", () => {
+  it("stops three rejected saves despite fresh DOM and counts delayed feedback only once", () => {
+    const progress = new VerificationProgress();
+    const save = (index: number, stateKey = "same-account-type") => ({
+      ...snapshot(`变化的提示 ${index}`, index),
+      arguments: JSON.stringify({
+        commandType: "page.click",
+        payload: { ref: `f${index}e1` },
+      }),
+      output: {
+        result: {
+          interaction: { targetKey: "save", stateKey },
+          actionFeedback: {
+            commandId: `save-${index}`,
+            requests: [{ method: "POST", status: 400 }],
+          },
+        },
+      },
+    });
+    expect(progress.tool(save(1))).toBe(false);
+    for (let i = 0; i < 3; i++) expect(progress.tool(save(1))).toBe(false);
+    expect(progress.tool(snapshot("重新渲染的表单", 2))).toBe(false);
+    expect(progress.tool(save(2))).toBe(false);
+    expect(progress.tool(save(3, "corrected-account-type"))).toBe(false);
+    expect(progress.tool(save(4))).toBe(true);
+  });
+
+  it("does not count infrastructure failures or read requests as rejected writes", () => {
+    const progress = new VerificationProgress();
+    for (let i = 0; i < 5; i++)
+      expect(
+        progress.tool({
+          ...snapshot(`观察 ${i}`, i),
+          output: {
+            result: {
+              content: `新页面 ${i}`,
+              interaction: { targetKey: "save", stateKey: "form" },
+              actionFeedback: {
+                commandId: `action-${i}`,
+                requests: [
+                  { method: "POST", status: 503 },
+                  { method: "GET", status: 400 },
+                ],
+              },
+            },
+          },
+        }),
+      ).toBe(false);
+  });
   it("bounds the same target with unchanged fields despite coordinate jitter and interleaved animated screenshots", () => {
     let now = 0;
     const progress = new VerificationProgress(() => now);

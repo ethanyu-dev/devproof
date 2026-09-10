@@ -159,6 +159,34 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("recovery classification and business protection", () => {
+  it("does not turn READ_ONLY intent or incomplete empty feedback into confirmed writes", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const { tx, session } = setup();
+    tx.agentRuntimeTask.findUnique.mockResolvedValue({
+      fencingToken: 5n,
+      completionId: "accepted",
+      status: "SUCCEEDED",
+      recoveryStatus: "NONE",
+      result: { kind: "VERIFICATION_COMPLETED", verdict: "INCONCLUSIVE" },
+      run: { concurrencyPolicy: { accessMode: "READ_ONLY" } },
+    } as never);
+    tx.browserRuntimeCommand.findUnique.mockResolvedValue({
+      commandType: "page.click",
+      result: {
+        actionFeedback: {
+          inputCompleted: true,
+          requests: [],
+          coverageIncomplete: true,
+        },
+      },
+    } as never);
+    expect(
+      await initialWriteState(
+        tx as never,
+        { ...session, ownerTaskId: "task", ownerFencingToken: 5n } as never,
+      ),
+    ).toBe("UNKNOWN");
+  });
   it("records unknown outcomes without creating a global guard in parallel mode", async () => {
     vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
     const { tx, session, recovery } = setup();

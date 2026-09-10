@@ -20,6 +20,7 @@ import {
   recoveryGuidance,
   recoveryNeedsWriteReview,
   recoveryWriteLabel,
+  recoveryWriteReviewGuidance,
 } from "./runtime-recovery-display";
 import {
   CopyId,
@@ -63,7 +64,7 @@ export function RuntimeRecoveryDetailView({
     <div className="grid min-w-0 gap-4 text-xs">
       <PageHeader
         title="恢复详情"
-        description="先确认浏览器关闭，再核实仍未知的业务结果。恢复操作需要当前团队管理员权限。"
+        description="分别查看关闭证明、业务结果与实际保护范围。未知结果不表示已发生写入；恢复操作需要当前团队管理员权限。"
         actions={
           <>
             <Button asChild variant="secondary">
@@ -220,7 +221,7 @@ export function RuntimeRecoveryDetailView({
                 }}
               >
                 <p className="leading-6 text-muted-foreground">
-                  请核对实际业务状态并提供证据。关闭浏览器本身不能确认此前写入是否成功。
+                  {recoveryWriteReviewGuidance(item.guards)}
                 </p>
                 {changed ? (
                   <Alert variant="warning">
@@ -291,7 +292,7 @@ export function RuntimeRecoveryDetailView({
                       !evidenceRefs(review.evidence).length
                     }
                   >
-                    保存核实结果并释放相关数据保护
+                    保存核实结果
                   </Button>
                 </div>
               </form>

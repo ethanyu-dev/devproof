@@ -89,7 +89,7 @@ export function RuntimeRecoveryList() {
     <div className="grid min-w-0 gap-4">
       <PageHeader
         title="会话恢复"
-        description="分别跟踪浏览器关闭和业务写入结果，处理阻塞后续执行的异常会话。"
+        description="分别跟踪浏览器关闭和业务写入结果；记录数量不等于阻塞执行或需要人工操作的数量。"
         actions={
           <>
             <Button asChild variant="secondary">
@@ -123,7 +123,7 @@ export function RuntimeRecoveryList() {
               value={view}
               onChange={(event) => filter("view", event.target.value)}
             >
-              <option value="pending">待处理</option>
+              <option value="pending">未结记录</option>
               <option value="all">全部记录</option>
             </Select>
           </Field>
@@ -191,7 +191,7 @@ export function RuntimeRecoveryList() {
         </div>
         {view === "pending" ? (
           <p className="text-xs text-muted-foreground">
-            待处理包含关闭异常和关闭后仍待核实的业务结果；正常运行中的会话请在“全部记录”查看。
+            未结记录包含关闭异常和关闭后的未知结果诊断，不一定占用槽位或保护业务数据。请在详情查看实际保护范围；正常运行中的会话请在“全部记录”查看。
           </p>
         ) : null}
         {!records.data && records.loading ? <LoadingState /> : null}
