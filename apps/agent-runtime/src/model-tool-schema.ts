@@ -7,7 +7,17 @@ import { z } from "zod";
  * defaulted fields; do not turn those fields into required properties.
  */
 export function openAiFunctionSchema(schema: z.ZodType): unknown {
-  return stripValidationFormats(z.toJSONSchema(schema));
+  const parameters = z.toJSONSchema(schema);
+  // Zod emits object unions as a bare anyOf. Kimi also requires the explicit
+  // root type; retain every branch so command-specific constraints stay intact.
+  if (
+    parameters.type === undefined &&
+    parameters.anyOf?.length &&
+    parameters.anyOf.every((branch) => branch.type === "object")
+  ) {
+    parameters.type = "object";
+  }
+  return stripValidationFormats(parameters);
 }
 
 function stripValidationFormats(value: unknown): unknown {
