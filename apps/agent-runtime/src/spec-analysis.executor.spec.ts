@@ -64,6 +64,49 @@ function call(name: string, arguments_: unknown, id: string) {
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("correlates each fallback call independently, even when candidates share a model name", async () => {
+    const create = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executor = new SpecAnalysisExecutor(
+      () => ({ complete: create }),
+      { appendSpecEvent } as never,
+      10,
+    );
+    const candidate = task.snapshot.modelCandidates[0]!;
+    await expect(
+      executor.execute(
+        {
+          ...task,
+          snapshot: {
+            ...task.snapshot,
+            modelCandidates: [
+              candidate,
+              { ...candidate, baseUrl: "https://fallback.example.com/v1" },
+            ],
+          },
+        },
+        lease,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("provider unavailable");
+    const events = appendSpecEvent.mock.calls.filter((call) =>
+      call[1].startsWith("agent.model."),
+    );
+    expect(events.map((call) => call[1])).toEqual([
+      "agent.model.started",
+      "agent.model.failed",
+      "agent.model.started",
+      "agent.model.failed",
+    ]);
+    const firstId = events[0]![2].modelCallId;
+    const secondId = events[2]![2].modelCallId;
+    expect(firstId).toEqual(expect.any(String));
+    expect(secondId).toEqual(expect.any(String));
+    expect(secondId).not.toBe(firstId);
+    expect(events[1]![2].modelCallId).toBe(firstId);
+    expect(events[3]![2].modelCallId).toBe(secondId);
+  });
+
   it("bounds text-only chat replies without treating them as a finished Spec", async () => {
     const message = {
       role: "assistant" as const,

@@ -103,8 +103,9 @@ export async function releaseVerifiedSessionResources(
     where: { id: sessionId },
   });
   if (!session) return false;
-  const recovery = await verifiedRecovery(tx, session);
+  let recovery = await verifiedRecovery(tx, session);
   if (!recovery) return false;
+  recovery = await refreshRecoveryWriteOutcome(tx, session, recovery);
   const epoch = {
     sessionId,
     leaseToken: session.leaseToken,

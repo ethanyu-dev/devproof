@@ -48,18 +48,12 @@ export class SessionRecoveryService {
       if (!initial)
         throw new NotFoundException("Runtime session was not found.");
       await lockRuntimeAndSession(tx, initial.runtimeId, sessionId);
-      const session = await tx.browserRuntimeSession.findUniqueOrThrow({
+      let session = await tx.browserRuntimeSession.findUniqueOrThrow({
         where: { id: sessionId },
       });
       const healthy =
         !options.explicitClose &&
         (await isHealthySession(tx, session, new Date()));
-      const recovery = await ensureRecovery(tx, session, reason, {
-        ...(options.sourceRunId ? { sourceRunId: options.sourceRunId } : {}),
-        observed: healthy,
-      });
-      if (session.closureVerifiedAt && session.closureEvidenceId)
-        await releaseVerifiedSessionResources(tx, session.id);
       if (!healthy && !session.closureVerifiedAt) {
         await tx.browserRuntimeSession.updateMany({
           where: {
@@ -76,7 +70,18 @@ export class SessionRecoveryService {
             quarantinedAt: session.quarantinedAt ?? new Date(),
           },
         });
+        session = await tx.browserRuntimeSession.findUniqueOrThrow({
+          where: { id: sessionId },
+        });
       }
+      // Stop command admission under the same lock before assessing the audit.
+      // Otherwise the first recovery pass may permanently block a safe retry.
+      const recovery = await ensureRecovery(tx, session, reason, {
+        ...(options.sourceRunId ? { sourceRunId: options.sourceRunId } : {}),
+        observed: healthy,
+      });
+      if (session.closureVerifiedAt && session.closureEvidenceId)
+        await releaseVerifiedSessionResources(tx, session.id);
       return recovery;
     });
   }

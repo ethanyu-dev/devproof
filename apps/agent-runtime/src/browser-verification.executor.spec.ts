@@ -2077,6 +2077,35 @@ describe("browser verification convergence", () => {
       ),
     ).toBe(false);
   });
+
+  it("bounds interrupted trace and browser cleanup so the worker can submit its shutdown outcome", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn().mockImplementation(() => new Promise(() => {}));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.appendEvent.mockImplementation((_lease, kind) =>
+      kind === "agent.segment.completed"
+        ? new Promise(() => {})
+        : Promise.resolve({}),
+    );
+    controlPlane.releaseBrowser.mockImplementation(() => new Promise(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("Runtime deployment interrupted execution");
+    let settled = false;
+    const execution = executor.execute(runTask, lease, controller.signal);
+    const rejected = expect(
+      execution.finally(() => {
+        settled = true;
+      }),
+    ).rejects.toBe(reason);
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort(reason);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(settled).toBe(false);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(settled).toBe(true);
+  });
 });
 
 describe("Agent Runtime browser verification executor", () => {
@@ -2634,6 +2663,27 @@ describe("Agent Runtime browser verification executor", () => {
     expect(JSON.stringify(controlPlane.appendEvent.mock.calls)).not.toContain(
       "sk-primary-secret-123456",
     );
+    const modelEvents = controlPlane.appendEvent.mock.calls.filter((call) =>
+      call[1].startsWith("agent.model."),
+    );
+    const starts = modelEvents.filter(
+      (call) => call[1] === "agent.model.started",
+    );
+    expect(new Set(starts.map((call) => call[2].modelCallId)).size).toBe(3);
+    expect(
+      starts.every((call) => typeof call[2].modelCallId === "string"),
+    ).toBe(true);
+    for (const start of starts) {
+      const end = modelEvents.find(
+        (call) =>
+          call[1] !== "agent.model.started" &&
+          call[2].modelCallId === start[2].modelCallId,
+      );
+      expect(end?.[2]).toMatchObject({
+        model: start[2].model,
+        step: start[2].step,
+      });
+    }
   });
 
   it("does not hold a Runtime lane while browser capacity is unavailable", async () => {

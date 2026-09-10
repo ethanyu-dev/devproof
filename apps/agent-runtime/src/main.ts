@@ -30,3 +30,5 @@ process.on("SIGINT", () => controller.abort());
 process.on("SIGTERM", () => controller.abort());
 
 await worker.run(controller.signal);
+// A transport that ignores cancellation must not outlive the bounded drain.
+process.exit(0);

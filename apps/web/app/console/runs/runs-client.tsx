@@ -36,6 +36,7 @@ import { RunHitlBrowser } from "./run-hitl-browser";
 import { RunLiveBrowser } from "./run-live-browser";
 import { runOutcome } from "./run-outcome";
 import { RunTrajectory } from "./run-trajectory";
+import { mergeTrajectoryRecords } from "./run-trajectory-records";
 
 interface RunSummary {
   createdAt: string;
@@ -49,6 +50,11 @@ interface RunSummary {
 }
 
 interface RunDetail extends RunSummary {
+  recoveries?: Array<{
+    id: string;
+    closureState: string;
+    writeOutcomeState: string;
+  }>;
   attempts: Array<{
     error: unknown;
     id: string;
@@ -650,6 +656,26 @@ function RunDetailClient({ id }: { id: string }) {
       ) : (
         <>
           {message ? <FormMessage message={message} tone="error" /> : null}
+          {detail.recoveries
+            ?.filter(
+              (recovery) =>
+                recovery.closureState !== "OBSERVED" &&
+                ["UNKNOWN", "UNASSESSED"].includes(recovery.writeOutcomeState),
+            )
+            .map((recovery) => (
+              <Card key={recovery.id} className="dp-run-card">
+                <h2>执行已中断，重试前需核对业务状态</h2>
+                <p>
+                  {recovery.closureState === "VERIFIED"
+                    ? "浏览器已确认关闭。"
+                    : "正在确认浏览器是否已关闭。"}
+                  本次操作的写入结果尚未确认，因此未自动重跑；这不代表产品验证失败。
+                </p>
+                <Link href={`/console/access/recoveries/${recovery.id}`}>
+                  查看恢复记录并核对写入结果
+                </Link>
+              </Card>
+            ))}
           <div className="dp-run-layout">
             {outcome ? (
               <Card
@@ -1162,20 +1188,4 @@ function displayCriteria(detail: RunDetail): DisplayCriterion[] {
     status: result.status,
     summary: null,
   }));
-}
-
-function mergeTrajectoryRecords(
-  ...groups: RunTrajectoryRecord[][]
-): RunTrajectoryRecord[] {
-  const records = new Map<string, RunTrajectoryRecord>();
-  for (const record of groups.flat()) records.set(record.id, record);
-  return [...records.values()].sort((left, right) => {
-    const leftSequence = BigInt(left.sequence);
-    const rightSequence = BigInt(right.sequence);
-    return leftSequence < rightSequence
-      ? -1
-      : leftSequence > rightSequence
-        ? 1
-        : 0;
-  });
 }

@@ -378,6 +378,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.started"),
     payload: runtimeTraceStepContextSchema.extend({
+      modelCallId: z.string().uuid().optional(),
       inputPreview: z.unknown(),
       model: z.string().trim().min(1).max(160),
       provider: z.string().trim().min(1).max(80),
@@ -386,6 +387,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.completed"),
     payload: runtimeTraceStepContextSchema.extend({
+      modelCallId: z.string().uuid().optional(),
       durationMs: z.number().int().nonnegative(),
       inputPreview: z.unknown(),
       model: z.string().trim().min(1).max(160),
@@ -398,6 +400,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.failed"),
     payload: runtimeTraceStepContextSchema.extend({
+      modelCallId: z.string().uuid().optional(),
       durationMs: z.number().int().nonnegative(),
       errorMessage: z.string().max(4_000),
       inputPreview: z.unknown(),

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   missingRequiredEvidenceKinds,
   runtimeCriterionResultSchema,
@@ -361,6 +363,7 @@ export class BrowserVerificationExecutor {
         let response: ModelCompletion | null = null;
         let selectedModel = preferredModel;
         let selectedModelStartedAt = Date.now();
+        let selectedModelCallId: string | undefined;
         let selectedAttempts: ModelRequestAttempt[] = [];
         let lastModelError: unknown;
         for (const candidate of modelCandidates) {
@@ -369,10 +372,12 @@ export class BrowserVerificationExecutor {
             return await finalize("FINALIZATION_RESERVE_REACHED");
           }
           const modelStartedAt = Date.now();
+          const modelCallId = randomUUID();
           const requestAttempts: ModelRequestAttempt[] = [];
           await this.appendTraceEvent(lease, {
             kind: "agent.model.started",
             payload: {
+              modelCallId,
               attemptNumber: task.snapshot.attemptNumber,
               inputPreview: modelInputPreview,
               model: candidate.modelId,
@@ -411,6 +416,7 @@ export class BrowserVerificationExecutor {
               return await finalize("FINALIZATION_RESERVE_REACHED");
             }
             selectedModel = candidate;
+            selectedModelCallId = modelCallId;
             selectedModelStartedAt = modelStartedAt;
             selectedAttempts = requestAttempts;
             lastModelError = undefined;
@@ -429,6 +435,7 @@ export class BrowserVerificationExecutor {
             const failedTrace = this.appendTraceEvent(lease, {
               kind: "agent.model.failed",
               payload: {
+                modelCallId,
                 attemptNumber: task.snapshot.attemptNumber,
                 durationMs: Math.max(0, Date.now() - modelStartedAt),
                 errorMessage: traceErrorMessage(responseError),
@@ -462,6 +469,7 @@ export class BrowserVerificationExecutor {
         await this.appendTraceEvent(lease, {
           kind: "agent.model.completed",
           payload: {
+            modelCallId: selectedModelCallId,
             attemptNumber: task.snapshot.attemptNumber,
             durationMs: Math.max(0, Date.now() - selectedModelStartedAt),
             inputPreview: {
@@ -632,7 +640,19 @@ export class BrowserVerificationExecutor {
           ...(segmentErrorMessage ? { errorMessage: segmentErrorMessage } : {}),
         },
       };
-      if (finalizationDeadline !== undefined) {
+      if (signal.aborted && finalizationDeadline === undefined) {
+        const cleanupUntil = Date.now() + 10_000;
+        await settleWithin(
+          this.appendTraceEvent(lease, segmentCompleted),
+          2_000,
+        );
+        if (!preserveBrowserForHuman) {
+          await settleWithin(
+            this.controlPlane.releaseBrowser(lease),
+            cleanupUntil - Date.now(),
+          );
+        }
+      } else if (finalizationDeadline !== undefined) {
         // The result must reach the worker while it can still be submitted.
         // Closing continues server-side if the bounded RPC wait expires.
         if (finalizationBudgetMs() > 0) {
