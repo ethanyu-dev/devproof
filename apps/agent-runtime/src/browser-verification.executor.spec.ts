@@ -3697,7 +3697,7 @@ describe("Agent Runtime browser verification executor", () => {
     );
   });
 
-  it("counts stale and invisible refs toward the two retarget limit", async () => {
+  it("finalizes after two failed retargets, preserving criteria and skipping queued tools", async () => {
     const create = vi
       .fn()
       .mockResolvedValueOnce({
@@ -3706,6 +3706,16 @@ describe("Agent Runtime browser verification executor", () => {
           role: "assistant" as const,
           content: null,
           tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "PASSED",
+                summary: "页面可见。",
+              },
+              10,
+            ),
             functionCall(
               "browser_command",
               {
@@ -3750,60 +3760,20 @@ describe("Agent Runtime browser verification executor", () => {
               },
               3,
             ),
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        id: "response-third-ref",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
             functionCall(
               "browser_command",
               {
                 commandType: "page.click",
-                locatorRecoveryToken: "call-1",
-                payload: { target: { ref: "e99" } },
+                payload: { target: { selector: "#save" } },
               },
               4,
             ),
           ],
         },
       })
-      .mockResolvedValueOnce({
-        id: "response-inconclusive",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "record_criterion",
-              {
-                criterionId: "page-visible",
-                evidenceRefs: [],
-                status: "INCONCLUSIVE",
-                summary: "两次重新定位均失败，无法确认页面行为。",
-              },
-              5,
-            ),
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        id: "response-finish",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "finish_verification",
-              { summary: "重新定位次数已用完。", verdict: "INCONCLUSIVE" },
-              6,
-            ),
-          ],
-        },
-      });
+      .mockRejectedValue(
+        new Error("No model call is allowed after recovery exhaustion."),
+      );
     const controlPlane = locatorAmbiguousControlPlane({
       refErrors: {
         e42: "ELEMENT_NOT_FOUND",
@@ -3817,7 +3787,20 @@ describe("Agent Runtime browser verification executor", () => {
     );
 
     const outcome = await executor.execute(
-      task,
+      {
+        ...task,
+        snapshot: {
+          ...task.snapshot,
+          criteria: [
+            ...task.snapshot.criteria,
+            {
+              ...task.snapshot.criteria[0]!,
+              id: "settings-visible",
+              description: "The settings page is visible.",
+            },
+          ],
+        },
+      },
       lease,
       new AbortController().signal,
     );
@@ -3825,7 +3808,14 @@ describe("Agent Runtime browser verification executor", () => {
     expect(outcome).toMatchObject({
       kind: "VERIFICATION_COMPLETED",
       verdict: "INCONCLUSIVE",
+      termination: { reason: "LOCATOR_RECOVERY_EXHAUSTED" },
+      criteria: [
+        { criterionId: "page-visible", status: "PASSED" },
+        { criterionId: "settings-visible", status: "INCONCLUSIVE" },
+      ],
     });
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
     ).toEqual([
@@ -3835,7 +3825,6 @@ describe("Agent Runtime browser verification executor", () => {
       "page.click",
       "page.snapshot",
       "page.click",
-      "page.snapshot",
     ]);
     expect(controlPlane.browserCommand.mock.calls[3]?.[1].payload).toEqual({
       target: { ref: "e42" },
@@ -3843,11 +3832,13 @@ describe("Agent Runtime browser verification executor", () => {
     expect(controlPlane.browserCommand.mock.calls[5]?.[1].payload).toEqual({
       target: { ref: "e97" },
     });
-    expect(JSON.stringify(create.mock.calls[3]?.[0].messages)).toContain(
-      'retargetAttempts\\":2',
-    );
-    expect(JSON.stringify(create.mock.calls[4]?.[0].messages)).toContain(
-      "已用完两次重新定位机会",
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "executor.stagnation.finalized",
+      expect.objectContaining({
+        reason: "LOCATOR_RECOVERY_EXHAUSTED",
+        pendingOutcome: outcome,
+      }),
     );
   });
 });

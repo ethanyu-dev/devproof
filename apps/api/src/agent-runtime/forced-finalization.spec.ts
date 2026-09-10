@@ -129,6 +129,7 @@ describe("forced finalization write audit", () => {
     "FINALIZATION_RESERVE_REACHED",
     "REPEATED_OPERATIONS",
     "TEXT_ONLY_LOOP",
+    "LOCATOR_RECOVERY_EXHAUSTED",
   ])(
     "keeps partial criteria and the original %s reason when writes are unknown",
     async (reason) => {

@@ -16,6 +16,7 @@ import {
   runtimeOutcomeSchema,
   runtimeTraceEventSchema,
   runtimeTaskSnapshotSchema,
+  runtimeVerificationTerminationReasonSchema,
   type RuntimeEvidenceRef,
   type RuntimeTaskClaimInput,
   type RuntimeTaskOutcomeInput,
@@ -1789,12 +1790,7 @@ export function readFinalizationCheckpoint(value: unknown, lostFence: bigint) {
   const parsed = z
     .object({
       fencingToken: z.literal(lostFence.toString()),
-      reason: z.enum([
-        "FINALIZATION_RESERVE_REACHED",
-        "TOOL_LIMIT_REACHED",
-        "REPEATED_OPERATIONS",
-        "TEXT_ONLY_LOOP",
-      ]),
+      reason: runtimeVerificationTerminationReasonSchema,
       pendingOutcome: runtimeOutcomeSchema,
     })
     .safeParse(value);

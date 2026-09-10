@@ -164,6 +164,37 @@ describe("agent runtime protocol", () => {
     expect(outcome.verdict).toBe("PASSED");
   });
 
+  it("preserves the locator recovery stop reason without requiring it from older agents", () => {
+    const outcome = {
+      criteria: [
+        {
+          criterionId: "settings-visible",
+          status: "INCONCLUSIVE",
+          summary: "The target could not be resolved after two retargets.",
+        },
+      ],
+      executionDisposition: "EXECUTED",
+      kind: "VERIFICATION_COMPLETED",
+      summary: "Locator recovery was exhausted.",
+      verdict: "INCONCLUSIVE",
+    };
+    expect(runtimeOutcomeSchema.parse(outcome)).not.toHaveProperty(
+      "termination",
+    );
+    expect(
+      runtimeOutcomeSchema.parse({
+        ...outcome,
+        termination: { reason: "LOCATOR_RECOVERY_EXHAUSTED" },
+      }),
+    ).toHaveProperty("termination.reason", "LOCATOR_RECOVERY_EXHAUSTED");
+    expect(
+      runtimeOutcomeSchema.safeParse({
+        ...outcome,
+        termination: { reason: "UNKNOWN_REASON" },
+      }).success,
+    ).toBe(false);
+  });
+
   it("represents browser capacity waits without failing the Runtime task", () => {
     expect(
       runtimeBrowserAcquireOutputSchema.parse({

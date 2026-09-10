@@ -6,6 +6,7 @@ import {
   runtimeEvidenceKindSchema,
   runtimeOutcomeSchema,
   runtimeTraceEventSchema,
+  runtimeVerificationTerminationReasonSchema,
   type RuntimeBrowserAcquireInput,
   type RuntimeEvidenceRef,
   type RuntimeOutcome,
@@ -683,6 +684,10 @@ export class BrowserVerificationExecutor {
               : "SUCCEEDED";
             return result.outcome;
           }
+          // Recovery has a hard bound: do not ask the model again or run the
+          // remaining tools in this response once both retargets have failed.
+          if (locatorRecoveryState?.exhausted)
+            return await finalize("LOCATOR_RECOVERY_EXHAUSTED");
           if (
             progress.tool({
               name: call.function.name,
@@ -1800,11 +1805,9 @@ function readDeadlinePolicy(
   };
 }
 
-type FinalizationReason =
-  | "FINALIZATION_RESERVE_REACHED"
-  | "REPEATED_OPERATIONS"
-  | "TEXT_ONLY_LOOP"
-  | "TOOL_LIMIT_REACHED";
+type FinalizationReason = z.infer<
+  typeof runtimeVerificationTerminationReasonSchema
+>;
 
 function finalizationReserveMs(policy: RuntimeDeadlinePolicy) {
   return policy.mode === "ADAPTIVE"
@@ -1837,6 +1840,8 @@ function finalizationOutcome(input: {
     TEXT_ONLY_LOOP:
       "模型连续四轮只返回文本，未调用工具继续验证，已停止自动执行。",
     TOOL_LIMIT_REACHED: "工具调用预算已用尽，已停止继续操作并保留验收结果。",
+    LOCATOR_RECOVERY_EXHAUSTED:
+      "定位恢复的两次重新定位均未成功，已停止自动执行并保留验收结果。",
   }[input.reason];
   const missing = input.task.snapshot.criteria.filter(
     (criterion) => !input.criterionResults.has(criterion.id),
