@@ -9,6 +9,8 @@ import {
   type BrowserVerificationOptions,
 } from "./browser-verification.executor.js";
 import { jsonBytes } from "./model-context.js";
+import { createChatCompletionsClient } from "./model-client.js";
+import { browserToolGroupNames } from "./browser-tool-catalog.js";
 
 type Request = {
   model: string;
@@ -17,6 +19,7 @@ type Request = {
     function: {
       name: string;
       parameters: {
+        type?: string;
         anyOf?: Array<{ properties: { commandType: { const: string } } }>;
       };
     };
@@ -170,6 +173,83 @@ function harness(
 }
 
 describe("browser tool module execution", () => {
+  it.each(["GROUPED", "LEGACY"] as const)(
+    "sends object-root function parameters to a Kimi-compatible chat endpoint in %s mode",
+    async (toolSurfaceMode) => {
+      const fixture = harness(
+        [
+          ...(toolSurfaceMode === "GROUPED"
+            ? [enable(...browserToolGroupNames)]
+            : []),
+          browse("page.snapshot"),
+          human,
+        ],
+        { toolSurfaceMode },
+      );
+      fixture.task.snapshot.modelCandidates![0]!.modelId = "kimi-k3";
+      const modelFetch = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async (url, init) => {
+          expect(String(url)).toBe(
+            "https://gateway.example.com/v1/chat/completions",
+          );
+          const request = JSON.parse(String(init?.body)) as Request;
+          // Reproduce the provider's request validation against the real tool catalog.
+          if (
+            request.tools.some(
+              (tool) => tool.function.parameters.type !== "object",
+            )
+          ) {
+            return new Response(
+              JSON.stringify({
+                error: {
+                  message:
+                    'Invalid request: tools.function.parameters.type is required and must be "object"',
+                },
+              }),
+              { status: 400, headers: { "content-type": "application/json" } },
+            );
+          }
+          const completion = await fixture.create(request);
+          return new Response(
+            JSON.stringify({
+              id: completion.id,
+              choices: [
+                {
+                  index: 0,
+                  finish_reason: "tool_calls",
+                  message: completion.message,
+                },
+              ],
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        });
+      const executor = new BrowserVerificationExecutor(
+        (candidate) => createChatCompletionsClient(candidate, modelFetch),
+        fixture.controlPlane as never,
+        60,
+        { toolSurfaceMode },
+      );
+      expect(
+        await executor.execute(
+          fixture.task,
+          fixture.lease,
+          new AbortController().signal,
+        ),
+      ).toMatchObject({ kind: "WAITING_HUMAN" });
+      expect(modelFetch).toHaveBeenCalledTimes(
+        toolSurfaceMode === "GROUPED" ? 3 : 2,
+      );
+      expect(names(fixture.requests[0]!)).toHaveLength(
+        toolSurfaceMode === "GROUPED" ? 15 : 39,
+      );
+      expect(names(fixture.requests.at(-1)!)).toHaveLength(
+        toolSurfaceMode === "GROUPED" ? 38 : 39,
+      );
+    },
+  );
+
   it("completes a core form without discovery and advertises less than 60% of legacy tool bytes", async () => {
     const script = [
       browse("page.navigate", { url: "https://example.com/form" }),
