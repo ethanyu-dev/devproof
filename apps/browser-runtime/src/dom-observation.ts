@@ -12,13 +12,12 @@ function register() {
     "devproofdom",
     `({
       query(root, ref) {
-        const doc = root.ownerDocument || root;
-        const node = doc.defaultView?.[${JSON.stringify(registryKey)}]?.get(ref);
+        const node = globalThis[${JSON.stringify(registryKey)}]?.get(ref);
         if (!node?.isConnected) return null;
         let ancestor = node;
         while (ancestor) {
-          if (ancestor === root || root.contains(ancestor)) return node;
-          ancestor = ancestor.getRootNode()?.host;
+          if (ancestor === root || Node.prototype.contains.call(root, ancestor)) return node;
+          ancestor = Node.prototype.getRootNode.call(ancestor)?.host;
         }
         return null;
       },
@@ -76,7 +75,9 @@ export class DomObservations {
       try {
         const captured = await root.evaluate(
           (body, input) => {
-            const view = body.ownerDocument.defaultView!;
+            // Use the evaluating frame's realm. Microfrontends can override a
+            // connected node's ownerDocument/getRootNode with a sandbox document.
+            const view = globalThis;
             const store = new Map<string, Element>();
             (view as unknown as Record<string, unknown>)[input.key] = store;
             const lines: string[] = [];

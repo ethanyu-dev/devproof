@@ -50,6 +50,16 @@ also preserves its business-subject purpose and requested usage. Deploy the API
 before both Agent pools; no database migration or Browser protocol change is
 required. See [the regression notes](../../docs/spec-data-finalization-regressions.md).
 
+Protocol v2.14 adds `LOCATOR_RECOVERY_EXHAUSTED` to verification termination
+reasons and diagnostic finalization checkpoints. After two unsuccessful
+retargets, the Agent stops further model and tool calls, preserves accepted
+criteria and evidence, and marks unverified criteria `INCONCLUSIVE`. The API
+still audits uncertain writes and retains the stop reason if it blocks the run.
+Deploy the API before the Agent; older APIs cannot parse this reason. No database
+migration or Browser protocol change is required. The accompanying DOM reference
+fix requires upgrading independently deployed Browser Runtime installations.
+See [the regression notes](../../docs/browser-reference-recovery.md).
+
 The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.
 The retired optimization pool, its routes, capabilities and concurrency field
 are removed. Existing workers for the two retained pools accept the registration

@@ -26,6 +26,44 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it("resolves connected microfrontend nodes whose document and root are virtualized", async () => {
+    await page.setContent(
+      '<div id="microfrontend"></div><iframe hidden></iframe>',
+    );
+    await page.locator("#microfrontend").evaluate((host) => {
+      const iframe = document.querySelector("iframe")!;
+      const virtualDocument = iframe.contentDocument!;
+      const shadow = host.attachShadow({ mode: "open" });
+      const body = virtualDocument.createElement("body");
+      const button = virtualDocument.createElement("button");
+      button.textContent = "Whitelist settings";
+      button.addEventListener("click", () => {
+        button.textContent = "Opened";
+      });
+      body.append(button);
+      shadow.append(body);
+      // Microfrontends such as Wujie expose their sandbox document instead of
+      // the native shadow root / owner document, without replacing the node.
+      for (const node of [body, button]) {
+        Object.defineProperty(node, "ownerDocument", {
+          get: () => virtualDocument,
+        });
+        node.getRootNode = () => virtualDocument;
+      }
+    });
+    const dom = new DomObservations();
+    const observed = await dom.snapshot(page);
+    const target = ref(observed.content, "Whitelist settings");
+    expect(await page.getByText("Whitelist settings").count()).toBe(1);
+    expect(await dom.locator(page, target).count()).toBe(1);
+    await dom.locator(page, target).click();
+    expect(await page.getByText("Opened").count()).toBe(1);
+    const scoped = await dom.snapshot(page, page.getByText("Opened"));
+    expect(await dom.locator(page, ref(scoped.content, "Opened")).count()).toBe(
+      1,
+    );
+  });
+
   it("observes a microfrontend with a body inside an open shadow root", async () => {
     await page.setContent('<div id="microfrontend"></div>');
     await page.locator("#microfrontend").evaluate((host) => {
