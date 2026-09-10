@@ -99,6 +99,9 @@ export function hitlWaitDeadline(input: {
 }
 
 interface AdaptiveDeadlineState {
+  requireMeaningfulProgress?: boolean;
+  lastMeaningfulProgressKey?: string | null;
+  lastDeadlineExtensionProgressKey?: string | null;
   activeOperation: string | null;
   activeOperationKey: string | null;
   activeOperationStartedAtMs: number | null;
@@ -114,6 +117,7 @@ interface AdaptiveDeadlineState {
 }
 
 export interface AdaptiveDeadlineExtension {
+  progressKey?: string;
   activeModelElapsedMs: number;
   deadlineAtMs: number;
   extendedByMs: number;
@@ -127,6 +131,14 @@ export function decideAdaptiveDeadlineExtension(
   state: AdaptiveDeadlineState,
 ): AdaptiveDeadlineExtension | null {
   if (state.policy.mode !== "ADAPTIVE") return null;
+  // Permit one bootstrap extension, then require new observed work. New model
+  // call IDs, fallback attempts and repeated cache reads cannot replenish time.
+  const progressKey = state.lastMeaningfulProgressKey ?? "INITIAL_OBSERVATION";
+  if (
+    state.requireMeaningfulProgress &&
+    progressKey === state.lastDeadlineExtensionProgressKey
+  )
+    return null;
   if (
     state.deadlineAtMs <= state.nowMs ||
     state.deadlineAtMs >= state.hardDeadlineAtMs
@@ -187,6 +199,7 @@ export function decideAdaptiveDeadlineExtension(
   const deadlineAtMs = Math.min(requestedDeadlineAtMs, state.hardDeadlineAtMs);
   if (deadlineAtMs <= state.deadlineAtMs) return null;
   return {
+    ...(state.requireMeaningfulProgress ? { progressKey } : {}),
     activeModelElapsedMs,
     deadlineAtMs,
     extendedByMs: deadlineAtMs - state.deadlineAtMs,
@@ -960,6 +973,9 @@ export class AgentRuntimeTaskService {
       });
       const policy = retryPolicySchema.parse(task.run.executionPolicy).deadline;
       const extension = decideAdaptiveDeadlineExtension({
+        requireMeaningfulProgress: task.capability === "BROWSER_VERIFICATION",
+        lastMeaningfulProgressKey: task.lastMeaningfulProgressKey,
+        lastDeadlineExtensionProgressKey: task.lastDeadlineExtensionProgressKey,
         activeOperation: task.activeOperation,
         activeOperationKey: task.activeOperationKey,
         activeOperationStartedAtMs:
@@ -1004,6 +1020,9 @@ export class AgentRuntimeTaskService {
             data: {
               deadlineAt: nextDeadlineAt,
               lastDeadlineExtensionOperationKey: extension.operationKey,
+              ...(extension.progressKey
+                ? { lastDeadlineExtensionProgressKey: extension.progressKey }
+                : {}),
               lastHeartbeatAt: now,
               leaseExpiresAt,
               snapshot: json(extendedSnapshot),
@@ -1022,6 +1041,7 @@ export class AgentRuntimeTaskService {
                 observedModelLatencyMs: extension.observedModelLatencyMs,
                 oldDeadlineAt: task.run.deadlineAt.toISOString(),
                 operationKey: extension.operationKey,
+                progressKey: extension.progressKey,
                 reason: "SLOW_MODEL",
                 reserveMs: extension.reserveMs,
                 trigger: extension.trigger,
@@ -1659,6 +1679,11 @@ export class AgentRuntimeTaskService {
     if (event.kind === "agent.model.started") {
       await tx.agentRuntimeTask.update({
         data: {
+          ...(event.payload.progress?.meaningful
+            ? {
+                lastMeaningfulProgressKey: `${event.payload.segmentId}:${event.payload.progress.sequence}`,
+              }
+            : {}),
           activeOperation: "MODEL",
           activeOperationKey: traceOperationKey(event.payload),
           activeOperationStartedAt: recordedAt,
@@ -1718,6 +1743,13 @@ export class AgentRuntimeTaskService {
     ) {
       await tx.agentRuntimeTask.update({
         data: {
+          ...(event.kind === "agent.tool.completed" &&
+          event.payload.status === "SUCCEEDED" &&
+          event.payload.progress?.meaningful
+            ? {
+                lastMeaningfulProgressKey: `${event.payload.segmentId}:${event.payload.progress.sequence}`,
+              }
+            : {}),
           activeOperation: null,
           activeOperationKey: null,
           activeOperationStartedAt: null,

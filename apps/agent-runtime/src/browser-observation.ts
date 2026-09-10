@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 import { jsonBytes } from "./model-context.js";
 import { compactValue } from "./operation-summary.js";
+import { observationContentKey } from "./observation-content.js";
 
 type Command = z.infer<typeof runtimeActionCommandInputSchema>;
 interface Observation {
@@ -27,6 +28,8 @@ interface Observation {
   readPages: Map<number, number | null>;
   lastReadCursor?: number;
   visualObservationId?: string;
+  contentKey: string;
+  readProgressInheritedFrom?: string;
 }
 
 export const READ_COMMANDS = new Set([
@@ -194,7 +197,15 @@ export class BrowserObservations {
   }
 
   /** The most recently read DOM page is pinned independently of operation summaries. */
-  currentPage() {
+  currentPage(): {
+    visualStatus: "AVAILABLE" | "UNAVAILABLE";
+    snapshot: Record<string, unknown> | null;
+    latestObservation: Record<string, unknown> | undefined;
+    nextAction?: {
+      tool: string;
+      arguments: { commandType: string; payload: Record<string, unknown> };
+    };
+  } {
     const entry = this.currentSnapshot
       ? this.entries.get(this.currentSnapshot)
       : undefined;
@@ -207,7 +218,10 @@ export class BrowserObservations {
               visualObservationId: entry.visualObservationId,
             }
           : null,
-      latestObservation: this.latestRead,
+      latestObservation:
+        this.latestRead?.observationId !== this.currentSnapshot
+          ? this.requestedPage()
+          : undefined,
       ...(!entry || this.pageDirty
         ? {
             nextAction: {
@@ -234,7 +248,16 @@ export class BrowserObservations {
       this.latestRead = page;
   }
 
+  requestedPage(): Record<string, unknown> | undefined {
+    const entry = this.entries.get(String(this.latestRead?.observationId));
+    const cursor = this.latestRead?.cursor;
+    return entry?.content !== undefined && typeof cursor === "number"
+      ? this.page(entry, cursor, false)
+      : undefined;
+  }
+
   capture(command: Command, raw: unknown) {
+    const previous = this.entries.get(this.currentSnapshot ?? "");
     this.latestRead = undefined;
     const response = record(raw);
     const stage = READ_COMMANDS.has(command.commandType)
@@ -311,6 +334,8 @@ export class BrowserObservations {
           typeof result.url === "string" ? result.url : undefined;
         this.pageDirty = false;
         if (this.visual) entry.visualObservationId = this.visual.observationId;
+        if (previous?.contentKey === entry.contentKey)
+          this.inheritReadProgress(previous, entry);
       }
     }
   }
@@ -355,8 +380,19 @@ export class BrowserObservations {
         error: "请使用该观察返回的 nextCursor，或从 cursor=0 开始读取。",
       };
     const page = this.page(entry, cursor);
-    if (entry.id !== this.currentSnapshot) this.latestRead = page;
+    this.latestRead = page;
     return page;
+  }
+
+  /** Checkpoints may quote delivered observations, never invented page facts. */
+  hasDeliveredQuote(id: string, cursor: number, quote: string) {
+    const entry = this.entries.get(id);
+    return Boolean(
+      quote.trim() &&
+      entry?.content !== undefined &&
+      entry.readPages.has(cursor) &&
+      String(this.page(entry, cursor, false).content).includes(quote),
+    );
   }
 
   project(raw: unknown, bounded = true): unknown {
@@ -430,7 +466,13 @@ export class BrowserObservations {
       const entry = this.capturedResults.get(result);
       projected.result = entry
         ? {
-            ...this.page(entry, 0, false),
+            ...this.page(
+              entry,
+              entry.id === this.currentSnapshot
+                ? (entry.lastReadCursor ?? 0)
+                : 0,
+              false,
+            ),
             ...(record(result).actionFeedback
               ? { actionFeedback: this.feedback }
               : {}),
@@ -614,6 +656,10 @@ export class BrowserObservations {
       captureTruncated:
         prefix.length < content.length || source.captureTruncated === true,
       sourceTruncated: source.truncated === true,
+      contentKey: observationContentKey(
+        prefix,
+        typeof source.url === "string" ? source.url : undefined,
+      ),
       cursors: new Set([0]),
       readPages: new Map(),
     };
@@ -645,6 +691,8 @@ export class BrowserObservations {
       observationId: entry.id,
       order: entry.order,
       commandType: entry.commandType,
+      contentKey: entry.contentKey,
+      readProgressInheritedFrom: entry.readProgressInheritedFrom,
       capturedAt: entry.capturedAt,
       url: entry.url,
       title: entry.title,
@@ -711,19 +759,52 @@ export class BrowserObservations {
       content,
       cursor,
       nextCursor: next < entry.content.length ? next : null,
-      ...(next < entry.content.length
-        ? {
-            nextAction: {
-              tool: "read_observation",
-              arguments: { observationId: entry.id, cursor: next },
-            },
-          }
-        : {}),
       totalCapturedChars: entry.content.length,
       ...(omittedLine ? { omittedLine: true } : {}),
     };
     if (deliver) this.deliverPage(page);
-    return page;
+    const nextUnread = this.nextUnreadCursor(entry);
+    return {
+      ...page,
+      ...this.descriptor(entry),
+      ...(nextUnread !== null
+        ? { nextAction: this.readAction(entry, nextUnread) }
+        : {}),
+    };
+  }
+
+  private inheritReadProgress(previous: Observation, entry: Observation) {
+    if (previous.content === undefined || entry.content === undefined) return;
+    // Ref width may change (f9 -> f10), so offsets cannot be copied verbatim.
+    const lineAt = (text: string, offset: number) =>
+      text.slice(0, offset).split("\n").length - 1;
+    const lineEnd = (text: string, offset: number) =>
+      lineAt(text, offset) + (offset > 0 && text[offset - 1] !== "\n" ? 1 : 0);
+    const readLines = new Set<number>();
+    for (const [start, end] of previous.readPages) {
+      if (this.page(previous, start, false).omittedLine) continue;
+      const first = lineAt(previous.content, start);
+      const last = lineEnd(previous.content, end ?? previous.content.length);
+      for (let line = first; line < last; line++) readLines.add(line);
+    }
+    const focusLine = lineAt(previous.content, previous.lastReadCursor ?? 0);
+    let cursor: number | null = 0;
+    while (cursor !== null) {
+      const page = this.page(entry, cursor, false);
+      const next = page.nextCursor as number | null;
+      const first = lineAt(entry.content, cursor);
+      const last = lineEnd(entry.content, next ?? entry.content.length);
+      if (
+        Array.from({ length: last - first }, (_, i) => first + i).every(
+          (line) => readLines.has(line),
+        )
+      )
+        entry.readPages.set(cursor, next);
+      if (first <= focusLine && (next === null || focusLine < last))
+        entry.lastReadCursor = cursor;
+      cursor = next;
+    }
+    entry.readProgressInheritedFrom = previous.id;
   }
 
   private deliverPage(
@@ -748,6 +829,10 @@ export class BrowserObservations {
       return;
     entry.lastReadCursor = page.cursor;
     entry.readPages.set(page.cursor, page.nextCursor as number | null);
+    Object.assign(page, this.descriptor(entry));
+    delete page.nextAction;
+    const unread = this.nextUnreadCursor(entry);
+    if (unread !== null) page.nextAction = this.readAction(entry, unread);
     if (exposeRefs && entry.id === this.currentSnapshot && !page.omittedLine)
       for (const match of page.content.matchAll(/\[ref=((?:f\d+)?e\d+)\]/gu))
         this.exposedRefs.add(match[1]!);

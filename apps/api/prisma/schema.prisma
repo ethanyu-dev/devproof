@@ -1776,6 +1776,8 @@ model AgentRuntimeTask {
   modelLatencyMaxMs                 Int                    @default(0) @map("model_latency_max_ms")
   lastModelOperationKey             String?                @map("last_model_operation_key")
   lastDeadlineExtensionOperationKey String?                @map("last_deadline_extension_operation_key")
+  lastMeaningfulProgressKey         String?                @map("last_meaningful_progress_key")
+  lastDeadlineExtensionProgressKey  String?                @map("last_deadline_extension_progress_key")
   completionId                      String?                @unique @map("completion_id") @db.Uuid
   cancelRequestedAt                 DateTime?              @map("cancel_requested_at") @db.Timestamptz
   deadlineAt                        DateTime               @map("deadline_at") @db.Timestamptz

@@ -9,6 +9,7 @@ import {
 } from "./model-types.js";
 import {
   OperationMemory,
+  presentOperationSummaries,
   summarizeTurn,
   type OperationSummary,
 } from "./operation-summary.js";
@@ -100,7 +101,7 @@ export class ModelContext {
               role: "user" as const,
               content: JSON.stringify({
                 kind: "recent_operations",
-                turns: this.summaries,
+                turns: presentOperationSummaries(this.summaries, currentPage),
               }),
             },
             {

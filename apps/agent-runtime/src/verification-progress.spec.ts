@@ -17,6 +17,69 @@ function snapshot(content: string, index: number) {
 }
 
 describe("verification progress", () => {
+  it("credits changed automatic DOM, but not refresh identities or animations", () => {
+    const progress = new VerificationProgress();
+    progress.observe(snapshot('- button "Open" [ref=f1e1]', 1).output);
+    expect(progress.state()).toMatchObject({ meaningful: true, sequence: 1 });
+    progress.observe(snapshot('- button "Open" [ref=f2e1]', 2).output);
+    expect(progress.state()).toMatchObject({ meaningful: false, sequence: 1 });
+    progress.observe(snapshot('- button "Close" [ref=f3e1]', 3).output);
+    expect(progress.state()).toMatchObject({ meaningful: true, sequence: 2 });
+  });
+  it("bounds repeated cached pages despite new capture IDs, cursor offsets and refs", () => {
+    let now = 0;
+    const progress = new VerificationProgress(() => now);
+    let stopped = false;
+    for (let n = 0; n < 12 && !stopped; n++) {
+      now += 61_000;
+      stopped = progress.tool({
+        name: "read_observation",
+        arguments: JSON.stringify({
+          observationId: `new-${n}`,
+          cursor: 11088 + n,
+        }),
+        criteria: [],
+        output: {
+          result: {
+            content: `- option "Same option" [ref=f${n}e1]`,
+            url: "https://example.com",
+          },
+        },
+      });
+      expect(progress.state().meaningful).toBe(n === 0);
+    }
+    expect(stopped).toBe(true);
+    expect(progress.state().sequence).toBe(1);
+    expect(
+      progress.tool({
+        name: "read_observation",
+        arguments: '{"cursor":0}',
+        criteria: [],
+        output: { result: { content: "New option" } },
+      }),
+    ).toBe(false);
+    expect(progress.state()).toMatchObject({
+      meaningful: true,
+      sequence: 2,
+      repeatedSteps: 0,
+    });
+  });
+
+  it("does not label a fresh screenshot hash alone as meaningful deadline progress", () => {
+    const progress = new VerificationProgress();
+    for (let n = 0; n < 3; n++) {
+      progress.tool({
+        ...snapshot("same", n),
+        output: {
+          artifacts: [{ kind: "SCREENSHOT", sha256: `animation-${n}` }],
+        },
+      });
+      expect(progress.state()).toMatchObject({
+        meaningful: false,
+        sequence: 0,
+      });
+    }
+  });
   it("stops three rejected saves despite fresh DOM and counts delayed feedback only once", () => {
     const progress = new VerificationProgress();
     const save = (index: number, stateKey = "same-account-type") => ({

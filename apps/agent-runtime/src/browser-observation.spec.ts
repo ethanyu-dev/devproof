@@ -1,7 +1,9 @@
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserObservations } from "./browser-observation.js";
-import { jsonBytes } from "./model-context.js";
+import { ModelContext, jsonBytes } from "./model-context.js";
+
+afterEach(() => vi.useRealTimers());
 
 const command = (commandType: string, payload: Record<string, unknown> = {}) =>
   runtimeActionCommandInputSchema.parse({ commandType, payload });
@@ -34,6 +36,108 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it.each([false, true])(
+    "delivers a requested current tail after a slow model and refresh (page changed=%s)",
+    (changed) => {
+      vi.useFakeTimers();
+      const cache = new BrowserObservations(undefined, true);
+      const context = new ModelContext([]);
+      const content =
+        "DOM viewport scope f9\n" +
+        '- text "background"\n'.repeat(700) +
+        '- button "新增用户白名单" [ref=f9e206]\n';
+      const { page } = capture(cache, content);
+      cache.deliverCurrentPage(cache.currentPage());
+      vi.setSystemTime(Date.now() + 165_000);
+      const args = {
+        observationId: String(page.observationId),
+        cursor: Number(page.nextCursor),
+      };
+      const result = cache.read(args.observationId, args.cursor);
+      expect(result.content).toContain("新增用户白名单");
+      context.completeTurn(
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              type: "function",
+              id: "read",
+              function: {
+                name: "read_observation",
+                arguments: JSON.stringify(args),
+              },
+            },
+          ],
+        },
+        [
+          {
+            role: "tool",
+            tool_call_id: "read",
+            content: JSON.stringify({ result }),
+          },
+        ],
+      );
+      expect(cache.needsSnapshot()).toBe(true);
+      const requested = cache.requestedPage();
+      capture(
+        cache,
+        changed
+          ? '- button "Different page" [ref=f10e1]\n'
+          : content.replaceAll("f9", "f10"),
+      );
+      cache.retainLatestObservation(requested);
+      const current = cache.currentPage();
+      const view = context.build(
+        {},
+        { observations: cache.index() },
+        undefined,
+        current,
+      );
+      expect(JSON.stringify(view.messages)).toContain("新增用户白名单");
+      expect(current.latestObservation).toMatchObject({
+        refState: "HISTORICAL",
+        content: result.content,
+      });
+      cache.deliverCurrentPage(current);
+      expect(cache.staleRef(click("f9e206"))).toBe(true);
+      if (!changed) {
+        expect(current.snapshot?.content).toContain("[ref=f10e206]");
+        expect(current.snapshot?.readProgressInheritedFrom).toBe(
+          page.observationId,
+        );
+        expect(cache.staleRef(click("f10e206"))).toBe(false);
+      } else {
+        expect(current.snapshot?.cursor).toBe(0);
+        expect(current.snapshot?.readProgressInheritedFrom).toBeUndefined();
+      }
+    },
+  );
+
+  it("keeps read coverage across ref width changes without exposing unread refs", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const content = Array.from(
+      { length: 900 },
+      (_, n) => `- button "Item ${n}" [ref=f9e${n}]\n`,
+    ).join("");
+    const { page } = capture(cache, content);
+    const before = cache.currentPage().snapshot!;
+    capture(cache, content.replaceAll("f9", "f100"));
+    const current = cache.currentPage();
+    expect(current.snapshot?.readProgressInheritedFrom).toBe(
+      page.observationId,
+    );
+    expect(current.snapshot?.nextUnreadCursor).not.toBeNull();
+    cache.deliverCurrentPage(current);
+    expect(cache.staleRef(click("f100e899"))).toBe(true);
+    expect(before.content).not.toContain("Item 899");
+    // URL changes are a distinct observation, even when the visible text matches.
+    capture(cache, content, { url: "https://other.example.com" });
+    expect(
+      cache.currentPage().snapshot?.readProgressInheritedFrom,
+    ).toBeUndefined();
+  });
+
   it("defers new refs until the final decision view is committed, including reads within a multi-call turn", () => {
     const cache = new BrowserObservations(undefined, true);
     const { page } = capture(cache, '- button "New" [ref=e1]\n');
@@ -325,7 +429,13 @@ describe("browser observations", () => {
     }
     expect(joined).toBe(content);
     expect(cache.staleRef(click("f2e900"))).toBe(false);
-    expect(cache.read(String(first.observationId))).toMatchObject(first);
+    const reread = cache.read(String(first.observationId));
+    expect(reread).toMatchObject({
+      content: first.content,
+      nextCursor: first.nextCursor,
+      nextUnreadCursor: null,
+    });
+    expect(reread).not.toHaveProperty("nextAction");
     expect(raw).toEqual(original);
     expect(cache.project(raw)).not.toHaveProperty("leaseToken");
     expect(cache.project(raw)).not.toHaveProperty("payload");
