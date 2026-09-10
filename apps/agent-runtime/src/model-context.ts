@@ -2,6 +2,11 @@ import {
   visualObservationSchema,
   type VisualObservation,
 } from "@devproof/runtime-protocol";
+import {
+  modelFunctionCalls,
+  type ModelAssistantMessage,
+  type ModelMessage,
+} from "./model-types.js";
 export interface ModelContextOptions {
   mode?: "BOUNDED" | "LEGACY";
   maxBytes?: number;
@@ -18,13 +23,13 @@ export class ContextBudgetExceeded extends Error {
 
 /** Retain complete response groups, never a call without its output. */
 export class ModelContext {
-  private readonly turns: unknown[][] = [];
+  private readonly turns: ModelMessage[][] = [];
   private compactedTurns = 0;
   readonly bounded: boolean;
   private readonly maxBytes: number;
 
   constructor(
-    private readonly initial: unknown[],
+    private readonly initial: ModelMessage[],
     options: ModelContextOptions = {},
   ) {
     this.initial = structuredClone(initial);
@@ -32,20 +37,13 @@ export class ModelContext {
     this.maxBytes = options.maxBytes ?? 96 * 1_024;
   }
 
-  completeTurn(output: unknown[], results: Array<Record<string, unknown>>) {
-    const calls = output
-      .filter((item): item is Record<string, unknown> =>
-        Boolean(
-          item &&
-          typeof item === "object" &&
-          "type" in item &&
-          item.type === "function_call",
-        ),
-      )
-      .map((item) => item.call_id);
+  completeTurn(message: ModelAssistantMessage | null, results: ModelMessage[]) {
+    const calls = message
+      ? modelFunctionCalls(message).map((call) => call.id)
+      : [];
     const replies = results
-      .filter((item) => item.type === "function_call_output")
-      .map((item) => item.call_id);
+      .filter((item) => item.role === "tool")
+      .map((item) => item.tool_call_id);
     if (
       new Set(calls).size !== calls.length ||
       calls.length !== replies.length ||
@@ -53,7 +51,9 @@ export class ModelContext {
     ) {
       throw new Error("Cannot retain an incomplete model/tool response group.");
     }
-    this.turns.push(structuredClone([...output, ...results]));
+    this.turns.push(
+      structuredClone([...(message ? [message] : []), ...results]),
+    );
   }
 
   build(
@@ -61,12 +61,12 @@ export class ModelContext {
     state: unknown,
     image?: VisualObservation,
   ) {
-    const input = () => [
+    const messages = (): ModelMessage[] => [
       ...this.initial,
       ...(this.bounded
         ? [
             {
-              role: "user",
+              role: "user" as const,
               content: JSON.stringify({
                 kind: "browser_working_state",
                 data: state,
@@ -82,13 +82,13 @@ export class ModelContext {
         this.compactedTurns += 1;
       }
     }
-    let view = input();
-    let bytes = jsonBytes({ ...baseRequest, input: view });
+    let view = messages();
+    let bytes = jsonBytes({ ...baseRequest, messages: view });
     while (this.bounded && bytes > this.maxBytes && this.turns.length > 1) {
       this.turns.shift();
       this.compactedTurns += 1;
-      view = input();
-      bytes = jsonBytes({ ...baseRequest, input: view });
+      view = messages();
+      bytes = jsonBytes({ ...baseRequest, messages: view });
     }
     if (this.bounded && bytes > this.maxBytes)
       throw new ContextBudgetExceeded(bytes, this.maxBytes);
@@ -100,7 +100,7 @@ export class ModelContext {
         role: "user",
         content: [
           {
-            type: "input_text",
+            type: "text",
             text: JSON.stringify({
               kind: "current_browser_viewport",
               ...metadata,
@@ -109,16 +109,18 @@ export class ModelContext {
             }),
           },
           {
-            type: "input_image",
-            image_url: `data:${contentType};base64,${dataBase64}`,
-            detail: "high",
+            type: "image_url",
+            image_url: {
+              url: `data:${contentType};base64,${dataBase64}`,
+              detail: "high",
+            },
           },
         ],
       });
-      bytes = jsonBytes({ ...baseRequest, input: view });
+      bytes = jsonBytes({ ...baseRequest, messages: view });
     }
     return {
-      input: structuredClone(view),
+      messages: structuredClone(view),
       metrics: {
         requestBytes: bytes,
         textRequestBytes,

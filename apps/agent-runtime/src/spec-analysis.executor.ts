@@ -16,17 +16,14 @@ import {
   type ActiveLease,
   type ControlPlaneClient,
 } from "./control-plane.client.js";
-import type {
-  ModelResponse,
-  ResponsesClientFactory,
-} from "./browser-verification.executor.js";
-
-interface ModelFunctionCall {
-  arguments: string;
-  call_id: string;
-  name: string;
-  type: "function_call";
-}
+import {
+  modelFunctionCalls,
+  type ModelCompletion,
+  type ModelClientFactory,
+  type ModelFunctionCall,
+  type ModelMessage,
+  type ModelAssistantMessage,
+} from "./model-types.js";
 
 const analysisSummarySchema = z.string().trim().min(1).max(4_000);
 const finishSpecSchema = z.object({
@@ -50,6 +47,7 @@ const finishSpecSchema = z.object({
   }),
 });
 const MAX_CONSECUTIVE_SOURCE_FAILURES = 2;
+const MAX_TEXT_ONLY_STEPS = 4;
 
 type SourceToolName =
   | "linear_get_issue"
@@ -60,7 +58,7 @@ type SourceToolName =
 
 export class SpecAnalysisExecutor {
   constructor(
-    private readonly modelClient: ResponsesClientFactory,
+    private readonly modelClient: ModelClientFactory,
     private readonly controlPlane: ControlPlaneClient,
     private readonly toolLimit: number,
   ) {}
@@ -75,7 +73,7 @@ export class SpecAnalysisExecutor {
     const preferredModel = candidates[0]!;
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
-    const history: unknown[] = [
+    const history: ModelMessage[] = [
       { role: "system", content: systemPrompt() },
       {
         role: "user",
@@ -101,6 +99,7 @@ export class SpecAnalysisExecutor {
     let segmentError: string | undefined;
     let leaseRejected = false;
     let step = 0;
+    let textOnlySteps = 0;
 
     await this.appendTrace(lease, signal, {
       kind: "agent.segment.started",
@@ -121,7 +120,7 @@ export class SpecAnalysisExecutor {
         signal.throwIfAborted();
         step += 1;
         const inputPreview = modelHistoryPreview(history);
-        let response: ModelResponse | null = null;
+        let response: ModelCompletion | null = null;
         let selectedModel = preferredModel;
         let selectedStartedAt = Date.now();
         let lastError: unknown;
@@ -141,12 +140,13 @@ export class SpecAnalysisExecutor {
             },
           });
           try {
-            response = await this.modelClient(candidate).responses.create(
+            response = await this.modelClient(candidate).complete(
               {
-                input: history,
+                messages: structuredClone(history),
                 model: candidate.modelId,
                 parallel_tool_calls: false,
-                tool_choice: "required",
+                tool_choice: "auto",
+                stream: false,
                 tools: toolDefinitions(sources.keys(), unavailableTools),
               },
               { signal },
@@ -187,7 +187,7 @@ export class SpecAnalysisExecutor {
             durationMs: Date.now() - selectedStartedAt,
             inputPreview,
             model: selectedModel.modelId,
-            outputPreview: modelOutputPreview(response.output),
+            outputPreview: modelOutputPreview(response.message),
             provider: "OPENAI_COMPATIBLE",
             responseId: response.id,
             segmentId,
@@ -195,9 +195,14 @@ export class SpecAnalysisExecutor {
             ...(response.usage ? { usage: traceRecord(response.usage) } : {}),
           },
         });
-        history.push(...response.output);
-        const calls = response.output.filter(isFunctionCall);
+        history.push(response.message);
+        const calls = modelFunctionCalls(response.message);
         if (!calls.length) {
+          if (++textOnlySteps >= MAX_TEXT_ONLY_STEPS) {
+            throw new Error(
+              "Spec analysis stopped after repeated text-only responses without tool calls.",
+            );
+          }
           history.push({
             role: "user",
             content:
@@ -206,21 +211,22 @@ export class SpecAnalysisExecutor {
           continue;
         }
 
+        textOnlySteps = 0;
         for (const call of calls) {
           signal.throwIfAborted();
           callCount += 1;
           if (callCount > this.toolLimit) break;
           const startedAt = Date.now();
-          const parsedArguments = parseArguments(call.arguments);
+          const parsedArguments = parseArguments(call.function.arguments);
           const summary = analysisSummary(parsedArguments);
           if (!summary) {
             await this.appendTrace(lease, signal, {
               kind: "agent.tool.started",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
-                callId: call.call_id,
+                callId: call.id,
                 inputPreview: tracePreview(parsedArguments),
-                name: call.name,
+                name: call.function.name,
                 segmentId,
                 step,
               },
@@ -249,7 +255,7 @@ export class SpecAnalysisExecutor {
             kind: "agent.analysis.completed",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
-              callId: call.call_id,
+              callId: call.id,
               sourceRefs: [],
               summary,
               segmentId,
@@ -260,16 +266,16 @@ export class SpecAnalysisExecutor {
             kind: "agent.tool.started",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
-              callId: call.call_id,
+              callId: call.id,
               inputPreview: tracePreview(parsedArguments),
-              name: call.name,
+              name: call.function.name,
               segmentId,
               step,
             },
           });
           signal.throwIfAborted();
 
-          if (call.name === "finish_spec") {
+          if (call.function.name === "finish_spec") {
             const parsed = finishSpecSchema.safeParse(parsedArguments);
             if (!parsed.success) {
               await this.validationFailed(
@@ -341,13 +347,13 @@ export class SpecAnalysisExecutor {
               kind: "agent.tool.completed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
-                callId: call.call_id,
+                callId: call.id,
                 durationMs: Date.now() - startedAt,
                 inputPreview: tracePreview({
                   analysisSummary: parsed.data.analysisSummary,
                   caseCount: parsed.data.spec.cases.length,
                 }),
-                name: call.name,
+                name: call.function.name,
                 outputPreview: { accepted: true },
                 segmentId,
                 sourceRefs: usedSourceIds,
@@ -375,8 +381,8 @@ export class SpecAnalysisExecutor {
             });
           }
 
-          if (!isSourceToolName(call.name)) {
-            const error = `未知的 Spec 分析工具：${call.name}`;
+          if (!isSourceToolName(call.function.name)) {
+            const error = `未知的 Spec 分析工具：${call.function.name}`;
             await this.appendTrace(
               lease,
               signal,
@@ -385,19 +391,19 @@ export class SpecAnalysisExecutor {
             history.push(toolOutput(call, { accepted: false, error }));
             continue;
           }
-          const sourceToolName = call.name;
+          const sourceToolName = call.function.name;
 
           try {
             const output = await this.controlPlane.executeSpecTool(
               lease,
               {
                 arguments: parsedArguments,
-                callId: call.call_id,
+                callId: call.id,
                 name: sourceToolName,
               },
               signal,
             );
-            calledTools.add(call.name);
+            calledTools.add(call.function.name);
             sourceFailureCounts.delete(sourceToolName);
             output.sourceRefs.forEach((source) =>
               sources.set(source.externalId, source),
@@ -408,7 +414,7 @@ export class SpecAnalysisExecutor {
                 [source.excerpt, ...stringLeaves(output.result)].join("\n"),
               );
             }
-            if (call.name === "linear_get_issue") {
+            if (call.function.name === "linear_get_issue") {
               const result = record(output.result);
               linkedPullRequestCount = Array.isArray(result.pullRequestUrls)
                 ? result.pullRequestUrls.length
@@ -418,10 +424,10 @@ export class SpecAnalysisExecutor {
               kind: "agent.tool.completed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
-                callId: call.call_id,
+                callId: call.id,
                 durationMs: Date.now() - startedAt,
                 inputPreview: tracePreview(parsedArguments),
-                name: call.name,
+                name: call.function.name,
                 outputPreview: tracePreview(output.result),
                 segmentId,
                 sourceRefs: output.sourceRefs.map(
@@ -570,10 +576,10 @@ export class SpecAnalysisExecutor {
       kind: "agent.tool.completed",
       payload: {
         attemptNumber: task.snapshot.attemptNumber,
-        callId: call.call_id,
+        callId: call.id,
         durationMs: Date.now() - startedAt,
-        inputPreview: tracePreview(parseArguments(call.arguments)),
-        name: call.name,
+        inputPreview: tracePreview(parseArguments(call.function.arguments)),
+        name: call.function.name,
         outputPreview: { accepted: false, error: error.slice(0, 4_000) },
         segmentId,
         sourceRefs: [],
@@ -688,7 +694,12 @@ function toolDefinitions(
       ) as Record<string, unknown>,
       strict: false,
     },
-  ].filter((tool) => !unavailableTools.has(tool.name));
+  ]
+    .filter((tool) => !unavailableTools.has(tool.name))
+    .map(({ type: _type, ...definition }) => ({
+      type: "function" as const,
+      function: definition,
+    }));
 }
 
 function constrainSourceRefs(
@@ -965,11 +976,11 @@ function analysisSummary(value: Record<string, unknown>) {
   return result.success && CHINESE_TEXT.test(result.data) ? result.data : null;
 }
 
-function toolOutput(call: ModelFunctionCall, output: unknown) {
+function toolOutput(call: ModelFunctionCall, output: unknown): ModelMessage {
   return {
-    call_id: call.call_id,
-    output: JSON.stringify(output),
-    type: "function_call_output",
+    tool_call_id: call.id,
+    content: JSON.stringify(output),
+    role: "tool",
   };
 }
 
@@ -985,60 +996,36 @@ function toolFailed(
     kind: "agent.tool.failed",
     payload: {
       attemptNumber: task.snapshot.attemptNumber,
-      callId: call.call_id,
+      callId: call.id,
       durationMs: Date.now() - startedAt,
       errorMessage,
-      inputPreview: tracePreview(parseArguments(call.arguments)),
-      name: call.name,
+      inputPreview: tracePreview(parseArguments(call.function.arguments)),
+      name: call.function.name,
       segmentId,
       step,
     },
   };
 }
 
-function isFunctionCall(value: unknown): value is ModelFunctionCall {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "type" in value &&
-    value.type === "function_call" &&
-    "name" in value &&
-    "arguments" in value &&
-    "call_id" in value,
+function modelOutputPreview(message: ModelAssistantMessage) {
+  return modelFunctionCalls(message).map((call) => ({
+    arguments: tracePreview(parseArguments(call.function.arguments)),
+    callId: call.id,
+    name: call.function.name,
+    type: call.type,
+  }));
+}
+
+function modelHistoryPreview(history: ModelMessage[]) {
+  return history.map((item) =>
+    item.role === "assistant"
+      ? {
+          role: item.role,
+          content: tracePreview(item.content),
+          tool_calls: modelOutputPreview(item),
+        }
+      : tracePreview(item),
   );
-}
-
-function modelOutputPreview(output: ModelResponse["output"]) {
-  return output.map((item) => {
-    if (isFunctionCall(item)) {
-      return {
-        arguments: tracePreview(parseArguments(item.arguments)),
-        callId: item.call_id,
-        name: item.name,
-        type: item.type,
-      };
-    }
-    const value = record(item);
-    return {
-      type: typeof value.type === "string" ? value.type : "provider_output",
-    };
-  });
-}
-
-function modelHistoryPreview(history: unknown[]) {
-  return history.map((item) => {
-    if (isFunctionCall(item)) {
-      return {
-        arguments: tracePreview(parseArguments(item.arguments)),
-        callId: item.call_id,
-        name: item.name,
-        type: item.type,
-      };
-    }
-    const value = record(item);
-    if (value.type === "reasoning") return { type: "reasoning" };
-    return tracePreview(item);
-  });
 }
 
 const SENSITIVE_KEY =
@@ -1058,7 +1045,8 @@ function tracePreview(value: unknown, depth = 0): unknown {
       .slice(0, 40)
       .map(([key, child]) => [
         key,
-        SENSITIVE_KEY.test(key)
+        SENSITIVE_KEY.test(key) ||
+        /^(?:reasoning|reasoning_content|reasoning_details)$/u.test(key)
           ? "••••redacted••••"
           : tracePreview(child, depth + 1),
       ]),

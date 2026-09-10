@@ -38,7 +38,7 @@ IDs, URLs or storage keys from model tool arguments. JPEG/PNG content is limited
 to 1,280,000 bytes. Failed reads preserve the original action result and report
 that the visual observation is unavailable, avoiding an accidental action replay.
 
-The executor supplies a typed Responses `input_image` data URL with `detail: high`,
+The executor supplies a Chat Completions `image_url` data URL with `detail: high`,
 alongside the current observation ID and viewport dimensions. Only the current
 image is retained, outside the 96 KiB text budget; request metrics report text
 bytes, image count, decoded image bytes and complete request bytes separately.
@@ -75,9 +75,9 @@ flowchart TD
     Catalog --> Budget
     State --> Budget
     History --> Budget
-    Budget --> Request["Assemble ordered input<br/>then append typed input_image"]
+    Budget --> Request["Assemble ordered messages<br/>then append typed image_url"]
     Image --> Request
-    Request --> Model["Responses model<br/>same frozen input across provider fallback"]
+    Request --> Model["Chat Completions model<br/>same frozen input across provider fallback"]
     Model --> Tools["Validate and execute tool calls"]
     Tools -->|browser_command| Browser
     Tools -->|read_observation; no browser RPC| Cache
@@ -97,15 +97,17 @@ The model request has the following order. Tool definitions are a sibling
 3. `user`: `browser_working_state`, reconstructed from the executor's current
    state on every request. The observation index contains metadata and validity,
    not every cached DOM body or screenshot.
-4. Recent complete response groups: original model output (including opaque
-   provider items), paired `function_call_output` records, and executor feedback.
+4. Recent complete response groups: original assistant messages (including provider
+   reasoning), paired `role: tool` messages with matching `tool_call_id` values, and executor feedback.
    Initial navigation is recorded as a `runtime_initial_navigation` user message
    in this history. The executor navigates before the first model call only when
    a target URL exists and the segment is not resuming from human control.
-5. When available, one `user` multimodal message with `input_text` containing
-   viewport metadata and `input_image` containing the current image data URL.
+5. When available, one `user` multimodal message with `text` containing
+   viewport metadata and `image_url` containing the current image data URL.
 
-The request also sets `tool_choice: required` and `parallel_tool_calls: false`.
+The request also sets `tool_choice: auto` and `parallel_tool_calls: false`.
+Both Spec Analysis and browser execution call `/chat/completions` relative to the configured Base URL, with `stream: false`. Tool definitions use the nested `function` format. Provider `reasoning_content` is replayed with assistant messages in memory and omitted from trace previews. Text-only replies cannot finish a task: the executor requests another tool call and stops after four consecutive text-only replies.
+
 Core commands are always advertised; extra browser groups become available in
 the next request after `enable_browser_tools`. Criteria requiring NETWORK or
 CONSOLE evidence enable diagnostics initially. The local read tool is available

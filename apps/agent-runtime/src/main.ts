@@ -7,7 +7,7 @@ import {
   parseModelHostAllowlist,
 } from "./model-network-policy.js";
 import { AgentRuntimeWorker } from "./worker.js";
-import { createResponsesClient } from "./model-client.js";
+import { createChatCompletionsClient } from "./model-client.js";
 
 const config = runtimeConfig();
 const controlPlane = new ControlPlaneClient(
@@ -22,7 +22,7 @@ const worker = new AgentRuntimeWorker(
   config,
   controlPlane,
   (candidate: RuntimeModelCandidate) =>
-    createResponsesClient(candidate, modelFetch),
+    createChatCompletionsClient(candidate, modelFetch),
 );
 const controller = new AbortController();
 

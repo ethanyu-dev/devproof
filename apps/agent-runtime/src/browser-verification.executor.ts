@@ -6,7 +6,6 @@ import {
   runtimeTraceEventSchema,
   type RuntimeBrowserAcquireInput,
   type RuntimeEvidenceRef,
-  type RuntimeModelCandidate,
   type RuntimeOutcome,
   type RuntimeTaskLease,
   type RuntimeTraceEvent,
@@ -44,18 +43,14 @@ import {
   type ToolCorrection,
 } from "./tool-correction.js";
 
-interface ModelFunctionCall {
-  arguments: string;
-  call_id: string;
-  name: string;
-  type: "function_call";
-}
-
-export interface ModelResponse {
-  id: string;
-  output: Array<ModelFunctionCall | Record<string, unknown>>;
-  usage?: Record<string, unknown>;
-}
+import {
+  modelFunctionCalls,
+  type ModelCompletion,
+  type ModelClientFactory,
+  type ModelFunctionCall,
+  type ModelMessage,
+  type ModelRequestAttempt,
+} from "./model-types.js";
 
 interface ToolExecutionResult {
   browserCommandCount: number;
@@ -76,31 +71,6 @@ interface LocatorRecoveryState {
 }
 
 type RuntimeActionCommand = z.infer<typeof runtimeActionCommandInputSchema>;
-
-export interface ResponsesClient {
-  responses: {
-    create(
-      request: Record<string, unknown>,
-      options?: {
-        signal?: AbortSignal;
-        onRequestAttempt?: (attempt: ModelRequestAttempt) => void;
-      },
-    ): Promise<ModelResponse>;
-  };
-}
-
-/** Transport metadata only; never contains URLs, headers or request bodies. */
-export interface ModelRequestAttempt {
-  attempt: number;
-  startedAt: number;
-  durationMs: number | null;
-  status: number | null;
-  outcome: "RUNNING" | "RESPONSE" | "ERROR" | "ABORTED";
-}
-
-export type ResponsesClientFactory = (
-  candidate: RuntimeModelCandidate,
-) => ResponsesClient;
 
 const recordCriterionInputSchema = runtimeCriterionResultSchema;
 const finishInputSchema = z.object({
@@ -123,7 +93,7 @@ export interface BrowserVerificationOptions extends ModelContextOptions {
 /** Executes one leased browser-verification task without owning retry state. */
 export class BrowserVerificationExecutor {
   constructor(
-    private readonly modelClient: ResponsesClientFactory,
+    private readonly modelClient: ModelClientFactory,
     private readonly controlPlane: ControlPlaneClient,
     private readonly toolLimit: number,
     private readonly options: BrowserVerificationOptions = {},
@@ -216,7 +186,8 @@ export class BrowserVerificationExecutor {
         "",
       ),
       parallel_tool_calls: false,
-      tool_choice: "required",
+      tool_choice: "auto",
+      stream: false,
     };
     const deadlinePolicy = readDeadlinePolicy(task.snapshot.executionPolicy);
     const progress = new VerificationProgress();
@@ -304,21 +275,18 @@ export class BrowserVerificationExecutor {
             outputPreview: tracePreview(result),
           },
         );
-        context.completeTurn(
-          [],
-          [
-            {
-              role: "user",
-              content: JSON.stringify({
-                kind: "runtime_initial_navigation",
-                command,
-                result: observations
-                  ? observations.project(result, context.bounded)
-                  : result,
-              }),
-            },
-          ],
-        );
+        context.completeTurn(null, [
+          {
+            role: "user",
+            content: JSON.stringify({
+              kind: "runtime_initial_navigation",
+              command,
+              result: observations
+                ? observations.project(result, context.bounded)
+                : result,
+            }),
+          },
+        ]);
       }
       for (let callCount = 0; callCount < this.toolLimit;) {
         signal.throwIfAborted();
@@ -388,9 +356,9 @@ export class BrowserVerificationExecutor {
         }
         const modelInputPreview = {
           context: { ...view.metrics, toolSurface },
-          input: tracePreview(view.input),
+          input: tracePreview(view.messages),
         };
-        let response: ModelResponse | null = null;
+        let response: ModelCompletion | null = null;
         let selectedModel = preferredModel;
         let selectedModelStartedAt = Date.now();
         let selectedAttempts: ModelRequestAttempt[] = [];
@@ -425,10 +393,10 @@ export class BrowserVerificationExecutor {
           try {
             modelAbort.signal.throwIfAborted();
             response = await abortable(
-              this.modelClient(candidate).responses.create(
+              this.modelClient(candidate).complete(
                 {
                   ...structuredClone(requestBase),
-                  input: structuredClone(view.input),
+                  messages: structuredClone(view.messages),
                   model: candidate.modelId,
                 },
                 {
@@ -501,7 +469,7 @@ export class BrowserVerificationExecutor {
               transport: modelTransport(selectedAttempts),
             },
             model: selectedModel.modelId,
-            outputPreview: tracePreview(response.output),
+            outputPreview: tracePreview(response.message),
             provider: "OPENAI_COMPATIBLE",
             responseId: response.id,
             segmentId,
@@ -509,11 +477,11 @@ export class BrowserVerificationExecutor {
             ...(response.usage ? { usage: traceRecord(response.usage) } : {}),
           },
         });
-        const calls = response.output.filter(isFunctionCall);
-        const toolOutputs: Array<Record<string, unknown>> = [];
+        const calls = modelFunctionCalls(response.message);
+        const toolOutputs: ModelMessage[] = [];
         if (calls.length === 0) {
           if (progress.textOnly()) return await finalize("TEXT_ONLY_LOOP");
-          context.completeTurn(response.output, [
+          context.completeTurn(response.message, [
             {
               role: "user",
               content: "请继续调用一个可用工具。仅返回文本无法完成验证。",
@@ -529,15 +497,15 @@ export class BrowserVerificationExecutor {
           }
           callCount += 1;
           if (callCount > this.toolLimit) break;
-          const toolInputPreview = traceToolInput(call.arguments);
+          const toolInputPreview = traceToolInput(call.function.arguments);
           const toolStartedAt = Date.now();
           await this.appendTraceEvent(lease, {
             kind: "agent.tool.started",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
-              callId: call.call_id,
+              callId: call.id,
               inputPreview: toolInputPreview,
-              name: call.name,
+              name: call.function.name,
               segmentId,
               step,
             },
@@ -563,11 +531,11 @@ export class BrowserVerificationExecutor {
               kind: "agent.tool.failed",
               payload: {
                 attemptNumber: task.snapshot.attemptNumber,
-                callId: call.call_id,
+                callId: call.id,
                 durationMs: Math.max(0, Date.now() - toolStartedAt),
                 errorMessage: traceErrorMessage(error),
                 inputPreview: toolInputPreview,
-                name: call.name,
+                name: call.function.name,
                 segmentId,
                 step,
               },
@@ -575,17 +543,17 @@ export class BrowserVerificationExecutor {
             throw error;
           }
           const modelOutput =
-            observations && call.name === "browser_command"
+            observations && call.function.name === "browser_command"
               ? observations.project(result.output, context.bounded)
               : result.output;
           await this.appendTraceEvent(lease, {
             kind: "agent.tool.completed",
             payload: {
               attemptNumber: task.snapshot.attemptNumber,
-              callId: call.call_id,
+              callId: call.id,
               durationMs: Math.max(0, Date.now() - toolStartedAt),
               inputPreview: toolInputPreview,
-              name: call.name,
+              name: call.function.name,
               outputPreview: tracePreview(
                 result.correctionBytes === undefined && !observations
                   ? result.output
@@ -624,8 +592,8 @@ export class BrowserVerificationExecutor {
           }
           if (
             progress.tool({
-              name: call.name,
-              arguments: call.arguments,
+              name: call.function.name,
+              arguments: call.function.arguments,
               output: result.output,
               criteria: [...criterionResults.values()].map((criterion) => ({
                 criterionId: criterion.criterionId,
@@ -640,13 +608,13 @@ export class BrowserVerificationExecutor {
           )
             return await finalize("REPEATED_OPERATIONS");
           toolOutputs.push({
-            call_id: call.call_id,
-            output: JSON.stringify(modelOutput),
-            type: "function_call_output",
+            tool_call_id: call.id,
+            content: JSON.stringify(modelOutput),
+            role: "tool",
           });
         }
         if (toolOutputs.length === calls.length)
-          context.completeTurn(response.output, toolOutputs);
+          context.completeTurn(response.message, toolOutputs);
       }
 
       return await finalize("TOOL_LIMIT_REACHED");
@@ -789,7 +757,7 @@ export class BrowserVerificationExecutor {
   }): Promise<ToolExecutionResult> {
     let raw: unknown;
     try {
-      raw = JSON.parse(input.call.arguments) as unknown;
+      raw = JSON.parse(input.call.function.arguments) as unknown;
     } catch {
       return correction(
         input.browserCommandCount,
@@ -804,7 +772,10 @@ export class BrowserVerificationExecutor {
       );
     }
 
-    if (input.call.name === "enable_browser_tools" && input.catalog.grouped) {
+    if (
+      input.call.function.name === "enable_browser_tools" &&
+      input.catalog.grouped
+    ) {
       const parsed = enableBrowserToolsInputSchema.safeParse(raw);
       if (!parsed.success)
         return correction(
@@ -817,7 +788,7 @@ export class BrowserVerificationExecutor {
       };
     }
 
-    if (input.call.name === "read_observation" && input.observations) {
+    if (input.call.function.name === "read_observation" && input.observations) {
       const parsed = readObservationInputSchema.safeParse(raw);
       if (!parsed.success)
         return correction(
@@ -834,7 +805,7 @@ export class BrowserVerificationExecutor {
       };
     }
 
-    if (input.call.name === "browser_command") {
+    if (input.call.function.name === "browser_command") {
       const catalogCorrection = input.catalog.correctionFor(
         (raw as Record<string, unknown>).commandType,
         input.advertisedGroups,
@@ -980,7 +951,7 @@ export class BrowserVerificationExecutor {
             failedCommandType: command.commandType,
             failedFrameContext: commandFrameContext(command),
             failedTargetSelectors: commandTargetSelectors(command),
-            recoveryToken: input.call.call_id,
+            recoveryToken: input.call.id,
             retargetAttempts: 0,
           };
           const recoverySnapshot = await this.captureLocatorRecoverySnapshot({
@@ -1065,7 +1036,7 @@ export class BrowserVerificationExecutor {
       }
     }
 
-    if (input.call.name === "record_criterion") {
+    if (input.call.function.name === "record_criterion") {
       const parsed = recordCriterionInputSchema.safeParse(raw);
       if (!parsed.success) {
         return correction(
@@ -1153,7 +1124,7 @@ export class BrowserVerificationExecutor {
       };
     }
 
-    if (input.call.name === "request_human_input") {
+    if (input.call.function.name === "request_human_input") {
       const hitlPolicy = readHitlPolicy(input.task.snapshot.executionPolicy);
       const deadlinePolicy = readDeadlinePolicy(
         input.task.snapshot.executionPolicy,
@@ -1229,7 +1200,7 @@ export class BrowserVerificationExecutor {
       };
     }
 
-    if (input.call.name === "finish_verification") {
+    if (input.call.function.name === "finish_verification") {
       const parsed = finishInputSchema.safeParse(raw);
       if (!parsed.success) {
         return correction(
@@ -1268,8 +1239,10 @@ export class BrowserVerificationExecutor {
           locatorRecoveryState: recovery,
           call: {
             ...input.call,
-            name: "record_criterion",
-            arguments: JSON.stringify(criterion),
+            function: {
+              name: "record_criterion",
+              arguments: JSON.stringify(criterion),
+            },
           },
         });
         if ((recorded.output as { accepted?: boolean }).accepted !== true)
@@ -1540,7 +1513,7 @@ function traceRecord(value: Record<string, unknown>): Record<string, unknown> {
 function tracePreview(value: unknown, depth = 0): unknown {
   if (typeof value === "string") {
     if (/^data:image\//u.test(value)) return "[viewport image omitted]";
-    // Responses tool arguments and outputs are JSON strings, including nested
+    // Chat Completions tool arguments and outputs are JSON strings, including nested
     // serialized results. Apply the same key redaction before truncating them.
     if (/^\s*[\[{"]/u.test(value)) {
       if (depth >= 6) return "[depth limit]";
@@ -1576,7 +1549,9 @@ function tracePreview(value: unknown, depth = 0): unknown {
       .slice(0, TRACE_KEY_LIMIT)
       .map(([key, child]) => [
         key,
-        SENSITIVE_TRACE_KEY.test(key) || key === "dataBase64"
+        SENSITIVE_TRACE_KEY.test(key) ||
+        key === "dataBase64" ||
+        /^(?:reasoning|reasoning_content|reasoning_details)$/u.test(key)
           ? "••••redacted••••"
           : tracePreview(child, depth + 1),
       ]),
@@ -1624,18 +1599,6 @@ function errorMessage(error: unknown): string {
 
 function traceErrorMessage(error: unknown): string {
   return redactTraceText(errorMessage(error)).slice(0, 4_000);
-}
-
-function isFunctionCall(item: unknown): item is ModelFunctionCall {
-  return (
-    typeof item === "object" &&
-    item !== null &&
-    "type" in item &&
-    item.type === "function_call" &&
-    "name" in item &&
-    "arguments" in item &&
-    "call_id" in item
-  );
 }
 
 function collectEvidence(
@@ -2003,7 +1966,10 @@ function toolDefinitions(
       parameters: openAiFunctionSchema(finishInputSchema),
       strict: false,
     },
-  ];
+  ].map(({ type: _type, ...definition }) => ({
+    type: "function" as const,
+    function: definition,
+  }));
 }
 
 function taskPrompt(task: RuntimeTaskLease, targetUrl?: string) {
@@ -2074,7 +2040,7 @@ ${groupedTools ? "browser_command 默认只公布核心操作。其他操作先�
 客户端导航后要等待明确的 selector 或文本。除非确定应用最终会完全空闲，否则避免使用 networkidle。
 搜索、筛选、保存等操作成功，只代表输入事件已执行；自动附带的 AFTER_ACTION 截图可能仍是加载遮罩下的旧表格。不能用它作为 PASSED/FAILED 的验收证据。先在 DOM + 图片中检查转圈、遮罩及结果更新，使用已观察到的 selector 等待 hidden，或用 page.snapshot/page.screenshot 重新观察直到加载结束，再引用新证据。domcontentloaded 不能证明 SPA 查询完成；page.wait 的 kind=text 等待文本出现，不能用它等待 Loading 消失。加载一直不结束或无法确定结果时应 INCONCLUSIVE；不要反复点击搜索/保存。
 page.snapshot 提供实际 DOM 节点、文本、原生标签、值和 ref，同时附带视口截图。网站不需要实现 ARIA 或特定组件语法，不依赖 accessibility role。观察整个页面及弹层，不要按框架名字预设 DOM 结构。
-current_browser_viewport 中的 input_image 才是你实际看到的图片；截图编号或文件名不代表看过图。DOM 不足（自定义控件、Canvas、封闭 Shadow DOM）时，结合截图判断，用 page.click 的 point 和该图 observationId 作为 visualObservationId 操作；不能猜坐标。滚动、导航、窗口变化或旧图失效后重新观察。图片缺失时先 page.screenshot，不能假装视觉成功。
+current_browser_viewport 中的 image_url 才是你实际看到的图片；截图编号或文件名不代表看过图。DOM 不足（自定义控件、Canvas、封闭 Shadow DOM）时，结合截图判断，用 page.click 的 point 和该图 observationId 作为 visualObservationId 操作；不能猜坐标。滚动、导航、窗口变化或旧图失效后重新观察。图片缺失时先 page.screenshot，不能假装视觉成功。
 原生 <select> 才能使用 page.select；自定义下拉先点击展开，再观察 DOM + 图片，点击当前可见选项，最后检查显示值和业务反馈。看到隐藏、重复候选时不能 first/nth 猜测。Canvas/自绘输入先视觉点击聚焦，再启用 input 工具组用不带 target 的 page.type 输入文本，必要时 page.press；操作后验证结果。
 DOM 快照仅覆盖当前视口与未被滚动容器裁剪的内容；captureTruncated/sourceTruncated/nextCursor 也表示证据尚不完整。断言选项“不存在”之前，必须在已确认支持搜索的控件中使用合理短关键词并确认搜索完成，或从列表顶部逐段滚动到末尾、观察每一段。使用带 scrollY/scrollX 的容器 ref 作为 page.scroll.target，避免滚动背景页面；atEnd=false 表示还有未见内容，到末尾一次也不代表已检查中间全部内容。无 DOM 时根据图片中的滚动条判断，在下拉内部点击聚焦后滚动，并重新截图确认选项确实变化。虚拟列表、搜索无效或范围无法穷尽时记录 INCONCLUSIVE，不能凭当前几项判 FAILED。
 下拉搜索要从实际页面文案出发：完整业务名称或内部枚举搜不到时，尝试较短关键词，再检查可见选项。连续清空并重复同一搜索而无进展时更换观察方式，不要循环。选项名称相似不能证明其内部枚举映射；要读取实际 DOM 值或对应网络证据。键盘组合使用 Control+A，不能使用 CTRL+A。

@@ -73,7 +73,7 @@ Local errors distinguish `TOOL_GROUP_REQUIRED`, `COMMAND_NOT_ALLOWED` for platfo
 
 175 Agent Runtime tests and repository-wide type checking pass. Tests verify complete canonical coverage, identical payload constraints and defaults, ordinary forms, typing, tabs/iframes, required network/console evidence, fault arm/wait/status/release, locator recovery after activation, invalid and duplicate enables, same-response gating, compaction, fallback, HITL reset, and independent rollback modes. Agent Runtime build, formatting, and local documentation links are checked as well.
 
-The fixtures use scripted Responses and the same bounded-context settings in both catalog modes. They compare commands delivered to the control plane rather than counting local enable calls as browser operations:
+The fixtures now use scripted Chat Completions and the same bounded-context settings in both catalog modes. They compare commands delivered to the control plane rather than counting local enable calls as browser operations. The measurements below were recorded with the original Responses transport:
 
 | Fixture / measurement                            |       Grouped |        Legacy |
 | ------------------------------------------------ | ------------: | ------------: |

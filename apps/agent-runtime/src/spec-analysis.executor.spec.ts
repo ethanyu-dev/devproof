@@ -57,14 +57,57 @@ const lease = {
 
 function call(name: string, arguments_: unknown, id: string) {
   return {
-    arguments: JSON.stringify(arguments_),
-    call_id: id,
-    name,
-    type: "function_call" as const,
+    type: "function" as const,
+    id: id,
+    function: { name: name, arguments: JSON.stringify(arguments_) },
   };
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("bounds text-only chat replies without treating them as a finished Spec", async () => {
+    const message = {
+      role: "assistant" as const,
+      content: "继续分析需求。",
+      reasoning_content: "private text-only reasoning",
+    };
+    const requests: Record<string, unknown>[] = [];
+    const create = vi.fn().mockImplementation(async (request) => {
+      requests.push(structuredClone(request));
+      return { id: "chatcmpl-text", message };
+    });
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executeSpecTool = vi.fn();
+    const executor = new SpecAnalysisExecutor(
+      () => ({ complete: create }),
+      { appendSpecEvent, executeSpecTool } as never,
+      10,
+    );
+    await expect(
+      executor.execute(task, lease, new AbortController().signal),
+    ).rejects.toThrow("repeated text-only responses");
+    expect(create).toHaveBeenCalledTimes(4);
+    expect(executeSpecTool).not.toHaveBeenCalled();
+    expect(requests[0]).toMatchObject({ tool_choice: "auto", stream: false });
+    expect(requests[1]!.messages).toEqual(
+      expect.arrayContaining([
+        message,
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("请继续调用"),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(appendSpecEvent.mock.calls)).not.toContain(
+      message.reasoning_content,
+    );
+    expect(appendSpecEvent.mock.calls.at(-1)).toEqual(
+      expect.arrayContaining([
+        "agent.segment.completed",
+        expect.objectContaining({ status: "FAILED" }),
+      ]),
+    );
+  });
+
   it("rejects invented mandatory remark requirements even with a valid source id", () => {
     const issueText = "新增 LEGACY_CORPORATE 类型；样式参考 ZDR。";
     const spec = runtimeGeneratedSpecSchema.parse({
@@ -130,7 +173,7 @@ describe("SpecAnalysisExecutor", () => {
     const create = vi.fn();
     const appendSpecEvent = vi.fn();
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent } as never,
       10,
     );
@@ -153,7 +196,7 @@ describe("SpecAnalysisExecutor", () => {
         }),
     );
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent } as never,
       10,
     );
@@ -170,14 +213,18 @@ describe("SpecAnalysisExecutor", () => {
     const controller = new AbortController();
     const create = vi.fn().mockResolvedValue({
       id: "response-1",
-      output: [
-        call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
+        ],
+      },
     });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
     const executeSpecTool = vi.fn().mockRejectedValue(lost);
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent, executeSpecTool } as never,
       10,
     );
@@ -195,17 +242,21 @@ describe("SpecAnalysisExecutor", () => {
     const lost = new LeaseLostError();
     const create = vi.fn().mockResolvedValue({
       id: "response-1",
-      output: [
-        call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
-        call(
-          "github_get_pull_request",
-          {
-            analysisSummary: "读取关联 PR。",
-            pullRequestUrl: "https://github.com/acme/web/pull/42",
-          },
-          "call-2",
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          call("linear_get_issue", { analysisSummary: "读取需求。" }, "call-1"),
+          call(
+            "github_get_pull_request",
+            {
+              analysisSummary: "读取关联 PR。",
+              pullRequestUrl: "https://github.com/acme/web/pull/42",
+            },
+            "call-2",
+          ),
+        ],
+      },
     });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
     const executeSpecTool = vi.fn().mockImplementation(async () => {
@@ -213,7 +264,7 @@ describe("SpecAnalysisExecutor", () => {
       throw lost;
     });
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent, executeSpecTool } as never,
       10,
     );
@@ -275,54 +326,70 @@ describe("SpecAnalysisExecutor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-1",
-        output: [
-          { summary: "private hidden reasoning", type: "reasoning" },
-          call(
-            "linear_get_issue",
-            { analysisSummary: "先读取权威 Issue。" },
-            "call-1",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          reasoning_content: "private hidden reasoning",
+          tool_calls: [
+            call(
+              "linear_get_issue",
+              { analysisSummary: "先读取权威 Issue。" },
+              "call-1",
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-3",
-        output: [
-          call(
-            "finish_spec",
-            {
-              analysisSummary:
-                "先提交一份包含英文摘要的 Spec，用于验证语言校验。",
-              spec: { ...spec, summary: "Verify refund behavior." },
-            },
-            "call-3",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            call(
+              "finish_spec",
+              {
+                analysisSummary:
+                  "先提交一份包含英文摘要的 Spec，用于验证语言校验。",
+                spec: { ...spec, summary: "Verify refund behavior." },
+              },
+              "call-3",
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-4",
-        output: [
-          call(
-            "finish_spec",
-            {
-              analysisSummary: "修正字段后提交完整 Spec。",
-              spec: specWithInvalidSourceRefs,
-            },
-            "call-4",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            call(
+              "finish_spec",
+              {
+                analysisSummary: "修正字段后提交完整 Spec。",
+                spec: specWithInvalidSourceRefs,
+              },
+              "call-4",
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-5",
-        output: [
-          call(
-            "finish_spec",
-            {
-              analysisSummary: "逐字采用合法来源并提交可执行的 Spec。",
-              spec,
-            },
-            "call-5",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            call(
+              "finish_spec",
+              {
+                analysisSummary: "逐字采用合法来源并提交可执行的 Spec。",
+                spec,
+              },
+              "call-5",
+            ),
+          ],
+        },
       });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
     const executeSpecTool = vi.fn().mockResolvedValueOnce({
@@ -333,7 +400,7 @@ describe("SpecAnalysisExecutor", () => {
       sourceRefs: [source],
     });
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent, executeSpecTool } as never,
       10,
     );
@@ -374,30 +441,32 @@ describe("SpecAnalysisExecutor", () => {
       "private hidden reasoning",
     );
     const firstRequest = create.mock.calls[0]?.[0] as {
-      input: Array<{ content?: string; role?: string }>;
-      tools: Array<{ description: string }>;
+      messages: Array<{ content?: string; role?: string }>;
+      tools: Array<{ function: { description: string } }>;
     };
-    expect(firstRequest.input[0]?.content).toContain(
+    expect(firstRequest.messages[0]?.content).toContain(
       "所有用户可见的生成内容必须使用简体中文",
     );
     expect(
       firstRequest.tools.every((tool) =>
-        /[\u3400-\u9fff]/u.test(tool.description),
+        /[\u3400-\u9fff]/u.test(tool.function.description),
       ),
     ).toBe(true);
     expect(JSON.stringify(firstRequest.tools)).not.toContain(source.externalId);
     expect(JSON.stringify(firstRequest.tools)).not.toContain(
       "knowledge_search",
     );
-    expect(firstRequest.input[0]?.content).not.toContain("知识库");
+    expect(firstRequest.messages[0]?.content).not.toContain("知识库");
 
     const secondRequest = create.mock.calls[1]?.[0] as {
-      tools: Array<{ name: string; parameters: unknown }>;
+      tools: Array<{ function: { name: string; parameters: unknown } }>;
     };
     const finishSpecTool = secondRequest.tools.find(
-      (tool) => tool.name === "finish_spec",
+      (tool) => tool.function.name === "finish_spec",
     );
-    const finishSpecParameters = JSON.stringify(finishSpecTool?.parameters);
+    const finishSpecParameters = JSON.stringify(
+      finishSpecTool?.function.parameters,
+    );
     expect(finishSpecParameters).toContain(
       "必须逐字选择一个已经由来源工具返回的 analysis-source。",
     );
@@ -406,14 +475,17 @@ describe("SpecAnalysisExecutor", () => {
     );
 
     const finalRequest = create.mock.calls[3]?.[0] as {
-      input: Array<{ call_id?: string; output?: string; type?: string }>;
+      messages: Array<{
+        tool_call_id?: string;
+        content?: string;
+        role?: string;
+      }>;
     };
-    const correctionOutput = finalRequest.input.find(
-      (item) =>
-        item.type === "function_call_output" && item.call_id === "call-4",
+    const correctionOutput = finalRequest.messages.find(
+      (item) => item.role === "tool" && item.tool_call_id === "call-4",
     );
     expect(correctionOutput).toBeDefined();
-    const correction = JSON.parse(correctionOutput?.output ?? "{}") as {
+    const correction = JSON.parse(correctionOutput?.content ?? "{}") as {
       allowedSourceRefs?: string[];
       error?: string;
     };
@@ -430,23 +502,31 @@ describe("SpecAnalysisExecutor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-1",
-        output: [
-          call(
-            "linear_get_issue",
-            { analysisSummary: "读取权威 Issue。" },
-            "call-1",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            call(
+              "linear_get_issue",
+              { analysisSummary: "读取权威 Issue。" },
+              "call-1",
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-2",
-        output: [
-          call(
-            "linear_get_issue",
-            { analysisSummary: "Linear 暂时失败，再重试一次。" },
-            "call-2",
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            call(
+              "linear_get_issue",
+              { analysisSummary: "Linear 暂时失败，再重试一次。" },
+              "call-2",
+            ),
+          ],
+        },
       });
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
     const executeSpecTool = vi.fn().mockRejectedValue(
@@ -456,7 +536,7 @@ describe("SpecAnalysisExecutor", () => {
       }),
     );
     const executor = new SpecAnalysisExecutor(
-      () => ({ responses: { create } }) as never,
+      () => ({ complete: create }) as never,
       { appendSpecEvent, executeSpecTool } as never,
       60,
     );
@@ -563,7 +643,11 @@ describe("SpecAnalysisExecutor", () => {
       ];
       const responses = calls.map((toolCall, index) => ({
         id: `response-${index + 1}`,
-        output: [toolCall],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [toolCall],
+        },
       }));
       const create = vi.fn().mockImplementation(async () => {
         const response = responses.shift();
@@ -609,7 +693,7 @@ describe("SpecAnalysisExecutor", () => {
           };
         });
       const executor = new SpecAnalysisExecutor(
-        () => ({ responses: { create } }) as never,
+        () => ({ complete: create }) as never,
         { appendSpecEvent, executeSpecTool } as never,
         12,
       );
@@ -636,9 +720,9 @@ describe("SpecAnalysisExecutor", () => {
         ),
       ).toHaveLength(2);
       const finalRequest = create.mock.calls.at(-1)?.[0] as {
-        tools: Array<{ name: string }>;
+        tools: Array<{ function: { name: string } }>;
       };
-      const toolNames = finalRequest.tools.map((tool) => tool.name);
+      const toolNames = finalRequest.tools.map((tool) => tool.function.name);
       expect(toolNames).not.toContain("knowledge_search");
       expect(toolNames.includes("github_search_code")).toBe(!searchUnavailable);
     },

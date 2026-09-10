@@ -12,11 +12,13 @@ import { jsonBytes } from "./model-context.js";
 
 type Request = {
   model: string;
-  input: Array<Record<string, unknown>>;
+  messages: Array<Record<string, unknown>>;
   tools: Array<{
-    name: string;
-    parameters: {
-      anyOf?: Array<{ properties: { commandType: { const: string } } }>;
+    function: {
+      name: string;
+      parameters: {
+        anyOf?: Array<{ properties: { commandType: { const: string } } }>;
+      };
     };
   }>;
 };
@@ -49,16 +51,17 @@ const human: Call = {
 };
 const names = (request: Request) =>
   request.tools
-    .find((tool) => tool.name === "browser_command")!
-    .parameters.anyOf!.map((variant) => variant.properties.commandType.const);
+    .find((tool) => tool.function.name === "browser_command")!
+    .function.parameters.anyOf!.map(
+      (variant) => variant.properties.commandType.const,
+    );
 const feedback = (request: Request, step: number, call = 0) =>
   JSON.parse(
     String(
-      request.input.find(
+      request.messages.find(
         (item) =>
-          item.type === "function_call_output" &&
-          item.call_id === `call-${step}-${call}`,
-      )!.output,
+          item.role === "tool" && item.tool_call_id === `call-${step}-${call}`,
+      )!.content,
     ),
   );
 
@@ -121,12 +124,15 @@ function harness(
           : [step];
     return {
       id: `response-${index}`,
-      output: calls.map((call, callIndex) => ({
-        type: "function_call",
-        name: call.name,
-        arguments: JSON.stringify(call.args),
-        call_id: `call-${index}-${callIndex}`,
-      })),
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: calls.map((call, callIndex) => ({
+          type: "function" as const,
+          id: `call-${index}-${callIndex}`,
+          function: { name: call.name, arguments: JSON.stringify(call.args) },
+        })),
+      },
     };
   });
   const controlPlane = {
@@ -147,7 +153,7 @@ function harness(
     releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
   };
   const executor = new BrowserVerificationExecutor(
-    () => ({ responses: { create } }),
+    () => ({ complete: create }),
     controlPlane as never,
     60,
     options,
@@ -274,9 +280,9 @@ describe("browser tool module execution", () => {
         browse("page.get_text", { target: { selector: `#row-${index}` } }),
       ),
       (request) => {
-        expect(request.input.some((item) => item.call_id === "call-0-0")).toBe(
-          false,
-        );
+        expect(
+          request.messages.some((item) => item.tool_call_id === "call-0-0"),
+        ).toBe(false);
         expect(names(request)).toContain("page.type");
         return [
           browse("page.type", {
@@ -497,7 +503,7 @@ describe("browser tool module execution", () => {
         (call) => call[1].commandType,
       ),
     ).toEqual(["frame.click", "frame.snapshot", "frame.click"]);
-    const stateItem = fixture.requests[3]!.input.find(
+    const stateItem = fixture.requests[3]!.messages.find(
       (item) =>
         typeof item.content === "string" &&
         item.content.startsWith('{"kind":"browser_working_state"'),
@@ -513,7 +519,7 @@ describe("browser tool module execution", () => {
       (request) => {
         expect(names(request)).toContain("tab.new");
         request.tools.splice(0);
-        request.input.splice(0);
+        request.messages.splice(0);
         throw new Error("primary unavailable");
       },
       human,
@@ -525,7 +531,9 @@ describe("browser tool module execution", () => {
     expect(await fixture.run()).toMatchObject({ kind: "WAITING_HUMAN" });
     expect(names(fixture.requests[1]!)).toContain("tab.new");
     expect(fixture.requests[2]!.tools).toEqual(fixture.requests[1]!.tools);
-    expect(fixture.requests[2]!.input).toEqual(fixture.requests[1]!.input);
+    expect(fixture.requests[2]!.messages).toEqual(
+      fixture.requests[1]!.messages,
+    );
     expect(fixture.controlPlane.browserCommand).not.toHaveBeenCalled();
   });
 
@@ -565,7 +573,7 @@ describe("browser tool module execution", () => {
       enable("tabs"),
     ]);
     const executor = new BrowserVerificationExecutor(
-      () => ({ responses: { create: fixture.create } }),
+      () => ({ complete: fixture.create }),
       fixture.controlPlane as never,
       5,
     );
@@ -622,7 +630,7 @@ describe("browser tool module execution", () => {
     expect(await grouped.run()).toMatchObject({ verdict: "PASSED" });
     expect(
       grouped.requests[0]!.tools.some(
-        (tool) => tool.name === "read_observation",
+        (tool) => tool.function.name === "read_observation",
       ),
     ).toBe(false);
     expect(names(grouped.requests[1]!)).toContain("page.type");
@@ -634,7 +642,7 @@ describe("browser tool module execution", () => {
     expect(await legacy.run()).toMatchObject({ verdict: "PASSED" });
     expect(
       legacy.requests[0]!.tools.some(
-        (tool) => tool.name === "enable_browser_tools",
+        (tool) => tool.function.name === "enable_browser_tools",
       ),
     ).toBe(false);
     expect(legacy.controlPlane.browserCommand.mock.calls[0]![1]).toMatchObject({

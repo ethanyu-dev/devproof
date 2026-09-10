@@ -25,7 +25,7 @@ The executor now builds a bounded view from the immutable task, deterministic ex
 
 Only existing `criterionResults`, `evidence`, and `locatorRecoveryState` determine execution state. Observed page text, cached values, and actions such as `clicked: true` cannot create an accepted result. Bodies appear in recent tool outputs or on demand, rather than being duplicated in the state block. Non-text result objects are retained as JSON observation content; arbitrary page text is not converted into inferred facts.
 
-[`browser-observation.ts`](../apps/agent-runtime/src/browser-observation.ts) changes only what the model sees. The executor continues using original responses for evidence collection, locator recovery, progress detection, and existing trace previews. Outcome, diagnostics, recovery tokens, and artifact IDs/kinds remain accessible. Transport IDs, echoed payloads, and artifact storage metadata are omitted from the projection. Screenshot metadata remains in tool text. With Browser Runtime v1.16, the API also hydrates one owned viewport image and the executor appends it as a typed Responses `input_image`, outside the text history budget. See [DOM + visual browser observations](dom-visual-browser.md).
+[`browser-observation.ts`](../apps/agent-runtime/src/browser-observation.ts) changes only what the model sees. The executor continues using original responses for evidence collection, locator recovery, progress detection, and existing trace previews. Outcome, diagnostics, recovery tokens, and artifact IDs/kinds remain accessible. Transport IDs, echoed payloads, and artifact storage metadata are omitted from the projection. Screenshot metadata remains in tool text. With Browser Runtime v1.16, the API also hydrates one owned viewport image and the executor appends it as a Chat Completions `image_url`, outside the text history budget. See [DOM + visual browser observations](dom-visual-browser.md).
 
 Context compaction originally shipped with all 39 browser command variants advertised. The separate [tool-module change](agent-tool-surface-design.md) now controls that catalog independently. Spec Analysis, Console, public MCP tools, Browser Runtime payloads, and database schemas are unchanged.
 
@@ -51,7 +51,7 @@ The byte budget is a local request limit, not a provider context-window or token
 
 ## Compaction, refs, and capacity failures
 
-Compaction occurs before the next model request and removes only complete response groups. Each group includes opaque reasoning/provider items and every matching tool result. Incomplete, duplicate, or orphaned call/result pairs cannot enter retained history. Cancellation and tool-budget exhaustion never replay a partially executed response.
+Compaction occurs before the next model request and removes only complete response groups. Each group includes the original assistant message, its provider reasoning fields, and every matching `role: tool` result. Incomplete, duplicate, or orphaned call/result pairs cannot enter retained history. Cancellation and tool-budget exhaustion never replay a partially executed response.
 
 The newest complete group is retained even when older groups are removed. If the immutable task, necessary state, tools, and this group still exceed the budget, execution returns `FATAL_FAILURE` with `AGENT_CONTEXT_BUDGET_EXCEEDED`. The error details retain accepted criteria, evidence IDs/kinds, and measured/allowed bytes. It reports an Agent capacity problem without fabricating a product verdict. Browser release still follows existing cleanup behavior.
 
@@ -59,13 +59,13 @@ The most recent successful snapshot is the only source of usable refs, and a ref
 
 Validity is based on actions and observations available to this executor. The browser command response does not expose a control generation; this layer cannot detect every asynchronous DOM update or concurrent manual action. Browser Runtime validation remains authoritative. Formal HITL resume creates a fresh segment with the existing `humanResume` input and an empty cache. Cache IDs cannot survive a new lease, process loss, or another task.
 
-Opaque provider items are preserved within retained groups. Mocked Responses replay and fallback formats are tested, and the initial live comparison exercised one approved gateway/model combination. Broader gateway compatibility remains unverified. Existing trace previews remain bounded previews, not full transcript storage.
+Provider reasoning is preserved within retained assistant messages and excluded from trace previews. Mocked Chat Completions replay and fallback formats are tested. The initial live comparison used the earlier Responses transport and exercised one approved gateway/model combination. Broader gateway compatibility remains unverified. Existing trace previews remain bounded previews, not full transcript storage.
 
 ## Verification
 
 Regression coverage includes long workflows with accepted evidence, recovery of an early order number after its original turn is compacted, local paging to a later ref, invalidation after mutation, scoped resnapshot, frame refs, Unicode, oversized lines/envelopes, eviction, human resume, cancellation, provider fallback, multi-call responses, and capacity failures. Existing evidence validation, locator recovery, and raw-observation loop detection tests continue to pass.
 
-A fixed 30-turn fixture uses the canonical browser-command JSON schema and identical response groups in both modes. It measures complete serialized request bodies, including JSON escaping. It isolates compaction rather than simulating a live model:
+The original Responses transport measurements below used a fixed 30-turn fixture with the canonical browser-command JSON schema and identical response groups in both modes. It measured complete serialized request bodies, including JSON escaping, to isolate compaction rather than simulate a live model:
 
 | Mode            | Cumulative request bytes |
 | --------------- | -----------------------: |
