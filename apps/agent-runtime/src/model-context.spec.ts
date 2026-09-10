@@ -1,4 +1,5 @@
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
+import type { ModelMessage } from "./model-types.js";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -7,7 +8,7 @@ import {
   jsonBytes,
 } from "./model-context.js";
 
-const initial = [
+const initial: ModelMessage[] = [
   { role: "system", content: "Use observed evidence." },
   { role: "user", content: "Verify every declared criterion exactly." },
 ];
@@ -16,33 +17,31 @@ const base = {
   tools: [
     {
       type: "function",
-      name: "browser_command",
-      parameters: z.toJSONSchema(runtimeActionCommandInputSchema),
+      function: {
+        name: "browser_command",
+        parameters: z.toJSONSchema(runtimeActionCommandInputSchema),
+      },
     },
   ],
 };
 
 function turn(context: ModelContext, index: number, content = "observed") {
   const calls = [0, 1].map((call) => ({
-    type: "function_call",
-    call_id: `${index}-${call}`,
-    name: "browser_command",
-    arguments: "{}",
+    type: "function" as const,
+    id: `${index}-${call}`,
+    function: { name: "browser_command", arguments: "{}" },
   }));
   context.completeTurn(
-    [
-      {
-        type: "reasoning",
-        id: `reasoning-${index}`,
-        encrypted_content: `opaque-${index}`,
-        summary: [],
-      },
-      ...calls,
-    ],
+    {
+      role: "assistant",
+      content: null,
+      reasoning_content: `opaque-${index}`,
+      tool_calls: calls,
+    },
     calls.map((call) => ({
-      type: "function_call_output",
-      call_id: call.call_id,
-      output: content,
+      role: "tool",
+      tool_call_id: call.id,
+      content,
     })),
   );
 }
@@ -62,14 +61,16 @@ describe("bounded model context", () => {
     expect(first.metrics).toMatchObject({ imageCount: 1, imageBytes: 512_000 });
     expect(first.metrics.textRequestBytes).toBeLessThan(4_096);
     expect(first.metrics.requestBytes).toBeGreaterThan(512_000);
-    expect(first.input.at(-1)).toMatchObject({
+    expect(first.messages.at(-1)).toMatchObject({
       role: "user",
       content: [
-        { type: "input_text" },
+        { type: "text" },
         {
-          type: "input_image",
-          image_url: `data:image/jpeg;base64,${image.dataBase64}`,
-          detail: "high",
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${image.dataBase64}`,
+            detail: "high",
+          },
         },
       ],
     });
@@ -79,10 +80,12 @@ describe("bounded model context", () => {
       dataBase64: Buffer.from("next image").toString("base64"),
     };
     const next = context.build({ model: "vision" }, {}, nextImage);
-    expect(JSON.stringify(next.input)).not.toContain(image.dataBase64);
-    expect(JSON.stringify(next.input).match(/input_image/gu)).toHaveLength(1);
-    expect(JSON.stringify(context.build({}, {}).input)).not.toContain(
-      "input_image",
+    expect(JSON.stringify(next.messages)).not.toContain(image.dataBase64);
+    expect(
+      JSON.stringify(next.messages).match(/"type":"image_url"/gu),
+    ).toHaveLength(1);
+    expect(JSON.stringify(context.build({}, {}).messages)).not.toContain(
+      "image_url",
     );
   });
 
@@ -101,27 +104,41 @@ describe("bounded model context", () => {
       locatorRecovery: { recoveryToken: "call-1" },
     };
     const view = context.build(base, state);
-    expect(view.input.slice(0, 2)).toEqual(initial);
-    expect(view.input[2]).toEqual({
+    expect(view.messages.slice(0, 2)).toEqual(initial);
+    expect(view.messages[2]).toEqual({
       role: "user",
       content: JSON.stringify({ kind: "browser_working_state", data: state }),
     });
     expect(view.metrics).toMatchObject({ retainedTurns: 4, compactedTurns: 5 });
-    const history = view.input.slice(3) as Array<Record<string, unknown>>;
-    expect(history).toHaveLength(20);
+    const history = view.messages.slice(3) as unknown as Array<
+      Record<string, unknown>
+    >;
+    expect(history).toHaveLength(12);
     for (let index = 5; index < 9; index += 1) {
-      expect(history).toContainEqual({
-        type: "reasoning",
-        id: `reasoning-${index}`,
-        encrypted_content: `opaque-${index}`,
-        summary: [],
-      });
+      expect(history).toContainEqual(
+        expect.objectContaining({
+          role: "assistant",
+          reasoning_content: `opaque-${index}`,
+        }),
+      );
       for (const call of [0, 1]) {
-        expect(
-          history
-            .filter((item) => item.call_id === `${index}-${call}`)
-            .map((item) => item.type),
-        ).toEqual(["function_call", "function_call_output"]);
+        expect(history).toContainEqual({
+          role: "tool",
+          tool_call_id: `${index}-${call}`,
+          content: "observed",
+        });
+        expect(history).toContainEqual(
+          expect.objectContaining({
+            role: "assistant",
+            tool_calls: expect.arrayContaining([
+              {
+                type: "function",
+                id: `${index}-${call}`,
+                function: { name: "browser_command", arguments: "{}" },
+              },
+            ]),
+          }),
+        );
       }
     }
     expect(JSON.stringify(history)).not.toContain("opaque-4");
@@ -129,11 +146,11 @@ describe("bounded model context", () => {
 
   it.each([
     [],
-    [{ type: "function_call_output", call_id: "orphan", output: "{}" }],
+    [{ role: "tool", tool_call_id: "orphan", content: "{}" }],
     [0, 1].map(() => ({
-      type: "function_call_output",
-      call_id: "call",
-      output: "{}",
+      role: "tool",
+      tool_call_id: "call",
+      content: "{}",
     })),
   ])(
     "rejects incomplete, orphaned, and duplicate replies (%#)",
@@ -141,8 +158,18 @@ describe("bounded model context", () => {
       const context = new ModelContext(initial);
       expect(() =>
         context.completeTurn(
-          [{ type: "function_call", call_id: "call" }],
-          results as Array<Record<string, unknown>>,
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                type: "function",
+                id: "call",
+                function: { name: "tool", arguments: "{}" },
+              },
+            ],
+          },
+          results as ModelMessage[],
         ),
       ).toThrow("incomplete");
     },
@@ -158,7 +185,7 @@ describe("bounded model context", () => {
       turn(context, index, '\n"\\'.repeat(1_000));
     const view = context.build(request, {});
     expect(view.metrics.requestBytes).toBe(
-      jsonBytes({ ...request, input: view.input }),
+      jsonBytes({ ...request, messages: view.messages }),
     );
     expect(view.metrics.requestBytes).toBeLessThanOrEqual(16_000);
     expect(view.metrics.toolSchemaBytes).toBe(jsonBytes(request.tools));
@@ -175,9 +202,9 @@ describe("bounded model context", () => {
     for (let index = 1; index < 8; index += 1) turn(context, index);
     const second = context.build(base, { accepted: ["first"] });
     expect(first).toEqual(saved);
-    (first.input[0] as Record<string, unknown>).content = "provider mutation";
-    expect(second.input.slice(0, 2)).toEqual(initial);
-    expect(context.build(base, {}).input.slice(0, 2)).toEqual(initial);
+    first.messages[0]!.content = "provider mutation";
+    expect(second.messages.slice(0, 2)).toEqual(initial);
+    expect(context.build(base, {}).messages.slice(0, 2)).toEqual(initial);
   });
 
   it("fails explicitly when requirements, state, or the newest atomic group cannot fit", () => {
@@ -206,8 +233,10 @@ describe("bounded model context", () => {
       retainedTurns: 12,
       compactedTurns: 0,
     });
-    expect(view.input).toHaveLength(initial.length + 12 * 5);
-    expect(JSON.stringify(view.input)).not.toContain("browser_working_state");
+    expect(view.messages).toHaveLength(initial.length + 12 * 3);
+    expect(JSON.stringify(view.messages)).not.toContain(
+      "browser_working_state",
+    );
   });
 
   it("reduces cumulative request bytes by at least half for an identical 30-turn fixture", () => {

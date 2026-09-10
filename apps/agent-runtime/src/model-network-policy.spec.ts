@@ -59,7 +59,10 @@ describe("Agent model network policy", () => {
     });
 
     await expect(
-      client.responses.create({ input: "test", model: "gpt-test" }),
+      client.chat.completions.create({
+        messages: [{ role: "user", content: "test" }],
+        model: "gpt-test",
+      }),
     ).rejects.toThrow();
     expect(received).not.toHaveBeenCalled();
   });
@@ -70,7 +73,7 @@ describe("Agent model network policy", () => {
     const allowlist = parseModelHostAllowlist("127.0.0.1");
 
     const response = await createModelFetch(allowlist)(
-      `http://127.0.0.1:${port}/v1/responses`,
+      `http://127.0.0.1:${port}/v1/chat/completions`,
       {
         body: "{}",
         headers: { authorization: "Bearer sk-approved" },
@@ -98,7 +101,7 @@ describe("Agent model network policy", () => {
 
     await expect(
       createModelFetch(new Set(["127.0.0.1"]))(
-        `http://127.0.0.1:${sourcePort}/v1/responses`,
+        `http://127.0.0.1:${sourcePort}/v1/chat/completions`,
         {
           headers: { authorization: "Bearer sk-secret" },
           method: "POST",

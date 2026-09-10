@@ -65,15 +65,14 @@ function functionCall(
   index: number,
 ) {
   return {
-    arguments: JSON.stringify(argumentsValue),
-    call_id: `call-${index}`,
-    name,
-    type: "function_call" as const,
+    type: "function" as const,
+    id: `call-${index}`,
+    function: { name: name, arguments: JSON.stringify(argumentsValue) },
   };
 }
 
 function modelFactory(create: ReturnType<typeof vi.fn>) {
-  return () => ({ responses: { create } }) as never;
+  return () => ({ complete: create }) as never;
 }
 
 function convergenceHarness(create: ReturnType<typeof vi.fn>) {
@@ -124,7 +123,11 @@ describe("runtime navigation and combined finalization", () => {
         index: number,
       ) => ({
         id: `response-${index}`,
-        output: [functionCall(name, args, index)],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [functionCall(name, args, index)],
+        },
       });
       const create = vi
         .fn()
@@ -209,17 +212,21 @@ describe("runtime navigation and combined finalization", () => {
   };
   const finish = (criteria = [criterion]) => ({
     id: "finish",
-    output: [
-      functionCall(
-        "finish_verification",
-        {
-          verdict: "PASSED",
-          summary: "验证完成。",
-          criteria,
-        },
-        2,
-      ),
-    ],
+    message: {
+      role: "assistant" as const,
+      content: null,
+      tool_calls: [
+        functionCall(
+          "finish_verification",
+          {
+            verdict: "PASSED",
+            summary: "验证完成。",
+            criteria,
+          },
+          2,
+        ),
+      ],
+    },
   });
 
   it("delivers actual image parts to the model, replaces stale images, and omits bytes from traces", async () => {
@@ -227,13 +234,17 @@ describe("runtime navigation and combined finalization", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "observe",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.snapshot", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.snapshot", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce(finish());
     const { runTask, controlPlane, executor } = convergenceHarness(create);
@@ -264,23 +275,23 @@ describe("runtime navigation and combined finalization", () => {
       await executor.execute(runTask, lease, new AbortController().signal),
     ).toMatchObject({ kind: "VERIFICATION_COMPLETED", verdict: "PASSED" });
     const requests = create.mock.calls.map((call) => call[0]);
-    expect(requests[0].input.at(-1)).toMatchObject({
+    expect(requests[0].messages.at(-1)).toMatchObject({
       role: "user",
       content: [
-        { type: "input_text" },
+        { type: "text" },
         {
-          type: "input_image",
-          image_url: `data:image/jpeg;base64,${first.dataBase64}`,
+          type: "image_url",
+          image_url: { url: `data:image/jpeg;base64,${first.dataBase64}` },
         },
       ],
     });
-    expect(requests[1].input.at(-1)).toMatchObject({
+    expect(requests[1].messages.at(-1)).toMatchObject({
       role: "user",
       content: [
-        { type: "input_text" },
+        { type: "text" },
         {
-          type: "input_image",
-          image_url: `data:image/jpeg;base64,${second.dataBase64}`,
+          type: "image_url",
+          image_url: { url: `data:image/jpeg;base64,${second.dataBase64}` },
         },
       ],
     });
@@ -300,13 +311,17 @@ describe("runtime navigation and combined finalization", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "observe",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.dom", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.dom", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce(finish());
     const { runTask, controlPlane, executor } = convergenceHarness(create);
@@ -338,7 +353,7 @@ describe("runtime navigation and combined finalization", () => {
     expect(
       controlPlane.browserCommand.mock.invocationCallOrder[0],
     ).toBeLessThan(create.mock.invocationCallOrder[0]!);
-    const bootstrap = create.mock.calls[0]![0].input.find(
+    const bootstrap = create.mock.calls[0]![0].messages.find(
       (item: Record<string, unknown>) =>
         typeof item.content === "string" &&
         item.content.includes('"kind":"runtime_initial_navigation"'),
@@ -355,13 +370,17 @@ describe("runtime navigation and combined finalization", () => {
   it("preserves the current page on human resume even when a target URL exists", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "human",
-      output: [
-        functionCall(
-          "request_human_input",
-          { prompt: "请确认接管状态。", summary: "等待人工确认。" },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            { prompt: "请确认接管状态。", summary: "等待人工确认。" },
+            1,
+          ),
+        ],
+      },
     });
     const { runTask, controlPlane, executor } = convergenceHarness(create);
     runTask.snapshot.environment = { targetUrl: "https://example.com" };
@@ -382,19 +401,23 @@ describe("runtime navigation and combined finalization", () => {
   it("exposes a failed initial navigation instead of claiming the page loaded", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "finish",
-      output: [
-        functionCall(
-          "finish_verification",
-          {
-            verdict: "INCONCLUSIVE",
-            summary: "目标页面未能加载。",
-            criteria: [
-              { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
-            ],
-          },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "finish_verification",
+            {
+              verdict: "INCONCLUSIVE",
+              summary: "目标页面未能加载。",
+              criteria: [
+                { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
+              ],
+            },
+            1,
+          ),
+        ],
+      },
     });
     const { runTask, controlPlane, executor } = convergenceHarness(create);
     runTask.snapshot.environment = { targetUrl: "https://example.com" };
@@ -407,7 +430,7 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
-    const bootstrap = create.mock.calls[0]![0].input.find(
+    const bootstrap = create.mock.calls[0]![0].messages.find(
       (item: Record<string, unknown>) =>
         typeof item.content === "string" &&
         item.content.includes('"kind":"runtime_initial_navigation"'),
@@ -449,13 +472,17 @@ describe("runtime navigation and combined finalization", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "observe",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.dom", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.dom", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce(finish(criteria))
       .mockResolvedValueOnce(finish());
@@ -474,11 +501,11 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "PASSED" });
-    const rejection = create.mock.calls[2]![0].input.find(
+    const rejection = create.mock.calls[2]![0].messages.find(
       (item: Record<string, unknown>) =>
-        item.type === "function_call_output" && item.call_id === "call-2",
+        item.role === "tool" && item.tool_call_id === "call-2",
     );
-    expect(JSON.parse(rejection.output).accepted).toBe(false);
+    expect(JSON.parse(rejection.content).accepted).toBe(false);
     expect(create).toHaveBeenCalledTimes(3);
   });
 
@@ -487,26 +514,34 @@ describe("runtime navigation and combined finalization", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "observe",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.dom", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.dom", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce(
         finish([criterion, { ...criterion, criterionId: "unknown" }]),
       )
       .mockResolvedValueOnce({
         id: "empty-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            { verdict: "PASSED", summary: "验证完成。" },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { verdict: "PASSED", summary: "验证完成。" },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce(finish());
     const { runTask, controlPlane, executor } = convergenceHarness(create);
@@ -515,12 +550,12 @@ describe("runtime navigation and combined finalization", () => {
       artifacts: [{ id: "proof", kind: "DOM" }],
     });
     await executor.execute(runTask, lease, new AbortController().signal);
-    const rejection = create.mock.calls[3]![0].input.find(
+    const rejection = create.mock.calls[3]![0].messages.find(
       (item: Record<string, unknown>) =>
-        item.type === "function_call_output" && item.call_id === "call-3",
+        item.role === "tool" && item.tool_call_id === "call-3",
     );
-    expect(JSON.parse(rejection.output)).toMatchObject({ accepted: false });
-    expect(rejection.output).toContain("page-visible");
+    expect(JSON.parse(rejection.content)).toMatchObject({ accepted: false });
+    expect(rejection.content).toContain("page-visible");
   });
 
   it("retains the locator-recovery guard in combined finalization", async () => {
@@ -528,46 +563,60 @@ describe("runtime navigation and combined finalization", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: "button" } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: "button" } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "wrong-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            {
-              verdict: "FAILED",
-              summary: "产品操作失败。",
-              criteria: [{ ...criterion, status: "FAILED", evidenceRefs: [] }],
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              {
+                verdict: "FAILED",
+                summary: "产品操作失败。",
+                criteria: [
+                  { ...criterion, status: "FAILED", evidenceRefs: [] },
+                ],
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            {
-              verdict: "INCONCLUSIVE",
-              summary: "定位仍不明确。",
-              criteria: [
-                { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
-              ],
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              {
+                verdict: "INCONCLUSIVE",
+                summary: "定位仍不明确。",
+                criteria: [
+                  { ...criterion, status: "INCONCLUSIVE", evidenceRefs: [] },
+                ],
+              },
+              3,
+            ),
+          ],
+        },
       });
     const { runTask, controlPlane, executor } = convergenceHarness(create);
     controlPlane.browserCommand.mockResolvedValueOnce({
@@ -580,11 +629,11 @@ describe("runtime navigation and combined finalization", () => {
       new AbortController().signal,
     );
     expect(outcome).toMatchObject({ verdict: "INCONCLUSIVE" });
-    const rejection = create.mock.calls[2]![0].input.find(
+    const rejection = create.mock.calls[2]![0].messages.find(
       (item: Record<string, unknown>) =>
-        item.type === "function_call_output" && item.call_id === "call-2",
+        item.role === "tool" && item.tool_call_id === "call-2",
     );
-    expect(rejection.output).toContain("LOCATOR_AMBIGUOUS");
+    expect(rejection.content).toContain("LOCATOR_AMBIGUOUS");
   });
 
   it.each([false, true])(
@@ -601,13 +650,17 @@ describe("runtime navigation and combined finalization", () => {
         if (fails) throw new Error("provider failed");
         return {
           id: "human",
-          output: [
-            functionCall(
-              "request_human_input",
-              { prompt: "请确认状态。", summary: "等待确认。" },
-              1,
-            ),
-          ],
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [
+              functionCall(
+                "request_human_input",
+                { prompt: "请确认状态。", summary: "等待确认。" },
+                1,
+              ),
+            ],
+          },
         };
       });
       const { runTask, controlPlane, executor } = convergenceHarness(create);
@@ -634,12 +687,12 @@ describe("runtime navigation and combined finalization", () => {
 
 describe("browser verification bounded context", () => {
   type Request = {
-    input: Array<Record<string, unknown>>;
-    tools: Array<Record<string, unknown>>;
+    messages: Array<Record<string, unknown>>;
+    tools: Array<{ function: Record<string, unknown> }>;
     model: string;
   };
   const state = (request: Request) => {
-    const item = request.input.find(
+    const item = request.messages.find(
       (item) =>
         item.role === "user" &&
         typeof item.content === "string" &&
@@ -650,11 +703,9 @@ describe("browser verification bounded context", () => {
   const output = (request: Request, id: number) =>
     JSON.parse(
       String(
-        request.input.find(
-          (item) =>
-            item.type === "function_call_output" &&
-            item.call_id === `call-${id}`,
-        )!.output,
+        request.messages.find(
+          (item) => item.role === "tool" && item.tool_call_id === `call-${id}`,
+        )!.content,
       ),
     );
 
@@ -686,9 +737,9 @@ describe("browser verification bounded context", () => {
           payload: { target: { selector: `#step-${step}` } },
         };
       else if (step === 8) {
-        expect(request.input.some((item) => item.call_id === "call-0")).toBe(
-          false,
-        );
+        expect(
+          request.messages.some((item) => item.tool_call_id === "call-0"),
+        ).toBe(false);
         expect(JSON.stringify(request)).not.toContain("PO-00042");
         expect(state(request)).toMatchObject({
           acceptedCriteria: [
@@ -732,7 +783,11 @@ describe("browser verification bounded context", () => {
       }
       return {
         id: `response-${step}`,
-        output: [functionCall(name, args, step)],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [functionCall(name, args, step)],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -846,7 +901,11 @@ describe("browser verification bounded context", () => {
       if (index === 7) args.locatorRecoveryToken = recoveryToken;
       return {
         id: `response-${index}`,
-        output: [functionCall(name, args, index)],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [functionCall(name, args, index)],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -882,45 +941,48 @@ describe("browser verification bounded context", () => {
 
   it("keeps multi-call groups and opaque reasoning identical across provider fallback", async () => {
     const requests: Request[] = [];
-    const reasoning = {
-      type: "reasoning",
-      id: "opaque-id",
-      encrypted_content: "opaque-provider-data",
-      summary: [],
-    };
+    const reasoning = { reasoning_content: "private preserved reasoning" };
     const create = vi.fn().mockImplementation(async (request: Request) => {
       requests.push(structuredClone(request));
       if (requests.length === 1)
         return {
           id: "first",
-          output: [
-            reasoning,
-            functionCall(
-              "browser_command",
-              { commandType: "page.get_url", payload: {} },
-              0,
-            ),
-            functionCall(
-              "browser_command",
-              { commandType: "page.get_title", payload: {} },
-              1,
-            ),
-          ],
+          message: {
+            role: "assistant" as const,
+            content: null,
+            ...reasoning,
+            tool_calls: [
+              functionCall(
+                "browser_command",
+                { commandType: "page.get_url", payload: {} },
+                0,
+              ),
+              functionCall(
+                "browser_command",
+                { commandType: "page.get_title", payload: {} },
+                1,
+              ),
+            ],
+          },
         };
       if (requests.length === 2) {
-        request.input.splice(0);
+        request.messages.splice(0);
         request.tools.splice(0);
         throw new Error("primary unavailable");
       }
       return {
         id: "last",
-        output: [
-          functionCall(
-            "request_human_input",
-            { prompt: "请完成访问确认。", summary: "等待人工确认。" },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              { prompt: "请完成访问确认。", summary: "等待人工确认。" },
+              2,
+            ),
+          ],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -936,18 +998,34 @@ describe("browser verification bounded context", () => {
     expect(
       await executor.execute(runTask, lease, new AbortController().signal),
     ).toMatchObject({ kind: "WAITING_HUMAN" });
-    expect(requests[2]!.input).toEqual(requests[1]!.input);
+    expect(requests[2]!.messages).toEqual(requests[1]!.messages);
     expect(requests[2]!.tools).toEqual(requests[1]!.tools);
-    expect(requests[2]!.input).toContainEqual(reasoning);
-    const group = requests[2]!.input.filter(
-      (item) => typeof item.call_id === "string",
+    expect(requests[2]!.messages).toContainEqual(
+      expect.objectContaining(reasoning),
     );
-    expect(group.map((item) => [item.type, item.call_id])).toEqual([
-      ["function_call", "call-0"],
-      ["function_call", "call-1"],
-      ["function_call_output", "call-0"],
-      ["function_call_output", "call-1"],
+    expect(JSON.stringify(controlPlane.appendEvent.mock.calls)).not.toContain(
+      reasoning.reasoning_content,
+    );
+    const assistant = requests[2]!.messages.find(
+      (item) => item.role === "assistant",
+    )!;
+    expect(assistant.tool_calls).toEqual([
+      functionCall(
+        "browser_command",
+        { commandType: "page.get_url", payload: {} },
+        0,
+      ),
+      functionCall(
+        "browser_command",
+        { commandType: "page.get_title", payload: {} },
+        1,
+      ),
     ]);
+    expect(
+      requests[2]!.messages
+        .filter((item) => item.role === "tool")
+        .map((item) => item.tool_call_id),
+    ).toEqual(["call-0", "call-1"]);
   });
 
   it("starts a fresh cache on the next segment after human intervention", async () => {
@@ -958,21 +1036,31 @@ describe("browser verification bounded context", () => {
       if (step === 0)
         return {
           id: "first",
-          output: [
-            functionCall(
-              "browser_command",
-              { commandType: "page.snapshot", payload: {} },
-              0,
-            ),
-          ],
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [
+              functionCall(
+                "browser_command",
+                { commandType: "page.snapshot", payload: {} },
+                0,
+              ),
+            ],
+          },
         };
       if (step === 1) observationId = output(request, 0).result.observationId;
       if (step === 2) {
         expect(state(request).observations).toEqual([]);
-        expect(JSON.stringify(request.input)).toContain("人工已完成登录");
+        expect(JSON.stringify(request.messages)).toContain("人工已完成登录");
         return {
           id: "resumed",
-          output: [functionCall("read_observation", { observationId }, 2)],
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [
+              functionCall("read_observation", { observationId }, 2),
+            ],
+          },
         };
       }
       if (step === 3)
@@ -982,13 +1070,17 @@ describe("browser verification bounded context", () => {
         });
       return {
         id: "human",
-        output: [
-          functionCall(
-            "request_human_input",
-            { prompt: "请完成登录。", summary: "等待人工登录。" },
-            step,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              { prompt: "请完成登录。", summary: "等待人工登录。" },
+              step,
+            ),
+          ],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -1048,29 +1140,37 @@ describe("browser verification bounded context", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "observe",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.snapshot", payload: {} },
-            0,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.snapshot", payload: {} },
+              0,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "record",
-        output: [
-          { type: "reasoning", encrypted_content: "x".repeat(100_000) },
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              status: "PASSED",
-              summary: "页面可见。",
-              evidenceRefs: ["artifact://proof"],
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          reasoning_content: "x".repeat(100_000),
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                status: "PASSED",
+                summary: "页面可见。",
+                evidenceRefs: ["artifact://proof"],
+              },
+              1,
+            ),
+          ],
+        },
       });
     const { runTask, controlPlane } = convergenceHarness(create);
     controlPlane.browserCommand.mockResolvedValue({
@@ -1113,13 +1213,17 @@ describe("browser verification bounded context", () => {
   it("does not replay a partial multi-call response when the tool budget is exhausted", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "multiple",
-      output: [0, 1].map((id) =>
-        functionCall(
-          "browser_command",
-          { commandType: "page.get_url", payload: {} },
-          id,
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [0, 1].map((id) =>
+          functionCall(
+            "browser_command",
+            { commandType: "page.get_url", payload: {} },
+            id,
+          ),
         ),
-      ),
+      },
     });
     const { runTask, controlPlane } = convergenceHarness(create);
     const executor = new BrowserVerificationExecutor(
@@ -1157,36 +1261,40 @@ describe("browser verification bounded context", () => {
   it("reserves the last calls for observation and preserves completed criteria on tool exhaustion", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "budget",
-      output: [
-        functionCall(
-          "browser_command",
-          { commandType: "page.snapshot", payload: {} },
-          0,
-        ),
-        functionCall(
-          "record_criterion",
-          {
-            criterionId: "page-visible",
-            status: "PASSED",
-            summary: "页面验证通过。",
-            evidenceRefs: [],
-          },
-          1,
-        ),
-        functionCall(
-          "browser_command",
-          {
-            commandType: "page.click",
-            payload: { target: { selector: "button" } },
-          },
-          2,
-        ),
-        functionCall(
-          "browser_command",
-          { commandType: "page.get_url", payload: {} },
-          3,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            0,
+          ),
+          functionCall(
+            "record_criterion",
+            {
+              criterionId: "page-visible",
+              status: "PASSED",
+              summary: "页面验证通过。",
+              evidenceRefs: [],
+            },
+            1,
+          ),
+          functionCall(
+            "browser_command",
+            {
+              commandType: "page.click",
+              payload: { target: { selector: "button" } },
+            },
+            2,
+          ),
+          functionCall(
+            "browser_command",
+            { commandType: "page.get_url", payload: {} },
+            3,
+          ),
+        ],
+      },
     });
     const { runTask, controlPlane } = convergenceHarness(create);
     const executor = new BrowserVerificationExecutor(
@@ -1212,19 +1320,23 @@ describe("browser verification bounded context", () => {
   it("requests a test account through the existing HITL outcome with a canonical text schema", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "account",
-      output: [
-        functionCall(
-          "request_human_input",
-          {
-            kind: "TEST_ACCOUNT",
-            prompt: "请提供当前环境可用的测试账号。",
-            summary: "账号不存在，需要人工提供测试账号。",
-            context: { observedError: "USER_NOT_FOUND" },
-            responseSchema: { required: ["password"] },
-          },
-          0,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              kind: "TEST_ACCOUNT",
+              prompt: "请提供当前环境可用的测试账号。",
+              summary: "账号不存在，需要人工提供测试账号。",
+              context: { observedError: "USER_NOT_FOUND" },
+              responseSchema: { required: ["password"] },
+            },
+            0,
+          ),
+        ],
+      },
     });
     const { runTask, controlPlane } = convergenceHarness(create);
     const executor = new BrowserVerificationExecutor(
@@ -1256,13 +1368,17 @@ describe("browser verification bounded context", () => {
     const reason = new Error("lease cancelled");
     const create = vi.fn().mockResolvedValue({
       id: "multiple",
-      output: [0, 1].map((id) =>
-        functionCall(
-          "browser_command",
-          { commandType: "page.get_url", payload: {} },
-          id,
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [0, 1].map((id) =>
+          functionCall(
+            "browser_command",
+            { commandType: "page.get_url", payload: {} },
+            id,
+          ),
         ),
-      ),
+      },
     });
     const { runTask, controlPlane } = convergenceHarness(create);
     controlPlane.browserCommand.mockImplementation(async () => {
@@ -1290,16 +1406,20 @@ describe("browser verification bounded context", () => {
       const step = index++;
       return {
         id: `response-${step}`,
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.get_text",
-              payload: { target: { selector: `#row-${step}` } },
-            },
-            step,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.get_text",
+                payload: { target: { selector: `#row-${step}` } },
+              },
+              step,
+            ),
+          ],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -1317,15 +1437,15 @@ describe("browser verification bounded context", () => {
     );
     await executor.execute(runTask, lease, new AbortController().signal);
     expect(
-      requests.at(-1)!.tools.some((tool) => tool.name === "read_observation"),
+      requests
+        .at(-1)!
+        .tools.some((tool) => tool.function.name === "read_observation"),
     ).toBe(false);
-    expect(JSON.stringify(requests[0]!.input)).not.toContain(
+    expect(JSON.stringify(requests[0]!.messages)).not.toContain(
       "browser_working_state",
     );
     expect(
-      requests
-        .at(-1)!
-        .input.filter((item) => item.type === "function_call_output"),
+      requests.at(-1)!.messages.filter((item) => item.role === "tool"),
     ).toHaveLength(6);
     expect(output(requests.at(-1)!, 0)).toEqual({
       ...raw,
@@ -1411,10 +1531,9 @@ describe("browser verification argument corrections", () => {
     async (invalid) => {
       const calls = [
         {
-          type: "function_call",
-          call_id: "call-invalid",
-          name: invalid.name,
-          arguments: invalid.arguments,
+          type: "function" as const,
+          id: "call-invalid",
+          function: { name: invalid.name, arguments: invalid.arguments },
         },
         functionCall(
           "finish_verification",
@@ -1445,11 +1564,18 @@ describe("browser verification argument corrections", () => {
           5,
         ),
       ];
-      const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+      const requests: Array<{ messages: Array<Record<string, unknown>> }> = [];
       let index = 0;
       const create = vi.fn().mockImplementation(async (request) => {
         requests.push(structuredClone(request));
-        return { id: `response-${index}`, output: [calls[index++]] };
+        return {
+          id: `response-${index}`,
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [calls[index++]],
+          },
+        };
       });
       const controlPlane = {
         acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -1485,24 +1611,21 @@ describe("browser verification argument corrections", () => {
         },
         expect.any(AbortSignal),
       );
-      const feedback = requests[1]!.input.find(
-        (item) =>
-          item.type === "function_call_output" &&
-          item.call_id === "call-invalid",
+      const feedback = requests[1]!.messages.find(
+        (item) => item.role === "tool" && item.tool_call_id === "call-invalid",
       )!;
-      expect(Buffer.byteLength(String(feedback.output))).toBeLessThanOrEqual(
+      expect(Buffer.byteLength(String(feedback.content))).toBeLessThanOrEqual(
         2_048,
       );
-      expect(JSON.parse(String(feedback.output))).toMatchObject({
+      expect(JSON.parse(String(feedback.content))).toMatchObject({
         accepted: false,
         code: invalid.code,
         retryable: true,
       });
-      const earlyFinish = requests[2]!.input.find(
-        (item) =>
-          item.type === "function_call_output" && item.call_id === "call-2",
+      const earlyFinish = requests[2]!.messages.find(
+        (item) => item.role === "tool" && item.tool_call_id === "call-2",
       )!;
-      expect(String(earlyFinish.output)).toContain(
+      expect(String(earlyFinish.content)).toContain(
         "至少需要执行一次浏览器命令",
       );
       expect(create).toHaveBeenCalledTimes(5);
@@ -1512,7 +1635,7 @@ describe("browser verification argument corrections", () => {
           kind === "agent.tool.completed" && payload.callId === "call-invalid",
       );
       expect(trace?.[2].outputPreview.correctionBytes).toBe(
-        Buffer.byteLength(String(feedback.output)),
+        Buffer.byteLength(String(feedback.content)),
       );
     },
   );
@@ -1521,13 +1644,17 @@ describe("browser verification argument corrections", () => {
     let index = 0;
     const create = vi.fn().mockImplementation(async () => ({
       id: `response-${index}`,
-      output: [
-        functionCall(
-          "browser_command",
-          { commandType: "page.content", payload: {} },
-          index++,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.content", payload: {} },
+            index++,
+          ),
+        ],
+      },
     }));
     const { controlPlane } = convergenceHarness(create);
     const executor = new BrowserVerificationExecutor(
@@ -1565,11 +1692,18 @@ describe("browser verification argument corrections", () => {
         2,
       ),
     ];
-    const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+    const requests: Array<{ messages: Array<Record<string, unknown>> }> = [];
     let index = 0;
     const create = vi.fn().mockImplementation(async (request) => {
       requests.push(structuredClone(request));
-      return { id: `response-${index}`, output: [calls[index++]] };
+      return {
+        id: `response-${index}`,
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [calls[index++]],
+        },
+      };
     });
     const { controlPlane } = convergenceHarness(create);
     controlPlane.browserCommand.mockRejectedValue(
@@ -1583,10 +1717,10 @@ describe("browser verification argument corrections", () => {
     expect(
       await executor.execute(task, lease, new AbortController().signal),
     ).toMatchObject({ kind: "WAITING_HUMAN" });
-    const feedback = requests[1]!.input.find(
-      (item) => item.type === "function_call_output",
+    const feedback = requests[1]!.messages.find(
+      (item) => item.role === "tool",
     )!;
-    expect(JSON.parse(String(feedback.output))).toEqual({
+    expect(JSON.parse(String(feedback.content))).toEqual({
       accepted: false,
       error: "Runtime transport unavailable",
     });
@@ -1671,13 +1805,17 @@ describe("browser verification convergence", () => {
     let index = 0;
     const create = vi.fn().mockImplementation(async () => ({
       id: `response-${++index}`,
-      output: [
-        functionCall(
-          "browser_command",
-          { commandType: "page.snapshot", payload: {} },
-          index,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            index,
+          ),
+        ],
+      },
     }));
     const { executor, controlPlane, runTask } = convergenceHarness(create);
     controlPlane.browserCommand.mockImplementation(async () => ({
@@ -1711,7 +1849,11 @@ describe("browser verification convergence", () => {
   it("bounds text-only responses even though they never consume a tool call", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "text",
-      output: [{ type: "message", text: "继续分析" }],
+      message: {
+        role: "assistant" as const,
+        content: "继续分析",
+        tool_calls: [],
+      },
     });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
     const outcome = await executor.execute(
@@ -1739,13 +1881,17 @@ describe("browser verification convergence", () => {
     vi.useFakeTimers();
     const create = vi.fn().mockResolvedValue({
       id: "browser",
-      output: [
-        functionCall(
-          "browser_command",
-          { commandType: "page.snapshot", payload: {} },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            { commandType: "page.snapshot", payload: {} },
+            1,
+          ),
+        ],
+      },
     });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
     controlPlane.browserCommand.mockImplementation(async () => {
@@ -1774,28 +1920,36 @@ describe("browser verification convergence", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "browser",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.screenshot", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.screenshot", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "criterion",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              status: "FAILED",
-              summary: "页面缺少所需内容。",
-              evidenceRefs: [`artifact://${screenshotId}`],
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                status: "FAILED",
+                summary: "页面缺少所需内容。",
+                evidenceRefs: [`artifact://${screenshotId}`],
+              },
+              2,
+            ),
+          ],
+        },
       });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
     runTask.snapshot.criteria = [
@@ -1845,13 +1999,17 @@ describe("browser verification convergence", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "browser",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.snapshot", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.snapshot", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockImplementation(() => new Promise(() => {}));
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -1925,16 +2083,20 @@ describe("Agent Runtime browser verification executor", () => {
   it("removes validation-only formats from non-strict function schemas", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "response-schema",
-      output: [
-        functionCall(
-          "request_human_input",
-          {
-            prompt: "请批准访问。",
-            summary: "当前需要人工批准。",
-          },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              prompt: "请批准访问。",
+              summary: "当前需要人工批准。",
+            },
+            1,
+          ),
+        ],
+      },
     });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -1953,31 +2115,36 @@ describe("Agent Runtime browser verification executor", () => {
     const tools = create.mock.calls[0]?.[0].tools;
     expect(JSON.stringify(tools)).not.toContain('"format":');
     expect(
-      (tools as Array<{ strict?: boolean }>).every(
-        (tool) => tool.strict === false,
+      (tools as Array<{ function: { strict?: boolean } }>).every(
+        (tool) => tool.function.strict === false,
       ),
     ).toBe(true);
     expect(tools).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: "browser_command", strict: false }),
+        expect.objectContaining({
+          function: expect.objectContaining({
+            name: "browser_command",
+            strict: false,
+          }),
+        }),
       ]),
     );
     const browserTool = (
-      tools as Array<{ name: string; parameters: unknown }>
-    ).find((tool) => tool.name === "browser_command");
-    expect(JSON.stringify(browserTool?.parameters)).toContain(
+      tools as Array<{ function: { name: string; parameters: unknown } }>
+    ).find((tool) => tool.function.name === "browser_command");
+    expect(JSON.stringify(browserTool?.function.parameters)).toContain(
       "locatorRecoveryToken",
     );
     const firstRequest = create.mock.calls[0]?.[0] as {
-      input: Array<{ content?: string; role?: string }>;
-      tools: Array<{ description: string }>;
+      messages: Array<{ content?: string; role?: string }>;
+      tools: Array<{ function: { description: string } }>;
     };
-    expect(firstRequest.input[0]?.content).toContain(
+    expect(firstRequest.messages[0]?.content).toContain(
       "所有用户可见的生成内容必须使用简体中文",
     );
     expect(
       firstRequest.tools.every((tool) =>
-        /[\u3400-\u9fff]/u.test(tool.description),
+        /[\u3400-\u9fff]/u.test(tool.function.description),
       ),
     ).toBe(true);
   });
@@ -1992,17 +2159,21 @@ describe("Agent Runtime browser verification executor", () => {
     };
     const create = vi.fn().mockResolvedValue({
       id: "response-sensitive",
-      output: [
-        functionCall(
-          "request_human_input",
-          {
-            context: { apiKey: "tool-secret-value" },
-            prompt: "请批准访问。",
-            summary: "当前需要人工批准。",
-          },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              context: { apiKey: "tool-secret-value" },
+              prompt: "请批准访问。",
+              summary: "当前需要人工批准。",
+            },
+            1,
+          ),
+        ],
+      },
     });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2044,24 +2215,28 @@ describe("Agent Runtime browser verification executor", () => {
         }),
       },
     };
-    const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+    const requests: Array<{ messages: Array<Record<string, unknown>> }> = [];
     const create = vi.fn().mockImplementation(async (request) => {
       requests.push(structuredClone(request));
       return {
         id: `response-${requests.length}`,
-        output: [
-          requests.length === 1
-            ? functionCall(
-                "browser_command",
-                { commandType: "page.get_title", payload: {} },
-                1,
-              )
-            : functionCall(
-                "request_human_input",
-                { prompt: "请确认订单。", summary: "等待人工确认。" },
-                2,
-              ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            requests.length === 1
+              ? functionCall(
+                  "browser_command",
+                  { commandType: "page.get_title", payload: {} },
+                  1,
+                )
+              : functionCall(
+                  "request_human_input",
+                  { prompt: "请确认订单。", summary: "等待人工确认。" },
+                  2,
+                ),
+          ],
+        },
       };
     });
     const { runTask, controlPlane } = convergenceHarness(create);
@@ -2075,10 +2250,10 @@ describe("Agent Runtime browser verification executor", () => {
 
     await executor.execute(runTask, lease, new AbortController().signal);
 
-    const modelOutput = requests[1]!.input.find(
-      (item) => item.type === "function_call_output",
+    const modelOutput = requests[1]!.messages.find(
+      (item) => item.role === "tool",
     );
-    expect(JSON.parse(String(modelOutput?.output))).toEqual({
+    expect(JSON.parse(String(modelOutput?.content))).toEqual({
       ...raw,
       observationStage: "OBSERVATION",
       observationNotice: expect.any(String),
@@ -2108,51 +2283,67 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-1",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "看起来正常。", verdict: "PASSED" },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "看起来正常。", verdict: "PASSED" },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-2",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.navigate",
-              payload: { url: "https://example.com" },
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.navigate",
+                payload: { url: "https://example.com" },
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-3",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "PASSED",
-              summary: "页面已加载。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "PASSED",
+                summary: "页面已加载。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-4",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "所需页面已加载。", verdict: "PASSED" },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "所需页面已加载。", verdict: "PASSED" },
+              4,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2187,11 +2378,11 @@ describe("Agent Runtime browser verification executor", () => {
         "agent.segment.completed",
       ]),
     );
-    const secondInput = create.mock.calls[1]?.[0].input as unknown[];
+    const secondInput = create.mock.calls[1]?.[0].messages as unknown[];
     expect(secondInput).toContainEqual(
       expect.objectContaining({
-        output: expect.stringContaining("至少需要执行一次浏览器命令"),
-        type: "function_call_output",
+        content: expect.stringContaining("至少需要执行一次浏览器命令"),
+        role: "tool",
       }),
     );
   });
@@ -2218,16 +2409,20 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-browser",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.navigate",
-              payload: { url: "https://example.com" },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.navigate",
+                payload: { url: "https://example.com" },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockImplementationOnce(async () => {
         // The criterion arrives before the reserved window; finalization is
@@ -2235,18 +2430,22 @@ describe("Agent Runtime browser verification executor", () => {
         vi.setSystemTime(startedAt + 59_999);
         return {
           id: "response-criterion",
-          output: [
-            functionCall(
-              "record_criterion",
-              {
-                criterionId: "page-visible",
-                evidenceRefs: [],
-                status: "PASSED",
-                summary: "页面已加载。",
-              },
-              2,
-            ),
-          ],
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: [
+              functionCall(
+                "record_criterion",
+                {
+                  criterionId: "page-visible",
+                  evidenceRefs: [],
+                  status: "PASSED",
+                  summary: "页面已加载。",
+                },
+                2,
+              ),
+            ],
+          },
         };
       });
     const controlPlane = {
@@ -2289,22 +2488,28 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-1",
-        output: [
-          { role: "assistant", text: "It probably passed.", type: "message" },
-        ],
+        message: {
+          role: "assistant" as const,
+          content: "It probably passed.",
+          tool_calls: [],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-2",
-        output: [
-          functionCall(
-            "request_human_input",
-            {
-              prompt: "请批准访问。",
-              summary: "当前需要人工批准。",
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              {
+                prompt: "请批准访问。",
+                summary: "当前需要人工批准。",
+              },
+              2,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2369,20 +2574,28 @@ describe("Agent Runtime browser verification executor", () => {
       )
       .mockResolvedValueOnce({
         id: "response-fallback",
-        output: [{ role: "assistant", text: "Continue.", type: "message" }],
+        message: {
+          role: "assistant" as const,
+          content: "Continue.",
+          tool_calls: [],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-primary-recovered",
-        output: [
-          functionCall(
-            "request_human_input",
-            {
-              prompt: "请批准访问。",
-              summary: "当前需要人工批准。",
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              {
+                prompt: "请批准访问。",
+                summary: "当前需要人工批准。",
+              },
+              2,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2426,16 +2639,20 @@ describe("Agent Runtime browser verification executor", () => {
   it("does not hold a Runtime lane while browser capacity is unavailable", async () => {
     const create = vi.fn().mockResolvedValue({
       id: "response-after-capacity",
-      output: [
-        functionCall(
-          "request_human_input",
-          {
-            prompt: "请批准访问。",
-            summary: "当前需要人工批准。",
-          },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              prompt: "请批准访问。",
+              summary: "当前需要人工批准。",
+            },
+            1,
+          ),
+        ],
+      },
     });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValueOnce({
@@ -2507,16 +2724,20 @@ describe("Agent Runtime browser verification executor", () => {
     };
     const create = vi.fn().mockResolvedValue({
       id: "response-resumed",
-      output: [
-        functionCall(
-          "request_human_input",
-          {
-            prompt: "请再次批准。",
-            summary: "正在等待再次批准。",
-          },
-          1,
-        ),
-      ],
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              prompt: "请再次批准。",
+              summary: "正在等待再次批准。",
+            },
+            1,
+          ),
+        ],
+      },
     });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2532,7 +2753,7 @@ describe("Agent Runtime browser verification executor", () => {
 
     await executor.execute(resumedTask, lease, new AbortController().signal);
 
-    const input = create.mock.calls[0]?.[0].input as Array<{
+    const input = create.mock.calls[0]?.[0].messages as Array<{
       content?: string;
       role?: string;
     }>;
@@ -2570,53 +2791,69 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-1",
-        output: [
-          functionCall(
-            "browser_command",
-            { commandType: "page.screenshot", payload: {} },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.screenshot", payload: {} },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-2",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [screenshotRef],
-              status: "PASSED",
-              summary: "页面当前可见。",
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [screenshotRef],
+                status: "PASSED",
+                summary: "页面当前可见。",
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-3",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [screenshotRef, "reference://spec/spec-1/issue"],
-              status: "PASSED",
-              summary: "页面符合来源中的要求。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [screenshotRef, "reference://spec/spec-1/issue"],
+                status: "PASSED",
+                summary: "页面符合来源中的要求。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-4",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "验证已完成。", verdict: "PASSED" },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "验证已完成。", verdict: "PASSED" },
+              4,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2659,13 +2896,13 @@ describe("Agent Runtime browser verification executor", () => {
         expect.objectContaining({ kind: "BUSINESS_REFERENCE" }),
       ]),
     );
-    expect(create.mock.calls[2]?.[0].input).toContainEqual(
+    expect(create.mock.calls[2]?.[0].messages).toContainEqual(
       expect.objectContaining({
-        output: expect.stringContaining("BUSINESS_REFERENCE"),
-        type: "function_call_output",
+        content: expect.stringContaining("BUSINESS_REFERENCE"),
+        role: "tool",
       }),
     );
-    expect(JSON.stringify(create.mock.calls[0]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[0]?.[0].messages)).toContain(
       "reference://spec/spec-1/issue",
     );
   });
@@ -2675,55 +2912,71 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-ambiguous-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: 'a[href="/solution/ai"]' } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: 'a[href="/solution/ai"]' } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-ref-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              locatorRecoveryToken: "call-1",
-              payload: { target: { ref: "e42" } },
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                locatorRecoveryToken: "call-1",
+                payload: { target: { ref: "e42" } },
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-criterion",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "PASSED",
-              summary: "已通过唯一 ref 打开目标页面。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "PASSED",
+                summary: "已通过唯一 ref 打开目标页面。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "目标页面验证完成。", verdict: "PASSED" },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "目标页面验证完成。", verdict: "PASSED" },
+              4,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2786,10 +3039,10 @@ describe("Agent Runtime browser verification executor", () => {
     expect(
       controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
     ).toEqual(["page.click", "page.snapshot", "page.click"]);
-    expect(JSON.stringify(create.mock.calls[1]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[1]?.[0].messages)).toContain(
       "RESNAPSHOT_AND_RETARGET",
     );
-    expect(JSON.stringify(create.mock.calls[1]?.[0].input)).toContain("e42");
+    expect(JSON.stringify(create.mock.calls[1]?.[0].messages)).toContain("e42");
   });
 
   it("prevents an unresolved locator ambiguity from becoming a product failure", async () => {
@@ -2797,59 +3050,75 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-ambiguous-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: 'a[href="/solution/ai"]' } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: 'a[href="/solution/ai"]' } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-invalid-failure",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "FAILED",
-              summary: "无法点击目标入口。",
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "FAILED",
+                summary: "无法点击目标入口。",
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-inconclusive",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "INCONCLUSIVE",
-              summary: "自动化定位歧义，无法确认产品行为。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "INCONCLUSIVE",
+                summary: "自动化定位歧义，无法确认产品行为。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            {
-              summary: "定位歧义导致验证结果不确定。",
-              verdict: "INCONCLUSIVE",
-            },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              {
+                summary: "定位歧义导致验证结果不确定。",
+                verdict: "INCONCLUSIVE",
+              },
+              4,
+            ),
+          ],
+        },
       });
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
@@ -2892,7 +3161,7 @@ describe("Agent Runtime browser verification executor", () => {
       kind: "VERIFICATION_COMPLETED",
       verdict: "INCONCLUSIVE",
     });
-    expect(JSON.stringify(create.mock.calls[2]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[2]?.[0].messages)).toContain(
       "不能据此记录产品 FAILED",
     );
   });
@@ -2917,71 +3186,91 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-ambiguous-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: 'a[href="/solution/ai"]' } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: 'a[href="/solution/ai"]' } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-invalid-page-failure",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "FAILED",
-              summary: "目标入口无法点击。",
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "FAILED",
+                summary: "目标入口无法点击。",
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-page-inconclusive",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "INCONCLUSIVE",
-              summary: "定位歧义，页面入口结果无法确认。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "INCONCLUSIVE",
+                summary: "定位歧义，页面入口结果无法确认。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-footer-failure",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "footer-visible",
-              evidenceRefs: [],
-              status: "FAILED",
-              summary: "页脚未显示。",
-            },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "footer-visible",
+                evidenceRefs: [],
+                status: "FAILED",
+                summary: "页脚未显示。",
+              },
+              4,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "页面结果不确定，页脚验证失败。", verdict: "FAILED" },
-            5,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "页面结果不确定，页脚验证失败。", verdict: "FAILED" },
+              5,
+            ),
+          ],
+        },
       });
     const controlPlane = locatorAmbiguousControlPlane();
     const executor = new BrowserVerificationExecutor(
@@ -3011,69 +3300,89 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-ambiguous-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: 'a[href="/solution/ai"]' } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: 'a[href="/solution/ai"]' } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-cookie-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: "#accept-cookie" } },
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: "#accept-cookie" } },
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-invalid-failure",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "FAILED",
-              summary: "入口无法打开。",
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "FAILED",
+                summary: "入口无法打开。",
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-inconclusive",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "INCONCLUSIVE",
-              summary: "定位恢复未完成，无法确认入口行为。",
-            },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "INCONCLUSIVE",
+                summary: "定位恢复未完成，无法确认入口行为。",
+              },
+              4,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "定位恢复未完成。", verdict: "INCONCLUSIVE" },
-            5,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "定位恢复未完成。", verdict: "INCONCLUSIVE" },
+              5,
+            ),
+          ],
+        },
       });
     const controlPlane = locatorAmbiguousControlPlane({
       successfulSelectors: ["#accept-cookie"],
@@ -3094,10 +3403,10 @@ describe("Agent Runtime browser verification executor", () => {
       kind: "VERIFICATION_COMPLETED",
       verdict: "INCONCLUSIVE",
     });
-    expect(JSON.stringify(create.mock.calls[2]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[2]?.[0].messages)).toContain(
       "没有正确确认原定位恢复",
     );
-    expect(JSON.stringify(create.mock.calls[3]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[3]?.[0].messages)).toContain(
       "不能据此记录产品 FAILED",
     );
   });
@@ -3107,83 +3416,107 @@ describe("Agent Runtime browser verification executor", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "response-ambiguous-click",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              payload: { target: { selector: 'a[href="/solution/ai"]' } },
-            },
-            1,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                payload: { target: { selector: 'a[href="/solution/ai"]' } },
+              },
+              1,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-stale-ref",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              locatorRecoveryToken: "call-1",
-              payload: { target: { ref: "e42" } },
-            },
-            2,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                locatorRecoveryToken: "call-1",
+                payload: { target: { ref: "e42" } },
+              },
+              2,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-invisible-ref",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              locatorRecoveryToken: "call-1",
-              payload: { target: { ref: "e97" } },
-            },
-            3,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                locatorRecoveryToken: "call-1",
+                payload: { target: { ref: "e97" } },
+              },
+              3,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-third-ref",
-        output: [
-          functionCall(
-            "browser_command",
-            {
-              commandType: "page.click",
-              locatorRecoveryToken: "call-1",
-              payload: { target: { ref: "e99" } },
-            },
-            4,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              {
+                commandType: "page.click",
+                locatorRecoveryToken: "call-1",
+                payload: { target: { ref: "e99" } },
+              },
+              4,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-inconclusive",
-        output: [
-          functionCall(
-            "record_criterion",
-            {
-              criterionId: "page-visible",
-              evidenceRefs: [],
-              status: "INCONCLUSIVE",
-              summary: "两次重新定位均失败，无法确认页面行为。",
-            },
-            5,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "record_criterion",
+              {
+                criterionId: "page-visible",
+                evidenceRefs: [],
+                status: "INCONCLUSIVE",
+                summary: "两次重新定位均失败，无法确认页面行为。",
+              },
+              5,
+            ),
+          ],
+        },
       })
       .mockResolvedValueOnce({
         id: "response-finish",
-        output: [
-          functionCall(
-            "finish_verification",
-            { summary: "重新定位次数已用完。", verdict: "INCONCLUSIVE" },
-            6,
-          ),
-        ],
+        message: {
+          role: "assistant" as const,
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              { summary: "重新定位次数已用完。", verdict: "INCONCLUSIVE" },
+              6,
+            ),
+          ],
+        },
       });
     const controlPlane = locatorAmbiguousControlPlane({
       refErrors: {
@@ -3222,10 +3555,10 @@ describe("Agent Runtime browser verification executor", () => {
     expect(controlPlane.browserCommand.mock.calls[4]?.[1].payload).toEqual({
       target: { ref: "e97" },
     });
-    expect(JSON.stringify(create.mock.calls[3]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[3]?.[0].messages)).toContain(
       'retargetAttempts\\":2',
     );
-    expect(JSON.stringify(create.mock.calls[4]?.[0].input)).toContain(
+    expect(JSON.stringify(create.mock.calls[4]?.[0].messages)).toContain(
       "已用完两次重新定位机会",
     );
   });

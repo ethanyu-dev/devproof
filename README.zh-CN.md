@@ -116,6 +116,8 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 
 5. 在 Console → 接入配置 → Agent 模型配置中分别维护 `SPEC_ANALYSIS` 和 `BROWSER_EXECUTION` 两个池的有序模型列表。每个部署使用独立凭证，通过 `pnpm --filter @devproof/api runtime:provision -- --team default --pool <POOL>` 签发。本地开发读取 `DEVPROOF_SPEC_ANALYSIS_RUNTIME_TOKEN` 和 `DEVPROOF_BROWSER_EXECUTION_RUNTIME_TOKEN`；独立部署使用 `DEVPROOF_AGENT_RUNTIME_TOKEN`，可用 `DEVPROOF_AGENT_RUNTIME_POOL` 显式声明池。省略时从凭证绑定池，声明不匹配则拒绝注册。浏览器 Worker 并发跟随 Console 配置的在线 Browser 节点容量。私网或 HTTP 模型网关通过 `DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST` 配置。
 
+Agent 模型需要支持 OpenAI 兼容的 Chat Completions API：Runtime 在配置的 Base URL（通常以 `/v1` 结尾）后追加 `/chat/completions`。两个池均使用 `tool_choice: auto`，并通过工具提交完成结果；思考字段保留在内存中，用于工具调用的多轮传递。
+
 6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。
 
 安全迁移会撤销原先通过 Console 签发的 Runtime Token，需要使用上述运维命令重新签发。旧的 Runtime Token 环境变量名、Worker ID、轮询间隔和工具上限环境变量名在迁移期间仍可读取；模型 API Key 与 Base URL 只在 Console 管理，新的 Runtime 参数统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。

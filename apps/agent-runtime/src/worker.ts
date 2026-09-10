@@ -11,10 +11,8 @@ import {
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 
-import type {
-  BrowserVerificationExecutor,
-  ResponsesClientFactory,
-} from "./browser-verification.executor.js";
+import type { BrowserVerificationExecutor } from "./browser-verification.executor.js";
+import type { ModelClientFactory } from "./model-types.js";
 import type { RuntimeConfig } from "./config.js";
 import {
   activeLease,
@@ -38,7 +36,7 @@ export class AgentRuntimeWorker {
   constructor(
     private readonly config: RuntimeConfig,
     private readonly controlPlane: ControlPlaneClient,
-    private readonly modelClient: ResponsesClientFactory,
+    private readonly modelClient: ModelClientFactory,
   ) {
     this.boundPool = config.DEVPROOF_AGENT_RUNTIME_POOL;
     this.instanceWorkerId = `${config.DEVPROOF_AGENT_WORKER_ID}:${randomUUID()}`;
