@@ -20,6 +20,8 @@ import {
 } from "@devproof/contracts";
 
 import { PrismaService } from "../database/prisma.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
+import { businessEnvironmentKey } from "../verification/execution-concurrency.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { summarizeValue } from "../observability/observability.service.js";
 import { refreshedTaskDeadline } from "../task-executions/task-deadline.js";
@@ -721,6 +723,19 @@ export class ExecutionRunService {
         intervention.kind === "TEST_ACCOUNT"
           ? { account: (input.response.account as string).trim() }
           : input.response;
+      if (
+        intervention.kind === "TEST_ACCOUNT" &&
+        intervention.run.taskExecutionId
+      ) {
+        await reserveCaseTestAccount(tx, {
+          account: (response as { account: string }).account,
+          context: intervention.context,
+          environment: intervention.run.environmentSnapshot,
+          runId,
+          taskExecutionId: intervention.run.taskExecutionId,
+          teamId: current.team.id,
+        });
+      }
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
         throw new ConflictException("The run is not waiting for human input.");
       }
@@ -792,6 +807,7 @@ export class ExecutionRunService {
           resume: {
             interventionId,
             kind: intervention.kind,
+            context: intervention.context,
             response,
             resolvedAt: now.toISOString(),
           },
@@ -975,6 +991,69 @@ export class ExecutionRunService {
     if (!run) throw new NotFoundException("Run not found.");
     return run;
   }
+}
+
+/** Resolved HITL replies are durable task-scoped allocations, including finished
+ * Cases whose records may still exist. The caller commits the reply under this lock. */
+export async function reserveCaseTestAccount(
+  tx: Prisma.TransactionClient,
+  input: {
+    account: string;
+    context: unknown;
+    environment: unknown;
+    runId: string;
+    taskExecutionId: string;
+    teamId: string;
+  },
+) {
+  // Read-only reuse never grants permission to mutate that account's records.
+  if (isRecord(input.context) && input.context.usage === "READ_EXISTING")
+    return;
+  await acquireAdvisoryTransactionLock(
+    tx,
+    `test-account:${input.teamId}:${input.taskExecutionId}`,
+  );
+  const allocated = await tx.humanIntervention.findMany({
+    where: {
+      kind: "TEST_ACCOUNT",
+      status: "RESOLVED",
+      teamId: input.teamId,
+      runId: { not: input.runId },
+      run: { taskExecutionId: input.taskExecutionId },
+    },
+    select: {
+      response: true,
+      context: true,
+      run: { select: { environmentSnapshot: true } },
+    },
+  });
+  const conflict = allocated.some(
+    (item) =>
+      !(isRecord(item.context) && item.context.usage === "READ_EXISTING") &&
+      isRecord(item.response) &&
+      typeof item.response.account === "string" &&
+      item.response.account.trim().toLowerCase() ===
+        input.account.trim().toLowerCase() &&
+      sameTestEnvironment(item.run.environmentSnapshot, input.environment),
+  );
+  if (conflict)
+    throw new ConflictException(
+      "该业务测试账号已分配给本任务同环境的其他 Case，可能已有相同类型的记录。请提供独立账号；不要删除已有业务记录。",
+    );
+}
+
+function testEnvironmentKey(value: unknown) {
+  if (!isRecord(value)) return businessEnvironmentKey();
+  const target = value.targetUrl ?? value.baseUrl;
+  return businessEnvironmentKey(
+    typeof target === "string" ? target : undefined,
+  );
+}
+
+function sameTestEnvironment(left: unknown, right: unknown) {
+  const a = testEnvironmentKey(left);
+  const b = testEnvironmentKey(right);
+  return a === "*" || b === "*" || a === b;
 }
 
 function browserAdmissionInput(input: ExecutionRunCreateInput) {

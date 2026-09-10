@@ -3,9 +3,18 @@ import { RecoveryRequest } from "./recovery-request";
 import {
   recoveryGuidance,
   recoveryNeedsWriteReview,
+  recoveryWriteReviewGuidance,
 } from "./runtime-recovery-display";
 
 describe("recovery reads", () => {
+  it("distinguishes empty protection scopes without claiming a no-write proof", () => {
+    expect(recoveryWriteReviewGuidance([])).toContain("诊断记录");
+    expect(recoveryWriteReviewGuidance([])).toContain("重试原执行");
+    expect(
+      recoveryWriteReviewGuidance([{ mode: "WRITE", quarantined: true }]),
+    ).toContain("才能释放");
+    expect(recoveryWriteReviewGuidance(undefined)).toContain("才能释放");
+  });
   it("rejects late results and errors from a superseded filter even if transport ignores abort", async () => {
     const requests = new RecoveryRequest();
     let release!: () => void;

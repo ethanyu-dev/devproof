@@ -169,7 +169,9 @@ describe("forced finalization write audit", () => {
         expect.objectContaining({
           data: expect.objectContaining({
             executionDisposition: "BLOCKED",
-            verdict: "INCONCLUSIVE",
+            // The real database requires a null verdict for BLOCKED, while
+            // partial criterion results above remain available for review.
+            verdict: null,
           }),
         }),
       );

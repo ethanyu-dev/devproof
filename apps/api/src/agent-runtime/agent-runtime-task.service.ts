@@ -13,6 +13,7 @@ import {
   missingRequiredEvidenceKinds,
   runtimeEvidenceKindSchema,
   runtimeFailureClassSchema,
+  runtimeOutcomeSchema,
   runtimeTraceEventSchema,
   runtimeTaskSnapshotSchema,
   type RuntimeEvidenceRef,
@@ -459,10 +460,35 @@ export class AgentRuntimeTaskService {
             const recoveryUnknownWrite = !writeSettled(
               currentRecovery?.writeOutcomeState ?? "UNKNOWN",
             );
+            const checkpointEvent = await tx.runEvent.findFirst({
+              where: {
+                taskId: task.id,
+                attemptId: task.attemptId,
+                actor: "AGENT_RUNTIME",
+                kind: {
+                  in: [
+                    "executor.deadline.finalized",
+                    "executor.budget.finalized",
+                    "executor.stagnation.finalized",
+                  ],
+                },
+                payload: {
+                  path: ["fencingToken"],
+                  equals: (current.fencingToken - 1n).toString(),
+                },
+              },
+              orderBy: { sequence: "desc" },
+              select: { payload: true },
+            });
+            const pending = readFinalizationCheckpoint(
+              checkpointEvent?.payload,
+              current.fencingToken - 1n,
+            );
             const decision = leaseRecoveryDecision({
               closed: verifiedClosed,
               unknownWrite: recoveryUnknownWrite,
               expired:
+                Boolean(pending) ||
                 Boolean(expiredRun) ||
                 current.run.deadlineAt <= new Date() ||
                 Boolean(current.run.cancelRequestedAt) ||
@@ -473,23 +499,48 @@ export class AgentRuntimeTaskService {
               attemptNumber: current.attempt.number,
               maxAttempts: current.run.maxAttempts,
             });
+            const recoveredOutcome = pending
+              ? runtimeOutcomeSchema.parse({
+                  kind: "FATAL_FAILURE",
+                  executionDisposition: "BLOCKED",
+                  error: {
+                    code:
+                      decision === "WRITE_OUTCOME_UNKNOWN"
+                        ? decision
+                        : "OUTCOME_SUBMISSION_UNCONFIRMED",
+                    failureClass: "RUNTIME_LOST",
+                    message:
+                      "执行器已停止，但结果提交未获确认；保留原始原因，需核对写入与验收证据。",
+                    phase: "browser_verification",
+                    details: {
+                      originalReason: pending.reason,
+                      pendingOutcome: pending.outcome,
+                    },
+                  },
+                  summary: `${pending.outcome.summary.slice(0, 7000)}\n结果提交未获确认；待核对内容不作为已接受的产品结论。`,
+                })
+              : null;
             const changed = await tx.agentRuntimeTask.updateMany({
               data: {
                 recoveryStatus: decision,
                 recoveryNextAttemptAt: null,
                 finishedAt: new Date(),
-                error: {
-                  code:
-                    decision === "WRITE_OUTCOME_UNKNOWN"
-                      ? decision
-                      : "RUNTIME_LEASE_LOST",
-                  failureClass: "RUNTIME_LOST",
-                  message:
-                    decision === "WRITE_OUTCOME_UNKNOWN"
-                      ? "A browser operation may have changed business data; reconcile state before replaying."
-                      : "The Runtime lease was lost.",
-                  phase: "browser_verification",
-                },
+                ...(recoveredOutcome ? { result: json(recoveredOutcome) } : {}),
+                error:
+                  recoveredOutcome?.kind === "FATAL_FAILURE"
+                    ? json(recoveredOutcome.error)
+                    : {
+                        code:
+                          decision === "WRITE_OUTCOME_UNKNOWN"
+                            ? decision
+                            : "RUNTIME_LEASE_LOST",
+                        failureClass: "RUNTIME_LOST",
+                        message:
+                          decision === "WRITE_OUTCOME_UNKNOWN"
+                            ? "A browser operation may have changed business data; reconcile state before replaying."
+                            : "The Runtime lease was lost.",
+                        phase: "browser_verification",
+                      },
               },
               where: {
                 id: task.id,
@@ -498,6 +549,18 @@ export class AgentRuntimeTaskService {
               },
             });
             if (changed.count !== 1) return;
+            if (recoveredOutcome?.kind === "FATAL_FAILURE") {
+              await tx.runAttempt.update({
+                where: { id: task.attemptId },
+                data: {
+                  result: json(recoveredOutcome),
+                  error: json(recoveredOutcome.error),
+                  failureClass: "RUNTIME_LOST",
+                  status: "FAILED",
+                  finishedAt: new Date(),
+                },
+              });
+            }
             if (execution?.runtimeSessionId) {
               if (recoveryUnknownWrite) {
                 await tx.executionResourceLease.updateMany({
@@ -544,7 +607,7 @@ export class AgentRuntimeTaskService {
                       : "COMPLETED",
                   verdict: null,
                   executionDisposition:
-                    decision === "WRITE_OUTCOME_UNKNOWN"
+                    pending || decision === "WRITE_OUTCOME_UNKNOWN"
                       ? "BLOCKED"
                       : "RUNTIME_LOST",
                   finishedAt: new Date(),
@@ -561,6 +624,12 @@ export class AgentRuntimeTaskService {
                   decision,
                   oldSessionClosed: verifiedClosed,
                   unknownWrite: recoveryUnknownWrite,
+                  ...(pending
+                    ? {
+                        originalReason: pending.reason,
+                        outcomeSubmissionConfirmed: false,
+                      }
+                    : {}),
                 },
                 runId: task.runId,
                 taskId: task.id,
@@ -1435,7 +1504,10 @@ export class AgentRuntimeTaskService {
             finishedAt:
               projection.nextAttemptScheduled || isWaiting ? null : completedAt,
             lifecycle: projection.lifecycle,
-            verdict: completedVerification?.verdict ?? projection.verdict,
+            // Write auditing may have converted verification to BLOCKED. Only
+            // the projected outcome can carry a Run verdict; partial criteria
+            // remain persisted separately for reconciliation.
+            verdict: projection.verdict,
             ...(pausedDeadlineAt ? { deadlineAt: pausedDeadlineAt } : {}),
           },
           where: { id: task.runId },
@@ -1710,6 +1782,35 @@ function staleLease() {
     code: "RUNTIME_LEASE_LOST",
     message: "The Runtime task lease is stale.",
   });
+}
+
+/** Checkpoints are diagnostic only: no criterion or write outcome is accepted here. */
+export function readFinalizationCheckpoint(value: unknown, lostFence: bigint) {
+  const parsed = z
+    .object({
+      fencingToken: z.literal(lostFence.toString()),
+      reason: z.enum([
+        "FINALIZATION_RESERVE_REACHED",
+        "TOOL_LIMIT_REACHED",
+        "REPEATED_OPERATIONS",
+        "TEXT_ONLY_LOOP",
+      ]),
+      pendingOutcome: runtimeOutcomeSchema,
+    })
+    .safeParse(value);
+  if (!parsed.success) return null;
+  const { pendingOutcome: outcome, reason } = parsed.data;
+  if (
+    outcome.kind === "VERIFICATION_COMPLETED" &&
+    outcome.termination?.reason === reason
+  )
+    return { outcome, reason };
+  if (
+    outcome.kind === "FATAL_FAILURE" &&
+    outcome.error.details.reason === reason
+  )
+    return { outcome, reason };
+  return null;
 }
 
 export function leaseRecoveryDecision(input: {

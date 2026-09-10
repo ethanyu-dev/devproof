@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { runtimeGeneratedSpecSchema } from "@devproof/agent-runtime-protocol";
 import type {
   RuntimeSpecAnalysisTaskLease,
   RuntimeSpecSourceRef,
 } from "@devproof/agent-runtime-protocol";
 
-import { SpecAnalysisExecutor } from "./spec-analysis.executor.js";
+import {
+  SpecAnalysisExecutor,
+  validateFinalSpec,
+} from "./spec-analysis.executor.js";
 import { ControlPlaneError } from "./control-plane.client.js";
 import { LeaseLostError } from "./lease-supervisor.js";
 
@@ -61,6 +65,64 @@ function call(name: string, arguments_: unknown, id: string) {
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("rejects invented mandatory remark requirements even with a valid source id", () => {
+    const issueText = "新增 LEGACY_CORPORATE 类型；样式参考 ZDR。";
+    const spec = runtimeGeneratedSpecSchema.parse({
+      summary: "验证新建类型。",
+      scope: { inScope: ["新建类型"] },
+      cases: [
+        {
+          name: "新建类型",
+          preconditions: ["已登录后台，业务账号另由 TEST_ACCOUNT 提供。"],
+          rationale: "来自需求。",
+          sourceRefs: [source.externalId],
+          testData: ["实际记录 ID 用于追踪，不假设备注字段存在。"],
+          steps: [
+            {
+              order: 1,
+              action: "探索新建表单实际字段。",
+              expectedObservation: "观察可用控件。",
+            },
+          ],
+          criteria: [
+            {
+              id: "remark",
+              description: "备注必须回显。",
+              required: true,
+              requiredEvidenceKinds: ["DOM"],
+              sourceRefs: [source.externalId],
+              basis: {
+                sourceRef: source.externalId,
+                quote: "备注必须回显。",
+                observationTarget: "列表备注列",
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const input = {
+      spec,
+      calledTools: new Set(["linear_get_issue"]),
+      linkedPullRequestCount: 0,
+      sources: new Map([[source.externalId, source]]),
+      sourceContents: new Map([[source.externalId, issueText]]),
+      unavailableTools: new Set<string>(),
+    };
+    expect(validateFinalSpec(input)).toContain("未出现在实际来源");
+    const criterion = spec.cases[0]!.criteria[0]!;
+    criterion.description = "新建类型提供 LEGACY_CORPORATE。";
+    criterion.basis = {
+      sourceRef: source.externalId,
+      quote: issueText,
+      observationTarget: "新建弹窗的类型选项",
+    };
+    expect(validateFinalSpec(input)).toBeNull();
+    delete criterion.basis;
+    expect(validateFinalSpec(input)).toContain(
+      "探索步骤和自拟测试标识不能作为产品要求",
+    );
+  });
   it("does not start an execution whose lease has already been lost", async () => {
     const controller = new AbortController();
     const lost = new LeaseLostError();
@@ -170,6 +232,11 @@ describe("SpecAnalysisExecutor", () => {
           criteria: [
             {
               description: "订单显示为已退款状态。",
+              basis: {
+                sourceRef: source.externalId,
+                quote: source.excerpt,
+                observationTarget: "订单详情的退款状态",
+              },
               id: "refunded-state",
               requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
               sourceRefs: [source.externalId],
@@ -425,6 +492,11 @@ describe("SpecAnalysisExecutor", () => {
             criteria: [
               {
                 description: "订单显示为已退款状态。",
+                basis: {
+                  sourceRef: source.externalId,
+                  quote: source.excerpt,
+                  observationTarget: "订单详情的退款状态",
+                },
                 id: "refunded-state",
                 requiredEvidenceKinds: ["DOM", "BUSINESS_REFERENCE"],
                 sourceRefs: [source.externalId],

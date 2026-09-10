@@ -1,5 +1,7 @@
 import {
   runtimeGeneratedSpecSchema,
+  runtimeGeneratedSpecCaseSchema,
+  runtimeSpecCriterionSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeTraceEventSchema,
   type RuntimeSpecAnalysisOutcome,
@@ -29,7 +31,23 @@ interface ModelFunctionCall {
 const analysisSummarySchema = z.string().trim().min(1).max(4_000);
 const finishSpecSchema = z.object({
   analysisSummary: analysisSummarySchema,
-  spec: runtimeGeneratedSpecSchema,
+  spec: runtimeGeneratedSpecSchema.extend({
+    cases: z
+      .array(
+        runtimeGeneratedSpecCaseSchema.extend({
+          criteria: z
+            .array(
+              runtimeSpecCriterionSchema.extend({
+                basis: runtimeSpecCriterionSchema.shape.basis.unwrap(),
+              }),
+            )
+            .min(1)
+            .max(100),
+        }),
+      )
+      .min(1)
+      .max(100),
+  }),
 });
 const MAX_CONSECUTIVE_SOURCE_FAILURES = 2;
 
@@ -74,6 +92,7 @@ export class SpecAnalysisExecutor {
       },
     ];
     const sources = new Map<string, RuntimeSpecSourceRef>();
+    const sourceContents = new Map<string, string>();
     const calledTools = new Set<string>();
     const sourceFailureCounts = new Map<SourceToolName, number>();
     const unavailableTools = new Set<SourceToolName>();
@@ -284,6 +303,7 @@ export class SpecAnalysisExecutor {
               calledTools,
               linkedPullRequestCount,
               sources,
+              sourceContents,
               spec: parsed.data.spec,
               unavailableTools,
             });
@@ -382,6 +402,12 @@ export class SpecAnalysisExecutor {
             output.sourceRefs.forEach((source) =>
               sources.set(source.externalId, source),
             );
+            for (const source of output.sourceRefs) {
+              sourceContents.set(
+                source.externalId,
+                [source.excerpt, ...stringLeaves(output.result)].join("\n"),
+              );
+            }
             if (call.name === "linear_get_issue") {
               const result = record(output.result);
               linkedPullRequestCount = Array.isArray(result.pullRequestUrls)
@@ -725,15 +751,18 @@ function systemPrompt() {
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。
+每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
+严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。
-账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。没有用户提供的有效测试账号时，在前置条件中说明由运行时通过 HITL 请求用户提供；名称、备注等可生成字段才使用唯一示例值。不要假定其他并发 Case 已创建可修改的记录；编辑/删除 Case 应明确自己的前置数据和仅清理本 Case 创建的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
+账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，各写入 Case 使用独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，存在则请求新账号，不删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
 只有在完成 Issue 和关联 PR 代码调查后才能调用 finish_spec。绝不能泄露凭据。`;
 }
 
-function validateFinalSpec(input: {
+export function validateFinalSpec(input: {
   calledTools: ReadonlySet<string>;
   linkedPullRequestCount: number;
   sources: ReadonlyMap<string, RuntimeSpecSourceRef>;
+  sourceContents: ReadonlyMap<string, string>;
   spec: z.infer<typeof runtimeGeneratedSpecSchema>;
   unavailableTools: ReadonlySet<string>;
 }) {
@@ -777,7 +806,25 @@ function validateFinalSpec(input: {
       "请只从 allowedSourceRefs 中逐字复制来源引用。",
     ].join("\n");
   }
+  for (const testCase of input.spec.cases) {
+    for (const criterion of testCase.criteria) {
+      const basis = criterion.basis;
+      if (!basis || !criterion.sourceRefs.includes(basis.sourceRef))
+        return `验收标准 ${criterion.id} 缺少引用来源内的 basis。探索步骤和自拟测试标识不能作为产品要求。`;
+      const content = input.sourceContents.get(basis.sourceRef) ?? "";
+      if (!content.includes(basis.quote))
+        return `验收标准 ${criterion.id} 的 basis.quote 未出现在实际来源中；请引用支持该产品断言的原文，或移除无来源的断言。`;
+    }
+  }
   return null;
+}
+
+function stringLeaves(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringLeaves);
+  if (value && typeof value === "object")
+    return Object.values(value).flatMap(stringLeaves);
+  return [];
 }
 
 function isSourceAvailabilityFailure(error: unknown) {

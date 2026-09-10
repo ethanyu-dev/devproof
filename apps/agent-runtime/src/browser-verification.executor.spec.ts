@@ -1134,6 +1134,21 @@ describe("browser verification bounded context", () => {
       verdict: "INCONCLUSIVE",
       termination: { reason: "TOOL_LIMIT_REACHED" },
     });
+    const checkpoint = controlPlane.appendEvent.mock.calls.find(
+      (call) => call[1] === "executor.budget.finalized",
+    );
+    expect(checkpoint?.[2]).toMatchObject({
+      fencingToken: lease.fencingToken,
+      pendingOutcome: {
+        termination: { reason: "TOOL_LIMIT_REACHED" },
+        criteria: [{ status: "INCONCLUSIVE" }],
+      },
+    });
+    expect(
+      controlPlane.appendEvent.mock.invocationCallOrder[
+        controlPlane.appendEvent.mock.calls.indexOf(checkpoint!)
+      ],
+    ).toBeLessThan(controlPlane.releaseBrowser.mock.invocationCallOrder[0]!);
     expect(create).toHaveBeenCalledOnce();
     expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();

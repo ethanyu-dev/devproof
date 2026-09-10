@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ExecutionRunService,
   projectRunTrajectory,
+  reserveCaseTestAccount,
 } from "./execution-run.service.js";
 
 const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
@@ -72,6 +73,91 @@ describe("ExecutionRunService events", () => {
 });
 
 describe("ExecutionRunService HITL resume", () => {
+  it("keeps a conflicting business account reply pending and preserves default scheduling", async () => {
+    const tx = transactionClient();
+    const original = intervention({
+      kind: "TEST_ACCOUNT",
+      context: {
+        usage: "CREATE_OR_MODIFY",
+        requiredTypes: ["LEGACY_CORPORATE"],
+      },
+    });
+    tx.humanIntervention.findFirst.mockResolvedValue({
+      ...original,
+      run: {
+        ...original.run,
+        taskExecutionId: "parent-task",
+        environmentSnapshot: { targetUrl: "https://test.example.com/list" },
+      },
+    });
+    tx.humanIntervention.findMany.mockResolvedValue([
+      {
+        response: { account: "test-user" },
+        context: {},
+        run: {
+          environmentSnapshot: { targetUrl: "https://test.example.com/form" },
+        },
+      },
+    ]);
+    const service = new ExecutionRunService(
+      {
+        $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
+      } as never,
+      {} as never,
+    );
+    await expect(
+      service.resolveIntervention(current, runId, interventionId, {
+        response: { account: "test-user" },
+      }),
+    ).rejects.toThrow("已分配");
+    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
+    expect(tx.executionRun.updateMany).not.toHaveBeenCalled();
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.humanIntervention.findMany.mock.invocationCallOrder[0]!,
+    );
+    expect(tx.humanIntervention.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "RESOLVED",
+          runId: { not: runId },
+          run: { taskExecutionId: "parent-task" },
+        }),
+      }),
+    );
+  });
+
+  it("allows independent accounts, environments and explicit read-only reuse", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findMany.mockResolvedValue([
+      {
+        response: { account: "allocated-user" },
+        context: {},
+        run: {
+          environmentSnapshot: { targetUrl: "https://test.example.com/list" },
+        },
+      },
+    ]);
+    const input = {
+      account: "independent-user",
+      context: {},
+      environment: { targetUrl: "https://test.example.com" },
+      runId,
+      taskExecutionId: "parent",
+      teamId: snapshot.teamId,
+    };
+    await reserveCaseTestAccount(tx as never, input);
+    await reserveCaseTestAccount(tx as never, {
+      ...input,
+      account: "allocated-user",
+      environment: { targetUrl: "https://other.example.com" },
+    });
+    await reserveCaseTestAccount(tx as never, {
+      ...input,
+      account: "allocated-user",
+      context: { usage: "READ_EXISTING" },
+    });
+  });
+
   it("copies the Run HITL policy into the immutable Runtime task snapshot", async () => {
     const tx = {
       agentRuntimeTask: { create: vi.fn() },
@@ -629,6 +715,7 @@ function intervention(overrides: Record<string, unknown>) {
 
 function transactionClient() {
   return {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     agentRuntimeTask: { update: vi.fn() },
     browserExecution: { findUnique: vi.fn().mockResolvedValue(null) },
     browserRuntimeProfileLease: { updateMany: vi.fn() },
@@ -637,6 +724,7 @@ function transactionClient() {
     executionRun: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     humanIntervention: {
       findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     notificationOutbox: { create: vi.fn() },

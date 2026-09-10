@@ -18,7 +18,7 @@ export function recoveryWriteLabel(state: string) {
     (
       {
         UNASSESSED: "写入范围待核对",
-        UNKNOWN: "业务写入结果待核实",
+        UNKNOWN: "写入结果尚未确认",
         NOT_APPLICABLE: "无业务写入保护",
         NO_WRITE_VERIFIED: "已证实没有写入",
         CONFIRMED: "业务结果已确认",
@@ -26,6 +26,12 @@ export function recoveryWriteLabel(state: string) {
       } as Record<string, string>
     )[state] ?? "业务结果状态待确认"
   );
+}
+
+export function recoveryWriteReviewGuidance(guards: unknown) {
+  if (Array.isArray(guards) && guards.length === 0)
+    return "当前没有业务数据保护范围。这是写入结果未确认的诊断记录，不表示已发生写入或当前占用浏览器槽位。若需重试原执行或复用其数据，请先核对实际业务状态并记录证据。";
+  return "请核对实际业务状态并提供证据。关闭浏览器本身不能确认此前写入是否成功；符合条件后才能释放相关数据保护。";
 }
 
 export function recoveryGuidance(state: string, errorCode: string | null) {

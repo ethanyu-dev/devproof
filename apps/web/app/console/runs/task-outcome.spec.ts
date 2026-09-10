@@ -151,6 +151,6 @@ it("explains an operator-blocked recovery without suggesting that it is running"
   ).toMatchObject({ label: "等待人工恢复", toneStatus: "PENDING" });
   expect(schedulingWaitText(scheduling)).toContain("自动恢复已暂停");
   expect(concurrencyPolicyExplanation("UNKNOWN")).toContain(
-    "同一环境按串行执行",
+    "并发资格由当前调度策略和数据约束决定",
   );
 });

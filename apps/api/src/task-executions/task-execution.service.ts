@@ -3019,6 +3019,12 @@ function taskCaseRunRequest(
       ? agentDefinition.data.criteria.map((criterion) => ({
           description: [
             criterion.description,
+            ...(criterion.basis
+              ? [
+                  `验收对象：${criterion.basis.observationTarget}`,
+                  `来源原文：${criterion.basis.quote}`,
+                ]
+              : []),
             `Spec 来源：${criterion.sourceRefs
               .map((sourceRef) =>
                 runtimeReferenceByAnalysisSource.get(sourceRef),

@@ -248,7 +248,14 @@ export class BrowserVerificationExecutor {
               : reason === "TOOL_LIMIT_REACHED"
                 ? "executor.budget.finalized"
                 : "executor.stagnation.finalized",
-            { reason, deadlineAt: task.snapshot.deadlineAt },
+            {
+              reason,
+              deadlineAt: task.snapshot.deadlineAt,
+              fencingToken: lease.fencingToken,
+              // A recovery checkpoint, not an accepted product verdict. Persist
+              // before browser cleanup; the outcome endpoint still validates it.
+              pendingOutcome: outcome,
+            },
           ),
           finalizationBudgetMs(),
         );
@@ -1175,7 +1182,20 @@ export class BrowserVerificationExecutor {
         outcome: runtimeOutcomeSchema.parse({
           executionDisposition: "BLOCKED",
           intervention: {
-            context: parsed.data.context,
+            context:
+              parsed.data.kind === "TEST_ACCOUNT"
+                ? {
+                    ...parsed.data.context,
+                    purpose: "BUSINESS_TEST_SUBJECT",
+                    usage:
+                      parsed.data.context.usage === "READ_EXISTING"
+                        ? "READ_EXISTING"
+                        : "CREATE_OR_MODIFY",
+                    runId: input.task.snapshot.runId,
+                    environment:
+                      readTargetUrl(input.task.snapshot.environment) ?? null,
+                  }
+                : parsed.data.context,
             expiresAt: new Date(
               Math.min(
                 Date.now() + hitlPolicy.timeoutSeconds * 1_000,
@@ -2026,6 +2046,9 @@ function readHumanResume(policy: Record<string, unknown>) {
   return {
     interventionId:
       typeof value.interventionId === "string" ? value.interventionId : null,
+    kind: typeof value.kind === "string" ? value.kind : null,
+    context:
+      value.context && typeof value.context === "object" ? value.context : {},
     resolvedAt: typeof value.resolvedAt === "string" ? value.resolvedAt : null,
     response:
       value.response && typeof value.response === "object"
@@ -2058,8 +2081,11 @@ DOM 快照仅覆盖当前视口与未被滚动容器裁剪的内容；captureTru
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE 或 STALE_VISUAL_OBSERVATION 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
+验收证据必须对应标准里的具体页面区域、控件和业务对象。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
+TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。写入前只读核对环境、账号和所需类型的唯一键是否已有记录；已存在则请求独立账号，禁止删除既有记录来满足新建前置条件。默认并发执行，不假设其他 Case 的数据归属。缺账号继续使用 TEST_ACCOUNT，请在 context 中说明 usage="CREATE_OR_MODIFY"、requiredTypes 和 uniquenessConstraint；仅查看已有记录的筛选 Case 优先复用已有数据，必要时以 usage="READ_EXISTING" 请求账号，并保持只读。获得的账号只属于本 Case 的所声明用途，READ_EXISTING 答复不授权写入。记录实际创建的 ID、类型和证据，不能假设备注字段存在。
 正向业务验证需要已有测试账号时，只使用任务或 humanResume.response.account 明确提供的账号；不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。缺少账号，或提交后明确观察到该账号不存在/不可用时，调用现有 request_human_input，kind="TEST_ACCOUNT"，用简体中文请求一个当前环境可用于本次测试的账号（页面支持手机号或 UUID 时说明即可），context 中保留字段、原始错误与证据引用。用户只需提供账号，不需要接管浏览器。恢复后先重新观察保留的页面，用 humanResume.response.account 填写并核对结果；不要因为任务正文中的旧示例而覆盖用户答复。HITL 禁用时将缺数据的标准记为 INCONCLUSIVE，不盲目试号。若验收目标就是无效账号应被拒绝，则保留负向测试输入，按实际错误验证，不索取有效账号。
 result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。
+保存后出现错误、弹窗不关闭或结果未更新时，先启用 diagnostics，读取 page.network（精确 urlIncludes、includeResponseBodies=true）及 page.console/page.errors。旧 Runtime 缺少 actionFeedback 时也必须走这条只读诊断路径；重复点击同一保存不能代替诊断。already exists 等唯一性拒绝意味着需要核查已有记录或换账号；前置数据冲突不应直接判产品失败。
 remainingToolCalls 不足 3 次时进入收尾，不发起新的提交；优先核对最近操作并提交已完成标准，剩余标准记录 INCONCLUSIVE。范围标签 fN 不是元素 ref，不要将它当作 frame.snapshot 的引用；恢复过的无效方法不要重复尝试。
 只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并提供所有必需验收标准后，才能完成验证。
 所有用户可见的生成内容必须使用简体中文，包括验收标准摘要、HITL 提示、等待摘要和最终验证摘要。标识符、URL、代码符号、API 路径、工具名、枚举值和 evidence reference 保持原样，不要翻译。

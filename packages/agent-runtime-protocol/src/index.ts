@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 12,
+  minor: 13,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -159,6 +159,14 @@ export const runtimeSpecSourceRefSchema = z.object({
 });
 
 export const runtimeSpecCriterionSchema = z.object({
+  // Optional for persisted Specs from older runtimes; new generation requires it.
+  basis: z
+    .object({
+      sourceRef: z.string().trim().min(1).max(500),
+      quote: z.string().trim().min(1).max(2_000),
+      observationTarget: z.string().trim().min(1).max(500),
+    })
+    .optional(),
   description: z.string().trim().min(1).max(5_000),
   id: z.string().trim().min(1).max(160),
   required: z.boolean().default(true),

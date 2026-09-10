@@ -11,6 +11,7 @@ import {
   hitlWaitDeadline,
   initializeExecutionBudget,
   leaseRecoveryDecision,
+  readFinalizationCheckpoint,
 } from "./agent-runtime-task.service.js";
 
 const snapshot = runtimeTaskSnapshotSchema.parse({
@@ -43,6 +44,15 @@ const snapshot = runtimeTaskSnapshotSchema.parse({
 
 describe("Agent Runtime ownership and recovery", () => {
   it.each([
+    {
+      name: "forced result survives unknown-write recovery",
+      potentialWrites: 1,
+      writeState: "UNKNOWN",
+      casCount: 1,
+      proved: true,
+      expected: "WRITE_OUTCOME_UNKNOWN",
+      checkpoint: true,
+    },
     {
       name: "proven no-write epoch",
       potentialWrites: 0,
@@ -121,6 +131,7 @@ describe("Agent Runtime ownership and recovery", () => {
     "uses independent closure and write evidence: $name",
     async ({
       potentialWrites,
+      checkpoint,
       writeState,
       casCount,
       proved,
@@ -227,9 +238,15 @@ describe("Agent Runtime ownership and recovery", () => {
           updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         executionRun: { update: vi.fn().mockResolvedValue({}) },
-        runAttempt: { create: vi.fn().mockResolvedValue({}) },
+        runAttempt: {
+          create: vi.fn().mockResolvedValue({}),
+          update: vi.fn().mockResolvedValue({}),
+        },
         browserExecution: { create: vi.fn().mockResolvedValue({}) },
-        runEvent: { create: vi.fn().mockResolvedValue({}) },
+        runEvent: {
+          create: vi.fn().mockResolvedValue({}),
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
         taskCaseExecution: {
           updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
@@ -264,7 +281,41 @@ describe("Agent Runtime ownership and recovery", () => {
         {} as never,
         browser as never,
       );
+      if (checkpoint)
+        tx.runEvent.findFirst.mockResolvedValue({
+          payload: checkpointPayload(),
+        } as never);
       await service.recoverExpiredLeases();
+      if (checkpoint) {
+        expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              result: expect.objectContaining({
+                kind: "FATAL_FAILURE",
+                executionDisposition: "BLOCKED",
+                error: expect.objectContaining({
+                  code: "WRITE_OUTCOME_UNKNOWN",
+                  details: expect.objectContaining({
+                    originalReason: "TOOL_LIMIT_REACHED",
+                    pendingOutcome: expect.objectContaining({
+                      criteria: expect.any(Array),
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        );
+        expect(tx.runAttempt.update).toHaveBeenCalledOnce();
+        expect(tx.executionRun.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              verdict: null,
+              executionDisposition: "BLOCKED",
+            }),
+          }),
+        );
+      }
       expect(tx.browserRuntimeCommand.count).not.toHaveBeenCalled();
       expect(prisma.browserRuntimeCommand.count).not.toHaveBeenCalled();
       if (expected === "RETRY_SCHEDULED") {
@@ -475,7 +526,10 @@ describe("Agent Runtime ownership and recovery", () => {
         },
         browserExecution: { create: vi.fn().mockResolvedValue({}) },
         executionRun: { update: vi.fn().mockResolvedValue({}) },
-        runEvent: { create: vi.fn().mockResolvedValue({}) },
+        runEvent: {
+          create: vi.fn().mockResolvedValue({}),
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
       };
       const prisma = {
         $transaction: vi.fn((fn: (tx: unknown) => unknown) => fn(tx)),
@@ -632,7 +686,10 @@ describe("Agent Runtime ownership and recovery", () => {
         }),
       },
       runAttempt: { update: vi.fn().mockResolvedValue({}) },
-      runEvent: { create: vi.fn().mockResolvedValue({}) },
+      runEvent: {
+        create: vi.fn().mockResolvedValue({}),
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
       taskCaseExecution: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
@@ -879,7 +936,10 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       },
       executionRun: { update: vi.fn().mockResolvedValue({}) },
       runAttempt: { update: vi.fn().mockResolvedValue({}) },
-      runEvent: { create: vi.fn().mockResolvedValue({}) },
+      runEvent: {
+        create: vi.fn().mockResolvedValue({}),
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
     };
     const prisma = {
       $transaction: vi.fn(
@@ -1163,6 +1223,50 @@ describe("adaptive Runtime deadline decisions", () => {
     expect(
       decideAdaptiveDeadlineExtension(
         adaptiveState({ deadlineAtMs: nowMs, nowMs }),
+      ),
+    ).toBeNull();
+  });
+});
+
+function checkpointPayload() {
+  return {
+    fencingToken: "1",
+    reason: "TOOL_LIMIT_REACHED",
+    pendingOutcome: {
+      kind: "VERIFICATION_COMPLETED",
+      executionDisposition: "EXECUTED",
+      termination: { reason: "TOOL_LIMIT_REACHED" },
+      verdict: "INCONCLUSIVE",
+      summary: "工具调用预算已用尽。",
+      evidence: [],
+      criteria: [
+        {
+          criterionId: "expected-1",
+          status: "INCONCLUSIVE",
+          summary: "尚未验证。",
+          evidenceRefs: [],
+        },
+      ],
+    },
+  };
+}
+
+describe("finalization checkpoints", () => {
+  it("retains pending criteria only for the lost fence and matching termination", () => {
+    expect(readFinalizationCheckpoint(checkpointPayload(), 1n)?.reason).toBe(
+      "TOOL_LIMIT_REACHED",
+    );
+    expect(readFinalizationCheckpoint(checkpointPayload(), 2n)).toBeNull();
+    expect(
+      readFinalizationCheckpoint(
+        { ...checkpointPayload(), reason: "TEXT_ONLY_LOOP" },
+        1n,
+      ),
+    ).toBeNull();
+    expect(
+      readFinalizationCheckpoint(
+        { ...checkpointPayload(), pendingOutcome: {} },
+        1n,
       ),
     ).toBeNull();
   });
