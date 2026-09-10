@@ -34,6 +34,169 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("defers new refs until the final decision view is committed, including reads within a multi-call turn", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const { page } = capture(cache, '- button "New" [ref=e1]\n');
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    cache.read(String(page.observationId));
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    const pending = cache.currentPage();
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    cache.deliverCurrentPage(pending);
+    expect(cache.staleRef(click("e1"))).toBe(false);
+    capture(cache, '- button "Replaced" [ref=e2]\n');
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    expect(cache.staleRef(click("e2"))).toBe(true);
+  });
+  it("keeps a real snapshot addressable and actionable when DOM plus feedback exceeds the envelope budget", () => {
+    const cache = new BrowserObservations();
+    const content =
+      '- button "新增白名单" [ref=f91e130]\n' +
+      '- text "列表内容"\n'.repeat(950);
+    const feedback = {
+      commandId: "search",
+      pending: false,
+      coverageIncomplete: true,
+      requests: [{ responseSummary: "网络诊断".repeat(1450) }],
+    };
+    const raw = {
+      status: "SUCCEEDED",
+      result: { content, actionFeedback: feedback },
+    };
+    cache.capture(command("page.snapshot"), raw);
+    const projected = cache.project(raw) as {
+      result: {
+        observationId: string;
+        content: string;
+        contentOmitted?: boolean;
+        nextCursor: number;
+      };
+    };
+    expect(jsonBytes(projected)).toBeLessThanOrEqual(16 * 1024);
+    expect(projected.result.contentOmitted).toBeUndefined();
+    expect(projected.result.content).toContain("[ref=f91e130]");
+    expect(
+      cache
+        .index()
+        .find(
+          (entry) => entry.observationId === projected.result.observationId,
+        ),
+    ).toMatchObject({ commandType: "page.snapshot", refState: "CURRENT" });
+    const view = cache.currentPage();
+    cache.deliverCurrentPage(view);
+    expect(cache.staleRef(click("f91e130"))).toBe(false);
+    expect(cache.unreadRef(click("f91e130"))).toBe(false);
+    expect(cache.latestActionFeedback()).toMatchObject({
+      summary: { pending: false, coverageIncomplete: true },
+      details: { nextAction: { tool: "read_observation" } },
+    });
+    const next = cache.read(
+      projected.result.observationId,
+      projected.result.nextCursor,
+    );
+    expect(cache.currentPage().snapshot).toMatchObject({
+      cursor: projected.result.nextCursor,
+      content: next.content,
+    });
+    expect(
+      cache
+        .index()
+        .find(
+          (entry) => entry.observationId === projected.result.observationId,
+        ),
+    ).toMatchObject({ readCursors: [0, projected.result.nextCursor] });
+  });
+
+  it("never exposes refs from generic JSON, an undelivered page, or a historical snapshot", () => {
+    const cache = new BrowserObservations();
+    const { page } = capture(
+      cache,
+      '- text "padding"\n'.repeat(1000) + '- button "Target" [ref=e900]\n',
+    );
+    const correction = cache.unreadRefCorrection(click("e900"))!;
+    expect(correction).toMatchObject({
+      code: "OBSERVATION_NOT_READ",
+      nextAction: {
+        arguments: {
+          observationId: page.observationId,
+          cursor: page.nextCursor,
+        },
+      },
+    });
+    capture(cache, JSON.stringify({ body: "[ref=e900]" }), { snapshot: false });
+    cache.deliverCurrentPage(cache.currentPage());
+    expect(cache.staleRef(click("e900"))).toBe(true);
+    cache.read(String(page.observationId), Number(page.nextCursor));
+    const preview = cache.currentPage();
+    cache.invalidate();
+    capture(cache, '- button "New" [ref=e42]\n');
+    cache.deliverCurrentPage(preview);
+    expect(cache.staleRef(click("e900"))).toBe(true);
+  });
+
+  it("refreshes after form changes and does not loop automatic reads after a failed snapshot", () => {
+    const cache = new BrowserObservations();
+    expect(cache.needsSnapshot()).toBe(true);
+    cache.capture(command("page.snapshot"), { status: "FAILED" });
+    expect(cache.needsSnapshot()).toBe(false);
+    capture(cache, '- input "Name" [ref=e1]\n');
+    expect(cache.needsSnapshot()).toBe(false);
+    cache.capture(
+      command("page.fill", { target: { ref: "e1" }, text: "Ada" }),
+      { status: "SUCCEEDED", result: { ok: true } },
+    );
+    expect(cache.needsSnapshot()).toBe(true);
+    expect(cache.currentPage().snapshot).toBeNull();
+  });
+
+  it("routes a ref back to an earlier delivered page after the current DOM window moves", () => {
+    const cache = new BrowserObservations();
+    const { page } = capture(
+      cache,
+      '- button "First" [ref=e1]\n' +
+        '- text "padding"\n'.repeat(1000) +
+        '- button "Last" [ref=e2]\n',
+    );
+    cache.read(String(page.observationId), Number(page.nextCursor));
+    cache.deliverCurrentPage(cache.currentPage());
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    expect(cache.unreadRefCorrection(click("e1"))).toMatchObject({
+      nextAction: {
+        arguments: { observationId: page.observationId, cursor: 0 },
+      },
+    });
+    cache.read(String(page.observationId), 0);
+    cache.deliverCurrentPage(cache.currentPage());
+    expect(cache.staleRef(click("e1"))).toBe(false);
+  });
+
+  it("delivers full historical observation text without making its refs actionable", () => {
+    const cache = new BrowserObservations();
+    const { page } = capture(
+      cache,
+      "历史说明".repeat(500) + '\n- input "Order PO-0042" [ref=e1]\n',
+    );
+    capture(cache, '- button "Current" [ref=e2]\n');
+    const historical = cache.read(String(page.observationId));
+    const view = cache.currentPage();
+    expect(view.latestObservation).toMatchObject({
+      content: historical.content,
+      refState: "HISTORICAL",
+    });
+    expect(String(view.latestObservation?.content)).toContain("PO-0042");
+    cache.deliverCurrentPage(view);
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    expect(cache.staleRef(click("e2"))).toBe(false);
+    const requestedObservation = view.latestObservation;
+    capture(cache, '- button "Refreshed" [ref=e3]\n');
+    cache.retainLatestObservation(requestedObservation);
+    const refreshed = cache.currentPage();
+    expect(refreshed.latestObservation?.content).toBe(historical.content);
+    cache.deliverCurrentPage(refreshed);
+    expect(cache.staleRef(click("e1"))).toBe(true);
+    expect(cache.staleRef(click("e3"))).toBe(false);
+  });
+
   it("retains the latest action feedback independently of observation history and preserves it when paging DOM", () => {
     const cache = new BrowserObservations();
     const actionFeedback = {
@@ -162,7 +325,7 @@ describe("browser observations", () => {
     }
     expect(joined).toBe(content);
     expect(cache.staleRef(click("f2e900"))).toBe(false);
-    expect(cache.read(String(first.observationId))).toEqual(first);
+    expect(cache.read(String(first.observationId))).toMatchObject(first);
     expect(raw).toEqual(original);
     expect(cache.project(raw)).not.toHaveProperty("leaseToken");
     expect(cache.project(raw)).not.toHaveProperty("payload");
@@ -311,6 +474,9 @@ describe("browser observations", () => {
       nextCursor: null,
     });
     expect(cache.staleRef(click("e2"))).toBe(false);
+    expect(cache.unreadRefCorrection(click("e1"))).toMatchObject({
+      code: "OBSERVATION_CONTENT_OMITTED",
+    });
   });
 
   it("does not keep earlier refs current when a new snapshot fails without content", () => {
@@ -422,33 +588,32 @@ describe("browser observations", () => {
     };
     const original = structuredClone(raw);
     const projected = cache.project(raw) as {
-      result: { observationId: string };
+      error: { details: { observationId: string } };
+      locatorRecovery: {
+        snapshot: { result: { observationId: string; content: string } };
+      };
     };
     expect(jsonBytes(projected)).toBeLessThanOrEqual(16 * 1_024);
     expect(projected).toMatchObject({
       status: "FAILED",
       locatorRecovery: { recoveryToken: "call-42", exhausted: false },
-      result: { contentOmitted: true },
     });
-    expect(cache.staleRef(click("e42"))).toBe(true);
-    let page = cache.read(projected.result.observationId);
+    expect(projected.locatorRecovery.snapshot.result.content).toBe(
+      snapshot.result.content,
+    );
+    expect(cache.staleRef(click("e42"))).toBe(false);
+    let page = cache.read(projected.error.details.observationId);
     let joined = "";
     while (true) {
       joined += page.content;
       if (page.nextCursor === null) break;
       page = cache.read(
-        projected.result.observationId,
+        projected.error.details.observationId,
         Number(page.nextCursor),
       );
     }
-    expect(JSON.parse(joined)).toMatchObject({
-      error: raw.error,
-      locatorRecovery: {
-        snapshot: { result: { content: snapshot.result.content } },
-      },
-    });
-    const snapshotId =
-      JSON.parse(joined).locatorRecovery.snapshot.result.observationId;
+    expect(JSON.parse(joined)).toEqual(raw.error);
+    const snapshotId = projected.locatorRecovery.snapshot.result.observationId;
     cache.read(snapshotId);
     expect(cache.staleRef(click("e42"))).toBe(false);
     expect(raw).toEqual(original);
