@@ -1,5 +1,24 @@
 # @devproof/runtime-protocol
 
+Protocol v1.17 adds the optional `scroll-feedback-v1` capability. With this
+capability negotiated, `page.scroll.result.scrollFeedback` reports `version: 1`,
+`status` (`MOVED`, `AT_BOUNDARY`, `NO_MOVEMENT`, or `UNVERIFIED`), and `settled`.
+Targeted scrolling also returns `targetKey`, `before`/`after` positions,
+`extentBefore`/`extent`, `viewport`, and per-axis `atStart`/`atEnd` flags.
+`scrolled` is true only for a measured displacement; untargeted wheel input
+omits it because its physical effect is unverified. `settled` describes a
+bounded period of local DOM stability, not completion of asynchronous business
+work. A non-container target fails with `SCROLL_TARGET_NOT_SCROLLABLE` instead
+of reporting a successful no-op. The input shape is unchanged.
+
+Snapshots recognize programmatically scrollable `overflow:hidden` containers,
+and may carry `focusRef` pointing to the newly observed scroll target. This is
+an observation focus hint, not authorization to reuse a previous snapshot's ref.
+The Agent delivers the containing text page without marking earlier pages read.
+Older peers receive no new feedback/focus fields; capability negotiation clears
+stale capability advertisements on reconnect. See [virtual dropdown scrolling](../../docs/virtual-dropdown-scrolling.md)
+for implementation and verification coverage.
+
 Protocol v1.15 adds `no-launch-evidence-v1`. New launch intents remember the daemon
 they were assigned to before dispatch. A close challenge may include
 `expectedLaunchDaemonInstanceId` alongside `expectedLaunchIdentity`. Only that

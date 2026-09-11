@@ -208,7 +208,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
       capabilities: ["browser", "persistent-profile"],
     } as never);
     const greeting = runtimeClientMessageSchema.parse({
-      ...hello("0.2.22", 16),
+      ...hello("0.2.24", 17),
       capabilities: [...RUNTIME_CAPABILITIES],
     });
 
@@ -220,7 +220,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
     expect(accepted?.capabilities).toEqual(new Set(negotiated));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       type: "runtime.hello.accepted",
-      protocol: { major: 1, minor: 16 },
+      protocol: { major: 1, minor: 17 },
       capabilities: negotiated,
     });
     expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
@@ -236,6 +236,8 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
     { protocolMinor: 15, advertised: ["dom-vision-v1", "action-feedback-v1"] },
     { protocolMinor: 16, advertised: [] },
     { protocolMinor: 16, advertised: undefined },
+    { protocolMinor: 16, advertised: ["scroll-feedback-v1"] },
+    { protocolMinor: 17, advertised: undefined },
   ])(
     "clears stale DOM + vision on reconnect with minor $protocolMinor and capabilities $advertised",
     async ({ protocolMinor, advertised }) => {
@@ -249,6 +251,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
           "persistent-profile",
           "dom-vision-v1",
           "action-feedback-v1",
+          "scroll-feedback-v1",
         ],
       } as never);
       const greeting = runtimeClientMessageSchema.parse({
@@ -260,6 +263,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
 
       expect(accepted?.capabilities.has("dom-vision-v1")).toBe(false);
       expect(accepted?.capabilities.has("action-feedback-v1")).toBe(false);
+      expect(accepted?.capabilities.has("scroll-feedback-v1")).toBe(false);
       expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
         type: "runtime.hello.accepted",
         capabilities: [],

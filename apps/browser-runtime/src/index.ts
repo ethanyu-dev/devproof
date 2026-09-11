@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { DomObservations } from "./dom-observation.js";
 import { VisualObservations } from "./visual-observation.js";
+import { scrollElement } from "./scroll.js";
 import {
   ActionFeedbackTracker,
   actionTarget,
@@ -33,6 +34,8 @@ import {
   RUNTIME_NO_LAUNCH_MINOR,
   RUNTIME_NO_LAUNCH_CAPABILITY,
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
+  RUNTIME_SCROLL_FEEDBACK_MINOR,
+  RUNTIME_SCROLL_FEEDBACK_CAPABILITY,
   runtimeCommandResultSchema,
   runtimeClientMessageSchema,
   type RuntimeSessionPermit,
@@ -1178,6 +1181,7 @@ export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
 }
 
 export class BrowserSessionManager {
+  private scrollFeedbackEnabled = true;
   private readonly domObservations = new DomObservations();
   private readonly visualObservations = new VisualObservations();
   private readonly sessions = new Map<string, LiveSession>();
@@ -1274,6 +1278,9 @@ export class BrowserSessionManager {
     roundTripMs = 0,
     capabilities: readonly string[] = [],
   ) {
+    this.scrollFeedbackEnabled =
+      minor >= RUNTIME_SCROLL_FEEDBACK_MINOR &&
+      capabilities.includes(RUNTIME_SCROLL_FEEDBACK_CAPABILITY);
     this.requirePermits = minor >= RUNTIME_SESSION_PERMIT_MINOR;
     this.closureEvidenceEnabled =
       minor >= RUNTIME_CLOSURE_EVIDENCE_MINOR &&
@@ -1292,6 +1299,7 @@ export class BrowserSessionManager {
   }
 
   disconnect() {
+    this.scrollFeedbackEnabled = false;
     this.closureEvidenceEnabled = false;
     this.permits.setConnected(false);
     for (const session of this.sessions.values()) {
@@ -1912,6 +1920,9 @@ export class BrowserSessionManager {
         return {
           result: {
             format: snapshot.format,
+            ...(this.scrollFeedbackEnabled && snapshot.focusRef
+              ? { focusRef: snapshot.focusRef }
+              : {}),
             captureTruncated: snapshot.captureLimited,
             ...pageText(redactText(snapshot.content), parsed.payload),
             title: boundedUtf8Text(await session.page.title(), 1_000),
@@ -2237,17 +2248,43 @@ export class BrowserSessionManager {
       }
       case "page.scroll": {
         if (parsed.payload.target) {
-          await this.locator(session, parsed.payload.target).evaluate(
-            (element, delta) => element.scrollBy(delta.x, delta.y),
-            { x: parsed.payload.deltaX, y: parsed.payload.deltaY },
+          if ("ref" in parsed.payload.target)
+            this.domObservations.focus(session.page, parsed.payload.target.ref);
+          const locator = await this.actionableLocator(
+            session,
+            parsed.payload.target,
+            timeout,
           );
+          const result = await scrollElement(
+            locator,
+            { x: parsed.payload.deltaX, y: parsed.payload.deltaY },
+            Math.max(
+              1,
+              Math.min(timeout, Date.parse(command.deadlineAt) - Date.now()),
+            ),
+          );
+          return {
+            result: this.scrollFeedbackEnabled
+              ? result
+              : { scrolled: result.scrolled },
+          };
         } else {
           await session.page.mouse.wheel(
             parsed.payload.deltaX,
             parsed.payload.deltaY,
           );
         }
-        return { result: { scrolled: true } };
+        return {
+          result: this.scrollFeedbackEnabled
+            ? {
+                scrollFeedback: {
+                  version: 1,
+                  status: "UNVERIFIED",
+                  settled: false,
+                },
+              }
+            : {},
+        };
       }
       case "page.drag": {
         const source = await this.actionableLocator(

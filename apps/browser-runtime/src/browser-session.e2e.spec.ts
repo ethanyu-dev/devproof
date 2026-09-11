@@ -14,6 +14,24 @@ afterEach(async () => {
 
 async function fixtureServer() {
   const server = createServer((request, response) => {
+    if (request.url === "/virtual-list") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<div id="holder" style="height:256px;width:240px;overflow:hidden;position:relative">
+        <div style="height:544px;position:relative"><div id="rows" style="position:absolute;inset:0 0 auto 0"></div></div>
+      </div><div id="selection"></div><script>
+        const holder=document.querySelector('#holder'), rows=document.querySelector('#rows');
+        function render() {
+          const start=Math.floor(holder.scrollTop/32);
+          rows.style.transform='translateY('+start*32+'px)';rows.replaceChildren();
+          for(let i=start;i<Math.min(17,start+10);i++) {
+            const row=document.createElement('div');row.style.cssText='height:32px;cursor:pointer';row.textContent='类型'+i;
+            row.onclick=()=>document.querySelector('#selection').textContent='选中类型'+i;rows.append(row);
+          }
+        }
+        render();holder.addEventListener('scroll',()=>setTimeout(render,40));
+      </script>`);
+      return;
+    }
     if (request.url === "/frame") {
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(
@@ -465,6 +483,49 @@ describe("BrowserSessionManager E2E", () => {
         }),
       ).rejects.toMatchObject({ code: "WAIT_TIMEOUT" });
       await execute("network.release", { policyId: "api-503" });
+
+      await execute("page.navigate", { url: `${origin}/virtual-list` });
+      const list = (await execute("page.snapshot", {})) as {
+        result: { content: string; focusRef?: string };
+      };
+      const scrollRef = list.result.content
+        .split("\n")
+        .find((line) => line.includes("scrollY=0/288"))!
+        .match(/\[ref=(f\d+e\d+)\]/u)![1]!;
+      await expect(
+        execute("page.scroll", {
+          target: { selector: "#rows > div:first-child" },
+          deltaY: 192,
+        }),
+      ).rejects.toMatchObject({ code: "SCROLL_TARGET_NOT_SCROLLABLE" });
+      await expect(
+        execute("page.scroll", { target: { ref: scrollRef }, deltaY: 288 }),
+      ).resolves.toMatchObject({
+        result: {
+          scrolled: true,
+          scrollFeedback: { version: 1, status: "MOVED", after: { y: 288 } },
+        },
+      });
+      const scrolled = (await execute("page.snapshot", {})) as typeof list;
+      expect(scrolled.result.focusRef).toBeTruthy();
+      expect(scrolled.result.content).toContain(
+        `scrollY=288/288 atStart=false atEnd=true> "" [ref=${scrolled.result.focusRef}]`,
+      );
+      const optionRef = scrolled.result.content
+        .split("\n")
+        .find((line) => line.includes('"类型16"'))!
+        .match(/\[ref=(f\d+e\d+)\]/u)![1]!;
+      await execute("page.click", { target: { ref: optionRef } });
+      await expect(
+        execute("page.get_text", { target: { selector: "#selection" } }),
+      ).resolves.toMatchObject({ result: { content: "选中类型16" } });
+      const wheel = await execute("page.scroll", { deltaY: 100 });
+      expect(wheel).toMatchObject({
+        result: { scrollFeedback: { status: "UNVERIFIED" } },
+      });
+      expect((wheel as { result: object }).result).not.toHaveProperty(
+        "scrolled",
+      );
 
       const closeResult = (await execute("session.close", {})) as {
         artifacts?: Array<{

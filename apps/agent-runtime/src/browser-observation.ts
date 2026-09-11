@@ -90,6 +90,52 @@ export class BrowserObservations {
   private pageDirty = true;
   private snapshotAttempted = false;
   private latestRead: Record<string, unknown> | undefined;
+  private readonly scrollFailures = new Map<
+    string,
+    { count: number; boundary: boolean; snapshotKey: string | undefined }
+  >();
+
+  private scrollKey(command: Command) {
+    if (command.commandType !== "page.scroll" || !command.payload.target)
+      return;
+    const target = command.payload.target;
+    const entry = this.entries.get(this.currentSnapshot ?? "");
+    const line =
+      "ref" in target
+        ? entry?.content
+            ?.split("\n")
+            .find((line) => line.includes(`[ref=${target.ref}]`))
+            ?.trim()
+        : JSON.stringify(target);
+    if (line === undefined) return;
+    return observationContentKey(
+      `${Math.sign(command.payload.deltaX)},${Math.sign(command.payload.deltaY)}:${line}`,
+      entry?.url,
+    );
+  }
+
+  scrollCorrection(command: Command) {
+    const key = this.scrollKey(command);
+    const failure = key ? this.scrollFailures.get(key) : undefined;
+    if (
+      failure &&
+      failure.snapshotKey !==
+        this.entries.get(this.currentSnapshot ?? "")?.contentKey
+    ) {
+      this.scrollFailures.delete(key!);
+      return;
+    }
+    if (!failure || (!failure.boundary && failure.count < 2)) return;
+    return {
+      accepted: false,
+      code: "SCROLL_NO_PROGRESS",
+      error: failure.boundary
+        ? "该容器已到本方向边界；继续同方向滚动不会发现更多内容。到达末尾不代表已检查中间全部选项。"
+        : "同一容器连续两次滚动没有产生位移；换 ref 或调整滚动距离不能作为恢复。",
+      nextAction:
+        "根据当前观察选择其他容器、反向滚动或已确认支持的搜索控件；仍无法覆盖时记录 INCONCLUSIVE。读取缓存不会滚动列表。",
+    };
+  }
 
   latestActionFeedback() {
     return this.feedback;
@@ -258,8 +304,27 @@ export class BrowserObservations {
 
   capture(command: Command, raw: unknown) {
     const previous = this.entries.get(this.currentSnapshot ?? "");
+    const scrollKey = this.scrollKey(command);
     this.latestRead = undefined;
     const response = record(raw);
+    const scroll = record(record(response.result).scrollFeedback);
+    if (
+      !READ_COMMANDS.has(command.commandType) &&
+      command.commandType !== "page.scroll"
+    )
+      this.scrollFailures.clear();
+    if (scrollKey && response.status === "SUCCEEDED" && scroll.version === 1) {
+      if (["NO_MOVEMENT", "AT_BOUNDARY"].includes(String(scroll.status))) {
+        this.scrollFailures.set(scrollKey, {
+          count: (this.scrollFailures.get(scrollKey)?.count ?? 0) + 1,
+          boundary: scroll.status === "AT_BOUNDARY",
+          snapshotKey: previous?.contentKey,
+        });
+        if (this.scrollFailures.size > 16)
+          this.scrollFailures.delete(this.scrollFailures.keys().next().value!);
+      } else if (scroll.status === "MOVED")
+        this.scrollFailures.delete(scrollKey);
+    }
     const stage = READ_COMMANDS.has(command.commandType)
       ? "OBSERVATION"
       : "AFTER_ACTION";
@@ -336,6 +401,18 @@ export class BrowserObservations {
         if (this.visual) entry.visualObservationId = this.visual.observationId;
         if (previous?.contentKey === entry.contentKey)
           this.inheritReadProgress(previous, entry);
+        // Scroll focus chooses the delivered page, never marks intervening pages read.
+        if (typeof result.focusRef === "string") {
+          let cursor: number | null = 0;
+          while (cursor !== null) {
+            const page = this.page(entry, cursor, false);
+            if (String(page.content).includes(`[ref=${result.focusRef}]`)) {
+              entry.lastReadCursor = cursor;
+              break;
+            }
+            cursor = page.nextCursor as number | null;
+          }
+        }
       }
     }
   }
@@ -363,8 +440,23 @@ export class BrowserObservations {
     return "引用了操作后自动采集的过程截图，页面可能仍在加载并显示旧结果，不能据此提交 PASSED/FAILED。先确认加载遮罩/转圈消失、查询或保存结果更新，再用 page.snapshot 或 page.screenshot 重新观察，替换为新证据；无法确认则记录 INCONCLUSIVE。";
   }
 
-  index() {
-    return [...this.entries.values()].map((entry) => this.descriptor(entry));
+  index(maxBytes = Infinity) {
+    const entries = [...this.entries.values()];
+    if (!Number.isFinite(maxBytes))
+      return entries.map((entry) => this.descriptor(entry));
+    const selected: ReturnType<BrowserObservations["descriptor"]>[] = [];
+    const priority = entries.filter(
+      (entry) =>
+        entry.id === this.currentSnapshot ||
+        entry.id === this.latestRead?.observationId,
+    );
+    for (const entry of [...priority, ...entries.reverse()]) {
+      if (selected.some((item) => item.observationId === entry.id)) continue;
+      const descriptor = this.descriptor(entry);
+      if (jsonBytes([...selected, descriptor]) <= maxBytes)
+        selected.push(descriptor);
+    }
+    return selected.sort((a, b) => a.order - b.order);
   }
 
   read(id: string, cursor: number = 0): Record<string, unknown> {

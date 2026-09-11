@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { selectors, type Locator, type Page } from "playwright";
+import { SCROLL_OVERFLOWS } from "./scroll.js";
 
 // References point to observed DOM nodes, without adding attributes to the site.
 // The selector does not consult accessibility roles, names, or ARIA snapshots.
@@ -32,6 +33,11 @@ await register();
 
 export class DomObservations {
   private readonly references = new WeakMap<Page, Map<string, Locator>>();
+  private readonly pendingFocus = new WeakMap<Page, string>();
+
+  focus(page: Page, ref: string) {
+    this.pendingFocus.set(page, ref);
+  }
 
   locator(page: Page, ref: string): Locator {
     const locator = this.references.get(page)?.get(ref);
@@ -56,6 +62,8 @@ export class DomObservations {
     } = {},
   ) {
     const deadline = Date.now() + (options.timeout ?? 5_000);
+    const previousFocus = this.pendingFocus.get(page);
+    this.pendingFocus.delete(page);
     await register();
     const references = new Map<string, Locator>();
     this.references.set(page, references);
@@ -66,6 +74,7 @@ export class DomObservations {
         page.frames().map((frame) => frame.locator(":root > body"));
     const sections: string[] = [];
     let limited = false;
+    let focusRef: string | undefined;
     for (const root of roots) {
       if (Date.now() >= deadline) {
         limited = true;
@@ -78,12 +87,16 @@ export class DomObservations {
             // Use the evaluating frame's realm. Microfrontends can override a
             // connected node's ownerDocument/getRootNode with a sandbox document.
             const view = globalThis;
+            const focus = (
+              view as unknown as Record<string, Map<string, Element>>
+            )[input.key]?.get(input.focusRef ?? "");
             const store = new Map<string, Element>();
             (view as unknown as Record<string, unknown>)[input.key] = store;
             const lines: string[] = [];
             const refs: string[] = [];
             let visited = 0;
             let limited = false;
+            let focusRef: string | undefined;
             const text = (value: string | null | undefined) =>
               (value ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
             type Clip = {
@@ -118,10 +131,12 @@ export class DomObservations {
                   Math.max(box.top, clip.top) &&
                 Math.min(box.right, clip.right) > Math.max(box.left, clip.left);
               const scrollY =
-                /auto|scroll/.test(style.overflowY) &&
+                input.scrollOverflows.includes(style.overflowY) &&
+                element.clientHeight > 0 &&
                 element.scrollHeight > element.clientHeight + 1;
               const scrollX =
-                /auto|scroll/.test(style.overflowX) &&
+                input.scrollOverflows.includes(style.overflowX) &&
+                element.clientWidth > 0 &&
                 element.scrollWidth > element.clientWidth + 1;
               const ownText = text(
                 Array.from(element.childNodes)
@@ -130,10 +145,15 @@ export class DomObservations {
                   .join(" "),
               );
               const tag = element.tagName.toLowerCase();
+              // Adopted microfrontend controls may retain another realm's prototype.
               const control =
-                element instanceof HTMLInputElement ||
-                element instanceof HTMLTextAreaElement ||
-                element instanceof HTMLSelectElement;
+                element.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+                ["input", "textarea", "select"].includes(tag)
+                  ? (element as
+                      | HTMLInputElement
+                      | HTMLTextAreaElement
+                      | HTMLSelectElement)
+                  : undefined;
               const interactive =
                 control ||
                 ["button", "a", "summary", "canvas", "iframe"].includes(tag) ||
@@ -152,6 +172,7 @@ export class DomObservations {
                 const ref = input.prefix + (refs.length + 1);
                 refs.push(ref);
                 store.set(ref, element);
+                if (element === focus) focusRef = ref;
                 const attributes: string[] = [];
                 for (const axis of ["Y", "X"] as const) {
                   if (!(axis === "Y" ? scrollY : scrollX)) continue;
@@ -178,22 +199,20 @@ export class DomObservations {
                 }
                 if (control) {
                   const label = text(
-                    Array.from(element.labels ?? [])
+                    Array.from(control.labels ?? [])
                       .map((label) => label.textContent)
                       .join(" "),
                   );
                   if (label) attributes.push(`label=${JSON.stringify(label)}`);
-                  if (!(
-                    element instanceof HTMLInputElement &&
-                    element.type === "password"
-                  ))
+                  if (!(tag === "input" && control.type === "password"))
                     attributes.push(
-                      `value=${JSON.stringify(text(element.value))}`,
+                      `value=${JSON.stringify(text(control.value))}`,
                     );
-                  if (element instanceof HTMLSelectElement) {
+                  if (tag === "select") {
+                    const select = control as HTMLSelectElement;
                     attributes.push(
                       `options=${JSON.stringify(
-                        Array.from(element.options)
+                        Array.from(select.options)
                           .slice(0, 100)
                           .map((option) => ({
                             text: text(option.text),
@@ -202,17 +221,24 @@ export class DomObservations {
                           })),
                       )}`,
                     );
-                    if (element.options.length > 100) {
+                    if (select.options.length > 100) {
                       attributes.push("optionsTruncated=true");
                       limited = true;
                     }
                   }
-                  if (element.disabled) attributes.push("disabled");
+                  if (control.disabled) attributes.push("disabled");
                   if (
-                    element instanceof HTMLInputElement &&
-                    ["checkbox", "radio"].includes(element.type)
+                    tag !== "select" &&
+                    (control as HTMLInputElement).readOnly
                   )
-                    attributes.push(`checked=${element.checked}`);
+                    attributes.push("readonly");
+                  if (
+                    tag === "input" &&
+                    ["checkbox", "radio"].includes(control.type)
+                  )
+                    attributes.push(
+                      `checked=${(control as HTMLInputElement).checked}`,
+                    );
                 }
                 const coordinates = input.boxes
                   ? ` [box=${[box.x, box.y, box.width, box.height].map(Math.round).join(",")}]`
@@ -262,13 +288,15 @@ export class DomObservations {
               right: view.innerWidth,
               bottom: view.innerHeight,
             });
-            return { content: lines.join("\n"), refs, limited };
+            return { content: lines.join("\n"), refs, limited, focusRef };
           },
           {
             key: registryKey,
             prefix,
             depth: options.depth ?? 40,
             boxes: options.includeBoxes ?? true,
+            scrollOverflows: SCROLL_OVERFLOWS,
+            focusRef: previousFocus,
           },
           { timeout: Math.max(1, deadline - Date.now()) },
         );
@@ -278,6 +306,7 @@ export class DomObservations {
           `DOM viewport scope ${prefix.slice(0, -1)} (coordinates local to this frame):\n${captured.content}`,
         );
         limited ||= captured.limited;
+        focusRef ??= captured.focusRef;
       } catch (error) {
         if (target) throw error;
         limited = true;
@@ -295,6 +324,7 @@ export class DomObservations {
         "DOM coverage: current viewport and unclipped content only. Scroll containers with atEnd=false have unseen content; absence here does not prove absence from the page or dropdown.\n\n" +
         sections.join("\n\n"),
       captureLimited: limited,
+      focusRef,
       format: "dom",
     };
   }
