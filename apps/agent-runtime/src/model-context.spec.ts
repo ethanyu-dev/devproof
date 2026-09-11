@@ -47,6 +47,60 @@ function turn(context: ModelContext, index: number, content = "observed") {
 }
 
 describe("bounded model context", () => {
+  it("only points a summary at content present in that request and demotes old refs", () => {
+    const context = new ModelContext(initial);
+    const page = {
+      observationId: "old",
+      cursor: 12,
+      refState: "CURRENT",
+      content: "Only in requested tail [ref=e2]",
+    };
+    context.completeTurn(
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            type: "function",
+            id: "read",
+            function: { name: "read_observation", arguments: "{}" },
+          },
+        ],
+      },
+      [
+        {
+          role: "tool",
+          tool_call_id: "read",
+          content: JSON.stringify({ result: page }),
+        },
+      ],
+    );
+    const summaries = (currentPage: unknown) =>
+      JSON.parse(
+        String(
+          context.build({}, {}, undefined, currentPage).messages[3]!.content,
+        ),
+      );
+    expect(summaries({ snapshot: page }).turns[0][0].result.result).toEqual({
+      observationId: "old",
+      cursor: 12,
+      refState: "CURRENT",
+      contentInCurrentPage: true,
+    });
+    const after = summaries({
+      snapshot: { observationId: "new", cursor: 0, content: "New page" },
+    }).turns[0][0].result.result;
+    expect(after).toMatchObject({
+      refState: "HISTORICAL",
+      content: page.content,
+    });
+    expect(after).not.toHaveProperty("contentInCurrentPage");
+    expect(
+      summaries({ snapshot: { ...page, cursor: 0, content: "Head" } })
+        .turns[0][0].result.result.content,
+    ).toBe(page.content);
+  });
+
   it("sends one typed image outside the text budget, replacing it without retaining pixels in history", () => {
     const context = new ModelContext(initial, { maxBytes: 4_096 });
     const image = {

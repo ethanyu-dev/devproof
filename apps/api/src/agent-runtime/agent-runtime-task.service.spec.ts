@@ -1078,6 +1078,95 @@ function adaptiveState(
 }
 
 describe("adaptive Runtime deadline decisions", () => {
+  it("requires new meaningful work after a browser bootstrap extension, despite new model IDs", () => {
+    const initial = adaptiveState({ requireMeaningfulProgress: true });
+    const bootstrap = decideAdaptiveDeadlineExtension(initial)!;
+    expect(bootstrap.progressKey).toBe("INITIAL_OBSERVATION");
+    const repeated = {
+      ...initial,
+      activeOperationKey: "another-model",
+      lastDeadlineExtensionOperationKey: bootstrap.operationKey,
+      lastDeadlineExtensionProgressKey: bootstrap.progressKey,
+    };
+    expect(decideAdaptiveDeadlineExtension(repeated)).toBeNull();
+    const progressed = { ...repeated, lastMeaningfulProgressKey: "segment:2" };
+    const extension = decideAdaptiveDeadlineExtension(progressed)!;
+    expect(extension.progressKey).toBe("segment:2");
+    expect(
+      decideAdaptiveDeadlineExtension({
+        ...progressed,
+        activeOperationKey: "third-model",
+        lastDeadlineExtensionProgressKey: extension.progressKey,
+      }),
+    ).toBeNull();
+  });
+
+  it.each([true, false])(
+    "only persists meaningful successful tool progress (%s)",
+    async (meaningful) => {
+      const now = new Date("2026-09-10T14:00:00Z");
+      const task = {
+        id: "task-1",
+        attemptId: snapshot.attemptId,
+        runId: snapshot.runId,
+        status: "RUNNING",
+        fencingToken: 1n,
+        leaseOwner: "worker-1",
+        leaseToken: "lease-1",
+        leaseExpiresAt: new Date(now.getTime() + 60000),
+      };
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+        agentRuntimeTask: {
+          findFirst: vi.fn().mockResolvedValue(task),
+          update: vi.fn().mockResolvedValue({}),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        },
+        runEvent: {
+          create: vi.fn().mockResolvedValue({ createdAt: now, sequence: 1n }),
+        },
+      };
+      const service = new AgentRuntimeTaskService(
+        {
+          $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
+        } as never,
+        {} as never,
+        {} as never,
+      );
+      await service.appendEvent(snapshot.teamId, task.id, {
+        fencingToken: "1",
+        leaseToken: "lease-1",
+        workerId: "worker-1",
+        event: {
+          eventId: "tool-progress",
+          occurredAt: now.toISOString(),
+          kind: "agent.tool.completed",
+          payload: {
+            attemptNumber: 1,
+            segmentId: "segment-1",
+            step: 2,
+            callId: "read-1",
+            durationMs: 3,
+            inputPreview: {},
+            outputPreview: {},
+            name: "read_observation",
+            status: "SUCCEEDED",
+            sourceRefs: [],
+            progress: {
+              meaningful,
+              sequence: 2,
+              repeatedSteps: meaningful ? 0 : 3,
+            },
+          },
+        },
+      });
+      expect(
+        tx.agentRuntimeTask.update.mock.calls[0]![0].data
+          .lastMeaningfulProgressKey,
+      ).toBe(meaningful ? "segment-1:2" : undefined);
+    },
+  );
+
   it("does not treat a failed model response as recent progress for a deadline extension", async () => {
     const now = new Date("2026-08-24T01:00:00.000Z");
     const task = {

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 14,
+  minor: 15,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -358,6 +358,12 @@ const runtimeTraceStepContextSchema = runtimeTraceContextSchema.extend({
   step: z.number().int().positive(),
 });
 
+const runtimeProgressSchema = z.object({
+  meaningful: z.boolean(),
+  sequence: z.number().int().nonnegative(),
+  repeatedSteps: z.number().int().nonnegative(),
+});
+
 export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.segment.started"),
@@ -378,6 +384,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.started"),
     payload: runtimeTraceStepContextSchema.extend({
+      progress: runtimeProgressSchema.optional(),
       modelCallId: z.string().uuid().optional(),
       inputPreview: z.unknown(),
       model: z.string().trim().min(1).max(160),
@@ -430,6 +437,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.tool.completed"),
     payload: runtimeTraceStepContextSchema.extend({
+      progress: runtimeProgressSchema.optional(),
       callId: z.string().trim().min(1).max(240),
       durationMs: z.number().int().nonnegative(),
       inputPreview: z.unknown(),

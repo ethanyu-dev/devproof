@@ -64,6 +64,59 @@ function call(name: string, arguments_: unknown, id: string) {
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it.each([
+    "已完成 Case 1，确认目标类型可选。",
+    "依赖其他用例创建的数据。",
+    "已了解 ZDR 新增的完整操作路径。",
+  ])("rejects undelivered prerequisites: %s", (precondition) => {
+    const text = "目标类型可选。";
+    const spec = runtimeGeneratedSpecSchema.parse({
+      summary: "独立核验目标类型。",
+      scope: { inScope: ["类型可选性"] },
+      cases: [
+        {
+          name: "检查类型",
+          preconditions: [precondition],
+          rationale: "核对真实页面。",
+          sourceRefs: [source.externalId],
+          steps: [
+            {
+              order: 1,
+              action: "在本 Case 中观察目标类型。",
+              expectedObservation: text,
+            },
+          ],
+          criteria: [
+            {
+              id: "type",
+              description: text,
+              sourceRefs: [source.externalId],
+              requiredEvidenceKinds: ["DOM"],
+              basis: {
+                sourceRef: source.externalId,
+                quote: text,
+                observationTarget: "类型控件",
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const input = {
+      spec,
+      calledTools: new Set(["linear_get_issue"]),
+      linkedPullRequestCount: 0,
+      sources: new Map([[source.externalId, source]]),
+      sourceContents: new Map([[source.externalId, text]]),
+      unavailableTools: new Set<string>(),
+    };
+    expect(validateFinalSpec(input)).toContain("每例独立并发执行");
+    spec.cases[0]!.preconditions = [
+      "具备访问权限，进入后只读核查类型与参照界面。",
+    ];
+    expect(validateFinalSpec(input)).toBeNull();
+  });
+
   it("correlates each fallback call independently, even when candidates share a model name", async () => {
     const create = vi.fn().mockRejectedValue(new Error("provider unavailable"));
     const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });

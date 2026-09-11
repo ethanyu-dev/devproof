@@ -146,6 +146,218 @@ function operationOutput(
   return output;
 }
 
+describe("context delivery and slow models", () => {
+  type Request = { model: string; messages: Array<Record<string, unknown>> };
+  const reply = (
+    name: string,
+    args: Record<string, unknown>,
+    index: number,
+  ) => ({
+    id: `response-${index}`,
+    message: {
+      role: "assistant" as const,
+      content: null,
+      tool_calls: [functionCall(name, args, index)],
+    },
+  });
+  const finish = {
+    verdict: "INCONCLUSIVE",
+    summary: "上下文交付已核对，业务验收未完成。",
+    criteria: [
+      {
+        criterionId: "page-visible",
+        status: "INCONCLUSIVE",
+        summary: "仅验证上下文。",
+        evidenceRefs: [],
+      },
+    ],
+  };
+
+  it("delivers the slow read result and fresh actionable refs before the next decision", async () => {
+    vi.useFakeTimers();
+    let step = 0;
+    let snapshot = 0;
+    const requests: Request[] = [];
+    const create = vi.fn(async (request: Request) => {
+      requests.push(structuredClone(request));
+      const page = contextData(request, "current_browser_page").data;
+      if (step++ === 0) {
+        expect(page.snapshot.content).not.toContain("Modal type");
+        vi.setSystemTime(Date.now() + 165_000);
+        return reply(
+          "read_observation",
+          {
+            observationId: page.snapshot.observationId,
+            cursor: page.snapshot.nextCursor,
+          },
+          step,
+        );
+      }
+      if (step === 2) {
+        expect(page.snapshot.content).toContain("Modal type");
+        expect(page.latestObservation).toMatchObject({
+          refState: "HISTORICAL",
+        });
+        expect(page.latestObservation.content).toContain("[ref=f1e206]");
+        expect(page.snapshot.content).toContain("[ref=f2e206]");
+        const state = contextData(request, "browser_working_state").data;
+        expect(state.timeBudget.remainingExecutionSeconds).toBe(675);
+        return reply(
+          "browser_command",
+          { commandType: "page.click", payload: { target: { ref: "f2e206" } } },
+          step,
+        );
+      }
+      return reply("finish_verification", finish, step);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 900_000).toISOString();
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => ({
+      status: "SUCCEEDED",
+      result:
+        command.commandType === "page.snapshot"
+          ? {
+              content:
+                '- text "Background"\n'.repeat(700) +
+                `- button "Modal type" [ref=f${++snapshot}e206]\n`,
+            }
+          : { clicked: true },
+    }));
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(
+      controlPlane.browserCommand.mock.calls.filter(
+        (call) => call[1].commandType === "page.click",
+      ),
+    ).toHaveLength(1);
+    expect(requests).toHaveLength(3);
+  });
+
+  it("refreshes an expired context before fallback instead of replaying old DOM", async () => {
+    vi.useFakeTimers();
+    let snapshot = 0;
+    const requests: Request[] = [];
+    const create = vi.fn(async (request: Request) => {
+      requests.push(structuredClone(request));
+      if (requests.length === 1) {
+        vi.setSystemTime(Date.now() + 165_000);
+        throw new Error("Connection error.");
+      }
+      expect(
+        contextData(request, "current_browser_page").data.snapshot.content,
+      ).toContain("[ref=f2e1]");
+      return reply("finish_verification", finish, 1);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 900_000).toISOString();
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    controlPlane.browserCommand.mockImplementation(async () => ({
+      status: "SUCCEEDED",
+      result: { content: `- button "Current" [ref=f${++snapshot}e1]` },
+    }));
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(snapshot).toBe(2);
+    expect(requests.map((request) => request.model)).toEqual([
+      "gpt-test",
+      "fallback",
+    ]);
+  });
+
+  it("bounds a hung primary to 90 seconds when a fallback is available", async () => {
+    vi.useFakeTimers();
+    const create = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValue(reply("finish_verification", finish, 1));
+    const { executor, runTask } = convergenceHarness(create);
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 600_000).toISOString();
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    const execution = executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(90_001);
+    expect(await execution).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(create.mock.calls[0]![1].signal.aborted).toBe(true);
+    expect(create.mock.calls.map((call) => call[0].model)).toEqual([
+      "gpt-test",
+      "fallback",
+    ]);
+  });
+
+  it("rejects invented progress quotes and keeps a verified checkpoint beyond four turns", async () => {
+    let step = 0;
+    const create = vi.fn(async (request: Request) => {
+      const page = contextData(request, "current_browser_page").data.snapshot;
+      step++;
+      if (step <= 2)
+        return reply(
+          "record_progress",
+          {
+            phase: "核对类型",
+            observations: [
+              {
+                observationId: page.observationId,
+                cursor: page.cursor,
+                quote: step === 1 ? "Invented field" : "Actual option",
+              },
+            ],
+            nextAction: "选择已观察到的类型。",
+          },
+          step,
+        );
+      if (step <= 8)
+        return reply(
+          "browser_command",
+          { commandType: "page.get_title", payload: {} },
+          step,
+        );
+      const memory = contextData(request, "browser_working_state").data
+        .executionMemory;
+      expect(memory.checkpoint).toMatchObject({
+        phase: "核对类型",
+        observations: [{ quote: "Actual option" }],
+      });
+      expect(
+        contextData(request, "recent_operations")
+          .turns.flat()
+          .some((op: { tool: string }) => op.tool === "record_progress"),
+      ).toBe(false);
+      return reply("finish_verification", finish, step);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content: '- option "Actual option" [ref=e1]' },
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    const progressEvents = controlPlane.appendEvent.mock.calls.filter(
+      (call) =>
+        call[1] === "agent.tool.completed" &&
+        call[2].name === "record_progress",
+    );
+    expect(progressEvents.map((call) => call[2].status)).toEqual([
+      "FAILED",
+      "SUCCEEDED",
+    ]);
+    expect(
+      progressEvents.every((call) => call[2].progress.meaningful === false),
+    ).toBe(true);
+  });
+});
+
 describe("runtime navigation and combined finalization", () => {
   it.each(["record_criterion", "finish_verification"])(
     "rejects loading-time action evidence through %s, then accepts newly observed results",
@@ -2803,7 +3015,7 @@ describe("Agent Runtime browser verification executor", () => {
     ).toEqual(expect.any(String));
   });
 
-  it("falls through configured models and probes the preferred model again on the next call", async () => {
+  it("keeps the successful fallback preferred for subsequent decisions", async () => {
     const fallbackTask: RuntimeTaskLease = {
       ...task,
       snapshot: {
@@ -2876,7 +3088,7 @@ describe("Agent Runtime browser verification executor", () => {
     expect(create.mock.calls.map((call) => call[0].model)).toEqual([
       "gpt-primary",
       "gpt-fallback",
-      "gpt-primary",
+      "gpt-fallback",
     ]);
     expect(controlPlane.appendEvent).toHaveBeenCalledWith(
       lease,
@@ -2886,7 +3098,7 @@ describe("Agent Runtime browser verification executor", () => {
     expect(controlPlane.appendEvent).toHaveBeenCalledWith(
       lease,
       "agent.model.completed",
-      expect.objectContaining({ model: "gpt-primary" }),
+      expect.objectContaining({ model: "gpt-fallback" }),
     );
     expect(JSON.stringify(controlPlane.appendEvent.mock.calls)).not.toContain(
       "sk-primary-secret-123456",

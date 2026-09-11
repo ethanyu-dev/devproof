@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeObservationContent } from "./observation-content.js";
 
 const REPEATED_STEPS = 8;
 const POLLING_GRACE_MS = 60_000;
@@ -31,6 +32,7 @@ const VOLATILE_KEYS = new Set([
   "byteSize",
   "dataBase64",
   "visualObservationId",
+  "observationId",
 ]);
 const OBSERVATION_KEYS = new Set([
   "content",
@@ -64,6 +66,39 @@ export class VerificationProgress {
   private repeatedSteps = 0;
   private textOnlySteps = 0;
   private lastProgressAt: number;
+  private semanticProgress = false;
+  private progressSequence = 0;
+
+  state() {
+    return {
+      meaningful: this.semanticProgress,
+      sequence: this.progressSequence,
+      repeatedSteps: this.repeatedSteps,
+    };
+  }
+
+  /** Automatic observations can advance work without inventing a model/tool turn. */
+  observe(output: unknown) {
+    this.semanticProgress = this.discoverObservations(output);
+    if (this.semanticProgress) {
+      this.progressSequence += 1;
+      this.repeatedSteps = 0;
+      this.lastProgressAt = this.now();
+    }
+  }
+
+  private discoverObservations(output: unknown) {
+    let changed = false;
+    for (const observation of pageObservations(output, false)) {
+      const key = fingerprint(observation);
+      if (!this.semanticObservations.has(key)) {
+        this.semanticObservations.add(key);
+        this.formActions.clear();
+        changed = true;
+      }
+    }
+    return changed;
+  }
 
   constructor(private readonly now: () => number = () => performance.now()) {
     this.lastProgressAt = now();
@@ -85,6 +120,7 @@ export class VerificationProgress {
     }>;
   }) {
     this.textOnlySteps = 0;
+    this.semanticProgress = false;
     let progress = false;
     for (const criterion of input.criteria) {
       const key = fingerprint(criterion);
@@ -92,15 +128,12 @@ export class VerificationProgress {
         this.criteria.add(key);
         this.formActions.clear();
         progress = true;
+        this.semanticProgress = true;
       }
     }
-    for (const observation of pageObservations(input.output, false)) {
-      const key = fingerprint(observation);
-      if (!this.semanticObservations.has(key)) {
-        this.semanticObservations.add(key);
-        this.formActions.clear();
-      }
-    }
+    this.semanticProgress =
+      this.discoverObservations(input.output) || this.semanticProgress;
+    if (this.semanticProgress) this.progressSequence += 1;
     for (const observation of pageObservations(input.output)) {
       const key = fingerprint(observation);
       if (!this.observations.has(key)) {
@@ -197,7 +230,9 @@ export class VerificationProgress {
                       commandType: record(argumentsValue).commandType,
                       interaction,
                     }
-                  : argumentsValue,
+                  : input.name === "read_observation"
+                    ? { pages: pageObservations(input.output, false) }
+                    : argumentsValue,
           }),
     });
     const repeated = this.operations.has(operation);
@@ -223,6 +258,14 @@ function pageObservations(output: unknown, includeVisual = true): unknown[] {
   const record = output as Record<string, unknown>;
   const result = record.result;
   const observations: unknown[] = [];
+  // Accept cached pages both directly and inside the executor's result envelope.
+  if (typeof record.content === "string") {
+    observations.push(
+      Object.fromEntries(
+        Object.entries(record).filter(([key]) => OBSERVATION_KEYS.has(key)),
+      ),
+    );
+  }
   if (result && typeof result === "object" && !Array.isArray(result)) {
     const content = Object.fromEntries(
       Object.entries(result).filter(([key]) => OBSERVATION_KEYS.has(key)),
@@ -275,10 +318,7 @@ function fingerprint(value: unknown) {
 }
 
 function stable(value: unknown): unknown {
-  if (typeof value === "string")
-    return value
-      .replace(/\s*\[ref=(?:f\d+)?e\d+\]/gu, "")
-      .replace(/DOM viewport scope f\d+/gu, "DOM viewport scope");
+  if (typeof value === "string") return normalizeObservationContent(value);
   if (Array.isArray(value)) return value.map(stable);
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(

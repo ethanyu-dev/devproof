@@ -60,6 +60,21 @@ migration or Browser protocol change is required. The accompanying DOM reference
 fix requires upgrading independently deployed Browser Runtime installations.
 See [the regression notes](../../docs/browser-reference-recovery.md).
 
+Protocol v2.15 adds optional `payload.progress` to `agent.model.started` and
+`agent.tool.completed`, with
+`meaningful`, `sequence`, and `repeatedSteps`. The browser Agent derives progress
+from newly observed content (including automatic snapshots) or accepted criteria,
+not model prose, capture IDs, or screenshot animations. The API persists a per-segment progress key and the
+key consumed by the last deadline extension. A browser task may receive one
+bootstrap extension; subsequent extensions require a new progress key. Spec
+analysis retains its existing deadline behavior. Older browser Agents that omit
+progress receive at most the bootstrap extension.
+
+Apply migration `20260910143000_agent_meaningful_progress`, deploy the API, then
+both Agent pools. The optional trace field is wire compatible; new Agents require
+the API update for progress-aware deadlines. Browser Runtime/protocol is unchanged.
+See [context delivery and progress](../../docs/agent-context-progress.md).
+
 The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.
 The retired optimization pool, its routes, capabilities and concurrency field
 are removed. Existing workers for the two retained pools accept the registration

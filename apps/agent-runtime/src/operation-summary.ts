@@ -92,7 +92,7 @@ export function compactValue(value: unknown, maxBytes: number): unknown {
     }
     return Object.fromEntries(
       Object.entries(item).flatMap(([key, child]) => {
-        // Pixels live in the current viewport, DOM lives in the current page window.
+        // Pixels stay outside text. DOM omission is decided against each request's page.
         if (
           [
             "dataBase64",
@@ -102,12 +102,6 @@ export function compactValue(value: unknown, maxBytes: number): unknown {
           ].includes(key)
         )
           return [];
-        if (
-          key === "content" &&
-          typeof child === "string" &&
-          object(item).refState === "CURRENT"
-        )
-          return [["contentInCurrentPage", true]];
         return [[key, visit(child, depth + 1)]];
       }),
     );
@@ -152,6 +146,7 @@ export function compactValue(value: unknown, maxBytes: number): unknown {
 }
 
 export class OperationMemory {
+  private checkpoint: unknown;
   private readonly failures = new Map<
     string,
     { operation: OperationSummary; count: number }
@@ -160,6 +155,11 @@ export class OperationMemory {
 
   record(operations: OperationSummary[]) {
     for (const operation of operations) {
+      if (
+        operation.tool === "record_progress" &&
+        operation.outcome === "SUCCEEDED"
+      )
+        this.checkpoint = object(operation.result).checkpoint;
       const key = createHash("sha256")
         .update(JSON.stringify([operation.tool, operation.arguments]))
         .digest("hex");
@@ -193,8 +193,50 @@ export class OperationMemory {
     return {
       recentFailures: [...this.failures.values()],
       lastBrowserAction: this.lastBrowserAction,
+      checkpoint: this.checkpoint,
     };
   }
+}
+
+/** A pointer is truthful only while that exact observation page is in this request. */
+export function presentOperationSummaries(
+  turns: OperationSummary[][],
+  currentPage: unknown,
+) {
+  const page = object(currentPage);
+  const current = object(page.snapshot);
+  const delivered = [current, object(page.latestObservation)];
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== "object") return value;
+    const item = object(value);
+    const isPage =
+      typeof item.observationId === "string" &&
+      typeof item.cursor === "number" &&
+      "content" in item;
+    const pinned =
+      isPage &&
+      delivered.some(
+        (candidate) =>
+          candidate.observationId === item.observationId &&
+          candidate.cursor === item.cursor &&
+          typeof candidate.content === "string",
+      );
+    const result = Object.fromEntries(
+      Object.entries(item)
+        .filter(([key]) => !(pinned && key === "content"))
+        .map(([key, child]) => [key, visit(child)]),
+    );
+    if (pinned) result.contentInCurrentPage = true;
+    if (
+      isPage &&
+      item.refState === "CURRENT" &&
+      item.observationId !== current.observationId
+    )
+      result.refState = "HISTORICAL";
+    return result;
+  };
+  return visit(turns);
 }
 
 function parseContent(value: unknown): unknown {
