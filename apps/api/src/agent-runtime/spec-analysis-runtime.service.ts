@@ -13,6 +13,7 @@ import {
   runtimeSpecAnalysisToolOutputSchema,
   runtimeSpecSourceRefSchema,
   runtimeTraceEventSchema,
+  specPullRequestCoverage,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskOutcomeInput,
   type RuntimeSpecAnalysisToolInput,
@@ -20,7 +21,9 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import {
   taskExecutionCreateInputSchema,
+  specificationContextDiagnosticSchema,
   testGenerationContextSchema,
+  type SpecificationContextDiagnostic,
 } from "@devproof/contracts";
 import {
   generateBusinessTestSpec,
@@ -457,7 +460,7 @@ export class SpecAnalysisRuntimeService {
           excerpt: file.patch.slice(0, 2_000),
           kind: "GITHUB_DIFF" as const,
           label: file.path,
-          locator: { path: file.path },
+          locator: { path: file.path, status: file.status },
           revision: result.revision,
           uri: `${arguments_.pullRequestUrl}/files#${encodeURIComponent(file.path)}`,
         })),
@@ -621,7 +624,32 @@ export class SpecAnalysisRuntimeService {
       assertGithubRevision(revisions.get(uri), source.revision, uri);
       revisions.set(uri, source.revision);
     }
-    const context = buildContext(attempt.analysisSources);
+    const context = buildSpecAnalysisContext(attempt.analysisSources);
+    const sourceCoverage = {
+      issueSources: attempt.analysisSources.filter(
+        (source) => source.kind === "LINEAR_ISSUE",
+      ).length,
+      pullRequestSources: attempt.analysisSources.filter(
+        (source) => source.kind === "GITHUB_PULL_REQUEST",
+      ).length,
+      diffSources: attempt.analysisSources.filter(
+        (source) => source.kind === "GITHUB_DIFF",
+      ).length,
+      fileSources: attempt.analysisSources.filter(
+        (source) =>
+          source.kind === "GITHUB_FILE" &&
+          record(source.locator).query === undefined,
+      ).length,
+      searchSources: attempt.analysisSources.filter(
+        (source) =>
+          source.kind === "GITHUB_FILE" &&
+          record(source.locator).query !== undefined,
+      ).length,
+      checksObserved: context.pullRequests.reduce(
+        (count, pr) => count + pr.checks.length,
+        0,
+      ),
+    };
     const primaryPullRequest = selectPrimaryPullRequest(context);
     const createInput = taskExecutionCreateInputSchema.parse(
       attempt.stage.taskExecution.inputSnapshot,
@@ -732,7 +760,9 @@ export class SpecAnalysisRuntimeService {
         caseCount: spec.cases.length,
         completionId,
         completeness,
+        diagnostics: context.resolution.diagnostics,
         nextAttemptScheduled: false,
+        sourceCoverage,
         snapshotId: snapshot.id,
         sourceHash,
         stageStatus: "SUCCEEDED",
@@ -801,6 +831,9 @@ export class SpecAnalysisRuntimeService {
             {
               attemptNumber: attempt.number,
               caseCount: spec.cases.length,
+              completeness,
+              diagnostics: context.resolution.diagnostics,
+              sourceCoverage,
               snapshotId: snapshot.id,
               stage: "SPEC_ANALYSIS",
               stageAttemptId: attempt.id,
@@ -1396,8 +1429,13 @@ function requireActiveTask(
   }
 }
 
-function buildContext(
-  sources: Array<{ content: Prisma.JsonValue; kind: string }>,
+export function buildSpecAnalysisContext(
+  sources: Array<{
+    content: Prisma.JsonValue;
+    kind: string;
+    uri: string;
+    locator: Prisma.JsonValue;
+  }>,
 ) {
   const issueSource = [...sources]
     .reverse()
@@ -1408,33 +1446,85 @@ function buildContext(
     );
   const issuePayload = record(sourceContent(issueSource.content));
   const issue = issuePayload.issue;
-  const pullRequests = sources
-    .filter((source) => source.kind === "GITHUB_PULL_REQUEST")
-    .map((source) => record(sourceContent(source.content)).pullRequest)
+  const metadata = new Map(
+    sources
+      .filter((source) => source.kind === "GITHUB_PULL_REQUEST")
+      .map((source) => [source.uri, record(sourceContent(source.content))]),
+  );
+  const pullRequests = [...metadata.values()]
+    .map((payload) => payload.pullRequest)
     .filter(Boolean);
   const expectedPullRequests = z
     .array(z.string().url())
     .parse(issuePayload.pullRequestUrls ?? []);
-  const resolvedUrls = new Set(
-    pullRequests
-      .map((value) => record(value).url)
-      .filter((value): value is string => typeof value === "string"),
+  const diagnostics: SpecificationContextDiagnostic[] = [
+    ...metadata.values(),
+  ].flatMap((payload) =>
+    z
+      .array(specificationContextDiagnosticSchema)
+      .parse(payload.diagnostics ?? []),
   );
-  const diagnostics = expectedPullRequests
-    .filter((url) => !resolvedUrls.has(url))
-    .map((url) => ({
-      code: "GITHUB_PR_NOT_ANALYZED",
-      level: "WARNING" as const,
-      message:
-        "Agent did not load this linked pull request before generating the Spec.",
-      reference: url,
-      source: "GITHUB" as const,
-    }));
+  const warn = (code: string, message: string, reference: string) =>
+    diagnostics.push({
+      code,
+      level: "WARNING",
+      message,
+      reference,
+      source: "GITHUB",
+    });
+  if (!expectedPullRequests.length) {
+    warn(
+      "GITHUB_PR_NOT_LINKED",
+      "Linear Issue 未提供关联 PR，未读取 GitHub 代码或检查结果；当前 Spec 仅基于 Issue，代码来源分析不完整。请在 Issue 中关联 PR 后重新分析。",
+      issueSource.uri,
+    );
+  }
+  for (const coverage of specPullRequestCoverage(
+    expectedPullRequests.map((url) => ({
+      url,
+      changedFiles: z
+        .array(z.string())
+        .parse(record(metadata.get(url)?.pullRequest).changedFiles ?? []),
+    })),
+    sources.map((source) => ({ ...source, locator: record(source.locator) })),
+  )) {
+    if (!coverage.metadataRead)
+      warn(
+        "GITHUB_PR_NOT_ANALYZED",
+        "生成 Spec 前未读取该关联 PR 的元数据。",
+        coverage.url,
+      );
+    if (!coverage.diffSourceCount)
+      warn(
+        "GITHUB_DIFF_NOT_ANALYZED",
+        "生成 Spec 前未读取该关联 PR 的变更 diff。",
+        coverage.url,
+      );
+    if (!coverage.fileSourceCount)
+      warn(
+        "GITHUB_FILE_NOT_ANALYZED",
+        "生成 Spec 前未读取该关联 PR 的相关文件内容；代码搜索片段不能替代文件读取。",
+        coverage.url,
+      );
+    if (coverage.unreadRouteSpecs.length)
+      warn(
+        "GITHUB_ROUTE_SPEC_NOT_ANALYZED",
+        `生成 Spec 前未读取 Route Spec：${coverage.unreadRouteSpecs.join("、")}`.slice(
+          0,
+          2000,
+        ),
+        coverage.url,
+      );
+  }
   return testGenerationContextSchema.parse({
     issue,
     pullRequests,
     resolution: {
-      completeness: diagnostics.length ? "PARTIAL" : "COMPLETE",
+      completeness: diagnostics.some(
+        (diagnostic) => diagnostic.level !== "INFO",
+      )
+        ? "PARTIAL"
+        : "COMPLETE",
       diagnostics,
     },
   });

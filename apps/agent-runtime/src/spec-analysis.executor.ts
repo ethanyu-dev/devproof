@@ -6,6 +6,7 @@ import {
   runtimeSpecCriterionSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeTraceEventSchema,
+  specPullRequestCoverage,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
   type RuntimeSpecSourceRef,
@@ -96,7 +97,8 @@ export class SpecAnalysisExecutor {
     const calledTools = new Set<string>();
     const sourceFailureCounts = new Map<SourceToolName, number>();
     const unavailableTools = new Set<SourceToolName>();
-    let linkedPullRequestCount = 0;
+    let linkedPullRequests: Array<{ url: string; changedFiles?: string[] }> =
+      [];
     let segmentStatus: "FAILED" | "SUCCEEDED" = "FAILED";
     let segmentError: string | undefined;
     let leaseRejected = false;
@@ -152,7 +154,12 @@ export class SpecAnalysisExecutor {
                 parallel_tool_calls: false,
                 tool_choice: "auto",
                 stream: false,
-                tools: toolDefinitions(sources.keys(), unavailableTools),
+                tools: toolDefinitions(
+                  sources.keys(),
+                  unavailableTools,
+                  calledTools.has("linear_get_issue"),
+                  linkedPullRequests.map((pr) => pr.url),
+                ),
               },
               { signal },
             );
@@ -315,7 +322,7 @@ export class SpecAnalysisExecutor {
             }
             const validationError = validateFinalSpec({
               calledTools,
-              linkedPullRequestCount,
+              linkedPullRequests,
               sources,
               sourceContents,
               spec: parsed.data.spec,
@@ -400,6 +407,37 @@ export class SpecAnalysisExecutor {
             continue;
           }
           const sourceToolName = call.function.name;
+          const sourceToolError = unavailableTools.has(sourceToolName)
+            ? `数据源 ${sourceToolName} 已标记为不可用，请使用其余来源并说明风险。`
+            : sourceToolName !== "linear_get_issue" &&
+                (!calledTools.has("linear_get_issue") ||
+                  !linkedPullRequests.some(
+                    (pr) => pr.url === record(parsedArguments).pullRequestUrl,
+                  ))
+              ? "GitHub 工具只能使用 linear_get_issue 返回的 pullRequestUrls。不得传入 Linear 链接或猜测 PR；没有关联 PR 时应说明代码来源缺失，生成仅基于 Issue 的部分规格。"
+              : null;
+          if (sourceToolError) {
+            await this.appendTrace(
+              lease,
+              signal,
+              toolFailed(
+                task,
+                segmentId,
+                step,
+                call,
+                startedAt,
+                sourceToolError,
+              ),
+            );
+            history.push(
+              toolOutput(call, {
+                accepted: false,
+                error: sourceToolError,
+                allowedPullRequestUrls: linkedPullRequests.map((pr) => pr.url),
+              }),
+            );
+            continue;
+          }
 
           try {
             const output = await this.controlPlane.executeSpecTool(
@@ -419,14 +457,26 @@ export class SpecAnalysisExecutor {
             for (const source of output.sourceRefs) {
               sourceContents.set(
                 source.externalId,
-                [source.excerpt, ...stringLeaves(output.result)].join("\n"),
+                observedSourceContent(source, output.result),
               );
             }
             if (call.function.name === "linear_get_issue") {
               const result = record(output.result);
-              linkedPullRequestCount = Array.isArray(result.pullRequestUrls)
-                ? result.pullRequestUrls.length
-                : 0;
+              linkedPullRequests = z
+                .array(z.string().url())
+                .parse(result.pullRequestUrls ?? [])
+                .map((url) => ({ url }));
+            }
+            if (call.function.name === "github_get_pull_request") {
+              const pr = linkedPullRequests.find(
+                (pr) => pr.url === record(parsedArguments).pullRequestUrl,
+              );
+              if (pr) {
+                const result = record(record(output.result).pullRequest);
+                pr.changedFiles = z
+                  .array(z.string())
+                  .parse(result.changedFiles ?? []);
+              }
             }
             await this.appendTrace(lease, signal, {
               kind: "agent.tool.completed",
@@ -614,6 +664,8 @@ function isSourceToolName(name: string): name is SourceToolName {
 function toolDefinitions(
   sourceIds: Iterable<string> = [],
   unavailableTools: ReadonlySet<string> = new Set(),
+  issueRead = false,
+  pullRequestUrls: readonly string[] = [],
 ) {
   const observedSourceIds = [...sourceIds];
   const analysisSummary = {
@@ -623,7 +675,11 @@ function toolDefinitions(
     minLength: 1,
     type: "string",
   };
-  const pullRequestUrl = { format: "uri", maxLength: 2_000, type: "string" };
+  const pullRequestUrl = {
+    enum: pullRequestUrls,
+    maxLength: 2_000,
+    type: "string",
+  };
   return [
     {
       type: "function",
@@ -703,7 +759,13 @@ function toolDefinitions(
       strict: false,
     },
   ]
-    .filter((tool) => !unavailableTools.has(tool.name))
+    .filter(
+      (tool) =>
+        !unavailableTools.has(tool.name) &&
+        (tool.name === "linear_get_issue" ||
+          (issueRead &&
+            (tool.name === "finish_spec" || pullRequestUrls.length > 0))),
+    )
     .map(({ type: _type, ...definition }) => ({
       type: "function" as const,
       function: definition,
@@ -766,6 +828,8 @@ function systemPrompt() {
   return `你是 DevProof 的 Spec 分析 Agent。
 请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成一份完整、可执行的验证 Spec。
 必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
+GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pullRequestUrls，不能使用 Issue URL 或猜测链接。没有关联 PR 时，只能生成基于 Issue 的部分规格，并在 risks 中明确说明未读取 GitHub 代码、无法核验路由和实现；不能声称代码分析完整。
+若变更包含 specs/routes 下的 Route Spec，必须用 github_read_file 读取它，并结合相关实现及界面文案核对。若 Issue、Route Spec 和实现存在名称或行为冲突，应在 risks 中注明来源与差异，把未确定部分作为待确认事项，不能擅自把其中一种说法设为硬性失败条件。
 同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Linear Issue 是后续来源的必要入口，如果它不可用，执行器会立即以明确的数据源错误终止。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
@@ -773,15 +837,16 @@ function systemPrompt() {
 每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。
+内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。多个业务类型分别生成可独立判定的验收标准，不能观察一个类型后就判定所有类型通过。
 每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。把所需的类型可选性、参照界面、权限和数据检查写成本 Case 的具体只读步骤；不能把假设当作已经观察的事实。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，各写入 Case 使用独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，存在则请求新账号，不删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
-只有在完成 Issue 和关联 PR 代码调查后才能调用 finish_spec。绝不能泄露凭据。`;
+只有完成所有可用来源的调查后才能调用 finish_spec；无关联 PR 或数据源不可用时，明确标出缺失范围与风险，允许提交部分规格。绝不能泄露凭据。`;
 }
 
 export function validateFinalSpec(input: {
   calledTools: ReadonlySet<string>;
-  linkedPullRequestCount: number;
+  linkedPullRequests: readonly { url: string; changedFiles?: string[] }[];
   sources: ReadonlyMap<string, RuntimeSpecSourceRef>;
   sourceContents: ReadonlyMap<string, string>;
   spec: z.infer<typeof runtimeGeneratedSpecSchema>;
@@ -792,23 +857,28 @@ export function validateFinalSpec(input: {
   if (!input.calledTools.has("linear_get_issue")) {
     return "完成 Spec 前必须读取 Linear Issue。";
   }
-  const sourceKinds = new Set(
-    [...input.sources.values()].map((source) => source.kind),
-  );
-  if (input.linkedPullRequestCount > 0) {
+  for (const coverage of specPullRequestCoverage(input.linkedPullRequests, [
+    ...input.sources.values(),
+  ])) {
     if (
-      !sourceKinds.has("GITHUB_PULL_REQUEST") &&
+      !coverage.metadataRead &&
       !input.unavailableTools.has("github_get_pull_request")
     ) {
-      return "完成 Spec 前必须读取每个相关联的 Pull Request。";
+      return `完成 Spec 前必须读取关联 Pull Request 的元数据：${coverage.url}`;
     }
     if (
-      (!sourceKinds.has("GITHUB_DIFF") &&
+      (!coverage.diffSourceCount &&
         !input.unavailableTools.has("github_list_changed_files")) ||
-      (!sourceKinds.has("GITHUB_FILE") &&
+      (!coverage.fileSourceCount &&
         !input.unavailableTools.has("github_read_file"))
     ) {
-      return "完成 Spec 前必须同时检查变更 diff 片段和相关代码内容。";
+      return `完成 Spec 前必须同时检查该 PR 的变更 diff 和相关文件内容，代码搜索片段不能替代文件读取：${coverage.url}`;
+    }
+    if (
+      coverage.unreadRouteSpecs.length &&
+      !input.unavailableTools.has("github_read_file")
+    ) {
+      return `完成 Spec 前必须读取 ${coverage.url} 的 Route Spec：${coverage.unreadRouteSpecs.join("、")}`;
     }
   }
   const invalidSourceRefs = specSourceRefEntries(input.spec).filter(
@@ -854,6 +924,21 @@ function stringLeaves(value: unknown): string[] {
   if (value && typeof value === "object")
     return Object.values(value).flatMap(stringLeaves);
   return [];
+}
+
+function observedSourceContent(source: RuntimeSpecSourceRef, result: unknown) {
+  // A batched diff/search response contains multiple independent sources. Do
+  // not let a quote from one file validate a citation to another file.
+  const output = record(result);
+  const items = Array.isArray(output.files)
+    ? output.files
+    : Array.isArray(output.matches)
+      ? output.matches
+      : null;
+  const content = items
+    ? items.find((item) => record(item).sourceRef === source.externalId)
+    : output;
+  return [source.excerpt, ...stringLeaves(content)].join("\n");
 }
 
 function isSourceAvailabilityFailure(error: unknown) {

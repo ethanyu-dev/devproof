@@ -781,3 +781,4 @@ export type RuntimeTaskLease = z.infer<typeof runtimeTaskLeaseSchema>;
 export type RuntimeTaskOutcomeInput = z.infer<
   typeof runtimeTaskOutcomeInputSchema
 >;
+export { specPullRequestCoverage } from "./spec-source-coverage.js";
