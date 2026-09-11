@@ -87,6 +87,9 @@ function refundSpec(sourceRef = source.externalId, quote = source.excerpt) {
             sourceRefs: [sourceRef],
             requiredEvidenceKinds: ["DOM"],
             basis: { sourceRef, quote, observationTarget: "退款结果" },
+            observationTargets: [
+              { label: "退款结果", expectedText: quote.slice(0, 500) },
+            ],
           },
         ],
       },
@@ -341,6 +344,7 @@ describe("SpecAnalysisExecutor", () => {
             {
               id: "type",
               description: text,
+              observationTargets: [{ label: "类型控件", expectedText: text }],
               sourceRefs: [source.externalId],
               requiredEvidenceKinds: ["DOM"],
               basis: {
@@ -507,6 +511,20 @@ describe("SpecAnalysisExecutor", () => {
       quote: issueText,
       observationTarget: "新建弹窗的类型选项",
     };
+    criterion.observationTargets = [
+      { label: "新建类型", expectedText: "LEGACY_CORPORATE" },
+    ];
+    expect(validateFinalSpec(input)).toBeNull();
+    delete criterion.observationTargets;
+    expect(validateFinalSpec(input)).toContain("缺少 observationTargets");
+    criterion.observationTargets = [
+      { label: "LEGACY", expectedText: "LEGACY_CORPORATE" },
+      { label: "ZDR", expectedText: "LEGACY_CORPORATE" },
+    ];
+    expect(validateFinalSpec(input)).toContain("必须能区分各对象");
+    criterion.observationTargets[1]!.expectedText = "invented-enum";
+    expect(validateFinalSpec(input)).toContain("必须来自已读取的来源");
+    criterion.observationTargets[1]!.expectedText = "ZDR";
     expect(validateFinalSpec(input)).toBeNull();
     delete criterion.basis;
     expect(validateFinalSpec(input)).toContain(
@@ -630,6 +648,9 @@ describe("SpecAnalysisExecutor", () => {
           criteria: [
             {
               description: "订单显示为已退款状态。",
+              observationTargets: [
+                { label: "退款状态", expectedText: source.excerpt },
+              ],
               basis: {
                 sourceRef: source.externalId,
                 quote: source.excerpt,
@@ -919,6 +940,9 @@ describe("SpecAnalysisExecutor", () => {
             criteria: [
               {
                 description: "订单显示为已退款状态。",
+                observationTargets: [
+                  { label: "退款状态", expectedText: source.excerpt },
+                ],
                 basis: {
                   sourceRef: source.externalId,
                   quote: source.excerpt,

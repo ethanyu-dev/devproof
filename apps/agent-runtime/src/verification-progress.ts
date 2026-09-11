@@ -89,7 +89,7 @@ export class VerificationProgress {
 
   private discoverObservations(output: unknown) {
     let changed = false;
-    for (const observation of pageObservations(output, false)) {
+    for (const observation of progressFacts(output)) {
       const key = fingerprint(observation);
       if (!this.semanticObservations.has(key)) {
         this.semanticObservations.add(key);
@@ -134,7 +134,7 @@ export class VerificationProgress {
     this.semanticProgress =
       this.discoverObservations(input.output) || this.semanticProgress;
     if (this.semanticProgress) this.progressSequence += 1;
-    for (const observation of pageObservations(input.output)) {
+    for (const observation of progressFacts(input.output, true)) {
       const key = fingerprint(observation);
       if (!this.observations.has(key)) {
         this.observations.add(key);
@@ -231,8 +231,14 @@ export class VerificationProgress {
                       interaction,
                     }
                   : input.name === "read_observation"
-                    ? { pages: pageObservations(input.output, false) }
-                    : argumentsValue,
+                    ? { commandType: "read_observation" }
+                    : [
+                          "page.snapshot",
+                          "frame.snapshot",
+                          "page.screenshot",
+                        ].includes(String(record(argumentsValue).commandType))
+                      ? { commandType: record(argumentsValue).commandType }
+                      : argumentsValue,
           }),
     });
     const repeated = this.operations.has(operation);
@@ -251,6 +257,26 @@ export class VerificationProgress {
         this.now() - this.lastProgressAt >= POLLING_GRACE_MS)
     );
   }
+}
+
+/** Depth, clipping, indentation and ref renumbering may change the capture without
+ * revealing a new page fact. Credit newly observed lines, not new permutations. */
+function progressFacts(output: unknown, includeVisual = false): unknown[] {
+  return pageObservations(output, includeVisual).flatMap((value) => {
+    const observation = record(value);
+    const content = observation.content;
+    if (typeof content !== "string" || !/\[ref=(?:f\d+)?e\d+\]/u.test(content))
+      return [value];
+    const { content: _content, ...metadata } = observation;
+    return [
+      metadata,
+      ...normalizeObservationContent(content)
+        .split("\n")
+        .map((line) => line.trim().replace(/\s*\[box=[^\]]*\]/gu, ""))
+        .filter((line) => line.startsWith("- "))
+        .map((line) => ({ url: observation.url, node: line })),
+    ];
+  });
 }
 
 function pageObservations(output: unknown, includeVisual = true): unknown[] {

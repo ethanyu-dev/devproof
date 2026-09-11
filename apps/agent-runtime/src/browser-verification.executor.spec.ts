@@ -173,6 +173,172 @@ describe("context delivery and slow models", () => {
     ],
   };
 
+  it("checks recovery acknowledgement before dispatch and clears recovery after the successful acknowledged action", async () => {
+    let step = 0;
+    let submitted = 0;
+    const create = vi.fn(async (request: Request) => {
+      const current = step++;
+      if (current === 4) {
+        expect(
+          contextData(request, "browser_working_state").data.locatorRecovery,
+        ).toBeNull();
+        expect(
+          contextData(request, "current_browser_page").data.snapshot.content,
+        ).toContain("Saved");
+        return reply("finish_verification", finish, current);
+      }
+      if (current >= 2) {
+        expect(operationOutput(request, `call-${current - 1}`)).toMatchObject({
+          accepted: false,
+          code: "LOCATOR_RECOVERY_NOT_ACKNOWLEDGED",
+          locatorRecovery: { exhausted: false, retargetAttempts: 0 },
+        });
+        expect(submitted).toBe(0);
+      }
+      return reply(
+        "browser_command",
+        {
+          commandType: "page.click",
+          payload: {
+            target: current === 0 ? { selector: ".save" } : { ref: "e1" },
+          },
+          ...(current === 2
+            ? { locatorRecoveryToken: "wrong" }
+            : current === 3
+              ? { locatorRecoveryToken: "call-0" }
+              : {}),
+        },
+        current,
+      );
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
+      if (command.commandType === "page.snapshot")
+        return {
+          status: "SUCCEEDED",
+          result: {
+            content: submitted
+              ? '- <span> "Saved" [ref=e2]'
+              : '- <button> "OK" [ref=e1]',
+          },
+        };
+      if (command.payload.target?.selector)
+        return {
+          status: "FAILED",
+          error: { code: "LOCATOR_AMBIGUOUS" },
+        } as never;
+      submitted++;
+      return {
+        status: "SUCCEEDED",
+        result: {
+          actionFeedback: {
+            pending: true,
+            requests: [{ method: "POST", status: null }],
+          },
+        },
+      } as never;
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(submitted).toBe(1);
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(5);
+  });
+
+  it("requires observed evidence for every declared target before accepting PASSED", async () => {
+    let step = 0;
+    let selected = "Legacy";
+    let legacy: Record<string, unknown>;
+    const create = vi.fn(async (request: Request) => {
+      const page = contextData(request, "current_browser_page").data.snapshot;
+      const quote = {
+        target: selected,
+        observationId: page.observationId,
+        cursor: page.cursor,
+        quote: page.content,
+      };
+      const current = step++;
+      if (current === 0) legacy = quote;
+      if (current === 1) {
+        expect(operationOutput(request, "call-0").error).toContain("Mapping");
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.select",
+            payload: { target: { ref: "e1" }, values: ["Mapping"] },
+          },
+          current,
+        );
+      }
+      if (current === 3)
+        return reply(
+          "finish_verification",
+          { verdict: "PASSED", summary: "已分别验证两个类型。" },
+          current,
+        );
+      return reply(
+        "record_criterion",
+        {
+          criterionId: "page-visible",
+          status: "PASSED",
+          summary: "两个类型显示正确。",
+          evidenceRefs: [],
+          observations: current === 0 ? [quote] : [legacy!, quote],
+        },
+        current,
+      );
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.criteria[0]!.observationTargets = [
+      { label: "Legacy", expectedText: 'value="Legacy"' },
+      { label: "Mapping", expectedText: 'value="Mapping"' },
+    ];
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
+      if (command.commandType === "page.select") selected = "Mapping";
+      return {
+        status: "SUCCEEDED",
+        result: {
+          content: `- <select value="${selected}"> "${selected}" [ref=e1]`,
+        },
+      };
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ verdict: "PASSED" });
+    expect(create).toHaveBeenCalledTimes(4);
+  });
+
+  it("reports a timed-out browser tool as FAILED in its outer trace", async () => {
+    let step = 0;
+    const create = vi.fn(async () =>
+      step++ === 0
+        ? reply(
+            "browser_command",
+            { commandType: "page.click", payload: { target: { ref: "e1" } } },
+            0,
+          )
+        : reply("finish_verification", finish, 1),
+    );
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) =>
+      command.commandType === "page.snapshot"
+        ? {
+            status: "SUCCEEDED",
+            result: { content: '- <button> "OK" [ref=e1]' },
+          }
+        : ({
+            status: "TIMED_OUT",
+            error: { code: "COMMAND_TIMEOUT" },
+          } as never),
+    );
+    await executor.execute(runTask, lease, new AbortController().signal);
+    const event = controlPlane.appendEvent.mock.calls.find(
+      (call) =>
+        call[1] === "agent.tool.completed" && call[2].callId === "call-0",
+    )!;
+    expect(event[2].status).toBe("FAILED");
+  });
+
   it("recovers an option-row scroll error using the new container ref", async () => {
     let step = 0;
     let snapshots = 0;
@@ -1135,6 +1301,51 @@ describe("runtime navigation and combined finalization", () => {
 });
 
 describe("browser verification bounded context", () => {
+  it("skips exhausted credentials and their aliases across executions while retaining a healthy fallback", async () => {
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      if (request.model !== "healthy")
+        throw Object.assign(new Error("Insufficient balance"), { status: 402 });
+      return {
+        id: "human",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              { prompt: "请确认状态。", summary: "等待确认。" },
+              0,
+            ),
+          ],
+        },
+      };
+    });
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    const first = runTask.snapshot.modelCandidates![0]!;
+    runTask.snapshot.modelCandidates = [
+      first,
+      { ...first, modelId: "alias" },
+      { ...first, modelId: "healthy", apiKey: "healthy-key" },
+    ];
+    for (let run = 0; run < 2; run++) {
+      expect(
+        await executor.execute(runTask, lease, new AbortController().signal),
+      ).toMatchObject({ kind: "WAITING_HUMAN" });
+    }
+    expect(create.mock.calls.map(([request]) => request.model)).toEqual([
+      first.modelId,
+      "healthy",
+      "healthy",
+    ]);
+    expect(
+      controlPlane.appendEvent.mock.calls.find(
+        (call) => call[1] === "agent.model.failed",
+      )?.[2].inputPreview.candidateHealth,
+    ).toMatchObject({
+      reason: "CREDENTIAL_UNAVAILABLE",
+      cooldownMs: 1_800_000,
+    });
+  });
   it("pins matching DOM and pixels through summary rotation, refreshing after clicks and fills but not cached reads", async () => {
     let step = 0;
     let captures = 0;
@@ -3985,7 +4196,7 @@ describe("Agent Runtime browser verification executor", () => {
     });
   });
 
-  it("does not clear locator recovery after an unrelated successful click", async () => {
+  it("blocks an unacknowledged unrelated click and preserves locator recovery", async () => {
     const create = vi
       .fn()
       .mockResolvedValueOnce({
@@ -4094,7 +4305,7 @@ describe("Agent Runtime browser verification executor", () => {
       verdict: "INCONCLUSIVE",
     });
     expect(JSON.stringify(create.mock.calls[2]?.[0].messages)).toContain(
-      "没有正确确认原定位恢复",
+      "尚未执行操作",
     );
     expect(JSON.stringify(create.mock.calls[3]?.[0].messages)).toContain(
       "不能据此记录产品 FAILED",

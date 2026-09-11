@@ -948,6 +948,19 @@ const issueTaskExecutionCreateInputSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(200),
   issueRef: z.string().trim().min(1).max(500),
   kind: z.literal("ISSUE_SPEC"),
+  pullRequestUrls: z
+    .array(
+      z
+        .string()
+        .trim()
+        .url()
+        .max(2_000)
+        .regex(
+          /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\/?$/u,
+        ),
+    )
+    .max(25)
+    .optional(),
   model: z
     .object({
       name: z.string().trim().min(1).max(160),

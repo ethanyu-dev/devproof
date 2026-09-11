@@ -13,6 +13,7 @@ import {
   type RuntimeTraceEvent,
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
+import { ModelHealth } from "./model-health.js";
 
 import {
   ControlPlaneError,
@@ -39,6 +40,8 @@ const finishSpecSchema = z.object({
             .array(
               runtimeSpecCriterionSchema.extend({
                 basis: runtimeSpecCriterionSchema.shape.basis.unwrap(),
+                observationTargets:
+                  runtimeSpecCriterionSchema.shape.observationTargets.unwrap(),
               }),
             )
             .min(1)
@@ -60,6 +63,7 @@ type SourceToolName =
   | "github_search_code";
 
 export class SpecAnalysisExecutor {
+  private readonly modelHealth = new ModelHealth();
   constructor(
     private readonly modelClient: ModelClientFactory,
     private readonly controlPlane: ControlPlaneClient,
@@ -131,6 +135,7 @@ export class SpecAnalysisExecutor {
         let lastError: unknown;
 
         for (const candidate of candidates) {
+          if (!this.modelHealth.available(candidate)) continue;
           signal.throwIfAborted();
           const modelStartedAt = Date.now();
           const modelCallId = randomUUID();
@@ -164,6 +169,7 @@ export class SpecAnalysisExecutor {
               { signal },
             );
             selectedModel = candidate;
+            this.modelHealth.success(candidate);
             selectedModelCallId = modelCallId;
             selectedStartedAt = modelStartedAt;
             lastError = undefined;
@@ -171,6 +177,7 @@ export class SpecAnalysisExecutor {
           } catch (error) {
             signal.throwIfAborted();
             lastError = error;
+            const candidateHealth = this.modelHealth.failure(candidate, error);
             await this.appendTrace(lease, signal, {
               kind: "agent.model.failed",
               payload: {
@@ -178,7 +185,7 @@ export class SpecAnalysisExecutor {
                 attemptNumber: task.snapshot.attemptNumber,
                 durationMs: Date.now() - modelStartedAt,
                 errorMessage: traceError(error),
-                inputPreview,
+                inputPreview: { ...inputPreview, candidateHealth },
                 model: candidate.modelId,
                 provider: "OPENAI_COMPATIBLE",
                 segmentId,
@@ -191,7 +198,7 @@ export class SpecAnalysisExecutor {
 
         if (!response) {
           throw new Error(
-            `All configured model providers failed: ${traceError(lastError)}`,
+            `All configured model providers failed: ${traceError(lastError ?? "Configured candidates are temporarily unavailable after previous provider failures.")}`,
           );
         }
         await this.appendTrace(lease, signal, {
@@ -834,7 +841,7 @@ GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pu
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。
-每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
+每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字或接口值（expectedText）。涉及多个类型时，分别列出每个类型的显示名或接口值，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。
 内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。多个业务类型分别生成可独立判定的验收标准，不能观察一个类型后就判定所有类型通过。
@@ -913,6 +920,30 @@ export function validateFinalSpec(input: {
       const content = input.sourceContents.get(basis.sourceRef) ?? "";
       if (!content.includes(basis.quote))
         return `验收标准 ${criterion.id} 的 basis.quote 未出现在实际来源中；请引用支持该产品断言的原文，或移除无来源的断言。`;
+      if (!criterion.observationTargets?.length)
+        return `验收标准 ${criterion.id} 缺少 observationTargets；请为每个待验证对象声明 label 和可在页面或接口中核对的 expectedText。`;
+      if (
+        new Set(criterion.observationTargets.map((target) => target.label))
+          .size !== criterion.observationTargets.length
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.label 必须唯一。`;
+      if (
+        new Set(
+          criterion.observationTargets.map((target) => target.expectedText),
+        ).size !== criterion.observationTargets.length
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须能区分各对象，不能用相同文字代替多个对象。`;
+      if (
+        criterion.observationTargets.some(
+          (target) =>
+            !criterion.sourceRefs.some((sourceRef) =>
+              (input.sourceContents.get(sourceRef) ?? "").includes(
+                target.expectedText,
+              ),
+            ),
+        )
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须来自已读取的来源，不能编造类型名或内部枚举。`;
     }
   }
   return null;

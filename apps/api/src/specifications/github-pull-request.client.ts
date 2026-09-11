@@ -40,6 +40,117 @@ export class GithubPullRequestClient {
     return this.access.configured(teamId);
   }
 
+  async discoverIssuePullRequests(teamId: string, issueUrl: string) {
+    const diagnostics: GithubPullRequestResolution["diagnostics"] = [];
+    const urls = new Set<string>();
+    const issueKey = linearIssueKey(issueUrl);
+    if (!issueKey) return { pullRequestUrls: [], diagnostics };
+    const candidates = await this.access.discoveryCandidates(teamId);
+    const completedScopes = new Map<string, Set<string>>();
+    let requests = 0;
+    discovery: for (const candidate of candidates) {
+      const scopes = [
+        ...candidate.repositories.map((repo) => `repo:${repo}`),
+        ...candidate.organizations.map((org) => `org:${org}`),
+      ];
+      for (const scope of scopes.slice(0, 25)) {
+        if (completedScopes.get(candidate.token)?.has(scope)) continue;
+        if (++requests > 8) {
+          diagnostics.push({
+            source: "GITHUB",
+            level: "WARNING",
+            code: "GITHUB_PR_DISCOVERY_PARTIAL",
+            message: "PR 关联发现达到查询上限，请在任务中补充明确的 PR 链接。",
+            reference: issueUrl,
+          });
+          break discovery;
+        }
+        try {
+          const query = new URLSearchParams({
+            q: `is:pr "${issueKey}" in:body ${scope}`,
+            per_page: "100",
+          });
+          const response = await this.request(
+            `/search/issues?${query}`,
+            candidate.token,
+            issueUrl,
+          );
+          const result = isRecord(response) ? response : {};
+          const items = Array.isArray(result.items) ? result.items : [];
+          const queried =
+            completedScopes.get(candidate.token) ?? new Set<string>();
+          queried.add(scope);
+          completedScopes.set(candidate.token, queried);
+          for (const item of items) {
+            if (
+              !isRecord(item) ||
+              !item.pull_request ||
+              typeof item.body !== "string" ||
+              typeof item.html_url !== "string"
+            )
+              continue;
+            const links =
+              item.body.match(/https:\/\/linear\.app\/[^\s<>"')]+/giu) ?? [];
+            if (!links.some((link) => linearIssueKey(link) === issueKey))
+              continue;
+            let ref: PullRequestReference;
+            try {
+              ref = parsePullRequestUrl(item.html_url);
+            } catch {
+              continue;
+            }
+            const repository = `${ref.owner}/${ref.repository}`.toLowerCase();
+            if (
+              scope !== `repo:${repository}` &&
+              scope !== `org:${ref.owner.toLowerCase()}`
+            )
+              continue;
+            urls.add(
+              `https://github.com/${ref.owner}/${ref.repository}/pull/${ref.number}`,
+            );
+          }
+          if (
+            result.incomplete_results === true ||
+            Number(result.total_count) > 100
+          )
+            diagnostics.push({
+              source: "GITHUB",
+              level: "WARNING",
+              code: "GITHUB_PR_DISCOVERY_PARTIAL",
+              message: "关联 PR 搜索结果不完整，请补充明确的 PR 链接。",
+              reference: issueUrl,
+            });
+        } catch {
+          diagnostics.push({
+            source: "GITHUB",
+            level: "WARNING",
+            code: "GITHUB_PR_DISCOVERY_FAILED",
+            message: "关联 PR 搜索失败，请检查 GitHub 配置或在任务中指定 PR。",
+            reference: issueUrl,
+          });
+        }
+      }
+    }
+    if (!candidates.length)
+      diagnostics.push({
+        source: "GITHUB",
+        level: "INFO",
+        code: "GITHUB_PR_DISCOVERY_SCOPE_MISSING",
+        message:
+          "未配置用于关联发现的 GitHub 仓库或组织范围；可在任务中提供 pullRequestUrls。",
+        reference: issueUrl,
+      });
+    if (urls.size > 25)
+      diagnostics.push({
+        source: "GITHUB",
+        level: "WARNING",
+        code: "GITHUB_PR_DISCOVERY_PARTIAL",
+        message: "关联 PR 超过 25 个，请在任务中明确实现 PR 的范围。",
+        reference: issueUrl,
+      });
+    return { pullRequestUrls: [...urls].slice(0, 25), diagnostics };
+  }
+
   async getPullRequest(
     teamId: string,
     pullRequestUrl: string,
@@ -560,6 +671,18 @@ export class GithubPullRequestClient {
     return response.status === 204
       ? null
       : ((await response.json()) as unknown);
+  }
+}
+
+function linearIssueKey(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/^\/([^/]+)\/issue\/([^/]+)(?:\/|$)/u);
+    return url.protocol === "https:" && url.hostname === "linear.app" && match
+      ? `https://linear.app/${match[1]}/issue/${match[2]}`.toLowerCase()
+      : null;
+  } catch {
+    return null;
   }
 }
 

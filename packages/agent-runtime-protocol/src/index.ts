@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 15,
+  minor: 16,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -118,10 +118,21 @@ export const runtimeProtocolVersionSchema = z.object({
   name: z.literal(AGENT_RUNTIME_PROTOCOL.name),
 });
 
+export const runtimeObservationTargetSchema = z.object({
+  label: z.string().trim().min(1).max(500),
+  expectedText: z.string().trim().min(1).max(500),
+});
+
 export const runtimeCriterionSchema = z.object({
   description: z.string().trim().min(1).max(4_000),
   id: z.string().trim().min(1).max(160),
   required: z.boolean().default(true),
+  requireObservedEvidence: z.boolean().optional(),
+  observationTargets: z
+    .array(runtimeObservationTargetSchema)
+    .min(1)
+    .max(20)
+    .optional(),
   requiredEvidenceKinds: z
     .array(runtimeEvidenceKindSchema)
     .max(6)
@@ -159,6 +170,11 @@ export const runtimeSpecSourceRefSchema = z.object({
 });
 
 export const runtimeSpecCriterionSchema = z.object({
+  observationTargets: z
+    .array(runtimeObservationTargetSchema)
+    .min(1)
+    .max(20)
+    .optional(),
   // Optional for persisted Specs from older runtimes; new generation requires it.
   basis: z
     .object({
@@ -554,6 +570,17 @@ export const runtimeBrowserReleaseInputSchema = leasedTaskInputSchema;
 export const runtimeCriterionResultSchema = z.object({
   criterionId: z.string().trim().min(1).max(160),
   evidenceRefs: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
+  observations: z
+    .array(
+      z.object({
+        target: z.string().trim().min(1).max(500),
+        observationId: z.string().uuid(),
+        cursor: z.number().int().nonnegative().default(0),
+        quote: z.string().trim().min(1).max(4_000),
+      }),
+    )
+    .max(20)
+    .optional(),
   status: criterionStatusSchema,
   summary: z.string().trim().min(1).max(4_000),
 });
