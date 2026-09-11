@@ -63,7 +63,258 @@ function call(name: string, arguments_: unknown, id: string) {
   };
 }
 
+function refundSpec(sourceRef = source.externalId, quote = source.excerpt) {
+  return runtimeGeneratedSpecSchema.parse({
+    summary: "验证退款行为。",
+    scope: { inScope: ["退款状态"] },
+    cases: [
+      {
+        name: "退款状态",
+        rationale: "覆盖退款要求。",
+        preconditions: ["具有退款权限。"],
+        sourceRefs: [sourceRef],
+        steps: [
+          {
+            order: 1,
+            action: "发起退款。",
+            expectedObservation: "显示退款结果。",
+          },
+        ],
+        criteria: [
+          {
+            id: "refund",
+            description: "显示退款结果。",
+            sourceRefs: [sourceRef],
+            requiredEvidenceKinds: ["DOM"],
+            basis: { sourceRef, quote, observationTarget: "退款结果" },
+          },
+        ],
+      },
+    ],
+  });
+}
+
+async function executeCalls(
+  calls: ReturnType<typeof call>[],
+  executeSpecTool: ReturnType<typeof vi.fn>,
+) {
+  const responses = calls.map((toolCall) => ({
+    id: `response-${toolCall.id}`,
+    message: {
+      role: "assistant" as const,
+      content: null,
+      tool_calls: [toolCall],
+    },
+  }));
+  const create = vi.fn().mockImplementation(async () => {
+    const response = responses.shift();
+    if (!response) throw new Error("Unexpected extra model request");
+    return response;
+  });
+  const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+  const outcome = await new SpecAnalysisExecutor(
+    () => ({ complete: create }),
+    { appendSpecEvent, executeSpecTool } as never,
+    calls.length,
+  ).execute(task, lease, new AbortController().signal);
+  return { create, appendSpecEvent, outcome };
+}
+
 describe("SpecAnalysisExecutor", () => {
+  it("rejects the incident's Linear URL passed to GitHub and hides tools without linked PRs", async () => {
+    const executeSpecTool = vi.fn().mockResolvedValue({
+      result: { pullRequestUrls: [] },
+      sourceRefs: [source],
+    });
+    const { create, appendSpecEvent, outcome } = await executeCalls(
+      [
+        call(
+          "github_search_code",
+          {
+            analysisSummary: "先检查代码。",
+            pullRequestUrl: source.uri,
+            query: "LEGACY_CORPORATE",
+          },
+          "before-issue",
+        ),
+        call("linear_get_issue", { analysisSummary: "读取需求。" }, "issue"),
+        call(
+          "github_search_code",
+          {
+            analysisSummary: "检查代码。",
+            pullRequestUrl: source.uri,
+            query: "LEGACY_CORPORATE",
+          },
+          "invalid-pr",
+        ),
+        call(
+          "finish_spec",
+          { analysisSummary: "提交部分规格。", spec: refundSpec() },
+          "finish",
+        ),
+      ],
+      executeSpecTool,
+    );
+    expect(outcome.kind).toBe("SPEC_GENERATED");
+    expect(executeSpecTool).toHaveBeenCalledTimes(1);
+    expect(
+      create.mock.calls[0]![0].tools.map(
+        (tool: { function: { name: string } }) => tool.function.name,
+      ),
+    ).toEqual(["linear_get_issue"]);
+    expect(
+      create.mock.calls
+        .at(-1)![0]
+        .tools.map(
+          (tool: { function: { name: string } }) => tool.function.name,
+        ),
+    ).toEqual(["linear_get_issue", "finish_spec"]);
+    expect(
+      appendSpecEvent.mock.calls.filter(
+        (args) => args[1] === "agent.tool.failed",
+      ),
+    ).toHaveLength(2);
+    expect(JSON.stringify(create.mock.calls.at(-1))).toContain("没有关联 PR");
+  });
+
+  it("requires metadata, diffs, file reads and discovered Route Specs for every linked PR", () => {
+    const first = "https://github.com/acme/web/pull/42";
+    const second = "https://github.com/acme/api/pull/43";
+    const sources = new Map([[source.externalId, source]]);
+    const addSource = (
+      url: string,
+      kind: RuntimeSpecSourceRef["kind"],
+      path = "src/refund.ts",
+      query?: string,
+    ) => {
+      const externalId = `analysis-source://${url}/${kind}/${path}/${query ?? "read"}`;
+      sources.set(externalId, {
+        ...source,
+        externalId,
+        kind,
+        uri:
+          kind === "GITHUB_PULL_REQUEST"
+            ? url
+            : `${url}/files#${encodeURIComponent(path)}`,
+        locator: { path, ...(query ? { query } : {}) },
+      });
+    };
+    for (const kind of [
+      "GITHUB_PULL_REQUEST",
+      "GITHUB_DIFF",
+      "GITHUB_FILE",
+    ] as const)
+      addSource(first, kind);
+    const input = {
+      calledTools: new Set(["linear_get_issue"]),
+      linkedPullRequests: [
+        { url: first },
+        { url: second, changedFiles: ["specs/routes/refund.md"] },
+      ],
+      sources,
+      sourceContents: new Map([[source.externalId, source.excerpt]]),
+      spec: refundSpec(),
+      unavailableTools: new Set<string>(),
+    };
+    expect(validateFinalSpec(input)).toContain(second);
+    addSource(second, "GITHUB_PULL_REQUEST");
+    addSource(second, "GITHUB_DIFF");
+    addSource(second, "GITHUB_FILE", "src/refund.ts", "refund");
+    expect(validateFinalSpec(input)).toContain("搜索片段不能替代");
+    addSource(second, "GITHUB_FILE");
+    expect(validateFinalSpec(input)).toContain("specs/routes/refund.md");
+    addSource(second, "GITHUB_FILE", "specs/routes/refund.md");
+    expect(validateFinalSpec(input)).toBeNull();
+  });
+
+  it("does not validate a quote using a different file in the same tool response", async () => {
+    const url = "https://github.com/acme/web/pull/42";
+    const fileA = {
+      ...source,
+      kind: "GITHUB_DIFF",
+      externalId: `${source.externalId}-a`,
+      excerpt: "文件甲说明退款。",
+      uri: `${url}/files#a.ts`,
+      locator: { path: "a.ts" },
+    };
+    const fileB = {
+      ...fileA,
+      externalId: `${source.externalId}-b`,
+      excerpt: "文件乙允许撤销退款。",
+      uri: `${url}/files#b.ts`,
+      locator: { path: "b.ts" },
+    };
+    const executeSpecTool = vi
+      .fn()
+      .mockImplementation(async (_lease, input) => {
+        if (input.name === "linear_get_issue")
+          return { result: { pullRequestUrls: [url] }, sourceRefs: [source] };
+        if (input.name === "github_get_pull_request")
+          return {
+            result: {},
+            sourceRefs: [
+              {
+                ...source,
+                kind: "GITHUB_PULL_REQUEST",
+                uri: url,
+                externalId: `${source.externalId}-pr`,
+              },
+            ],
+          };
+        if (input.name === "github_read_file")
+          return {
+            result: { content: fileA.excerpt },
+            sourceRefs: [
+              {
+                ...fileA,
+                kind: "GITHUB_FILE",
+                externalId: `${source.externalId}-read`,
+              },
+            ],
+          };
+        return {
+          result: {
+            files: [fileA, fileB].map((file) => ({
+              sourceRef: file.externalId,
+              patch: file.excerpt,
+            })),
+          },
+          sourceRefs: [fileA, fileB],
+        };
+      });
+    const args = { analysisSummary: "核对来源。", pullRequestUrl: url };
+    const { outcome, appendSpecEvent } = await executeCalls(
+      [
+        call("linear_get_issue", args, "issue"),
+        call("github_get_pull_request", args, "pr"),
+        call("github_list_changed_files", args, "diff"),
+        call("github_read_file", { ...args, path: "a.ts" }, "file"),
+        call(
+          "finish_spec",
+          {
+            analysisSummary: "提交规格。",
+            spec: refundSpec(fileA.externalId, fileB.excerpt),
+          },
+          "wrong-quote",
+        ),
+        call(
+          "finish_spec",
+          {
+            analysisSummary: "修正引用。",
+            spec: refundSpec(fileB.externalId, fileB.excerpt),
+          },
+          "correct-quote",
+        ),
+      ],
+      executeSpecTool,
+    );
+    expect(outcome.kind).toBe("SPEC_GENERATED");
+    expect(
+      appendSpecEvent.mock.calls.filter(
+        (args) => args[1] === "agent.spec.validation_failed",
+      ),
+    ).toHaveLength(1);
+  });
   it.each([
     "已完成 Case 1，确认目标类型可选。",
     "依赖其他用例创建的数据。",
@@ -105,7 +356,7 @@ describe("SpecAnalysisExecutor", () => {
     const input = {
       spec,
       calledTools: new Set(["linear_get_issue"]),
-      linkedPullRequestCount: 0,
+      linkedPullRequests: [],
       sources: new Map([[source.externalId, source]]),
       sourceContents: new Map([[source.externalId, text]]),
       unavailableTools: new Set<string>(),
@@ -243,7 +494,7 @@ describe("SpecAnalysisExecutor", () => {
     const input = {
       spec,
       calledTools: new Set(["linear_get_issue"]),
-      linkedPullRequestCount: 0,
+      linkedPullRequests: [],
       sources: new Map([[source.externalId, source]]),
       sourceContents: new Map([[source.externalId, issueText]]),
       unavailableTools: new Set<string>(),
@@ -733,6 +984,11 @@ describe("SpecAnalysisExecutor", () => {
                 { ...githubArguments, query: "refund" },
                 "search-2",
               ),
+              call(
+                "github_search_code",
+                { ...githubArguments, query: "refund" },
+                "search-after-disabled",
+              ),
             ]
           : []),
         call("finish_spec", finishArguments, "finish"),
@@ -801,6 +1057,13 @@ describe("SpecAnalysisExecutor", () => {
       );
 
       expect(outcome.kind).toBe("SPEC_GENERATED");
+      const githubTool = create.mock.calls[1]![0].tools.find(
+        (tool: { function: { name: string } }) =>
+          tool.function.name === "github_search_code",
+      );
+      expect(
+        githubTool.function.parameters.properties.pullRequestUrl.enum,
+      ).toEqual([pullRequestUrl]);
       expect(executeSpecTool.mock.calls.map((args) => args[1].name)).toEqual([
         "linear_get_issue",
         "github_get_pull_request",

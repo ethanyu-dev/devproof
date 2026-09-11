@@ -121,7 +121,19 @@ export class GithubPullRequestClient {
           truncated: true,
         };
       }),
-      this.checks(prefix, headSha, token, pullRequestUrl).catch(() => []),
+      this.checks(prefix, headSha, token, pullRequestUrl).catch(
+        (error: unknown) => {
+          diagnostics.push(
+            diagnostic(
+              "WARNING",
+              "GITHUB_CHECKS_UNAVAILABLE",
+              errorMessage(error, "无法读取 PR 检查结果。"),
+              pullRequestUrl,
+            ),
+          );
+          return [];
+        },
+      ),
       this.deployment(prefix, headSha, token, pullRequestUrl).catch(
         (error: unknown) => {
           diagnostics.push(

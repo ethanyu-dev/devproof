@@ -5,6 +5,48 @@ import { GithubPullRequestClient } from "./github-pull-request.client.js";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("GithubPullRequestClient credential fallback", () => {
+  it("distinguishes unavailable checks from a PR with no checks", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith("/pulls/7"))
+          return Response.json({
+            head: { sha: "abc123" },
+            html_url: "https://github.com/acme/web/pull/7",
+            id: 7,
+            number: 7,
+            title: "Refund flow",
+          });
+        if (url.includes("/check-runs?"))
+          return new Response(null, { status: 503 });
+        if (url.includes("/files?") || url.includes("/deployments?"))
+          return Response.json([]);
+        throw new Error(`Unexpected URL: ${url}`);
+      }),
+    );
+    const client = new GithubPullRequestClient({
+      candidatesForRepository: vi
+        .fn()
+        .mockResolvedValue([{ token: "test-token" }]),
+    } as never);
+    const result = await client.getPullRequest(
+      "team-1",
+      "https://github.com/acme/web/pull/7",
+      true,
+    );
+    expect(result.pullRequest.checks).toEqual([]);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "GITHUB_CHECKS_UNAVAILABLE",
+          level: "WARNING",
+          reference: "https://github.com/acme/web/pull/7",
+        }),
+      ]),
+    );
+  });
+
   it("tries matching credentials by priority when the first PAT cannot access a repository", async () => {
     const access = {
       candidatesForRepository: vi.fn().mockResolvedValue([

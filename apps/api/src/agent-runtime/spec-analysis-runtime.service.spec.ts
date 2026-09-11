@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runtimeGeneratedSpecSchema } from "@devproof/agent-runtime-protocol";
 
 import { resetEnvForTests } from "../config/env.js";
 
@@ -120,6 +121,106 @@ function issueTaskInput() {
 }
 
 describe("SpecAnalysisRuntimeService", () => {
+  it("persists and logs PARTIAL source coverage even when the agent submits a successful Issue-only Spec", async () => {
+    const source = {
+      externalId: `analysis-source://${attemptId}/issue`,
+      contentHash: "a".repeat(64),
+      kind: "LINEAR_ISSUE" as const,
+      uri: "https://linear.app/acme/issue/ENG-123",
+      locator: {},
+      label: "退款需求",
+      excerpt: "支持退款。",
+      revision: null,
+      content: {
+        issue: {
+          id: "issue-1",
+          identifier: "ENG-123",
+          title: "退款需求",
+          url: "https://linear.app/acme/issue/ENG-123",
+        },
+        pullRequestUrls: [],
+      },
+    };
+    const { service, tx } = recoveryHarness({
+      ...analysisAttempt(),
+      analysisSources: [source],
+    } as never);
+    const createSnapshot = vi
+      .fn()
+      .mockResolvedValue({ id: "snapshot-1", cases: [] });
+    const createEvents = vi.fn().mockResolvedValue({ count: 2 });
+    const updateAttempt = vi.fn().mockResolvedValue({});
+    Object.assign(tx, {
+      taskSpecificationSnapshot: { create: createSnapshot },
+      taskDeployment: { findMany: vi.fn().mockResolvedValue([]) },
+      taskCaseExecution: {
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+    });
+    Object.assign(tx.taskExecutionEvent, { createMany: createEvents });
+    Object.assign(tx.taskStageAttempt, { update: updateAttempt });
+    await service.submitOutcome(teamId, attemptId, {
+      ...identity,
+      completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
+      outcome: {
+        kind: "SPEC_GENERATED",
+        summary: "验证退款。",
+        sourceRefs: [source],
+        spec: runtimeGeneratedSpecSchema.parse({
+          summary: "验证退款。",
+          scope: { inScope: ["退款"] },
+          cases: [
+            {
+              name: "退款",
+              rationale: "覆盖需求。",
+              preconditions: ["具有退款权限。"],
+              sourceRefs: [source.externalId],
+              steps: [
+                {
+                  order: 1,
+                  action: "申请退款。",
+                  expectedObservation: "退款成功。",
+                },
+              ],
+              criteria: [
+                {
+                  id: "refund",
+                  description: "退款成功。",
+                  sourceRefs: [source.externalId],
+                  requiredEvidenceKinds: ["DOM"],
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    });
+    expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
+      completeness: "PARTIAL",
+      diagnostics: [{ code: "GITHUB_PR_NOT_LINKED" }],
+    });
+    const coverage = {
+      issueSources: 1,
+      pullRequestSources: 0,
+      diffSources: 0,
+      fileSources: 0,
+      searchSources: 0,
+      checksObserved: 0,
+    };
+    expect(updateAttempt.mock.calls[0]![0].data.result).toMatchObject({
+      completeness: "PARTIAL",
+      sourceCoverage: coverage,
+    });
+    expect(createEvents.mock.calls[0]![0].data[0]).toMatchObject({
+      kind: "task.stage.succeeded",
+      payload: {
+        completeness: "PARTIAL",
+        diagnostics: [{ code: "GITHUB_PR_NOT_LINKED" }],
+        sourceCoverage: coverage,
+      },
+    });
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
