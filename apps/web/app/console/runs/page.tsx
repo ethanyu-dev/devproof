@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 
 import { TasksClient } from "./tasks-client";
+import { taskDetailHref } from "./task-navigation";
 
 export const metadata: Metadata = { title: "任务执行" };
 
@@ -10,7 +12,6 @@ export default async function RunsPage({
   searchParams: Promise<{ task?: string | string[] }>;
 }) {
   const task = (await searchParams).task;
-  return (
-    <TasksClient initialId={typeof task === "string" ? task : undefined} />
-  );
+  if (typeof task === "string" && task.trim()) redirect(taskDetailHref(task));
+  return <TasksClient />;
 }

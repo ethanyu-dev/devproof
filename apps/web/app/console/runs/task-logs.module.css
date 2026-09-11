@@ -1,0 +1,255 @@
+.panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.panel[hidden],
+.eventPanel[hidden],
+.analysisPanel[hidden] {
+  display: none;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 12px 12px 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 3px;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.tabs button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.tabs button:hover {
+  color: var(--foreground);
+}
+
+.tabs button[aria-selected="true"] {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--primary);
+}
+
+.tabs button:focus-visible,
+.eventsViewport:focus-visible,
+.eventPanel:focus-visible,
+.analysisPanel:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.tabs svg {
+  width: 14px;
+  height: 14px;
+}
+
+.count {
+  min-width: 22px;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--secondary);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.context {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 0 14px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.context p {
+  flex: 1 1 320px;
+  margin: 0;
+}
+
+.context > span {
+  white-space: nowrap;
+}
+
+.feedback,
+.analysisPanel {
+  padding: 12px;
+}
+
+.analysisPanel {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.eventsViewport {
+  max-height: 640px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.eventColumns,
+.events summary {
+  display: grid;
+  grid-template-columns: 14px 160px minmax(0, 1fr) 120px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.eventColumns {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.events {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.events li + li {
+  border-top: 1px solid var(--border);
+}
+
+.events summary {
+  min-height: 42px;
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.events summary::-webkit-details-marker {
+  display: none;
+}
+
+.events summary:hover {
+  background: var(--secondary);
+}
+
+.events summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.events time,
+.events summary > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.events strong {
+  font-weight: 500;
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.events details[open] .chevron {
+  transform: rotate(90deg);
+}
+
+.events pre {
+  max-height: 400px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding: 12px 14px;
+  background: var(--background);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.empty {
+  margin: 0;
+  padding: 24px 14px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .eventColumns {
+    display: none;
+  }
+
+  .events summary {
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    gap: 4px 8px;
+  }
+
+  .events summary strong {
+    grid-row: 2;
+    grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    padding: 10px;
+  }
+
+  .toolbar > button {
+    margin-left: auto;
+  }
+
+  .context {
+    padding-inline: 12px;
+  }
+
+  .events summary {
+    padding-inline: 12px;
+    grid-template-columns: 14px minmax(0, 1fr);
+  }
+
+  .events summary > span {
+    grid-column: 2;
+    font-size: 11px;
+  }
+}

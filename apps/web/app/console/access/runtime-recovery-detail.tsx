@@ -103,7 +103,7 @@ export function RuntimeRecoveryDetailView({
               {recoveryDate(item.updatedAt)} · 已尝试 {item.attempts} 次
             </p>
             {item.resolvedAt ? (
-              <p className="text-emerald-700">
+              <p className="text-success">
                 已于 {recoveryDate(item.resolvedAt)} 完成恢复处理。
               </p>
             ) : null}

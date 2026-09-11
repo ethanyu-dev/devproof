@@ -15,7 +15,7 @@ export function runOutcome(
       description: "等待执行资源或前置条件满足，浏览器尚未开始验证。",
       label: "排队中",
       title: "等待开始验证",
-      tone: "warning" as const,
+      tone: "neutral" as const,
     };
   }
   if (detail.lifecycle === "PREPARING") {
@@ -23,7 +23,7 @@ export function runOutcome(
       description: "正在准备浏览器与执行环境，尚未得到验收结论。",
       label: "准备执行",
       title: "正在准备验证",
-      tone: "warning" as const,
+      tone: "info" as const,
     };
   }
   if (detail.lifecycle === "RUNNING") {
@@ -31,7 +31,7 @@ export function runOutcome(
       description: "浏览器正在执行验收步骤，页面会自动刷新最新进度。",
       label: "执行中",
       title: "正在验证",
-      tone: "warning" as const,
+      tone: "info" as const,
     };
   }
   if (detail.lifecycle === "WAITING_HUMAN") {

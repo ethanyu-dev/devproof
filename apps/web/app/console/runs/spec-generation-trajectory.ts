@@ -204,7 +204,10 @@ function projectAgentTaskEvent(event: TaskEvent): RunTrajectoryRecord {
   };
 }
 
-function agentEventTitle(kind: string, payload: Record<string, unknown>) {
+export function agentEventTitle(
+  kind: string,
+  payload: Record<string, unknown>,
+) {
   if (kind === "agent.analysis.completed") return "Agent 分析";
   if (kind.startsWith("agent.model.")) {
     return `模型 ${displayLabel(kind.split(".").at(-1) ?? kind)}`;

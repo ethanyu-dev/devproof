@@ -4,14 +4,15 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const alertVariants = cva(
-  "relative grid w-full gap-1 rounded-lg border px-2.5 py-2 text-[10px] [&>svg]:absolute [&>svg]:left-2.5 [&>svg]:top-2.5 [&>svg]:size-3 [&>svg+div]:pl-5",
+  "relative grid w-full gap-1 rounded-lg border px-3 py-3 text-[13px] leading-5 [&>svg]:absolute [&>svg]:left-3 [&>svg]:top-3.5 [&>svg]:size-4 [&>svg+div]:pl-6",
   {
     variants: {
       variant: {
         default: "border-border bg-card text-card-foreground",
-        destructive: "border-destructive/20 bg-destructive/5 text-destructive",
-        success: "border-emerald-200 bg-emerald-50 text-emerald-800",
-        warning: "border-amber-200 bg-amber-50 text-amber-800",
+        destructive:
+          "border-destructive/20 bg-destructive-soft text-destructive",
+        success: "border-success/20 bg-success-soft text-success",
+        warning: "border-warning/20 bg-warning-soft text-warning",
       },
     },
     defaultVariants: { variant: "default" },
@@ -50,7 +51,7 @@ function AlertDescription({
   return (
     <div
       data-slot="alert-description"
-      className={cn("text-[10px] opacity-90", className)}
+      className={cn("text-[13px] leading-5", className)}
       {...props}
     />
   );

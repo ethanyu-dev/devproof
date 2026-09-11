@@ -29,28 +29,39 @@
 }
 
 .actions {
-  gap: 2px;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .actions button {
-  min-height: 26px;
+  min-height: 32px;
   gap: 5px;
   border: 0;
   background: transparent;
   color: var(--ek-muted);
   padding: 0 6px;
   font:
-    10px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
   cursor: pointer;
 }
 
-.actions button:hover,
-.actions button[aria-pressed="true"] {
+.actions button:hover {
   background: var(--ek-surface-2);
   color: var(--ek-fg);
+}
+
+.actions button[aria-pressed="true"] {
+  background: var(--ek-brand-soft);
+  color: var(--ek-brand);
+}
+
+.actions button:focus-visible,
+.search:focus-within {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .actions svg {
@@ -75,13 +86,13 @@
 
 .search input {
   width: 100%;
-  min-height: 24px;
+  min-height: 32px;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--ek-fg);
   font:
-    10px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -96,8 +107,8 @@
 
 .lane {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  min-height: 11px;
+  grid-template-columns: 64px minmax(0, 1fr);
+  min-height: 22px;
   align-items: center;
 }
 
@@ -105,7 +116,7 @@
   color: var(--ek-muted);
   padding-right: 7px;
   font:
-    8px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -114,7 +125,7 @@
 
 .track {
   position: relative;
-  height: 9px;
+  height: 14px;
   overflow: hidden;
   border-left: 1px solid var(--ek-border);
   background-image: linear-gradient(
@@ -134,23 +145,23 @@
 .track button {
   position: absolute;
   top: 1px;
-  height: 7px;
+  height: 10px;
   border: 0;
-  background: #6f96dc;
+  background: var(--ek-fg-2);
   padding: 0;
   cursor: pointer;
 }
 
 .track button[data-lane="MODEL"] {
-  background: #8a70b8;
+  background: var(--ek-brand);
 }
 
 .track button[data-lane="TOOLS"] {
-  background: #d47b28;
+  background: var(--ek-info);
 }
 
 .track button[data-status="FAILED"] {
-  background: #df2020;
+  background: var(--ek-danger);
 }
 
 .content {
@@ -188,7 +199,7 @@
   background: var(--ek-bg);
   color: var(--ek-muted);
   font:
-    9px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -201,16 +212,16 @@
 
 .turnHeader {
   width: 100%;
-  min-height: 28px;
+  min-height: 36px;
   justify-content: space-between;
   gap: 12px;
   border: 0;
-  border-bottom: 2px solid var(--ek-border-2);
+  border-bottom: 1px solid var(--ek-border);
   background: var(--ek-bg);
   color: var(--ek-fg-2);
   padding: 0 12px;
   font:
-    9px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -236,9 +247,12 @@
   cursor: pointer;
 }
 
-.record:hover,
-.record[data-selected="true"] {
+.record:hover {
   background: var(--ek-surface-2);
+}
+
+.record[data-selected="true"] {
+  background: var(--ek-brand-soft);
 }
 
 .dot {
@@ -246,7 +260,7 @@
   left: 12px;
   width: 4px;
   height: 4px;
-  border-radius: 50%;
+  border-radius: var(--radius-sm);
   background: var(--ek-border-2);
 }
 
@@ -262,12 +276,12 @@
 
 .tag {
   flex: 0 0 auto;
-  border-radius: 3px;
-  background: #edf3ff;
-  color: #4875c6;
+  border-radius: var(--radius-sm);
+  background: var(--ek-surface-2);
+  color: var(--ek-fg-2);
   padding: 2px 6px;
   font:
-    8px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -275,14 +289,14 @@
 }
 
 .record[data-kind="MODEL"] .tag {
-  background: #f1ecf8;
-  color: #73549f;
+  background: var(--ek-brand-soft);
+  color: var(--ek-brand);
 }
 
 .record[data-kind="TOOL"] .tag,
 .record[data-kind="RUNTIME"] .tag {
-  background: #fff1e4;
-  color: #c56819;
+  background: var(--ek-info-soft);
+  color: var(--ek-info);
 }
 
 .record[data-status="FAILED"] .tag {
@@ -306,7 +320,7 @@
 
 .summary b {
   font:
-    10px ui-monospace,
+    13px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -317,7 +331,7 @@
 .duration {
   color: var(--ek-muted);
   font:
-    9px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -334,13 +348,9 @@
   display: grid;
   min-width: 0;
   max-width: 100%;
-  max-height: min(64svh, 620px);
   gap: 12px;
   align-self: start;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  overflow: visible;
   border-left: 1px solid var(--ek-border-2);
   background: var(--ek-bg);
   padding: 14px;
@@ -358,7 +368,7 @@
 .inspector header b,
 .inspector header small {
   font:
-    10px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -390,7 +400,7 @@
 .inspector dd {
   margin: 0;
   font:
-    9px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -418,7 +428,7 @@
   padding: 7px 9px;
   color: var(--ek-muted);
   font:
-    9px ui-monospace,
+    12px ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -434,7 +444,7 @@
   padding: 9px;
   color: var(--ek-fg-2);
   font:
-    9px/1.55 ui-monospace,
+    12px/1.55 ui-monospace,
     SFMono-Regular,
     Menlo,
     monospace;
@@ -448,11 +458,8 @@
   }
 
   .inspector {
-    position: sticky;
-    top: 0;
+    position: static;
     grid-row: 1;
-    max-height: min(55svh, 480px);
-    overflow: auto;
     border-top: 1px solid var(--ek-border-2);
     border-left: 0;
   }

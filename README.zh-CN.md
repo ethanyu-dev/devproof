@@ -32,7 +32,7 @@ DevProof 将这些问题收敛到一个统一控制面：调用方只需要描�
 3. **Agent Runtime**：独立部署的轻量 Worker，领取具体 Run，调用模型完成推理，并把高层动作发送给 Execution Runner。
 4. **Execution Runner**：提供实际受控环境。Browser Runtime 是当前第一个 Runner；协议边界允许继续扩展 HTTP、Shell 和 Container Runner。
 
-执行产生的 Screenshot、DOM、Console、Network、视频和结构化事件统一回传控制面，形成从任务输入、执行轨迹到最终结论的完整证据链。Console 在同一控制面上提供配置、可观测性和人工接管能力。
+执行产生的 Screenshot、DOM、Console、Network、视频和结构化事件统一回传控制面，形成从任务输入、执行轨迹到最终结论的完整证据链。Console 在同一控制面上提供配置、任务执行详情和人工接管能力。
 
 Browser Runtime 是第一个 Execution Runner，而不是平台边界。用户可见的 `TaskExecution` 是聚合根：Issue 任务固定包含“Spec 分析生成”“Profile 解析”和“Spec 执行”三个阶段；原 `ExecutionRun` 保留为 Case 级实际执行与证据载体。
 
@@ -87,7 +87,7 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 - 不可变 Case Version、可重放 Run Snapshot 与幂等创建
 - 追加式 Trace、对象制品引用和 HITL Checkpoint 数据底座
 - W3C Trace/Request 关联、MCP/HTTP Tool 调用审计、Agent 模型与工具轨迹
-- 真实 Readiness、Prometheus 指标、Worker 心跳、告警规则和可观测性 Console
+- 真实 Readiness、Prometheus 指标、Worker 心跳、告警规则和带鉴权的监控 API
 - 按 Run 策略执行的事件/制品保留与对象存储清理
 - Run v2 的单一控制面与 `lifecycle / executionDisposition / verdict` 三状态轴
 - Agent Runtime 的 claim、heartbeat、fencing、事件与幂等 outcome 协议
@@ -130,7 +130,7 @@ Docker 中的 PostgreSQL、Redis、MinIO API 分别映射到宿主机 55432、56
 
 ## 可观测性
 
-API 提供 `/live`、`/ready` 和带 Bearer 保护的 `/metrics`；Web 使用 API 的真实依赖 Readiness。Console 的“系统监控”页面可查看依赖、Worker、业务积压、MCP/HTTP Tool 调用和控制面操作记录。生产环境必须配置 `OBSERVABILITY_METRICS_TOKEN`。
+API 提供 `/live`、`/ready` 和带 Bearer 保护的 `/metrics`；Web 使用 API 的真实依赖 Readiness。系统监控不再作为面向用户的 Console 功能；依赖、Worker、业务积压、Tool 调用和操作审计继续通过带鉴权的监控 API 提供。独立的免登录状态页计划在后续版本实现。生产环境必须配置 `OBSERVABILITY_METRICS_TOKEN`。
 
 Prometheus 抓取、告警、Grafana Dashboard、日志字段、数据保留和逐项告警处置见 [docs/observability.md](docs/observability.md)。
 

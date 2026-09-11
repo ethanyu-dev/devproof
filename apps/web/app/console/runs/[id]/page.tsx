@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
+import { TaskDetailClient } from "../task-detail-client";
 
 export const metadata: Metadata = { title: "任务详情" };
 
@@ -9,5 +9,5 @@ export default async function RunDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  redirect(`/console/runs?task=${encodeURIComponent(id)}`);
+  return <TaskDetailClient id={id} key={id} />;
 }
