@@ -97,7 +97,7 @@ export function ChartTooltipContent({
           return (
             <span className="flex items-center gap-2" key={key}>
               <i
-                className="size-2 rounded-[2px]"
+                className="size-2 rounded-sm"
                 style={color ? { background: color } : undefined}
               />
               <small className="flex-1 text-muted-foreground">

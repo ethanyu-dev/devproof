@@ -9,7 +9,7 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card"
       className={cn(
-        "flex flex-col gap-4 rounded-lg border border-border/80 bg-card py-4 text-card-foreground shadow-[0_1px_2px_rgba(15,23,42,0.03)]",
+        "flex flex-col gap-4 rounded-lg border border-border/80 bg-card py-4 text-card-foreground shadow-[0_1px_2px_color-mix(in_srgb,var(--foreground)_3%,transparent)]",
         usesLegacyLayout && "gap-0 py-0",
         className,
       )}

@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  Activity,
-  Cable,
-  Gauge,
-  LogOut,
-  Menu,
-  UserRoundCheck,
-  X,
-} from "lucide-react";
+import { Activity, Cable, LogOut, Menu, UserRoundCheck, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -44,12 +36,6 @@ const adminSections = [
     href: "/console/access",
     icon: Cable,
     label: "接入配置",
-    group: "管理",
-  },
-  {
-    href: "/console/observability",
-    icon: Gauge,
-    label: "系统监控",
     group: "管理",
   },
 ] as const;
@@ -119,8 +105,8 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     if (sessionError) {
       return (
         <main className="grid min-h-svh place-items-center bg-muted/30 p-6">
-          <div className="w-full max-w-md rounded-2xl border bg-card p-6 shadow-sm">
-            <div className="mb-5 grid size-10 place-items-center rounded-xl bg-destructive/10 text-destructive">
+          <div className="w-full max-w-md rounded-lg border bg-card p-6 shadow-sm">
+            <div className="mb-5 grid size-10 place-items-center rounded-lg bg-muted text-destructive">
               <X className="size-5" />
             </div>
             <h1 className="text-lg font-semibold">无法连接 DevProof</h1>
@@ -144,7 +130,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         role="status"
       >
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          <span className="size-2 animate-pulse rounded-full bg-primary" />
+          <span className="size-2 animate-pulse rounded-md bg-primary" />
           正在进入工作区…
         </div>
       </main>
@@ -156,7 +142,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className="min-h-svh bg-muted/30 lg:grid lg:grid-cols-[232px_minmax(0,1fr)]"
+      className="min-h-svh bg-background lg:grid lg:grid-cols-[232px_minmax(0,1fr)]"
       data-console-role="admin"
     >
       <aside className="fixed inset-y-0 left-0 z-50 hidden w-[232px] flex-col border-r border-border/80 bg-sidebar lg:flex">
@@ -170,7 +156,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
                 DevProof
               </strong>
               <small className="mt-1 block text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                Admin console
+                团队控制台
               </small>
             </span>
           </Link>
@@ -181,7 +167,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         >
           {groupedSections.map((group) => (
             <div className="mb-4" key={group}>
-              <p className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              <p className="mb-2 px-3 text-xs font-medium text-muted-foreground">
                 {group}
               </p>
               <div className="grid gap-1">
@@ -201,15 +187,15 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="border-t border-sidebar-border p-3">
-          <div className="flex items-center gap-3 rounded-xl px-2 py-2">
+          <div className="flex items-center gap-3 rounded-lg px-2 py-2">
             {session.user.avatarUrl ? (
               <img
                 alt=""
-                className="size-9 rounded-full object-cover"
+                className="size-9 rounded-lg object-cover"
                 src={session.user.avatarUrl}
               />
             ) : (
-              <span className="grid size-9 place-items-center rounded-full bg-muted text-xs font-semibold">
+              <span className="grid size-9 place-items-center rounded-lg bg-muted text-xs font-semibold">
                 {name.slice(0, 1).toUpperCase()}
               </span>
             )}
@@ -217,7 +203,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               <strong className="block truncate text-xs font-medium">
                 {name}
               </strong>
-              <small className="block truncate text-[10px] text-muted-foreground">
+              <small className="block truncate text-xs text-muted-foreground">
                 {session.user.email ?? "飞书公司成员"}
               </small>
             </span>
@@ -234,7 +220,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="min-w-0 lg:col-start-2">
-        <header className="sticky top-0 z-40 flex h-14 items-center justify-between border-b border-border/80 bg-background/95 px-4 backdrop-blur sm:px-5 lg:px-6">
+        <header className="sticky top-0 z-40 flex h-14 items-center justify-between border-b border-border/80 bg-card/95 px-4 backdrop-blur sm:px-5 lg:px-6">
           <div className="flex items-center gap-3">
             <Button
               aria-label={mobileNavOpen ? "关闭管理员导航" : "打开管理员导航"}
@@ -245,11 +231,16 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
             >
               {mobileNavOpen ? <X /> : <Menu />}
             </Button>
-            <div>
-              <strong className="text-sm font-semibold">{current.label}</strong>
-              <p className="hidden text-[11px] text-muted-foreground sm:block">
+            <div className="flex min-w-0 items-center gap-2 text-[13px]">
+              <strong className="truncate font-medium">
                 {session.team.name}
-              </p>
+              </strong>
+              <span aria-hidden="true" className="text-border">
+                /
+              </span>
+              <span className="shrink-0 text-muted-foreground">
+                {current.group}
+              </span>
             </div>
           </div>
         </header>
@@ -300,8 +291,10 @@ function ConsoleNavLink({
     <Link
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex h-9 items-center gap-2.5 rounded-md px-2.5 text-xs font-medium text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-        active && "bg-sidebar-accent text-sidebar-accent-foreground shadow-xs",
+        "flex h-10 items-center gap-2.5 rounded-md px-3 text-[13px] font-medium text-muted-foreground transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "hover:bg-card hover:text-foreground",
       )}
       href={href}
     >

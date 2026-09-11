@@ -9,8 +9,8 @@ import { Select } from "@/components/ui/native-select";
 import { Toggle } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  ArrowDown,
-  ArrowUp,
+  ArrowLeft,
+  ArrowRight,
   Bot,
   Cable,
   Clipboard,
@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import {
   type FormEvent,
+  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -52,6 +53,8 @@ import {
   runtimeRecoveryPath,
 } from "./recovery-ui";
 import { useRecoveryResource } from "./use-recovery-resource";
+import { AccessCollection } from "./access-collection";
+import styles from "./access.module.css";
 
 type Scope =
   | "verification:read"
@@ -215,22 +218,22 @@ const accessSections: Array<{
   {
     icon: MonitorUp,
     id: "browser",
-    label: "浏览器执行节点配置",
+    label: "执行节点",
   },
   {
     icon: GitPullRequest,
     id: "github",
-    label: "GitHub 访问权限配置",
+    label: "GitHub 凭证",
   },
   {
     icon: Bot,
     id: "agent-runtime",
-    label: "Agent 模型配置",
+    label: "Agent 模型",
   },
   {
     icon: Cable,
     id: "mcp",
-    label: "MCP 配置",
+    label: "MCP Token",
   },
 ];
 
@@ -332,6 +335,9 @@ export function AccessClient() {
   const [pendingItem, setPendingItem] = useState<string | null>(null);
   const pairingRef = useRef<HTMLDivElement>(null);
   const issuedRef = useRef<HTMLDivElement>(null);
+  const githubEditorRef = useRef<HTMLFormElement>(null);
+  const agentEditorRef = useRef<HTMLFormElement>(null);
+  const policyEditorRef = useRef<HTMLFormElement>(null);
 
   const mcpCredentials = useMemo(
     () =>
@@ -954,7 +960,7 @@ export function AccessClient() {
     agentModels !== null;
 
   return (
-    <>
+    <div className={styles.page}>
       <PageHeader
         actions={
           <Button
@@ -970,14 +976,22 @@ export function AccessClient() {
         title="接入配置"
       />
 
-      <nav aria-label="接入配置分类" className="dp-access-navigation">
+      <nav
+        aria-label="接入配置分类"
+        className={styles.navigation}
+        role="tablist"
+        onKeyDown={navigateTabs}
+      >
         {accessSections.map((section) => {
           const Icon = section.icon;
           const active = activeSection === section.id;
           return (
             <button
-              aria-pressed={active}
-              className={active ? "active" : undefined}
+              aria-selected={active}
+              aria-controls={`access-panel-${section.id}`}
+              id={`access-tab-${section.id}`}
+              role="tab"
+              tabIndex={active ? 0 : -1}
               key={section.id}
               onClick={() => {
                 setActiveSection(section.id);
@@ -1013,7 +1027,12 @@ export function AccessClient() {
       ) : (
         <>
           {activeSection === "browser" ? (
-            <section className="dp-access-module">
+            <section
+              className="dp-access-module"
+              id="access-panel-browser"
+              role="tabpanel"
+              aria-labelledby="access-tab-browser"
+            >
               <div className="mb-3">
                 <RecoveryFeedback
                   error={
@@ -1104,6 +1123,151 @@ export function AccessClient() {
               ) : null}
 
               <div className="dp-runtime-layout">
+                <section className="dp-runtime-aside">
+                  <Card className="dp-runtime-section">
+                    <div className="dp-section-head">
+                      <span>
+                        <MonitorUp />
+                        <b>可用执行节点</b>
+                      </span>
+                      <span>
+                        <span className="dp-count">
+                          {
+                            runtimes.filter(
+                              (runtime) => runtime.status !== "REVOKED",
+                            ).length
+                          }{" "}
+                          个可用
+                        </span>
+                        <Button
+                          disabled={pendingItem !== null}
+                          onClick={createPairingToken}
+                          variant="secondary"
+                        >
+                          <Link2 />
+                          {pendingItem === "pairing" ? "生成中…" : "注册"}
+                        </Button>
+                      </span>
+                    </div>
+                    <AccessCollection
+                      label="浏览器执行节点列表"
+                      count={runtimes.length}
+                    >
+                      {runtimes.length ? (
+                        runtimes.map((runtime) => {
+                          const capacity = browserPool?.nodes.find(
+                            (node) => node.id === runtime.id,
+                          );
+                          return (
+                            <div className="dp-runtime-item" key={runtime.id}>
+                              <div>
+                                <i
+                                  className={`status ${runtime.status.toLowerCase()}`}
+                                />
+                                <span>
+                                  <strong title={runtime.name}>
+                                    {runtime.name}
+                                  </strong>
+                                  <small>
+                                    {runtime.deviceInfo || runtime.instanceKey}
+                                  </small>
+                                </span>
+                                <Badge tone={runtimeTone(runtime.status)}>
+                                  {displayLabel(runtime.status)}
+                                </Badge>
+                              </div>
+                              <dl>
+                                <div>
+                                  <dt>版本</dt>
+                                  <dd>{runtime.version || "未知"}</dd>
+                                </div>
+                                <div>
+                                  <dt>并发容量</dt>
+                                  <dd>{runtime.maxConcurrency}</dd>
+                                </div>
+                                <div>
+                                  <dt>最后在线</dt>
+                                  <dd>
+                                    {runtime.lastSeenAt
+                                      ? new Date(
+                                          runtime.lastSeenAt,
+                                        ).toLocaleTimeString("zh-CN")
+                                      : "从未"}
+                                  </dd>
+                                </div>
+                              </dl>
+                              {capacity ? (
+                                <div className={styles.capacity}>
+                                  <span>占用 {capacity.occupied}</span>
+                                  <span>空闲 {capacity.available}</span>
+                                  <span>
+                                    等待{" "}
+                                    {capacity.runtimeWaiting ??
+                                      capacity.waiting}
+                                  </span>
+                                  <span>隔离 {capacity.quarantined ?? 0}</span>
+                                </div>
+                              ) : null}
+                              <div className={styles.itemActions}>
+                                <Button
+                                  aria-label={`配置 ${runtime.name}`}
+                                  variant="secondary"
+                                  onClick={() => {
+                                    setPolicyRuntimeId(runtime.id);
+                                    setRuntimeConfigurationMessage(null);
+                                    focusEditor(policyEditorRef.current);
+                                  }}
+                                  disabled={runtime.status === "REVOKED"}
+                                >
+                                  配置
+                                </Button>
+                                <Button asChild variant="secondary">
+                                  <Link
+                                    href={`${recoveryPath}?runtimeId=${runtime.id}`}
+                                  >
+                                    恢复记录
+                                  </Link>
+                                </Button>
+                                <Button
+                                  asChild
+                                  variant={
+                                    runtime.drainState &&
+                                    runtime.drainState !== "NONE"
+                                      ? "primary"
+                                      : "secondary"
+                                  }
+                                >
+                                  <Link href={runtimeRecoveryPath(runtime.id)}>
+                                    {runtime.drainState &&
+                                    runtime.drainState !== "NONE"
+                                      ? "处理节点恢复"
+                                      : "排空与恢复"}
+                                  </Link>
+                                </Button>
+                                {runtime.status !== "REVOKED" ? (
+                                  <Button
+                                    disabled={pendingItem !== null}
+                                    onClick={() => revokeRuntime(runtime)}
+                                    variant="ghost"
+                                  >
+                                    <Trash2 />
+                                    撤销凭证
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="dp-runtime-empty">
+                          <MonitorUp />
+                          <strong>尚未注册执行节点</strong>
+                          <span>生成一次性命令并在执行机器运行。</span>
+                        </div>
+                      )}
+                    </AccessCollection>
+                  </Card>
+                </section>
                 <div className="dp-runtime-primary">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
@@ -1113,20 +1277,25 @@ export function AccessClient() {
                       </span>
                     </div>
                     <div className="dp-section-body dp-form">
-                      <div className="dp-form-grid">
-                        <Toggle
-                          checked={settings.hitlEnabled}
-                          label="允许验证过程中人工接管"
-                          onChange={(hitlEnabled) =>
-                            setSettings({ ...settings, hitlEnabled })
-                          }
-                        />
-                      </div>
-                      <div className="dp-config-actions">
-                        <Button disabled={savingRuntime} onClick={saveRuntime}>
-                          <Save />
-                          {savingRuntime ? "保存中…" : "保存策略"}
-                        </Button>
+                      <div className={styles.policyControls}>
+                        <div className="dp-form-grid">
+                          <Toggle
+                            checked={settings.hitlEnabled}
+                            label="允许验证过程中人工接管"
+                            onChange={(hitlEnabled) =>
+                              setSettings({ ...settings, hitlEnabled })
+                            }
+                          />
+                        </div>
+                        <div className="dp-config-actions">
+                          <Button
+                            disabled={savingRuntime}
+                            onClick={saveRuntime}
+                          >
+                            <Save />
+                            {savingRuntime ? "保存中…" : "保存策略"}
+                          </Button>
+                        </div>
                       </div>
                       {browserPool ? (
                         <div className="dp-browser-pool-summary">
@@ -1176,132 +1345,6 @@ export function AccessClient() {
                     </div>
                   </Card>
                 </div>
-
-                <aside className="dp-runtime-aside">
-                  <Card className="dp-runtime-section">
-                    <div className="dp-section-head">
-                      <span>
-                        <MonitorUp />
-                        <b>可用执行节点</b>
-                      </span>
-                      <span>
-                        <span className="dp-count">
-                          {
-                            runtimes.filter(
-                              (runtime) => runtime.status !== "REVOKED",
-                            ).length
-                          }{" "}
-                          个可用
-                        </span>
-                        <Button
-                          disabled={pendingItem !== null}
-                          onClick={createPairingToken}
-                          variant="secondary"
-                        >
-                          <Link2 />
-                          {pendingItem === "pairing" ? "生成中…" : "注册"}
-                        </Button>
-                      </span>
-                    </div>
-                    <div
-                      aria-label="浏览器执行节点列表"
-                      className="dp-runtime-list"
-                      role="region"
-                      tabIndex={0}
-                    >
-                      {runtimes.length ? (
-                        runtimes.map((runtime) => (
-                          <div className="dp-runtime-item" key={runtime.id}>
-                            <div>
-                              <i
-                                className={`status ${runtime.status.toLowerCase()}`}
-                              />
-                              <span>
-                                <strong>{runtime.name}</strong>
-                                <small>
-                                  {runtime.deviceInfo || runtime.instanceKey}
-                                </small>
-                              </span>
-                              <Badge tone={runtimeTone(runtime.status)}>
-                                {displayLabel(runtime.status)}
-                              </Badge>
-                            </div>
-                            <dl>
-                              <div>
-                                <dt>版本</dt>
-                                <dd>{runtime.version || "未知"}</dd>
-                              </div>
-                              <div>
-                                <dt>并发容量</dt>
-                                <dd>
-                                  {runtime.maxConcurrency}
-                                  {browserPool?.nodes.find(
-                                    (node) => node.id === runtime.id,
-                                  ) ? (
-                                    <small>
-                                      {` · 占用 ${browserPool.nodes.find((node) => node.id === runtime.id)!.occupied} · 空闲 ${browserPool.nodes.find((node) => node.id === runtime.id)!.available} · 槽位等待 ${browserPool.nodes.find((node) => node.id === runtime.id)!.runtimeWaiting ?? browserPool.nodes.find((node) => node.id === runtime.id)!.waiting} · 隔离中 ${browserPool.nodes.find((node) => node.id === runtime.id)!.quarantined ?? 0}`}
-                                    </small>
-                                  ) : null}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>最后在线</dt>
-                                <dd>
-                                  {runtime.lastSeenAt
-                                    ? new Date(
-                                        runtime.lastSeenAt,
-                                      ).toLocaleTimeString("zh-CN")
-                                    : "从未"}
-                                </dd>
-                              </div>
-                            </dl>
-                            <div className="flex flex-wrap gap-2">
-                              <Button asChild variant="secondary">
-                                <Link
-                                  href={`${recoveryPath}?runtimeId=${runtime.id}`}
-                                >
-                                  恢复记录
-                                </Link>
-                              </Button>
-                              <Button
-                                asChild
-                                variant={
-                                  runtime.drainState &&
-                                  runtime.drainState !== "NONE"
-                                    ? "primary"
-                                    : "secondary"
-                                }
-                              >
-                                <Link href={runtimeRecoveryPath(runtime.id)}>
-                                  {runtime.drainState &&
-                                  runtime.drainState !== "NONE"
-                                    ? "处理节点恢复"
-                                    : "排空与恢复"}
-                                </Link>
-                              </Button>
-                            </div>
-                            {runtime.status !== "REVOKED" ? (
-                              <Button
-                                disabled={pendingItem !== null}
-                                onClick={() => revokeRuntime(runtime)}
-                                variant="ghost"
-                              >
-                                <Trash2 />
-                                撤销连接凭证
-                              </Button>
-                            ) : null}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="dp-runtime-empty">
-                          <MonitorUp />
-                          <strong>尚未注册执行节点</strong>
-                          <span>生成一次性命令并在执行机器运行。</span>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                </aside>
               </div>
 
               <Card className="dp-runtime-section dp-network-policy-card">
@@ -1315,6 +1358,7 @@ export function AccessClient() {
                 <div className="dp-section-body">
                   <form
                     className="dp-network-policy-form"
+                    ref={policyEditorRef}
                     onSubmit={saveRuntimeConfiguration}
                   >
                     <Field label="目标执行节点">
@@ -1485,11 +1529,16 @@ export function AccessClient() {
                   </form>
 
                   {routingRules.length ? (
-                    <div className="dp-routing-list">
+                    <AccessCollection
+                      label="域名路由规则列表"
+                      count={routingRules.length}
+                    >
                       {routingRules.map((rule) => (
                         <div className="dp-routing-rule" key={rule.id}>
                           <div>
-                            <code>{rule.hostnamePattern}</code>
+                            <code title={rule.hostnamePattern}>
+                              {rule.hostnamePattern}
+                            </code>
                             <Badge tone={rule.enabled ? "success" : "neutral"}>
                               {rule.enabled ? "已启用" : "已停用"}
                             </Badge>
@@ -1523,7 +1572,7 @@ export function AccessClient() {
                           </Button>
                         </div>
                       ))}
-                    </div>
+                    </AccessCollection>
                   ) : (
                     <div className="dp-routing-empty">
                       尚无域名规则；验证会从在线且能力匹配的执行节点中随机分配。
@@ -1535,7 +1584,12 @@ export function AccessClient() {
           ) : null}
 
           {activeSection === "github" ? (
-            <section className="dp-access-module">
+            <section
+              className="dp-access-module"
+              id="access-panel-github"
+              role="tabpanel"
+              aria-labelledby="access-tab-github"
+            >
               {githubMessage ? (
                 <div className="dp-runtime-message">
                   <FormMessage
@@ -1545,6 +1599,89 @@ export function AccessClient() {
                 </div>
               ) : null}
               <div className="dp-runtime-layout">
+                <section className="dp-runtime-aside">
+                  <Card className="dp-runtime-section">
+                    <div className="dp-section-head">
+                      <span>
+                        <GitPullRequest />
+                        <b>GitHub 凭证列表</b>
+                      </span>
+                      <span className="dp-count">
+                        {githubCredentials.filter((row) => row.enabled).length}{" "}
+                        个启用
+                      </span>
+                    </div>
+                    <AccessCollection
+                      label="GitHub 凭证列表"
+                      count={githubCredentials.length}
+                    >
+                      {githubCredentials.length ? (
+                        githubCredentials.map((credential) => (
+                          <div
+                            className={`dp-runtime-item ${githubCredentialId === credential.id ? "selected" : ""}`}
+                            key={credential.id}
+                          >
+                            <div>
+                              <i
+                                className={`status ${credential.enabled ? "online" : "revoked"}`}
+                              />
+                              <span>
+                                <strong title={credential.name}>
+                                  {credential.name}
+                                </strong>
+                                <small>
+                                  {credential.tokenHint} ·{" "}
+                                  {credential.enabled ? "启用" : "停用"}
+                                </small>
+                              </span>
+                            </div>
+                            <dl>
+                              <div>
+                                <dt>范围</dt>
+                                <dd>
+                                  {githubCredentialScopeLabel(
+                                    credential.organizations,
+                                    credential.repositories,
+                                  )}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>优先级</dt>
+                                <dd>{credential.priority}</dd>
+                              </div>
+                            </dl>
+                            <div className={styles.itemActions}>
+                              <Button
+                                aria-label={`编辑 ${credential.name}`}
+                                onClick={() => {
+                                  editGithubCredential(credential);
+                                  focusEditor(githubEditorRef.current);
+                                }}
+                                variant="secondary"
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                disabled={pendingItem !== null}
+                                onClick={() =>
+                                  deleteGithubCredential(credential)
+                                }
+                                variant="ghost"
+                              >
+                                <Trash2 />
+                                删除
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="dp-runtime-empty">
+                          <strong>尚未配置 GitHub 凭证</strong>
+                        </div>
+                      )}
+                    </AccessCollection>
+                  </Card>
+                </section>
                 <div className="dp-runtime-primary">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
@@ -1557,6 +1694,7 @@ export function AccessClient() {
                     </div>
                     <form
                       className="dp-section-body dp-form"
+                      ref={githubEditorRef}
                       onSubmit={saveGithubCredential}
                     >
                       <div className="dp-form-grid">
@@ -1672,85 +1810,21 @@ export function AccessClient() {
                     </form>
                   </Card>
                 </div>
-                <aside className="dp-runtime-aside">
-                  <Card className="dp-runtime-section">
-                    <div className="dp-section-head">
-                      <span>
-                        <GitPullRequest />
-                        <b>GitHub 凭证列表</b>
-                      </span>
-                      <span className="dp-count">
-                        {githubCredentials.filter((row) => row.enabled).length}{" "}
-                        个启用
-                      </span>
-                    </div>
-                    <div className="dp-runtime-list">
-                      {githubCredentials.length ? (
-                        githubCredentials.map((credential) => (
-                          <div
-                            className={`dp-runtime-item ${githubCredentialId === credential.id ? "selected" : ""}`}
-                            key={credential.id}
-                          >
-                            <div>
-                              <i
-                                className={`status ${credential.enabled ? "online" : "revoked"}`}
-                              />
-                              <span>
-                                <strong>{credential.name}</strong>
-                                <small>
-                                  {credential.tokenHint} ·{" "}
-                                  {credential.enabled ? "启用" : "停用"}
-                                </small>
-                              </span>
-                            </div>
-                            <dl>
-                              <div>
-                                <dt>范围</dt>
-                                <dd>
-                                  {githubCredentialScopeLabel(
-                                    credential.organizations,
-                                    credential.repositories,
-                                  )}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>优先级</dt>
-                                <dd>{credential.priority}</dd>
-                              </div>
-                            </dl>
-                            <Button
-                              onClick={() => editGithubCredential(credential)}
-                              variant="secondary"
-                            >
-                              编辑
-                            </Button>
-                            <Button
-                              disabled={pendingItem !== null}
-                              onClick={() => deleteGithubCredential(credential)}
-                              variant="ghost"
-                            >
-                              <Trash2 />
-                              删除
-                            </Button>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="dp-runtime-empty">
-                          <strong>尚未配置 GitHub 凭证</strong>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                </aside>
               </div>
             </section>
           ) : null}
 
           {activeSection === "agent-runtime" ? (
-            <section className="dp-access-module">
+            <section
+              className="dp-access-module"
+              id="access-panel-agent-runtime"
+              role="tabpanel"
+              aria-labelledby="access-tab-agent-runtime"
+            >
               <nav
                 aria-label="Agent Runtime 模型池"
-                className="dp-agent-model-navigation"
+                className={styles.poolNavigation}
+                onKeyDown={navigateTabs}
                 role="tablist"
               >
                 {agentModelPoolTabs.map((pool) => {
@@ -1763,6 +1837,7 @@ export function AccessClient() {
                     <button
                       aria-controls="agent-model-pool-panel"
                       aria-selected={active}
+                      tabIndex={active ? 0 : -1}
                       id={`agent-model-pool-${pool.id.toLowerCase()}`}
                       key={pool.id}
                       onClick={() => {
@@ -1790,6 +1865,90 @@ export function AccessClient() {
                 id="agent-model-pool-panel"
                 role="tabpanel"
               >
+                <section className="dp-runtime-aside">
+                  <Card className="dp-runtime-section">
+                    <div className="dp-section-head">
+                      <span>
+                        <Bot />
+                        <b>{agentModelPoolLabels[agentModelPool]} 模型优先级</b>
+                      </span>
+                      <span className="dp-count">
+                        {pooledAgentModels.length}/10
+                      </span>
+                    </div>
+                    <AccessCollection
+                      key={agentModelPool}
+                      label="模型优先级列表"
+                      count={pooledAgentModels.length}
+                    >
+                      {pooledAgentModels.length ? (
+                        pooledAgentModels.map((model, index) => (
+                          <div
+                            className={`dp-agent-model-item ${agentModelId === model.id ? "selected" : ""}`}
+                            key={model.id}
+                          >
+                            <div className="dp-agent-model-summary">
+                              <span>P{index + 1}</span>
+                              <button
+                                aria-label={`编辑 ${model.displayName}`}
+                                onClick={() => {
+                                  editAgentModel(model);
+                                  focusEditor(agentEditorRef.current);
+                                }}
+                                type="button"
+                              >
+                                <strong title={model.displayName}>
+                                  {model.displayName}
+                                </strong>
+                                <code>{model.modelId}</code>
+                              </button>
+                              <div className="dp-agent-model-actions">
+                                <Button
+                                  aria-label={`提高 ${model.displayName} 的优先级`}
+                                  disabled={index === 0 || pendingItem !== null}
+                                  onClick={() => void moveAgentModel(index, -1)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <ArrowLeft />
+                                </Button>
+                                <Button
+                                  aria-label={`降低 ${model.displayName} 的优先级`}
+                                  disabled={
+                                    index === pooledAgentModels.length - 1 ||
+                                    pendingItem !== null
+                                  }
+                                  onClick={() => void moveAgentModel(index, 1)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <ArrowRight />
+                                </Button>
+                                <Button
+                                  aria-label={`删除 ${model.displayName}`}
+                                  disabled={pendingItem !== null}
+                                  onClick={() => void deleteAgentModel(model)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </div>
+                            </div>
+                            <div className="dp-agent-model-meta">
+                              <code>{model.baseUrl}</code>
+                              <span>{model.apiKeyHint}</span>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="dp-runtime-empty">
+                          <strong>尚未配置模型</strong>
+                        </div>
+                      )}
+                    </AccessCollection>
+                  </Card>
+                </section>
                 <div className="dp-runtime-primary">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
@@ -1803,6 +1962,7 @@ export function AccessClient() {
                     </div>
                     <form
                       className="dp-section-body dp-form"
+                      ref={agentEditorRef}
                       onSubmit={saveAgentModel}
                     >
                       <div className="dp-form-grid">
@@ -1889,87 +2049,17 @@ export function AccessClient() {
                     </form>
                   </Card>
                 </div>
-
-                <aside className="dp-runtime-aside">
-                  <Card className="dp-runtime-section">
-                    <div className="dp-section-head">
-                      <span>
-                        <Bot />
-                        <b>{agentModelPoolLabels[agentModelPool]} 模型优先级</b>
-                      </span>
-                      <span className="dp-count">
-                        {pooledAgentModels.length}/10
-                      </span>
-                    </div>
-                    <div className="dp-agent-model-list">
-                      {pooledAgentModels.length ? (
-                        pooledAgentModels.map((model, index) => (
-                          <div
-                            className={`dp-agent-model-item ${agentModelId === model.id ? "selected" : ""}`}
-                            key={model.id}
-                          >
-                            <div className="dp-agent-model-summary">
-                              <span>P{index + 1}</span>
-                              <button
-                                onClick={() => editAgentModel(model)}
-                                type="button"
-                              >
-                                <strong>{model.displayName}</strong>
-                                <code>{model.modelId}</code>
-                              </button>
-                              <div className="dp-agent-model-actions">
-                                <Button
-                                  aria-label={`上移 ${model.displayName}`}
-                                  disabled={index === 0 || pendingItem !== null}
-                                  onClick={() => void moveAgentModel(index, -1)}
-                                  type="button"
-                                  variant="ghost"
-                                >
-                                  <ArrowUp />
-                                </Button>
-                                <Button
-                                  aria-label={`下移 ${model.displayName}`}
-                                  disabled={
-                                    index === pooledAgentModels.length - 1 ||
-                                    pendingItem !== null
-                                  }
-                                  onClick={() => void moveAgentModel(index, 1)}
-                                  type="button"
-                                  variant="ghost"
-                                >
-                                  <ArrowDown />
-                                </Button>
-                                <Button
-                                  aria-label={`删除 ${model.displayName}`}
-                                  disabled={pendingItem !== null}
-                                  onClick={() => void deleteAgentModel(model)}
-                                  type="button"
-                                  variant="ghost"
-                                >
-                                  <Trash2 />
-                                </Button>
-                              </div>
-                            </div>
-                            <div className="dp-agent-model-meta">
-                              <code>{model.baseUrl}</code>
-                              <span>{model.apiKeyHint}</span>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="dp-runtime-empty">
-                          <strong>尚未配置模型</strong>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                </aside>
               </div>
             </section>
           ) : null}
 
           {activeSection === "mcp" ? (
-            <section className="dp-access-module">
+            <section
+              className="dp-access-module"
+              id="access-panel-mcp"
+              role="tabpanel"
+              aria-labelledby="access-tab-mcp"
+            >
               {credentialMessage ? (
                 <div className="dp-runtime-message">
                   <FormMessage
@@ -2007,6 +2097,89 @@ export function AccessClient() {
               ) : null}
 
               <div className="dp-runtime-layout">
+                <section className="dp-runtime-aside">
+                  <Card className="dp-runtime-section">
+                    <div className="dp-section-head">
+                      <span>
+                        <KeyRound />
+                        <b>访问 Token</b>
+                      </span>
+                      <span className="dp-count">
+                        {
+                          mcpCredentials.filter(
+                            (credential) => !credential.revokedAt,
+                          ).length
+                        }{" "}
+                        个可用
+                      </span>
+                    </div>
+                    <AccessCollection
+                      label="访问 Token 列表"
+                      count={mcpCredentials.length}
+                    >
+                      {mcpCredentials.length ? (
+                        mcpCredentials.map((row) => (
+                          <div className="dp-runtime-item" key={row.id}>
+                            <div>
+                              <i
+                                className={`status ${row.revokedAt ? "revoked" : "online"}`}
+                              />
+                              <span>
+                                <strong title={row.name}>{row.name}</strong>
+                                <small>
+                                  {row.tokenHint} ·{" "}
+                                  {row.revokedAt ? "已撤销" : "可用"}
+                                </small>
+                              </span>
+                            </div>
+                            <dl>
+                              <div>
+                                <dt>权限</dt>
+                                <dd title={scopeLabel(row.scopes)}>
+                                  {scopeLabel(row.scopes)}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>最后使用</dt>
+                                <dd>
+                                  {row.lastUsedAt
+                                    ? new Date(
+                                        row.lastUsedAt,
+                                      ).toLocaleDateString("zh-CN")
+                                    : "从未"}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>过期时间</dt>
+                                <dd>
+                                  {row.expiresAt
+                                    ? new Date(
+                                        row.expiresAt,
+                                      ).toLocaleDateString("zh-CN")
+                                    : "永不过期"}
+                                </dd>
+                              </div>
+                            </dl>
+                            {!row.revokedAt ? (
+                              <Button
+                                disabled={pendingItem !== null}
+                                onClick={() => revokeCredential(row)}
+                                variant="ghost"
+                              >
+                                <Trash2 />
+                                撤销 Token
+                              </Button>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="dp-runtime-empty">
+                          <strong>尚未生成访问 Token</strong>
+                        </div>
+                      )}
+                    </AccessCollection>
+                  </Card>
+                </section>
                 <div className="dp-runtime-primary">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
@@ -2053,96 +2226,12 @@ export function AccessClient() {
                     </div>
                   </Card>
                 </div>
-
-                <aside className="dp-runtime-aside">
-                  <Card className="dp-runtime-section">
-                    <div className="dp-section-head">
-                      <span>
-                        <KeyRound />
-                        <b>访问 Token</b>
-                      </span>
-                      <span className="dp-count">
-                        {
-                          mcpCredentials.filter(
-                            (credential) => !credential.revokedAt,
-                          ).length
-                        }{" "}
-                        个可用
-                      </span>
-                    </div>
-                    <div
-                      aria-label="访问 Token 列表"
-                      className="dp-runtime-list"
-                      role="region"
-                      tabIndex={0}
-                    >
-                      {mcpCredentials.length ? (
-                        mcpCredentials.map((row) => (
-                          <div className="dp-runtime-item" key={row.id}>
-                            <div>
-                              <i
-                                className={`status ${row.revokedAt ? "revoked" : "online"}`}
-                              />
-                              <span>
-                                <strong>{row.name}</strong>
-                                <small>
-                                  {row.tokenHint} ·{" "}
-                                  {row.revokedAt ? "已撤销" : "可用"}
-                                </small>
-                              </span>
-                            </div>
-                            <dl>
-                              <div>
-                                <dt>权限</dt>
-                                <dd>{scopeLabel(row.scopes)}</dd>
-                              </div>
-                              <div>
-                                <dt>最后使用</dt>
-                                <dd>
-                                  {row.lastUsedAt
-                                    ? new Date(
-                                        row.lastUsedAt,
-                                      ).toLocaleDateString("zh-CN")
-                                    : "从未"}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>过期时间</dt>
-                                <dd>
-                                  {row.expiresAt
-                                    ? new Date(
-                                        row.expiresAt,
-                                      ).toLocaleDateString("zh-CN")
-                                    : "永不过期"}
-                                </dd>
-                              </div>
-                            </dl>
-                            {!row.revokedAt ? (
-                              <Button
-                                disabled={pendingItem !== null}
-                                onClick={() => revokeCredential(row)}
-                                variant="ghost"
-                              >
-                                <Trash2 />
-                                撤销 Token
-                              </Button>
-                            ) : null}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="dp-runtime-empty">
-                          <strong>尚未生成访问 Token</strong>
-                        </div>
-                      )}
-                    </div>
-                  </Card>
-                </aside>
               </div>
             </section>
           ) : null}
         </>
       )}
-    </>
+    </div>
   );
 }
 
@@ -2169,4 +2258,30 @@ function scopeLabel(scopes: Scope[]) {
     "verification:write": "创建/更新验证",
   };
   return scopes.map((scope) => labels[scope]).join("、") || "无权限";
+}
+
+function navigateTabs(event: KeyboardEvent<HTMLElement>) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  );
+  const index = tabs.indexOf(event.target as HTMLButtonElement);
+  if (index < 0) return;
+  event.preventDefault();
+  const next =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) %
+          tabs.length;
+  tabs[next]?.focus();
+  tabs[next]?.click();
+}
+
+function focusEditor(form: HTMLFormElement | null) {
+  form?.scrollIntoView({ block: "start" });
+  form
+    ?.querySelector<HTMLInputElement | HTMLSelectElement>("input, select")
+    ?.focus({ preventScroll: true });
 }

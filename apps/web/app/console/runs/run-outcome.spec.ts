@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import { runOutcome } from "./run-outcome";
 
 describe("Run lifecycle outcome", () => {
-  it.each(["QUEUED", "PREPARING", "RUNNING", "WAITING_HUMAN"])(
+  it.each([
+    ["QUEUED", "neutral"],
+    ["PREPARING", "info"],
+    ["RUNNING", "info"],
+    ["WAITING_HUMAN", "warning"],
+  ])(
     "%s never presents a stale verdict as a completed verification",
-    (lifecycle) => {
+    (lifecycle, tone) => {
       const result = runOutcome(
         { lifecycle, verdict: "PASSED" },
         "EXECUTED",
@@ -12,7 +17,7 @@ describe("Run lifecycle outcome", () => {
         [],
       );
       expect(result.title).not.toMatch(/已完成|验证通过/u);
-      expect(result.tone).toBe("warning");
+      expect(result.tone).toBe(tone);
     },
   );
   it("only completed runs present verification verdicts", () => {

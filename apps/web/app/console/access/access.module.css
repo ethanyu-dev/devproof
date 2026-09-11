@@ -1,0 +1,383 @@
+.page {
+  min-width: 0;
+}
+
+.navigation,
+.poolNavigation {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+  padding: 4px;
+}
+
+.navigation button,
+.poolNavigation button {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  padding: 7px 14px;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.navigation button:hover,
+.poolNavigation button:hover {
+  color: var(--foreground);
+}
+
+.navigation button[aria-selected="true"],
+.poolNavigation button[aria-selected="true"] {
+  background: var(--card);
+  color: var(--primary);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.navigation button:focus-visible,
+.poolNavigation button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.navigation svg,
+.poolNavigation svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.navigation strong,
+.poolNavigation strong {
+  font-weight: 600;
+}
+
+.poolNavigation {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.poolNavigation button {
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+
+.poolNavigation button[aria-selected="true"] {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.poolNavigation button > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.poolNavigation small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.page :global(.dp-runtime-layout) {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.page :global(.dp-runtime-aside) {
+  min-width: 0;
+  position: static;
+}
+
+.page :global(.dp-runtime-primary) {
+  min-width: 0;
+}
+
+.page :global(.dp-runtime-section) {
+  display: block;
+  min-width: 0;
+  padding: 0;
+}
+
+.page :global(.dp-section-head) {
+  flex-wrap: wrap;
+  min-height: 44px;
+  padding-block: 6px;
+}
+
+.page :global(.dp-section-head) > span {
+  min-width: 0;
+}
+
+.page :global(.dp-section-head) b {
+  font-size: 12px;
+}
+
+.page form {
+  scroll-margin-top: 16px;
+}
+
+.page :global(.dp-network-policy-form),
+.page :global(.dp-routing-form) {
+  margin-top: 0;
+}
+
+.page :global(.dp-routing-form) > :global([data-slot="button"]) {
+  align-self: end;
+}
+
+.page :global(.dp-browser-pool-summary) {
+  gap: 8px;
+}
+
+.page :global(.dp-browser-pool-summary) > span {
+  gap: 4px;
+  padding: 10px 12px;
+}
+
+.collectionRegion {
+  min-width: 0;
+  padding: 12px;
+}
+
+.collection {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pagination button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.page
+  .collection
+  > :is(
+    :global(.dp-runtime-item),
+    :global(.dp-agent-model-item),
+    :global(.dp-routing-rule)
+  ) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: 12px;
+}
+
+.page .collection > :global(.selected) {
+  background: var(--accent);
+}
+
+.page .collection > :global(.dp-runtime-empty) {
+  grid-column: 1 / -1;
+}
+
+.page .collection :global(.dp-runtime-item) :global([data-slot="badge"]) {
+  flex: 0 0 auto;
+}
+
+.page .collection :global(.dp-runtime-item) dl {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+.page
+  .collection
+  :global(.dp-runtime-item)
+  dl:has(> div:nth-child(2):last-child) {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+.page .collection :global(.dp-runtime-item) dl > div + div {
+  border: 0;
+}
+
+.page .collection :global(.dp-runtime-item) > :global([data-slot="button"]) {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.itemActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.itemActions :global([data-slot="button"]) {
+  padding-inline: 9px;
+}
+
+.capacity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.page .capacity > span {
+  flex: none;
+}
+
+.page .collection :global(.dp-agent-model-summary) {
+  grid-template-columns: 26px minmax(0, 1fr);
+  row-gap: 12px;
+}
+
+.page .collection :global(.dp-agent-model-summary) > span {
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.page .collection :global(.dp-agent-model-actions) {
+  grid-column: 1 / -1;
+}
+
+.page .collection :global(.dp-agent-model-actions) button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.page .collection :global(.dp-agent-model-actions) button:last-child {
+  margin-left: auto;
+}
+
+.page .collection :global(.dp-agent-model-meta) {
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.page .collection :global(.dp-routing-rule) > label {
+  margin-top: auto;
+}
+
+.page .collection :global(.dp-routing-rule) > button {
+  align-self: flex-end;
+}
+
+@media (max-width: 1180px) {
+  .collection {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .navigation {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .navigation button {
+    padding-inline: 8px;
+  }
+
+  .poolNavigation {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .poolNavigation button {
+    justify-content: flex-start;
+  }
+
+  .poolNavigation button > span {
+    flex: 1;
+    justify-content: space-between;
+  }
+
+  .collection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .collectionRegion {
+    padding: 10px;
+  }
+
+  .page :global(.dp-network-policy-actions),
+  .page :global(.dp-config-actions) {
+    flex-wrap: wrap;
+  }
+
+  .page :global(.dp-section-head) > span {
+    flex-wrap: wrap;
+  }
+
+  .page :global(.dp-mcp-endpoint) code {
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (pointer: coarse) {
+  .navigation button,
+  .poolNavigation button,
+  .pagination button,
+  .page .collection :global(.dp-agent-model-actions) button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.policyControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.page .policyControls :global(.dp-form-grid) {
+  grid-template-columns: minmax(0, 1fr);
+  width: min(360px, 100%);
+}
+
+.page .policyControls :global(.dp-config-actions) {
+  border: 0;
+  padding: 0;
+}
+
+.page :global(.dp-section-body) > .collectionRegion {
+  padding: 16px 0 0;
+}

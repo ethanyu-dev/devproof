@@ -1,6 +1,16 @@
 # Observability and operations
 
-DevProof combines structured process logs, Prometheus metrics, and durable audit events. The Console System Monitoring page is the primary team-scoped troubleshooting view.
+DevProof combines structured process logs, Prometheus metrics, and durable audit events. Operational monitoring is provided through APIs and external observability tools; the user-facing Console has no System Monitoring page or navigation entry.
+
+## Monitoring API and future public status page
+
+The following API routes remain available with the existing session authentication and team scoping:
+
+- `GET /console/api/observability/overview`: dependency and worker health, plus team execution and backlog counts.
+- `GET /console/api/observability/tool-invocations`: recent team tool calls.
+- `GET /console/api/observability/audit-events`: recent team operation records.
+
+A standalone status page outside `/console` is planned for a future release and is not implemented yet. It should work without login and show a bounded service-availability summary, degradation or outage state, and the last check time. Its public response should use a dedicated allowlist of fields; team records, user identities, credential hints, internal errors, tool-call details, and audit events remain behind the existing authenticated APIs.
 
 ## Correlation identifiers
 

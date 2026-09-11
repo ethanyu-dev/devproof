@@ -42,7 +42,7 @@ export function EmptyState({
   return (
     <div className="grid min-h-44 place-items-center px-6 py-10 text-center">
       <div>
-        <span className="mx-auto mb-3 grid size-10 place-items-center rounded-xl bg-muted text-muted-foreground">
+        <span className="mx-auto mb-3 grid size-10 place-items-center rounded-lg bg-muted text-muted-foreground">
           <Inbox className="size-5" />
         </span>
         <strong className="block text-sm font-medium">{title}</strong>
@@ -84,7 +84,7 @@ export function ErrorState({
   return (
     <div className="grid min-h-48 place-items-center px-6 py-10 text-center">
       <div className="max-w-md">
-        <span className="mx-auto mb-3 grid size-10 place-items-center rounded-xl bg-destructive/10 text-destructive">
+        <span className="mx-auto mb-3 grid size-10 place-items-center rounded-lg bg-muted text-destructive">
           <AlertCircle className="size-5" />
         </span>
         <strong className="block text-sm font-medium">暂时无法读取数据</strong>

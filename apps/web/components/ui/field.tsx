@@ -33,7 +33,7 @@ function Field({
     .join(" ");
 
   return (
-    <div data-slot="field" className={cn("grid gap-1", className)}>
+    <div data-slot="field" className={cn("grid min-w-0 gap-1.5", className)}>
       <Label htmlFor={controlId}>{label}</Label>
       {element
         ? cloneElement(element, {
@@ -43,7 +43,7 @@ function Field({
         : child}
       {description ? (
         <p
-          className="text-[10px] leading-relaxed text-muted-foreground"
+          className="text-xs leading-relaxed text-muted-foreground"
           id={descriptionId}
         >
           {description}

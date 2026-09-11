@@ -32,7 +32,7 @@ The system is organized into four layers:
 3. **Agent Runtime**: a lightweight, independently deployable worker claims Runs, invokes a model for reasoning, and sends high-level actions to an Execution Runner.
 4. **Execution Runner**: a controlled environment in which actions actually run. Browser Runtime is the first Runner; the protocol boundary is designed to support HTTP, shell, and container Runners as well.
 
-Screenshots, DOM snapshots, console logs, network traces, video, and structured events flow back into the control plane, creating an evidence chain from task input through execution trajectory to final verdict. The Console uses the same control plane for configuration, observability, and human handoff.
+Screenshots, DOM snapshots, console logs, network traces, video, and structured events flow back into the control plane, creating an evidence chain from task input through execution trajectory to final verdict. The Console uses the same control plane for configuration, task execution details, and human handoff.
 
 Browser Runtime is the first Execution Runner, not the platform boundary. The user-facing `TaskExecution` is the aggregate root. Issue tasks always contain three stages—Spec Analysis, Profile Resolution, and Spec Execution—while the original `ExecutionRun` remains the Case-level carrier for actual execution and evidence.
 
@@ -87,7 +87,7 @@ This flag controls presentation in the current browser only; it is not an author
 - Immutable Case Versions, replayable Run Snapshots, and idempotent creation
 - Append-only Traces, object artifact references, and HITL Checkpoint foundations
 - W3C Trace/Request correlation, MCP/HTTP tool invocation auditing, and agent model/tool trajectories
-- Real readiness checks, Prometheus metrics, worker heartbeats, alert rules, and an observability Console
+- Real readiness checks, Prometheus metrics, worker heartbeats, alert rules, and authenticated monitoring APIs
 - Policy-driven event and artifact retention with object-storage cleanup
 - A single Run v2 control plane and three state axes: `lifecycle`, `executionDisposition`, and `verdict`
 - Agent Runtime claim, heartbeat, fencing, event, and idempotent outcome protocols
@@ -132,7 +132,7 @@ The local `DATABASE_URL` should use port 55432 shown above. If you intentionally
 
 ## Observability
 
-The API exposes `/live`, `/ready`, and a Bearer-protected `/metrics` endpoint. Web readiness reflects the API's real dependencies. The Console System Monitoring page shows dependencies, workers, business backlogs, MCP/HTTP tool invocations, and control-plane operation records. Production requires `OBSERVABILITY_METRICS_TOKEN`.
+The API exposes `/live`, `/ready`, and a Bearer-protected `/metrics` endpoint. Web readiness reflects the API's real dependencies. System monitoring is outside the user-facing Console. Authenticated monitoring APIs retain dependency, worker, backlog, tool-invocation, and audit data for operations. A separate public status page is planned for a future release. Production requires `OBSERVABILITY_METRICS_TOKEN`.
 
 Prometheus scraping, alerts, the Grafana dashboard, log fields, data retention, and alert runbooks are documented in [docs/observability.md](docs/observability.md).
 

@@ -26,9 +26,13 @@ import {
   X,
 } from "lucide-react";
 import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/native-select";
+import styles from "./profiles.module.css";
 
 import { PageHeader } from "@/components/page-header";
 import {
@@ -274,23 +278,29 @@ export function ProfilesClient() {
   }
 
   return (
-    <>
+    <div className={styles.page}>
       <PageHeader
-        description="登录状态只保存在执行节点；在任务要求时完成登录、MFA 或授权。"
+        description="管理任务使用的登录身份，在需要时完成登录、MFA 或授权。"
         title="浏览器身份"
+        actions={
+          <Button
+            disabled={busy}
+            onClick={() => void load().catch(() => undefined)}
+            variant="secondary"
+            size="sm"
+          >
+            <RefreshCw /> 刷新
+          </Button>
+        }
       />
       {message ? (
-        <div className="dp-runtime-message">
-          <FormMessage message={message.text} tone={message.tone} />
-        </div>
+        <FormMessage message={message.text} tone={message.tone} />
       ) : null}
       {loadError && profiles !== null && !message ? (
-        <div className="dp-runtime-message">
-          <FormMessage message={loadError} tone="error" />
-        </div>
+        <FormMessage message={loadError} tone="error" />
       ) : null}
       {profiles === null ? (
-        <Card className="dp-profile-settings">
+        <Card className={styles.detail}>
           {loadError ? (
             <ErrorState
               message={loadError}
@@ -301,177 +311,244 @@ export function ProfilesClient() {
           )}
         </Card>
       ) : (
-        <div className="dp-settings-grid dp-profile-settings">
-          <section className="dp-resource-list">
-            <div className="dp-list-head">
-              <strong>我的浏览器身份</strong>
-              <span>{profiles.length} 个</span>
-            </div>
-            <div className="dp-list-items">
-              {profiles.map((profile) => (
-                <button
-                  className={`dp-list-item ${profile.id === selectedId ? "active" : ""}`}
-                  key={profile.id}
-                  onClick={() => select(profile)}
-                  type="button"
-                >
-                  <div>
-                    <strong>{profile.displayName}</strong>
-                    <Badge tone={profileTone(profile.status)}>
-                      {displayLabel(profile.status)}
-                    </Badge>
-                  </div>
-                  <small>{profile.siteHostname ?? "等待目标站点"}</small>
-                </button>
-              ))}
-              {!profiles.length ? (
-                <div className="dp-profile-empty">
-                  暂无登录任务。任务选择“使用我的浏览器身份”或“Issue
-                  负责人的浏览器身份”后，系统会按目标站点自动创建。
-                </div>
-              ) : null}
-            </div>
-          </section>
-          <section className="dp-resource-editor">
-            {selected ? (
-              <div className="dp-form">
-                <header className="dp-form-header">
-                  <div>
-                    <h2>{selected.displayName}</h2>
-                    <p>
-                      目标站点和验证规则已由任务自动生成。Cookie、localStorage
-                      和登录态只保存在分配的执行节点。
-                    </p>
-                  </div>
-                  <Badge tone={profileTone(selected.status)}>
-                    {displayLabel(selected.status)}
-                  </Badge>
-                </header>
-                <div className="dp-profile-summary">
-                  <div>
-                    <Globe2 />
-                    <span>
-                      <small>目标站点</small>
-                      <strong>{selected.siteHostname ?? "待确定"}</strong>
-                    </span>
-                  </div>
-                  <div>
-                    <ShieldCheck />
-                    <span>
-                      <small>已授权入口</small>
-                      <strong>
-                        {activeTriggerSources(selected).length
-                          ? activeTriggerSources(selected)
-                              .map(grantLabel)
-                              .join("、")
-                          : "尚未授权"}
+        <div className={styles.layout}>
+          <Card className={styles.sidebar}>
+            <section aria-labelledby="profile-list-heading">
+              <header className={styles.listHeader}>
+                <h2 id="profile-list-heading">我的浏览器身份</h2>
+                <span>{profiles.length}</span>
+              </header>
+              <div className={styles.list}>
+                {profiles.map((profile) => (
+                  <button
+                    aria-pressed={profile.id === selectedId}
+                    className={styles.entry}
+                    key={profile.id}
+                    onClick={() => select(profile)}
+                    type="button"
+                  >
+                    <span className={styles.entryHeading}>
+                      <strong title={profile.displayName}>
+                        {profile.displayName}
                       </strong>
+                      <Badge tone={profileTone(profile.status)}>
+                        {displayLabel(profile.status)}
+                      </Badge>
                     </span>
-                  </div>
-                </div>
-                <form
-                  className="dp-form"
-                  onSubmit={(event) => void saveExecutionSettings(event)}
-                >
-                  <label>
-                    执行方式
-                    <select
-                      value={executionMode}
-                      onChange={(event) => setExecutionMode(event.target.value)}
-                      disabled={busy}
-                    >
-                      <option value="SERIAL_PERSISTENT">串行复用浏览器</option>
-                      <option
-                        value="ISOLATED_AUTH"
-                        disabled={
-                          !selected.isolatedExecutionAvailable ||
-                          !selected.authSnapshotGeneration
-                        }
-                      >
-                        独立会话并发执行
-                      </option>
-                    </select>
-                  </label>
-                  {executionMode === "ISOLATED_AUTH" ? (
-                    <label>
-                      此登录身份的并发上限
-                      <input
-                        type="number"
-                        min={1}
-                        max={4}
-                        value={executionConcurrency}
-                        onChange={(event) =>
-                          setExecutionConcurrency(Number(event.target.value))
-                        }
-                        disabled={busy}
-                        required
-                      />
-                    </label>
-                  ) : null}
-                  <p className="dp-muted">
-                    {selected.authSnapshotGeneration
-                      ? "已通过 4 个独立会话的登录验证。读写冲突的 Case 仍会按数据锁排队。"
-                      : "启用并发前，请重新登录，在登录窗口勾选“验证并发登录”并保存，再切换执行方式。"}
-                    {!selected.isolatedExecutionAvailable
-                      ? "当前部署尚未启用并发登录功能。"
-                      : ""}
+                    <small>
+                      {profile.siteHostname &&
+                      profile.siteHostname !== profile.displayName
+                        ? profile.siteHostname
+                        : profile.lastUsedAt
+                          ? `最近使用 ${formatDate(profile.lastUsedAt)}`
+                          : "尚未用于任务"}
+                    </small>
+                  </button>
+                ))}
+                {!profiles.length ? (
+                  <p className={styles.emptyCopy}>
+                    暂无浏览器身份。需要登录的任务会按目标站点自动创建。
                   </p>
-                  <Button type="submit" disabled={busy}>
-                    保存执行方式
+                ) : null}
+              </div>
+              {profiles.length > 0 && (
+                <p className={styles.listHint}>
+                  身份由需要登录的任务自动创建。
+                </p>
+              )}
+            </section>
+          </Card>
+          <Card className={styles.detail}>
+            {selected ? (
+              <>
+                <header className={styles.detailHeader}>
+                  <div className={styles.identityHeading}>
+                    <div>
+                      <h2>{selected.displayName}</h2>
+                      <Badge tone={profileTone(selected.status)}>
+                        {displayLabel(selected.status)}
+                      </Badge>
+                    </div>
+                    <p>登录状态仅保存在执行节点，用于后续任务验证。</p>
+                  </div>
+                  <Button
+                    className={`dp-profile-operation-button${operation === "prepare" || operation === "reauth" ? " is-loading" : ""}`}
+                    disabled={busy || loginBlocked}
+                    onClick={() =>
+                      void action(requiresReauth ? "reauth" : "prepare")
+                    }
+                    variant={requiresReauth ? "secondary" : "primary"}
+                    size="sm"
+                  >
+                    {operation === "prepare" || operation === "reauth" ? (
+                      <LoaderCircle />
+                    ) : (
+                      <KeyRound />
+                    )}
+                    {operation === "prepare" || operation === "reauth"
+                      ? "正在打开登录页…"
+                      : requiresReauth
+                        ? "重新登录"
+                        : "准备登录"}
                   </Button>
-                </form>
+                </header>
+                <dl className={styles.facts}>
+                  <div>
+                    <dt>
+                      <Globe2 />
+                      目标站点
+                    </dt>
+                    <dd>{selected.siteHostname ?? "待确定"}</dd>
+                  </div>
+                  <div>
+                    <dt>
+                      <ShieldCheck />
+                      已授权入口
+                    </dt>
+                    <dd>
+                      {activeTriggerSources(selected).length
+                        ? activeTriggerSources(selected)
+                            .map(grantLabel)
+                            .join("、")
+                        : "尚未授权"}
+                    </dd>
+                  </div>
+                </dl>
                 {selected.pendingTriggerSources.length ? (
-                  <div className="dp-profile-consent">
-                    <span>
-                      <b>任务正在请求使用该登录状态</b>
-                      <small>
+                  <section
+                    className={styles.consent}
+                    aria-label="待确认的授权请求"
+                  >
+                    <div>
+                      <h3>任务正在请求使用此身份</h3>
+                      <p>
                         请求入口：
                         {selected.pendingTriggerSources
                           .map(grantLabel)
                           .join("、")}
-                      </small>
-                    </span>
+                      </p>
+                    </div>
                     {selected.status === "READY" ? (
                       <Button
                         disabled={busy}
                         onClick={() => void action("approve")}
+                        size="sm"
                       >
                         <ShieldCheck /> 确认授权
                       </Button>
                     ) : (
-                      <small>完成下方登录后将自动确认该请求。</small>
+                      <p>完成登录后将自动确认该请求。</p>
                     )}
+                  </section>
+                ) : null}
+                {selected.activeSession?.status !== "HUMAN_CONTROL" &&
+                ["PREPARING", "VERIFYING"].includes(selected.status) ? (
+                  <div className={styles.sessionNotice} role="status">
+                    <span>
+                      <LoaderCircle />
+                      {displayLabel(selected.status)}
+                    </span>
+                    <Button
+                      disabled={operation === "close"}
+                      onClick={() => void action("close")}
+                      variant="secondary"
+                      size="sm"
+                    >
+                      {operation === "close" ? <LoaderCircle /> : <X />}
+                      {operation === "close" ? "正在关闭…" : "关闭登录"}
+                    </Button>
                   </div>
                 ) : null}
-                <div className="dp-form-actions">
-                  <div>
-                    <Button
-                      className={`dp-profile-operation-button${
-                        operation === "prepare" || operation === "reauth"
-                          ? " is-loading"
-                          : ""
-                      }`}
-                      disabled={busy || loginBlocked}
-                      onClick={() =>
-                        void action(requiresReauth ? "reauth" : "prepare")
-                      }
-                      variant="secondary"
+                <section
+                  className={styles.settings}
+                  aria-labelledby="profile-settings-heading"
+                >
+                  <h3 id="profile-settings-heading">执行设置</h3>
+                  <form onSubmit={(event) => void saveExecutionSettings(event)}>
+                    <div
+                      className={`${styles.settingsFields}${executionMode === "ISOLATED_AUTH" ? ` ${styles.withConcurrency}` : ""}`}
                     >
-                      {operation === "prepare" || operation === "reauth" ? (
-                        <LoaderCircle />
-                      ) : (
-                        <KeyRound />
-                      )}
-                      {operation === "prepare" || operation === "reauth"
-                        ? "正在打开登录页…"
-                        : requiresReauth
-                          ? "重新登录"
-                          : "准备登录"}
-                    </Button>
+                      <Field label="执行方式">
+                        <Select
+                          value={executionMode}
+                          onChange={(event) =>
+                            setExecutionMode(event.target.value)
+                          }
+                          disabled={busy}
+                          aria-describedby="profile-execution-help"
+                        >
+                          <option value="SERIAL_PERSISTENT">
+                            串行复用浏览器
+                          </option>
+                          <option
+                            value="ISOLATED_AUTH"
+                            disabled={
+                              !selected.isolatedExecutionAvailable ||
+                              !selected.authSnapshotGeneration
+                            }
+                          >
+                            独立会话并发执行
+                          </option>
+                        </Select>
+                      </Field>
+                      {executionMode === "ISOLATED_AUTH" ? (
+                        <Field label="此登录身份的并发上限">
+                          <Input
+                            type="number"
+                            min={1}
+                            max={4}
+                            value={executionConcurrency}
+                            onChange={(event) =>
+                              setExecutionConcurrency(
+                                Number(event.target.value),
+                              )
+                            }
+                            disabled={busy}
+                            required
+                          />
+                        </Field>
+                      ) : null}
+                      <Button type="submit" disabled={busy} size="sm">
+                        {operation === "settings" ? "正在保存…" : "保存设置"}
+                      </Button>
+                    </div>
+                    <p className={styles.help} id="profile-execution-help">
+                      {!selected.isolatedExecutionAvailable
+                        ? "当前部署尚未启用并发登录功能，仅支持串行复用此身份。"
+                        : selected.authSnapshotGeneration
+                          ? "已通过 4 个独立会话的登录验证。存在读写冲突的任务仍会排队执行。"
+                          : "如需并发执行，请先重新登录，在登录窗口勾选“验证并发登录”并保存。"}
+                    </p>
+                  </form>
+                </section>
+                <dl className={styles.timestamps} aria-label="身份使用记录">
+                  <div>
+                    <dt>最近验证</dt>
+                    <dd>
+                      <ProfileTimestamp value={selected.lastVerifiedAt} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>最近使用</dt>
+                    <dd>
+                      <ProfileTimestamp value={selected.lastUsedAt} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>自动清理</dt>
+                    <dd>
+                      <ProfileTimestamp value={selected.inactivityExpiresAt} />
+                    </dd>
+                  </div>
+                </dl>
+                <footer className={styles.management}>
+                  <span>身份管理</span>
+                  <div>
                     <Button
                       disabled={busy || selected.status === "DISABLED"}
                       onClick={() => void action("disable")}
-                      variant="secondary"
+                      variant="ghost"
+                      size="sm"
                     >
                       停用
                     </Button>
@@ -479,28 +556,26 @@ export function ProfilesClient() {
                       aria-label={`永久清理 ${selected.displayName}`}
                       disabled={busy}
                       onClick={() => void purge()}
-                      variant="danger"
+                      variant="ghost"
+                      size="sm"
+                      className={styles.deleteButton}
                     >
-                      <Trash2 />
+                      <Trash2 /> 清理登录数据
                     </Button>
                   </div>
-                  <Button
-                    disabled={busy}
-                    onClick={() =>
-                      void load(selected.id).catch(() => undefined)
-                    }
-                    variant="secondary"
-                  >
-                    <RefreshCw /> 刷新
-                  </Button>
-                </div>
-              </div>
+                </footer>
+              </>
             ) : (
-              <div className="dp-profile-empty">
-                浏览器身份会由需要登录态的任务自动创建，无需提前配置。
+              <div className={styles.empty}>
+                <Globe2 />
+                <h2>暂无浏览器身份</h2>
+                <p>
+                  在任务中选择“使用我的浏览器身份”或“Issue
+                  负责人的浏览器身份”，系统会按目标站点自动创建，无需提前配置。
+                </p>
               </div>
             )}
-          </section>
+          </Card>
         </div>
       )}
       {selected?.activeSession?.status === "HUMAN_CONTROL" ? (
@@ -514,30 +589,16 @@ export function ProfilesClient() {
           operation={operation}
           operationError={message?.tone === "error" ? message.text : null}
         />
-      ) : selected ? (
-        <Card className="dp-profile-status-card">
-          <ShieldCheck />
-          <span>
-            <b>身份状态：{displayLabel(selected.status)}</b>
-            <small>
-              最近验证：{formatDate(selected.lastVerifiedAt)} · 最近使用：
-              {formatDate(selected.lastUsedAt)} · 自动清理：
-              {formatDate(selected.inactivityExpiresAt)}
-            </small>
-          </span>
-          {["PREPARING", "VERIFYING"].includes(selected.status) ? (
-            <Button
-              disabled={operation === "close"}
-              onClick={() => void action("close")}
-              variant="secondary"
-            >
-              {operation === "close" ? <LoaderCircle /> : <X />}
-              {operation === "close" ? "正在关闭…" : "关闭登录"}
-            </Button>
-          ) : null}
-        </Card>
       ) : null}
-    </>
+    </div>
+  );
+}
+
+function ProfileTimestamp({ value }: { value: string | null }) {
+  return value ? (
+    <time dateTime={value}>{formatDate(value)}</time>
+  ) : (
+    <span>尚无</span>
   );
 }
 
@@ -1076,14 +1137,11 @@ function grantLabel(grant: TriggerSource) {
       ? "飞书群 @ 任务"
       : "Issue assignee 任务";
 }
-function profileTone(
-  status: string,
-): "success" | "warning" | "danger" | "neutral" {
+function profileTone(status: string): BadgeTone {
+  if (["PREPARING", "VERIFYING"].includes(status)) return "info";
   return status === "READY"
     ? "success"
-    : ["PREPARING", "VERIFYING", "REAUTH_REQUIRED", "UNINITIALIZED"].includes(
-          status,
-        )
+    : ["REAUTH_REQUIRED", "UNINITIALIZED"].includes(status)
       ? "warning"
       : ["LOST", "DISABLED"].includes(status)
         ? "danger"

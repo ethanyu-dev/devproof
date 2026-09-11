@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type {
@@ -22,6 +22,8 @@ import {
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { executionReturnHref } from "./task-navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/page-header";
@@ -139,17 +141,14 @@ interface RunDetail extends RunSummary {
   }>;
 }
 
-function tone(
-  status: string | null,
-): "success" | "warning" | "danger" | "neutral" {
-  if (status === "PASSED" || status === "SUCCEEDED" || status === "EXECUTED") {
+function tone(status: string | null): BadgeTone {
+  if (status === "PASSED" || status === "SUCCEEDED") {
     return "success";
   }
   if (
     status &&
     [
       "FAILED",
-      "CANCELLED",
       "TIMED_OUT",
       "AGENT_ERROR",
       "PROVIDER_ERROR",
@@ -159,14 +158,10 @@ function tone(
   ) {
     return "danger";
   }
-  if (
-    status &&
-    ["QUEUED", "PREPARING", "RUNNING", "WAITING_HUMAN", "PENDING"].includes(
-      status,
-    )
-  ) {
+  if (status && ["WAITING_HUMAN", "PENDING"].includes(status)) {
     return "warning";
   }
+  if (status && ["PREPARING", "RUNNING"].includes(status)) return "info";
   return "neutral";
 }
 
@@ -408,6 +403,8 @@ export function RunsClient({ initialId }: { initialId: string }) {
 }
 
 function RunDetailClient({ id }: { id: string }) {
+  const searchParams = useSearchParams();
+  const returnTo = executionReturnHref(searchParams.get("returnTo"));
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [trajectory, setTrajectory] = useState<RunTrajectoryPage | null>(null);
   const [olderRecords, setOlderRecords] = useState<RunTrajectoryRecord[]>([]);
@@ -641,8 +638,9 @@ function RunDetailClient({ id }: { id: string }) {
         description="先查看验证结论与操作回放，需要排查时再展开技术详情。"
         title="执行详情"
       />
-      <Link className="dp-back-link" href="/console/runs">
-        <ArrowLeft /> 返回任务列表
+      <Link className="dp-back-link" href={returnTo}>
+        <ArrowLeft />{" "}
+        {returnTo === "/console/runs" ? "返回任务列表" : "返回任务详情"}
       </Link>
       {!detail ? (
         message ? (
@@ -733,7 +731,9 @@ function RunDetailClient({ id }: { id: string }) {
               </Card>
             ) : null}
 
-            <div className="dp-run-decision-grid">
+            <div
+              className={`dp-run-decision-grid ${videos.length === 0 && stepScreenshots.length === 0 ? "is-without-media" : ""}`}
+            >
               {videos.length > 0 || stepScreenshots.length > 0 ? (
                 <Card className="dp-verification-detail dp-run-card dp-run-media-card">
                   <div className="dp-section-head">

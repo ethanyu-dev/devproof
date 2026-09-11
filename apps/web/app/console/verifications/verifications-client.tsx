@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ArrowLeft, CheckCircle2, RefreshCw } from "lucide-react";
@@ -105,16 +105,12 @@ interface RunDetail {
   };
 }
 
-function tone(status: string): "success" | "warning" | "danger" | "neutral" {
+function tone(status: string): BadgeTone {
   if (status === "PASSED" || status === "DELIVERED" || status === "RESOLVED")
     return "success";
-  if (["FAILED", "CANCELLED", "TIMED_OUT"].includes(status)) return "danger";
-  if (
-    ["WAITING_EXECUTION", "RUNNING", "WAITING_HUMAN", "PENDING"].includes(
-      status,
-    )
-  )
-    return "warning";
+  if (["FAILED", "TIMED_OUT"].includes(status)) return "danger";
+  if (status === "RUNNING") return "info";
+  if (["WAITING_HUMAN", "PENDING"].includes(status)) return "warning";
   return "neutral";
 }
 
@@ -352,7 +348,7 @@ function TraceDetails<T extends { id: string }>({
 }: {
   items: T[];
   label: string;
-  toneFor?: (item: T) => "success" | "warning" | "danger" | "neutral";
+  toneFor?: (item: T) => BadgeTone;
 }) {
   return (
     <section className="dp-observe-section">
