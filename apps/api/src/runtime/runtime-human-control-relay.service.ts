@@ -50,6 +50,7 @@ export class RuntimeHumanControlRelay {
   async subscribe(
     session: RuntimeSessionFence,
     emit: (event: HumanPreviewEvent) => void,
+    options: { pixelRatio?: number; quality?: number } = {},
   ) {
     const streamId = randomUUID();
     const fencingToken = session.fencingToken.toString();
@@ -66,7 +67,8 @@ export class RuntimeHumanControlRelay {
         fencingToken,
         intervalMs: 500,
         leaseToken: session.leaseToken,
-        quality: 65,
+        ...options,
+        quality: options.quality ?? 65,
         sessionId: session.id,
         streamId,
         type: "human.preview.subscribe",

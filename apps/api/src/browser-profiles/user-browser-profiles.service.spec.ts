@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { UserBrowserProfilesService } from "./user-browser-profiles.service.js";
+
+beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
+afterEach(() => vi.unstubAllEnvs());
 
 function service(
   prisma: Record<string, unknown>,
@@ -17,6 +20,30 @@ function service(
 }
 
 describe("UserBrowserProfilesService", () => {
+  it("requests a high quality login preview for the authenticated control session", async () => {
+    const subscribe = vi.fn().mockResolvedValue(vi.fn());
+    const profiles = new UserBrowserProfilesService(
+      {} as never,
+      {} as never,
+      {} as never,
+      { subscribe } as never,
+      {} as never,
+      {} as never,
+    );
+    const session = { id: "session-1", runtimeId: "runtime-1" };
+    const controlled = vi
+      .spyOn(profiles as never, "controlledSession" as never)
+      .mockResolvedValue(session as never);
+    const auth = { user: { id: "user-1" } };
+    const emit = vi.fn();
+    await profiles.stream(auth as never, "profile-1", emit, 2);
+    expect(controlled).toHaveBeenCalledWith(auth, "profile-1");
+    expect(subscribe).toHaveBeenCalledWith(session, emit, {
+      pixelRatio: 2,
+      quality: 85,
+    });
+  });
+
   it("provisions a task-scoped Profile without user-authored verification settings", async () => {
     const create = vi.fn().mockImplementation(({ data }) => ({
       ...data,

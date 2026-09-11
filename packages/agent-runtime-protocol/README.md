@@ -94,3 +94,30 @@ are removed. Existing workers for the two retained pools accept the registration
 response (the removed optional concurrency field defaulted to zero). Upgrade API
 and workers together with the coordinated database migration described in
 [Upgrading DevProof](../../docs/upgrading.md#removing-premature-features).
+
+Protocol v2.17 negotiates `specFormat: "COMPACT"` on Spec claims. The model first
+calls the local `define_requirements` tool with source-backed requirements, then
+submits Cases with `name`, `steps` and `criteria`. Preconditions, test data and
+cleanup are optional. The runtime assigns IDs, step order, default priority and
+provenance; the persisted execution envelope remains compatible with earlier
+Specs. New snapshots use `agent-spec-v3` and preserve scope, assumptions, risks,
+requirements and explicit uncovered reasons in `context.specification`.
+
+Each requirement must map to a required criterion or an explicit omission.
+Omissions produce `SPEC_REQUIREMENT_UNCOVERED` diagnostics and `PARTIAL` coverage;
+a Task whose generated subset passes still returns `INCONCLUSIVE` when requirements
+remain uncovered. Source incompleteness alone does not change the product verdict.
+This validates coverage of the model's fixed requirement list, not the semantic
+completeness of its initial extraction or the truth of a browser assertion.
+
+Observation targets remain conjunctive: every business object needs delivered
+observational evidence. Within one target, `expectedText` and optional
+`alternatives` are equivalent texts; any one may match. Each permitted text must
+come from a referenced source. Deploy the API and both Agent pools together for
+this behavior. Older Spec workers receive the prior format; persisted Specs are
+not rewritten. No database migration or Browser Runtime upgrade is required.
+
+Linked GitHub PRs still require metadata, diffs and related file reads before
+requirements are fixed and the Spec is submitted (including changed Route Specs).
+No linked PR or unavailable optional GitHub tools permit an explicitly partial
+Spec. The compact format does not bypass source coverage checks.

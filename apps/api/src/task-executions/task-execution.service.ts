@@ -1335,6 +1335,7 @@ export class TaskExecutionService {
           orderBy: { generatedAt: "desc" },
           select: {
             primaryPullRequestUrl: true,
+            diagnostics: true,
             summary: true,
             cases: { select: { id: true } },
           },
@@ -1453,6 +1454,18 @@ export class TaskExecutionService {
         typeof environment.targetUrl === "string",
       timedOut,
     });
+    const diagnostics = task.specificationSnapshots[0]?.diagnostics;
+    if (
+      !direct &&
+      projection.verdict === "PASSED" &&
+      Array.isArray(diagnostics) &&
+      diagnostics.some(
+        (item) => record(item).code === "SPEC_REQUIREMENT_UNCOVERED",
+      )
+    ) {
+      // Passing the generated subset does not establish the omitted requirements.
+      projection.verdict = "INCONCLUSIVE";
+    }
     const now = new Date();
     const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
       projection.lifecycle,
@@ -3077,6 +3090,26 @@ function taskCaseRunRequest(
     },
     goal: [
       `${context.issue.identifier} · ${context.issue.title}`,
+      ...(context.specification?.assumptions.length
+        ? [
+            "待核实假设（不能作为产品失败依据）：",
+            ...context.specification.assumptions.map((value) => `- ${value}`),
+          ]
+        : []),
+      ...(context.specification?.risks.length
+        ? [
+            "规格分析风险：",
+            ...context.specification.risks.map((value) => `- ${value}`),
+          ]
+        : []),
+      ...(context.specification?.scope.outOfScope.length
+        ? [
+            "本次验证范围之外：",
+            ...context.specification.scope.outOfScope.map(
+              (value) => `- ${value}`,
+            ),
+          ]
+        : []),
       agentDefinition.success
         ? agentDefinition.data.name
         : legacyDefinition!.name,

@@ -86,6 +86,7 @@ const displayLabels: Record<string, string> = {
   DIRECT_RUN: "直接任务",
   LEGACY_RUN: "历史任务",
   SPEC_ANALYSIS: "Spec 分析生成",
+  PROFILE_RESOLUTION: "浏览器身份准备",
   SPEC_EXECUTION: "Spec 执行",
   TASK_CASE: "任务 Case",
   SPEC_CASE: "Spec Case",

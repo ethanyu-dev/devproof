@@ -120,23 +120,16 @@ export function TaskDetailContent({
     detail.profileBinding?.strategy === "EXPLICIT_PROFILE"
       ? boundProfile
       : null;
-  const stages = (
-    ["SPEC_ANALYSIS", "PROFILE_RESOLUTION", "SPEC_EXECUTION"] as const
-  ).flatMap((type) => {
-    const stage = detail.stages.find((item) => item.type === type);
-    return stage ? [stage] : [];
-  });
   const analysis = detail.stages.find(
     (stage) => stage.type === "SPEC_ANALYSIS",
   );
-  const analysisFailure =
-    analysis?.lastError ??
-    [...(analysis?.attempts ?? [])].reverse().find((attempt) => attempt.error)
-      ?.error;
-  const showStages =
-    !terminalLifecycles.has(detail.lifecycle) ||
-    Boolean(detail.waitingReason) ||
-    stages.some((stage) => ["FAILED", "RUNNING"].includes(stage.status));
+  const failedStages = detail.stages.filter(
+    (stage) => stage.status === "FAILED",
+  );
+  const canRetryStage =
+    detail.kind === "ISSUE_SPEC" &&
+    !detail.cancelRequestedAt &&
+    new Date(detail.deadlineAt).getTime() > Date.now();
 
   useEffect(() => {
     if (
@@ -232,40 +225,19 @@ export function TaskDetailContent({
         hidden={view !== "specs"}
       >
         {profileError && <FormMessage message={profileError} tone="error" />}
-        {showStages ? (
-          <div className="dp-task-stage-grid">
-            {stages.map((stage, index) => (
-              <StageCard
-                allowRetry={detail.kind === "ISSUE_SPEC"}
-                busy={busy}
-                index={index + 1}
-                key={stage.id}
-                onRetry={() =>
-                  void onMutate(`/stages/${stage.type}/retry`, {
-                    reason: "Manual retry from console",
-                  })
-                }
-                stage={stage}
-              />
-            ))}
-          </div>
-        ) : null}
-
-        {analysis?.status === "FAILED" && analysisFailure ? (
-          <div className="dp-task-analysis-failure" role="alert">
-            <div>
-              <Badge tone="danger">Spec 分析失败</Badge>
-              <strong>
-                {errorMessage(analysisFailure) ??
-                  "分析 Worker 未返回可读错误信息。"}
-              </strong>
-            </div>
-            <details>
-              <summary>查看完整失败原因</summary>
-              <pre>{prettyValue(analysisFailure)}</pre>
-            </details>
-          </div>
-        ) : null}
+        {failedStages.map((stage) => (
+          <StageFailureNotice
+            allowRetry={canRetryStage}
+            busy={busy}
+            key={stage.id}
+            onRetry={() =>
+              void onMutate(`/stages/${stage.type}/retry`, {
+                reason: "Manual retry from console",
+              })
+            }
+            stage={stage}
+          />
+        ))}
 
         {detail.waitingReason === "DEPLOYMENT_TARGET_REQUIRED" ? (
           <Card className="dp-task-input-card">
@@ -537,7 +509,11 @@ export function TaskDetailContent({
             </h2>
             {detail.kind === "ISSUE_SPEC" && detail.cases.length === 0 && (
               <p className="dp-task-empty-copy">
-                暂无执行用例，分析完成后将在这里显示。
+                {analysis?.status === "FAILED"
+                  ? "需求分析未完成，尚未生成执行用例。"
+                  : detail.lifecycle === "CANCELLED"
+                    ? "任务已取消，未生成执行用例。"
+                    : "暂无执行用例，分析完成后将在这里显示。"}
               </p>
             )}
             {detail.kind !== "ISSUE_SPEC" && detail.runs.length === 0 && (
@@ -981,55 +957,55 @@ function CasePolicyEditor({
   );
 }
 
-function StageCard({
+function StageFailureNotice({
   allowRetry,
   busy,
-  index,
   onRetry,
   stage,
 }: {
   allowRetry: boolean;
   busy: boolean;
-  index: number;
   onRetry: () => void;
   stage: TaskStage;
 }) {
-  const retryable =
-    allowRetry &&
-    stage.type !== "PROFILE_RESOLUTION" &&
-    stage.status === "FAILED";
+  const failure =
+    stage.lastError ??
+    stage.attempts.find(
+      (attempt) => attempt.number === stage.currentAttemptNumber,
+    )?.error;
+  const label =
+    stage.type === "SPEC_ANALYSIS"
+      ? "需求分析失败"
+      : stage.type === "PROFILE_RESOLUTION"
+        ? "浏览器身份准备失败"
+        : "用例执行失败";
   return (
-    <Card
-      className={`dp-task-stage ${stage.status === "RUNNING" ? "is-active" : ""}`}
-    >
-      <div className="dp-task-stage-number">{index}</div>
+    <div className="dp-task-analysis-failure" role="alert">
       <div>
-        <small>{displayLabel(stage.type)}</small>
-        <b>
-          {stage.type === "SPEC_ANALYSIS"
-            ? "分析 Issue 并生成 Spec Case"
-            : stage.type === "PROFILE_RESOLUTION"
-              ? "解析用户、授权域名和浏览器登录身份"
-              : "派发 Case 并聚合执行结果"}
-        </b>
-        <span>
-          尝试 {stage.currentAttemptNumber}/{stage.maxAttempts}
-          {stage.waitingReason ? ` · ${displayLabel(stage.waitingReason)}` : ""}
-        </span>
+        <Badge tone="danger">{label}</Badge>
+        <strong className={styles.failureMessage}>
+          {errorMessage(failure) ?? "此阶段未能完成，请查看任务日志。"}
+        </strong>
+        {allowRetry && stage.type !== "PROFILE_RESOLUTION" ? (
+          <Button
+            className={styles.failureRetry}
+            disabled={busy}
+            onClick={onRetry}
+            size="sm"
+            variant="secondary"
+          >
+            <RotateCcw />
+            {stage.type === "SPEC_ANALYSIS" ? "重试分析" : "重试执行"}
+          </Button>
+        ) : null}
       </div>
-      <Badge tone={tone(stage.status)}>
-        {displayLabel(
-          stage.status === "RUNNING" && stage.waitingReason
-            ? stage.waitingReason
-            : stage.status,
-        )}
-      </Badge>
-      {retryable ? (
-        <Button disabled={busy} onClick={onRetry} variant="secondary">
-          <RotateCcw /> 重试阶段
-        </Button>
+      {failure ? (
+        <details>
+          <summary>查看完整失败原因</summary>
+          <pre>{prettyValue(failure)}</pre>
+        </details>
       ) : null}
-    </Card>
+    </div>
   );
 }
 

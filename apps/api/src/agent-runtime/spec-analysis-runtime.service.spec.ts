@@ -121,105 +121,268 @@ function issueTaskInput() {
 }
 
 describe("SpecAnalysisRuntimeService", () => {
-  it("persists and logs PARTIAL source coverage even when the agent submits a successful Issue-only Spec", async () => {
-    const source = {
-      externalId: `analysis-source://${attemptId}/issue`,
-      contentHash: "a".repeat(64),
-      kind: "LINEAR_ISSUE" as const,
-      uri: "https://linear.app/acme/issue/ENG-123",
-      locator: {},
-      label: "退款需求",
-      excerpt: "支持退款。",
-      revision: null,
-      content: {
-        issue: {
-          id: "issue-1",
-          identifier: "ENG-123",
-          title: "退款需求",
-          url: "https://linear.app/acme/issue/ENG-123",
+  it.each([false, true])(
+    "persists source and requirement coverage for Issue-only Specs (compact: %s)",
+    async (compact) => {
+      const source = {
+        externalId: `analysis-source://${attemptId}/issue`,
+        contentHash: "a".repeat(64),
+        kind: "LINEAR_ISSUE" as const,
+        uri: "https://linear.app/acme/issue/ENG-123",
+        locator: {},
+        label: "退款需求",
+        excerpt: "支持退款。",
+        revision: null,
+        content: {
+          issue: {
+            id: "issue-1",
+            identifier: "ENG-123",
+            title: "退款需求",
+            description: "支持退款。",
+            url: "https://linear.app/acme/issue/ENG-123",
+          },
+          pullRequestUrls: [],
         },
-        pullRequestUrls: [],
-      },
-    };
-    const { service, tx } = recoveryHarness({
-      ...analysisAttempt(),
-      analysisSources: [source],
-    } as never);
-    const createSnapshot = vi
-      .fn()
-      .mockResolvedValue({ id: "snapshot-1", cases: [] });
-    const createEvents = vi.fn().mockResolvedValue({ count: 2 });
-    const updateAttempt = vi.fn().mockResolvedValue({});
-    Object.assign(tx, {
-      taskSpecificationSnapshot: { create: createSnapshot },
-      taskDeployment: { findMany: vi.fn().mockResolvedValue([]) },
-      taskCaseExecution: {
-        createMany: vi.fn().mockResolvedValue({ count: 0 }),
-      },
-    });
-    Object.assign(tx.taskExecutionEvent, { createMany: createEvents });
-    Object.assign(tx.taskStageAttempt, { update: updateAttempt });
-    await service.submitOutcome(teamId, attemptId, {
-      ...identity,
-      completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
-      outcome: {
-        kind: "SPEC_GENERATED",
-        summary: "验证退款。",
-        sourceRefs: [source],
-        spec: runtimeGeneratedSpecSchema.parse({
+      };
+      const { service, tx } = recoveryHarness({
+        ...analysisAttempt(),
+        analysisSources: [source],
+      } as never);
+      const createSnapshot = vi
+        .fn()
+        .mockResolvedValue({ id: "snapshot-1", cases: [] });
+      const createEvents = vi.fn().mockResolvedValue({ count: 2 });
+      const updateAttempt = vi.fn().mockResolvedValue({});
+      Object.assign(tx, {
+        taskSpecificationSnapshot: { create: createSnapshot },
+        taskDeployment: { findMany: vi.fn().mockResolvedValue([]) },
+        taskCaseExecution: {
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+      });
+      Object.assign(tx.taskExecutionEvent, { createMany: createEvents });
+      Object.assign(tx.taskStageAttempt, { update: updateAttempt });
+      await service.submitOutcome(teamId, attemptId, {
+        ...identity,
+        completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
+        outcome: {
+          kind: "SPEC_GENERATED",
           summary: "验证退款。",
-          scope: { inScope: ["退款"] },
-          cases: [
-            {
-              name: "退款",
-              rationale: "覆盖需求。",
-              preconditions: ["具有退款权限。"],
-              sourceRefs: [source.externalId],
-              steps: [
-                {
-                  order: 1,
-                  action: "申请退款。",
-                  expectedObservation: "退款成功。",
-                },
-              ],
-              criteria: [
-                {
-                  id: "refund",
-                  description: "退款成功。",
-                  sourceRefs: [source.externalId],
-                  requiredEvidenceKinds: ["DOM"],
-                },
-              ],
-            },
-          ],
-        }),
-      },
-    });
-    expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
-      completeness: "PARTIAL",
-      diagnostics: [{ code: "GITHUB_PR_NOT_LINKED" }],
-    });
-    const coverage = {
-      issueSources: 1,
-      pullRequestSources: 0,
-      diffSources: 0,
-      fileSources: 0,
-      searchSources: 0,
-      checksObserved: 0,
-    };
-    expect(updateAttempt.mock.calls[0]![0].data.result).toMatchObject({
-      completeness: "PARTIAL",
-      sourceCoverage: coverage,
-    });
-    expect(createEvents.mock.calls[0]![0].data[0]).toMatchObject({
-      kind: "task.stage.succeeded",
-      payload: {
+          sourceRefs: [source],
+          spec: runtimeGeneratedSpecSchema.parse({
+            summary: "验证退款。",
+            assumptions: ["当前身份具有退款权限，需先核实。"],
+            risks: ["尚未读取 GitHub 实现。"],
+            ...(compact
+              ? {
+                  requirements: [
+                    {
+                      id: "requirement-1",
+                      description: "支持退款",
+                      sourceRef: source.externalId,
+                      quote: "支持退款。",
+                    },
+                    {
+                      id: "requirement-2",
+                      description: "退款异常分支",
+                      sourceRef: source.externalId,
+                      quote: "支持退款。",
+                    },
+                  ],
+                  uncoveredRequirements: [
+                    {
+                      requirementId: "requirement-2",
+                      reason: "缺少异常分支的具体预期。",
+                    },
+                  ],
+                }
+              : {}),
+            scope: { inScope: ["退款"] },
+            cases: [
+              {
+                name: "退款",
+                rationale: "覆盖需求。",
+                preconditions: ["具有退款权限。"],
+                sourceRefs: [source.externalId],
+                steps: [
+                  {
+                    order: 1,
+                    action: "申请退款。",
+                    expectedObservation: "退款成功。",
+                  },
+                ],
+                criteria: [
+                  {
+                    id: "refund",
+                    ...(compact
+                      ? {
+                          requirementId: "requirement-1",
+                          basis: {
+                            sourceRef: source.externalId,
+                            quote: "支持退款。",
+                            observationTarget: "退款结果",
+                          },
+                        }
+                      : {}),
+                    description: "退款成功。",
+                    sourceRefs: [source.externalId],
+                    requiredEvidenceKinds: ["DOM"],
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+      });
+      expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
         completeness: "PARTIAL",
-        diagnostics: [{ code: "GITHUB_PR_NOT_LINKED" }],
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "GITHUB_PR_NOT_LINKED" }),
+        ]),
+      });
+      expect(
+        createSnapshot.mock.calls[0]![0].data.context.specification,
+      ).toMatchObject({
+        assumptions: ["当前身份具有退款权限，需先核实。"],
+        risks: ["尚未读取 GitHub 实现。"],
+        scope: { inScope: ["退款"] },
+      });
+      if (compact) {
+        expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
+          generatorVersion: "agent-spec-v3",
+          context: {
+            specification: {
+              requirements: [{ id: "requirement-1" }, { id: "requirement-2" }],
+              uncoveredRequirements: [{ requirementId: "requirement-2" }],
+            },
+          },
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: "SPEC_REQUIREMENT_UNCOVERED",
+              message: expect.stringContaining("缺少异常分支"),
+            }),
+          ]),
+        });
+      }
+      const coverage = {
+        issueSources: 1,
+        pullRequestSources: 0,
+        diffSources: 0,
+        fileSources: 0,
+        searchSources: 0,
+        checksObserved: 0,
+      };
+      expect(updateAttempt.mock.calls[0]![0].data.result).toMatchObject({
+        completeness: "PARTIAL",
         sourceCoverage: coverage,
-      },
-    });
-  });
+      });
+      expect(createEvents.mock.calls[0]![0].data[0]).toMatchObject({
+        kind: "task.stage.succeeded",
+        payload: {
+          completeness: "PARTIAL",
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: "GITHUB_PR_NOT_LINKED" }),
+          ]),
+          sourceCoverage: coverage,
+        },
+      });
+    },
+  );
+
+  it.each(["missing", "wrong-source"])(
+    "rejects invalid requirement coverage at the API boundary: %s",
+    async (mode) => {
+      const sourceRef = `analysis-source://${attemptId}/issue`;
+      const spec = runtimeGeneratedSpecSchema.parse({
+        summary: "验证退款",
+        scope: { inScope: ["退款"] },
+        requirements: [
+          {
+            id: "requirement-1",
+            description: "支持退款",
+            sourceRef,
+            quote: "支持退款。",
+          },
+          ...(mode === "missing"
+            ? [
+                {
+                  id: "requirement-2",
+                  description: "验证异常退款",
+                  sourceRef,
+                  quote: "支持退款。",
+                },
+              ]
+            : []),
+        ],
+        cases: [
+          {
+            name: "退款",
+            rationale: "验证退款",
+            preconditions: ["具有权限"],
+            sourceRefs: [sourceRef],
+            steps: [
+              { order: 1, action: "申请退款", expectedObservation: "退款成功" },
+            ],
+            criteria: [
+              {
+                id: "refund",
+                requirementId: "requirement-1",
+                description: "退款成功",
+                sourceRefs: [sourceRef],
+                requiredEvidenceKinds: ["DOM"],
+                basis: {
+                  sourceRef,
+                  quote: "支持退款。",
+                  observationTarget: "退款结果",
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const { service, tx } = recoveryHarness({
+        ...analysisAttempt(),
+        analysisSources: [
+          {
+            externalId: sourceRef,
+            kind: "LINEAR_ISSUE",
+            content: { description: "未描述退款行为。" },
+          },
+          {
+            externalId: "analysis-source://another",
+            kind: "GITHUB_FILE",
+            content: { text: "支持退款。" },
+          },
+        ],
+      } as never);
+      await expect(
+        service.submitOutcome(teamId, attemptId, {
+          ...identity,
+          completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
+          outcome: {
+            kind: "SPEC_GENERATED",
+            summary: "验证退款",
+            sourceRefs: [
+              {
+                externalId: sourceRef,
+                kind: "LINEAR_ISSUE",
+                contentHash: "a".repeat(64),
+                uri: "https://linear.app/acme/issue/ENG-123",
+                label: "退款需求",
+                excerpt: "未描述退款行为。",
+                locator: {},
+                revision: null,
+              },
+            ],
+            spec,
+          },
+        }),
+      ).rejects.toThrow(
+        mode === "missing" ? "遗漏需求" : "actual analysis source",
+      );
+      expect(tx.taskExecutionStage.update).not.toHaveBeenCalled();
+    },
+  );
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -235,85 +398,94 @@ describe("SpecAnalysisRuntimeService", () => {
     resetEnvForTests();
   });
 
-  it("retires an expired lease and claims a new numbered Attempt with server timing", async () => {
-    const expired = analysisAttempt({
-      leaseExpiresAt: new Date(now.getTime() - 1),
-    });
-    const pending = {
-      ...analysisAttempt({
-        number: 2,
-        status: "PENDING",
-        leaseExpiresAt: null,
-      }),
-      id: nextAttemptId,
-    };
-    const running = {
-      ...pending,
-      fencingToken: 1n,
-      leaseExpiresAt: new Date(now.getTime() + 60_000),
-      leaseOwner: claimInput.workerId,
-      leaseToken: "new-token",
-      status: "RUNNING",
-    };
-    const { service, tx } = recoveryHarness(expired);
-    tx.taskStageAttempt.findFirst
-      .mockReset()
-      .mockResolvedValueOnce(expired)
-      .mockResolvedValueOnce(pending);
-    tx.taskStageAttempt.findUniqueOrThrow
-      .mockReset()
-      .mockResolvedValueOnce(expired)
-      .mockResolvedValueOnce(pending)
-      .mockResolvedValueOnce(running);
-
-    const result = await service.claim(teamId, claimInput);
-
-    expect(result.task).toMatchObject({
-      fencingToken: "1",
-      leaseDurationMs: 60_000,
-      serverTime: now.toISOString(),
-      snapshot: { attemptNumber: 2 },
-      taskId: nextAttemptId,
-    });
-    expect(tx.taskStageAttempt.updateMany).toHaveBeenNthCalledWith(1, {
-      data: expect.objectContaining({
-        error: expect.objectContaining({ code: "RUNTIME_LEASE_LOST" }),
-        fencingToken: { increment: 1 },
-        leaseExpiresAt: null,
-        leaseOwner: null,
-        leaseToken: null,
-        status: "FAILED",
-      }),
-      where: {
-        fencingToken: 4n,
-        id: attemptId,
-        leaseExpiresAt: { lte: now },
-        leaseOwner: identity.workerId,
-        leaseToken,
-        status: "RUNNING",
-      },
-    });
-    expect(tx.taskStageAttempt.create).toHaveBeenCalledWith({
-      data: {
-        inputSnapshot: expired.inputSnapshot,
-        number: 2,
-        stageId: "spec-stage",
-      },
-    });
-    expect(tx.taskStageAttempt.updateMany).toHaveBeenNthCalledWith(2, {
-      data: expect.objectContaining({ status: "RUNNING" }),
-      where: { id: nextAttemptId, status: "PENDING" },
-    });
-    expect(tx.taskExecutionEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        kind: "task.stage.lease_lost",
-        payload: expect.objectContaining({
-          attemptNumber: 1,
-          nextAttemptScheduled: true,
+  it.each([3, 17])(
+    "recovers and negotiates generation format for protocol %s",
+    async (minor) => {
+      const expired = analysisAttempt({
+        leaseExpiresAt: new Date(now.getTime() - 1),
+      });
+      const pending = {
+        ...analysisAttempt({
+          number: 2,
+          status: "PENDING",
+          leaseExpiresAt: null,
         }),
-      }),
-    });
-  });
+        id: nextAttemptId,
+      };
+      const running = {
+        ...pending,
+        fencingToken: 1n,
+        leaseExpiresAt: new Date(now.getTime() + 60_000),
+        leaseOwner: claimInput.workerId,
+        leaseToken: "new-token",
+        status: "RUNNING",
+      };
+      const { service, tx } = recoveryHarness(expired);
+      tx.taskStageAttempt.findFirst
+        .mockReset()
+        .mockResolvedValueOnce(expired)
+        .mockResolvedValueOnce(pending);
+      tx.taskStageAttempt.findUniqueOrThrow
+        .mockReset()
+        .mockResolvedValueOnce(expired)
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce(running);
+
+      const result = await service.claim(teamId, {
+        ...claimInput,
+        protocol: { minor },
+      });
+      expect(result.task?.snapshot.specFormat).toBe(
+        minor >= 17 ? "COMPACT" : undefined,
+      );
+
+      expect(result.task).toMatchObject({
+        fencingToken: "1",
+        leaseDurationMs: 60_000,
+        serverTime: now.toISOString(),
+        snapshot: { attemptNumber: 2 },
+        taskId: nextAttemptId,
+      });
+      expect(tx.taskStageAttempt.updateMany).toHaveBeenNthCalledWith(1, {
+        data: expect.objectContaining({
+          error: expect.objectContaining({ code: "RUNTIME_LEASE_LOST" }),
+          fencingToken: { increment: 1 },
+          leaseExpiresAt: null,
+          leaseOwner: null,
+          leaseToken: null,
+          status: "FAILED",
+        }),
+        where: {
+          fencingToken: 4n,
+          id: attemptId,
+          leaseExpiresAt: { lte: now },
+          leaseOwner: identity.workerId,
+          leaseToken,
+          status: "RUNNING",
+        },
+      });
+      expect(tx.taskStageAttempt.create).toHaveBeenCalledWith({
+        data: {
+          inputSnapshot: expired.inputSnapshot,
+          number: 2,
+          stageId: "spec-stage",
+        },
+      });
+      expect(tx.taskStageAttempt.updateMany).toHaveBeenNthCalledWith(2, {
+        data: expect.objectContaining({ status: "RUNNING" }),
+        where: { id: nextAttemptId, status: "PENDING" },
+      });
+      expect(tx.taskExecutionEvent.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          kind: "task.stage.lease_lost",
+          payload: expect.objectContaining({
+            attemptNumber: 1,
+            nextAttemptScheduled: true,
+          }),
+        }),
+      });
+    },
+  );
 
   it("exhausts the configured Attempt budget and requests parent completion through projection", async () => {
     const { service, tx } = recoveryHarness(

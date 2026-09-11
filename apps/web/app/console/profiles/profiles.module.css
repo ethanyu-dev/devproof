@@ -264,6 +264,161 @@
   margin-top: 10px;
 }
 
+.handoffBackdrop {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  background: color-mix(in srgb, var(--foreground) 22%, transparent);
+  pointer-events: none;
+}
+
+.handoffPanel:global(.is-floating) {
+  border: 2px solid var(--primary);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--accent), var(--card) 84px);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--primary) 14%, transparent),
+    0 12px 28px color-mix(in srgb, var(--foreground) 22%, transparent),
+    0 2px 6px color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.handoffPanel:global(.is-fullscreen) {
+  border: 2px solid var(--primary);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.handoffPanel > header > span:first-child {
+  color: var(--primary);
+}
+
+.handoffDetails {
+  min-width: 0;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.handoffSummary {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 12px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.handoffSummary::-webkit-details-marker {
+  display: none;
+}
+
+.handoffSummary:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+
+.handoffPrompt {
+  min-width: 0;
+  flex: 1;
+}
+
+.handoffRuntime {
+  display: flex;
+  min-width: 0;
+  max-width: 40%;
+  align-items: center;
+  gap: 6px;
+}
+
+.handoffRuntimeName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoffDetailsToggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.handoffDetails[open] .handoffDetailsToggle svg {
+  transform: rotate(180deg);
+}
+
+.handoffDetailsContent {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.handoffDetailsContent p {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+}
+
+.handoffDetailsContent p > svg {
+  margin-top: 2px;
+}
+
+.handoffDetailsContent dl,
+.handoffDetailsContent dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.handoffDetailsContent dl {
+  column-gap: 20px;
+}
+
+.handoffDetailsContent dd {
+  margin: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.handoffInstructions {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  line-height: 1.6;
+}
+
+.concurrentLogin {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.concurrentLogin input {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  accent-color: var(--primary);
+}
+
+.concurrentLogin span {
+  min-width: 0;
+}
+
+.concurrentLogin strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
 .consent,
 .sessionNotice {
   display: flex;
@@ -398,6 +553,26 @@
   }
   .management {
     padding: 8px 14px;
+  }
+}
+
+@media (max-width: 620px) {
+  .handoffSummary {
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+
+  .handoffPrompt {
+    flex-basis: 100%;
+  }
+
+  .handoffRuntime {
+    max-width: none;
+    flex: 1;
+  }
+
+  .handoffDetailsToggle {
+    margin-left: auto;
   }
 }
 

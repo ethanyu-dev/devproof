@@ -466,7 +466,14 @@ export class ExecutionRunService {
       ? await this.prisma.runtimeSessionRecovery.findMany({
           where: { teamId: current.team.id, sessionId: { in: sessionIds } },
           orderBy: { createdAt: "desc" },
-          select: { id: true, closureState: true, writeOutcomeState: true },
+          select: {
+            id: true,
+            closureState: true,
+            writeOutcomeState: true,
+            sessionId: true,
+            lastErrorCode: true,
+            resolvedAt: true,
+          },
         })
       : [];
     return {

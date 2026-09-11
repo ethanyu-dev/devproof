@@ -100,6 +100,7 @@ function refundSpec(sourceRef = source.externalId, quote = source.excerpt) {
 async function executeCalls(
   calls: ReturnType<typeof call>[],
   executeSpecTool: ReturnType<typeof vi.fn>,
+  runTask = task,
 ) {
   const responses = calls.map((toolCall) => ({
     id: `response-${toolCall.id}`,
@@ -119,11 +120,156 @@ async function executeCalls(
     () => ({ complete: create }),
     { appendSpecEvent, executeSpecTool } as never,
     calls.length,
-  ).execute(task, lease, new AbortController().signal);
+  ).execute(runTask, lease, new AbortController().signal);
   return { create, appendSpecEvent, outcome };
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("negotiates compact cases and preserves uncovered requirements across corrections", async () => {
+    const compactTask = {
+      ...task,
+      snapshot: { ...task.snapshot, specFormat: "COMPACT" as const },
+    };
+    const issue = {
+      ...source,
+      excerpt: "新增旧版对公转账白名单，样式参考 ZDR。",
+    };
+    const requirements = [
+      {
+        description: "支持旧版对公转账白名单",
+        sourceRef: source.externalId,
+        quote: "新增旧版对公转账白名单",
+      },
+      {
+        description: "样式参考 ZDR",
+        sourceRef: source.externalId,
+        quote: "样式参考 ZDR",
+      },
+    ];
+    const spec = {
+      summary: "验证白名单类型",
+      cases: [
+        {
+          name: "检查新增白名单类型",
+          steps: ["独立打开白名单配置，检查类型选项。"],
+          preconditions: ["不依赖其他 Case。"],
+          testData: [
+            "LEGACY_CORPORATE",
+            "https://example.com",
+            "user@example.com",
+          ],
+          criteria: [
+            {
+              requirementId: "requirement-1",
+              description: "可以选择旧版对公转账白名单。",
+              observationTargets: [
+                { label: "对公转账类型", expectedText: "旧版对公转账白名单" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const executeSpecTool = vi.fn().mockResolvedValue({
+      result: { pullRequestUrls: [] },
+      sourceRefs: [issue],
+    });
+    const { create, outcome } = await executeCalls(
+      [
+        call("linear_get_issue", { analysisSummary: "读取需求。" }, "issue"),
+        call(
+          "finish_spec",
+          { analysisSummary: "尝试直接提交。", spec },
+          "premature",
+        ),
+        call(
+          "define_requirements",
+          { analysisSummary: "确定完整需求。", requirements },
+          "plan",
+        ),
+        call(
+          "finish_spec",
+          { analysisSummary: "提交类型检查。", spec },
+          "missing-style",
+        ),
+        call(
+          "define_requirements",
+          {
+            analysisSummary: "缩小需求范围。",
+            requirements: requirements.slice(0, 1),
+          },
+          "shrink",
+        ),
+        call(
+          "finish_spec",
+          {
+            analysisSummary: "明确待确认项。",
+            spec: {
+              ...spec,
+              uncoveredRequirements: [
+                {
+                  requirementId: "requirement-2",
+                  reason: "尚未明确样式比较范围，等待确认。",
+                },
+              ],
+            },
+          },
+          "finish",
+        ),
+      ],
+      executeSpecTool,
+      compactTask,
+    );
+    expect(outcome).toMatchObject({
+      kind: "SPEC_GENERATED",
+      spec: {
+        requirements: requirements.map((item, index) => ({
+          ...item,
+          id: `requirement-${index + 1}`,
+        })),
+        uncoveredRequirements: [{ requirementId: "requirement-2" }],
+        cases: [
+          {
+            sourceRefs: [source.externalId],
+            priority: "MEDIUM",
+            steps: [{ order: 1 }],
+            criteria: [
+              {
+                requirementId: "requirement-1",
+                required: true,
+                requiredEvidenceKinds: ["DOM"],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(executeSpecTool).toHaveBeenCalledTimes(1);
+    const toolNames = (index: number) =>
+      create.mock.calls[index]![0].tools.map(
+        (tool: { function: { name: string } }) => tool.function.name,
+      );
+    expect(toolNames(0)).toEqual(["linear_get_issue"]);
+    expect(toolNames(1)).toContain("define_requirements");
+    expect(toolNames(1)).not.toContain("finish_spec");
+    expect(toolNames(3)).not.toContain("define_requirements");
+    const finishTool = create.mock.calls[3]![0].tools.find(
+      (tool: { function: { name: string } }) =>
+        tool.function.name === "finish_spec",
+    );
+    const caseInput =
+      finishTool.function.parameters.properties.spec.properties.cases.items;
+    expect(caseInput.required).toEqual(["name", "steps", "criteria"]);
+    expect(caseInput.properties.criteria.items.required).toEqual([
+      "requirementId",
+      "description",
+      "observationTargets",
+    ]);
+    const transcript = JSON.stringify(create.mock.calls.at(-1)![0].messages);
+    expect(transcript).toContain("遗漏需求：requirement-2");
+    expect(transcript).toContain("不能为通过校验删除需求");
+  });
+
   it("rejects the incident's Linear URL passed to GitHub and hides tools without linked PRs", async () => {
     const executeSpecTool = vi.fn().mockResolvedValue({
       result: { pullRequestUrls: [] },

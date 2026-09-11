@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   Sse,
   type MessageEvent,
   UseGuards,
@@ -28,6 +29,9 @@ import { parseBody } from "../common/validation.js";
 import { UserBrowserProfilesService } from "./user-browser-profiles.service.js";
 
 const browserInputSchema = z.object({ events: browserHumanInputEventsSchema });
+const browserPreviewQuerySchema = z.object({
+  pixelRatio: z.coerce.number().min(1).max(2).default(1),
+});
 
 @Controller("console/api/browser-profiles")
 @UseGuards(AuthGuard)
@@ -118,12 +122,19 @@ export class UserBrowserProfilesController {
   stream(
     @CurrentAuth() current: AuthContext,
     @Param("id") id: string,
+    @Query() query: unknown,
   ): Observable<MessageEvent> {
+    const { pixelRatio } = parseBody(browserPreviewQuerySchema, query);
     return new Observable<MessageEvent>((subscriber) => {
       let close: (() => Promise<void>) | undefined;
       let cancelled = false;
       void this.profiles
-        .stream(current, id, (event) => subscriber.next({ data: event }))
+        .stream(
+          current,
+          id,
+          (event) => subscriber.next({ data: event }),
+          pixelRatio,
+        )
         .then((cleanup) => {
           if (cancelled) void cleanup().catch(() => undefined);
           else close = cleanup;

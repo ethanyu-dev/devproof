@@ -7,6 +7,7 @@ import {
   runtimeSpecAnalysisOutcomeSchema,
   runtimeTraceEventSchema,
   specPullRequestCoverage,
+  specRequirementCoverageError,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
   type RuntimeSpecSourceRef,
@@ -14,6 +15,14 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 import { ModelHealth } from "./model-health.js";
+import { hasExternalCaseDependency } from "./spec-case-dependency.js";
+import {
+  compactSpecSchema,
+  defineSpecRequirements,
+  normalizeCompactSpec,
+  requirementPlanSchema,
+  type SpecRequirement,
+} from "./spec-draft.js";
 
 import {
   ControlPlaneError,
@@ -80,8 +89,10 @@ export class SpecAnalysisExecutor {
     const preferredModel = candidates[0]!;
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
+    const compact = task.snapshot.specFormat === "COMPACT";
+    let requirements: SpecRequirement[] | null = null;
     const history: ModelMessage[] = [
-      { role: "system", content: systemPrompt() },
+      { role: "system", content: systemPrompt(compact) },
       {
         role: "user",
         content: JSON.stringify(
@@ -164,6 +175,8 @@ export class SpecAnalysisExecutor {
                   unavailableTools,
                   calledTools.has("linear_get_issue"),
                   linkedPullRequests.map((pr) => pr.url),
+                  compact,
+                  requirements,
                 ),
               },
               { signal },
@@ -297,8 +310,96 @@ export class SpecAnalysisExecutor {
           });
           signal.throwIfAborted();
 
+          if (compact && call.function.name === "define_requirements") {
+            try {
+              const coverageError = sourceCoverageError({
+                calledTools,
+                linkedPullRequests,
+                sources,
+                unavailableTools,
+              });
+              if (coverageError) throw new Error(coverageError);
+              if (requirements)
+                throw new Error(
+                  "需求清单已确定，不能为通过校验删除需求。无法验证的需求请在 uncoveredRequirements 中说明原因。",
+                );
+              requirements = defineSpecRequirements(
+                parsedArguments,
+                sourceContents,
+              );
+              history.push(toolOutput(call, { accepted: true, requirements }));
+              await this.appendTrace(lease, signal, {
+                kind: "agent.tool.completed",
+                payload: {
+                  attemptNumber: task.snapshot.attemptNumber,
+                  callId: call.id,
+                  durationMs: Date.now() - startedAt,
+                  name: call.function.name,
+                  inputPreview: tracePreview(parsedArguments),
+                  outputPreview: tracePreview({ requirements }),
+                  segmentId,
+                  sourceRefs: requirements.map((item) => item.sourceRef),
+                  status: "SUCCEEDED",
+                  step,
+                },
+              });
+            } catch (error) {
+              const message = traceError(error);
+              await this.toolCorrection(
+                lease,
+                signal,
+                task,
+                segmentId,
+                step,
+                call,
+                startedAt,
+                message,
+              );
+              history.push(
+                toolOutput(call, {
+                  accepted: false,
+                  error: message,
+                  requirements,
+                }),
+              );
+            }
+            continue;
+          }
+
           if (call.function.name === "finish_spec") {
-            const parsed = finishSpecSchema.safeParse(parsedArguments);
+            let argumentsToValidate = parsedArguments;
+            if (compact) {
+              try {
+                if (!requirements)
+                  throw new Error(
+                    "请先调用 define_requirements 确定完整需求清单，再提交用例。",
+                  );
+                argumentsToValidate = {
+                  ...parsedArguments,
+                  spec: normalizeCompactSpec(
+                    parsedArguments.spec,
+                    requirements,
+                  ),
+                };
+              } catch (error) {
+                const message = traceError(error);
+                await this.toolCorrection(
+                  lease,
+                  signal,
+                  task,
+                  segmentId,
+                  step,
+                  call,
+                  startedAt,
+                  message,
+                );
+                history.push(
+                  toolOutput(call, specCorrection(message, sources.keys())),
+                );
+                continue;
+              }
+            }
+            const parsed = finishSpecSchema.safeParse(argumentsToValidate);
             if (!parsed.success) {
               await this.validationFailed(
                 lease,
@@ -673,6 +774,8 @@ function toolDefinitions(
   unavailableTools: ReadonlySet<string> = new Set(),
   issueRead = false,
   pullRequestUrls: readonly string[] = [],
+  compact = false,
+  requirements: readonly SpecRequirement[] | null = null,
 ) {
   const observedSourceIds = [...sourceIds];
   const analysisSummary = {
@@ -754,13 +857,44 @@ function toolDefinitions(
       ),
       strict: false,
     },
+    ...(compact
+      ? [
+          {
+            type: "function",
+            name: "define_requirements",
+            description:
+              "逐条确定本次需求的可验证产品要求，包含所有业务类型、行为和样式参照。每项提供来源原文。系统分配编号并固定清单，后续 Case 必须覆盖或明确说明未覆盖原因。",
+            parameters: constrainSourceRefs(
+              stripFormats(
+                z.toJSONSchema(
+                  requirementPlanSchema.extend({
+                    analysisSummary: analysisSummarySchema,
+                  }),
+                ),
+              ),
+              observedSourceIds,
+            ) as Record<string, unknown>,
+            strict: false,
+          },
+        ]
+      : []),
     {
       type: "function",
       name: "finish_spec",
       description:
         "完成来源分析后提交完整、可执行的中文 Spec；每个 Case 和验收标准都必须引用实际观察到的 analysis-source。",
       parameters: constrainSourceRefs(
-        stripFormats(z.toJSONSchema(finishSpecSchema)),
+        stripFormats(
+          z.toJSONSchema(
+            compact
+              ? z.object({
+                  analysisSummary: analysisSummarySchema,
+                  spec: compactSpecSchema,
+                })
+              : finishSpecSchema,
+            { io: compact ? "input" : "output" },
+          ),
+        ),
         observedSourceIds,
       ) as Record<string, unknown>,
       strict: false,
@@ -769,9 +903,13 @@ function toolDefinitions(
     .filter(
       (tool) =>
         !unavailableTools.has(tool.name) &&
+        !(compact && tool.name === "finish_spec" && !requirements) &&
+        !(tool.name === "define_requirements" && requirements) &&
         (tool.name === "linear_get_issue" ||
           (issueRead &&
-            (tool.name === "finish_spec" || pullRequestUrls.length > 0))),
+            (tool.name === "finish_spec" ||
+              tool.name === "define_requirements" ||
+              pullRequestUrls.length > 0))),
     )
     .map(({ type: _type, ...definition }) => ({
       type: "function" as const,
@@ -791,6 +929,13 @@ function constrainSourceRefs(
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, child]) => {
       const constrainedChild = constrainSourceRefs(child, sourceIds);
+      if (
+        key === "sourceRef" &&
+        constrainedChild &&
+        typeof constrainedChild === "object" &&
+        !Array.isArray(constrainedChild)
+      )
+        return [key, { ...constrainedChild, enum: sourceIds }];
       if (
         key !== "sourceRefs" ||
         !constrainedChild ||
@@ -831,7 +976,7 @@ function stripFormats(value: unknown): unknown {
   );
 }
 
-function systemPrompt() {
+function systemPrompt(compact = false) {
   return `你是 DevProof 的 Spec 分析 Agent。
 请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成一份完整、可执行的验证 Spec。
 必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
@@ -840,15 +985,23 @@ GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pu
 同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Linear Issue 是后续来源的必要入口，如果它不可用，执行器会立即以明确的数据源错误终止。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
-每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。
-每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字或接口值（expectedText）。涉及多个类型时，分别列出每个类型的显示名或接口值，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
+${compact ? "每条需求引用实际返回的 analysis-source 和原文，由系统传递给 Case 及验收标准；不要手工重复来源字段。" : "每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。"}
+每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字或接口值（expectedText）。涉及多个类型时，分别列出每个类型的显示名或接口值，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。${compact ? "每条标准必须引用 define_requirements 返回的 requirementId，来源原文必须直接支持断言。" : "每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。"}来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
-生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。
+${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定位元素、探索路径和选择工具，不预先编造选择器。前置条件、测试数据和清理步骤按需填写。" : "生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。"}
 内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。多个业务类型分别生成可独立判定的验收标准，不能观察一个类型后就判定所有类型通过。
 每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。把所需的类型可选性、参照界面、权限和数据检查写成本 Case 的具体只读步骤；不能把假设当作已经观察的事实。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，各写入 Case 使用独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，存在则请求新账号，不删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
-只有完成所有可用来源的调查后才能调用 finish_spec；无关联 PR 或数据源不可用时，明确标出缺失范围与风险，允许提交部分规格。绝不能泄露凭据。`;
+只有完成所有可用来源的调查后才能调用 finish_spec；无关联 PR 或数据源不可用时，明确标出缺失范围与风险，允许提交部分规格。绝不能泄露凭据。
+${
+  compact
+    ? `当前使用精简 Spec 协议。先读取所有可用来源，再调用 define_requirements 独立列出完整需求清单；不同业务对象及样式参照要求均需保留。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。
+Case 只需填写 name、steps（有序操作字符串数组）、criteria；仅确有需要时填写 preconditions、testData、cleanup。每条 criterion 填写 requirementId、description 和 observationTargets；系统自动生成编号、默认优先级、步骤序号及上述来源引用和 basis，不要重复填写这些自动字段。
+同一个业务对象的不同合法显示方式写在该 target 的 alternatives 中，例如 expectedText 为中文名称，alternatives 为内部枚举；不同业务对象分别列 target，所有对象都必须验证。描述中的“或”必须体现在同一 target 的 alternatives 中，不能拆成两个必须出现的对象。UI 未承诺展示内部枚举时，优先使用业务中文名称。
+criteria.description 描述产品应满足的条件，不把“截图、记录差异、观察页面”等测试动作当作通过条件。样式比较须写明被比较的目标、参照对象和要比较的结构/交互，requiredEvidenceKinds 包含 SCREENSHOT；来源没有明确比较范围时，在 uncoveredRequirements 中说明待确认内容，不擅自把像素、颜色或字段当作硬性要求。`
+    : ""
+}`;
 }
 
 export function validateFinalSpec(input: {
@@ -861,6 +1014,72 @@ export function validateFinalSpec(input: {
 }) {
   const chineseError = validateChineseSpec(input.spec);
   if (chineseError) return chineseError;
+  const coverageError = specRequirementCoverageError(input.spec);
+  if (coverageError) return coverageError;
+  const sourceError = sourceCoverageError(input);
+  if (sourceError) return sourceError;
+  const invalidSourceRefs = specSourceRefEntries(input.spec).filter(
+    ({ sourceRef }) => !input.sources.has(sourceRef),
+  );
+  if (invalidSourceRefs.length) {
+    const details = invalidSourceRefs
+      .slice(0, 20)
+      .map(({ path, sourceRef }) => `- ${path}: ${sourceRef}`);
+    if (invalidSourceRefs.length > details.length) {
+      details.push(`- 另有 ${invalidSourceRefs.length - details.length} 处`);
+    }
+    return [
+      `Spec 引用了 ${new Set(invalidSourceRefs.map(({ sourceRef }) => sourceRef)).size} 个尚未观察到的来源（共 ${invalidSourceRefs.length} 处）：`,
+      ...details,
+      "请只从 allowedSourceRefs 中逐字复制来源引用。",
+    ].join("\n");
+  }
+  for (const testCase of input.spec.cases) {
+    if (testCase.preconditions.some(hasExternalCaseDependency))
+      return `用例「${testCase.name}」依赖其他 Case 或未交付的操作知识。每例独立并发执行，请将必要检查和参照观察展开为本 Case 的步骤，不得假定其他用例已完成。`;
+    for (const criterion of testCase.criteria) {
+      const basis = criterion.basis;
+      if (!basis || !criterion.sourceRefs.includes(basis.sourceRef))
+        return `验收标准 ${criterion.id} 缺少引用来源内的 basis。探索步骤和自拟测试标识不能作为产品要求。`;
+      const content = input.sourceContents.get(basis.sourceRef) ?? "";
+      if (!content.includes(basis.quote))
+        return `验收标准 ${criterion.id} 的 basis.quote 未出现在实际来源中；请引用支持该产品断言的原文，或移除无来源的断言。`;
+      if (!criterion.observationTargets?.length)
+        return `验收标准 ${criterion.id} 缺少 observationTargets；请为每个待验证对象声明 label 和可在页面或接口中核对的 expectedText。`;
+      if (
+        new Set(criterion.observationTargets.map((target) => target.label))
+          .size !== criterion.observationTargets.length
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.label 必须唯一。`;
+      if (
+        new Set(
+          criterion.observationTargets.map((target) => target.expectedText),
+        ).size !== criterion.observationTargets.length
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须能区分各对象，不能用相同文字代替多个对象。`;
+      if (
+        criterion.observationTargets.some(
+          (target) =>
+            ![target.expectedText, ...(target.alternatives ?? [])].every(
+              (text) =>
+                criterion.sourceRefs.some((sourceRef) =>
+                  (input.sourceContents.get(sourceRef) ?? "").includes(text),
+                ),
+            ),
+        )
+      )
+        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须来自已读取的来源，不能编造类型名或内部枚举。`;
+    }
+  }
+  return null;
+}
+
+function sourceCoverageError(
+  input: Pick<
+    Parameters<typeof validateFinalSpec>[0],
+    "calledTools" | "linkedPullRequests" | "sources" | "unavailableTools"
+  >,
+) {
   if (!input.calledTools.has("linear_get_issue")) {
     return "完成 Spec 前必须读取 Linear Issue。";
   }
@@ -886,64 +1105,6 @@ export function validateFinalSpec(input: {
       !input.unavailableTools.has("github_read_file")
     ) {
       return `完成 Spec 前必须读取 ${coverage.url} 的 Route Spec：${coverage.unreadRouteSpecs.join("、")}`;
-    }
-  }
-  const invalidSourceRefs = specSourceRefEntries(input.spec).filter(
-    ({ sourceRef }) => !input.sources.has(sourceRef),
-  );
-  if (invalidSourceRefs.length) {
-    const details = invalidSourceRefs
-      .slice(0, 20)
-      .map(({ path, sourceRef }) => `- ${path}: ${sourceRef}`);
-    if (invalidSourceRefs.length > details.length) {
-      details.push(`- 另有 ${invalidSourceRefs.length - details.length} 处`);
-    }
-    return [
-      `Spec 引用了 ${new Set(invalidSourceRefs.map(({ sourceRef }) => sourceRef)).size} 个尚未观察到的来源（共 ${invalidSourceRefs.length} 处）：`,
-      ...details,
-      "请只从 allowedSourceRefs 中逐字复制来源引用。",
-    ].join("\n");
-  }
-  for (const testCase of input.spec.cases) {
-    if (
-      testCase.preconditions.some((value) =>
-        /\bcase\s*[-#]?\s*\d+|用例\s*[一二三四五六七八九十\d]+|(?:其他|其它|前一|另一个)(?:\s*Case|用例)|(?:已了解|已掌握).*(?:操作路径|操作流程)/iu.test(
-          value,
-        ),
-      )
-    )
-      return `用例「${testCase.name}」依赖其他 Case 或未交付的操作知识。每例独立并发执行，请将必要检查和参照观察展开为本 Case 的步骤，不得假定其他用例已完成。`;
-    for (const criterion of testCase.criteria) {
-      const basis = criterion.basis;
-      if (!basis || !criterion.sourceRefs.includes(basis.sourceRef))
-        return `验收标准 ${criterion.id} 缺少引用来源内的 basis。探索步骤和自拟测试标识不能作为产品要求。`;
-      const content = input.sourceContents.get(basis.sourceRef) ?? "";
-      if (!content.includes(basis.quote))
-        return `验收标准 ${criterion.id} 的 basis.quote 未出现在实际来源中；请引用支持该产品断言的原文，或移除无来源的断言。`;
-      if (!criterion.observationTargets?.length)
-        return `验收标准 ${criterion.id} 缺少 observationTargets；请为每个待验证对象声明 label 和可在页面或接口中核对的 expectedText。`;
-      if (
-        new Set(criterion.observationTargets.map((target) => target.label))
-          .size !== criterion.observationTargets.length
-      )
-        return `验收标准 ${criterion.id} 的 observationTargets.label 必须唯一。`;
-      if (
-        new Set(
-          criterion.observationTargets.map((target) => target.expectedText),
-        ).size !== criterion.observationTargets.length
-      )
-        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须能区分各对象，不能用相同文字代替多个对象。`;
-      if (
-        criterion.observationTargets.some(
-          (target) =>
-            !criterion.sourceRefs.some((sourceRef) =>
-              (input.sourceContents.get(sourceRef) ?? "").includes(
-                target.expectedText,
-              ),
-            ),
-        )
-      )
-        return `验收标准 ${criterion.id} 的 observationTargets.expectedText 必须来自已读取的来源，不能编造类型名或内部枚举。`;
     }
   }
   return null;
@@ -1008,6 +1169,20 @@ const CHINESE_TEXT = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
 function validateChineseSpec(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
   const fields: Array<[string, string]> = [
     ["summary", spec.summary],
+    ...(spec.requirements ?? []).map(
+      (item, index) =>
+        [`requirements[${index}].description`, item.description] as [
+          string,
+          string,
+        ],
+    ),
+    ...(spec.uncoveredRequirements ?? []).map(
+      (item, index) =>
+        [`uncoveredRequirements[${index}].reason`, item.reason] as [
+          string,
+          string,
+        ],
+    ),
     ...spec.assumptions.map(
       (value, index) => [`assumptions[${index}]`, value] as [string, string],
     ),
@@ -1033,10 +1208,6 @@ function validateChineseSpec(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
             string,
           ],
       ),
-      ...testCase.testData.map(
-        (value, index) =>
-          [`cases[${caseIndex}].testData[${index}]`, value] as [string, string],
-      ),
       ...testCase.cleanup.map(
         (value, index) =>
           [`cases[${caseIndex}].cleanup[${index}]`, value] as [string, string],
@@ -1060,6 +1231,7 @@ function validateChineseSpec(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
       ),
     );
   });
+  // Test data can be literal identifiers, URLs or deliberately invalid inputs.
   const invalid = fields.find(([, value]) => !CHINESE_TEXT.test(value));
   return invalid
     ? `${invalid[0]} 必须使用简体中文描述；标识符、URL 和代码符号可以保持原样。`
@@ -1075,18 +1247,24 @@ function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
 function specSourceRefEntries(
   spec: z.infer<typeof runtimeGeneratedSpecSchema>,
 ) {
-  return spec.cases.flatMap((testCase, caseIndex) => [
-    ...testCase.sourceRefs.map((sourceRef, sourceIndex) => ({
-      path: `spec.cases[${caseIndex}].sourceRefs[${sourceIndex}]`,
-      sourceRef,
+  return [
+    ...(spec.requirements ?? []).map((item, index) => ({
+      path: `spec.requirements[${index}].sourceRef`,
+      sourceRef: item.sourceRef,
     })),
-    ...testCase.criteria.flatMap((criterion, criterionIndex) =>
-      criterion.sourceRefs.map((sourceRef, sourceIndex) => ({
-        path: `spec.cases[${caseIndex}].criteria[${criterionIndex}].sourceRefs[${sourceIndex}]`,
+    ...spec.cases.flatMap((testCase, caseIndex) => [
+      ...testCase.sourceRefs.map((sourceRef, sourceIndex) => ({
+        path: `spec.cases[${caseIndex}].sourceRefs[${sourceIndex}]`,
         sourceRef,
       })),
-    ),
-  ]);
+      ...testCase.criteria.flatMap((criterion, criterionIndex) =>
+        criterion.sourceRefs.map((sourceRef, sourceIndex) => ({
+          path: `spec.cases[${caseIndex}].criteria[${criterionIndex}].sourceRefs[${sourceIndex}]`,
+          sourceRef,
+        })),
+      ),
+    ]),
+  ];
 }
 
 function specCorrection(error: string, sourceIds: Iterable<string>) {

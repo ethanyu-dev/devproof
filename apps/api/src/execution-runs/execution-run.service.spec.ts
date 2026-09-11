@@ -75,7 +75,14 @@ describe("ExecutionRunService events", () => {
     expect(prisma.runtimeSessionRecovery.findMany).toHaveBeenCalledWith({
       where: { teamId: snapshot.teamId, sessionId: { in: ["session"] } },
       orderBy: { createdAt: "desc" },
-      select: { id: true, closureState: true, writeOutcomeState: true },
+      select: {
+        id: true,
+        closureState: true,
+        writeOutcomeState: true,
+        sessionId: true,
+        lastErrorCode: true,
+        resolvedAt: true,
+      },
     });
   });
 

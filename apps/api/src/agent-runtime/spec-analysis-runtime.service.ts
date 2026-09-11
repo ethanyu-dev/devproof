@@ -14,6 +14,7 @@ import {
   runtimeSpecSourceRefSchema,
   runtimeTraceEventSchema,
   specPullRequestCoverage,
+  specRequirementCoverageError,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskOutcomeInput,
   type RuntimeSpecAnalysisToolInput,
@@ -231,6 +232,9 @@ export class SpecAnalysisRuntimeService {
           leaseToken: attempt.leaseToken!,
           serverTime: serverTime.toISOString(),
           snapshot: {
+            ...(input.protocol.minor >= 17
+              ? { specFormat: "COMPACT" as const }
+              : {}),
             attemptNumber: attempt.number,
             deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
             issueRef: createInput.issueRef,
@@ -621,6 +625,8 @@ export class SpecAnalysisRuntimeService {
     outcome: Extract<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
   ) {
     const spec = runtimeGeneratedSpecSchema.parse(outcome.spec);
+    const coverageError = specRequirementCoverageError(spec);
+    if (coverageError) throw new BadRequestException(coverageError);
     const available = new Map(
       attempt.analysisSources.map((source) => [source.externalId, source]),
     );
@@ -639,6 +645,17 @@ export class SpecAnalysisRuntimeService {
       }
     }
     const revisions = new Map<string, string>();
+    for (const requirement of spec.requirements ?? []) {
+      const source = available.get(requirement.sourceRef)!;
+      if (
+        !stringLeaves(sourceContent(source.content))
+          .join("\n")
+          .includes(requirement.quote)
+      )
+        throw new BadRequestException(
+          `Requirement ${requirement.id} must quote its actual analysis source.`,
+        );
+    }
     for (const source of attempt.analysisSources) {
       if (!source.kind.startsWith("GITHUB_") || !source.revision) continue;
       const uri = source.uri.split("/files#")[0]!;
@@ -646,6 +663,27 @@ export class SpecAnalysisRuntimeService {
       revisions.set(uri, source.revision);
     }
     const context = buildSpecAnalysisContext(attempt.analysisSources);
+    const { cases: _cases, ...specification } = spec;
+    context.specification = specification;
+    for (const uncovered of spec.uncoveredRequirements ?? []) {
+      const requirement = spec.requirements!.find(
+        (item) => item.id === uncovered.requirementId,
+      )!;
+      context.resolution.diagnostics.push({
+        code: "SPEC_REQUIREMENT_UNCOVERED",
+        level: "WARNING",
+        message:
+          `未覆盖需求「${requirement.description}」：${uncovered.reason}`.slice(
+            0,
+            2000,
+          ),
+        reference: requirement.sourceRef,
+        source: available.get(requirement.sourceRef)!.kind.startsWith("GITHUB_")
+          ? "GITHUB"
+          : "LINEAR",
+      });
+      context.resolution.completeness = "PARTIAL";
+    }
     const sourceCoverage = {
       issueSources: attempt.analysisSources.filter(
         (source) => source.kind === "LINEAR_ISSUE",
@@ -730,7 +768,9 @@ export class SpecAnalysisRuntimeService {
           context: json(context),
           diagnostics: json(context.resolution.diagnostics),
           generatorKind: "AGENT",
-          generatorVersion: "agent-spec-v2",
+          generatorVersion: spec.requirements
+            ? "agent-spec-v3"
+            : "agent-spec-v2",
           primaryPullRequestUrl: primaryPullRequest?.url ?? null,
           sourceHash,
           stageAttemptId: attempt.id,
@@ -740,7 +780,9 @@ export class SpecAnalysisRuntimeService {
             create: spec.cases.map((definition, position) => ({
               definition: json({
                 ...definition,
-                schemaVersion: "agent-spec-v2",
+                schemaVersion: spec.requirements
+                  ? "agent-spec-v3"
+                  : "agent-spec-v2",
               }),
               definitionHash: specificationDefinitionHash(definition),
               name: definition.name,
@@ -1376,9 +1418,11 @@ function leaseWhere(
 }
 
 async function databaseNow(tx: Prisma.TransactionClient) {
+  // The pg adapter replaces timestamptz offsets with UTC without shifting the
+  // clock value. Normalize in PostgreSQL before decoding lease/deadline times.
   const [row] = await tx.$queryRaw<
     Array<{ now: Date }>
-  >`SELECT clock_timestamp() AS now`;
+  >`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
   return row!.now;
 }
 
@@ -1554,13 +1598,22 @@ export function buildSpecAnalysisContext(
 
 function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
   return Array.from(
-    new Set(
-      spec.cases.flatMap((testCase) => [
+    new Set([
+      ...(spec.requirements ?? []).map((item) => item.sourceRef),
+      ...spec.cases.flatMap((testCase) => [
         ...testCase.sourceRefs,
         ...testCase.criteria.flatMap((criterion) => criterion.sourceRefs),
       ]),
-    ),
+    ]),
   );
+}
+
+function stringLeaves(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringLeaves);
+  if (value && typeof value === "object")
+    return Object.values(value).flatMap(stringLeaves);
+  return [];
 }
 
 function normalizeTargetUrl(value: string) {
