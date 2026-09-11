@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 16,
+  minor: 17,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -121,6 +121,8 @@ export const runtimeProtocolVersionSchema = z.object({
 export const runtimeObservationTargetSchema = z.object({
   label: z.string().trim().min(1).max(500),
   expectedText: z.string().trim().min(1).max(500),
+  // Alternatives describe the same business object, not additional objects.
+  alternatives: z.array(z.string().trim().min(1).max(500)).max(10).optional(),
 });
 
 export const runtimeCriterionSchema = z.object({
@@ -170,6 +172,7 @@ export const runtimeSpecSourceRefSchema = z.object({
 });
 
 export const runtimeSpecCriterionSchema = z.object({
+  requirementId: z.string().trim().min(1).max(100).optional(),
   observationTargets: z
     .array(runtimeObservationTargetSchema)
     .min(1)
@@ -212,7 +215,28 @@ export const runtimeGeneratedSpecCaseSchema = z.object({
   testData: z.array(z.string().trim().min(1).max(5_000)).max(100).default([]),
 });
 
+export const runtimeSpecRequirementSchema = z.object({
+  id: z.string().trim().min(1).max(100),
+  description: z.string().trim().min(1).max(2_000),
+  sourceRef: z.string().trim().min(1).max(500),
+  quote: z.string().trim().min(1).max(2_000),
+});
+
+export const runtimeUncoveredRequirementSchema = z.object({
+  requirementId: z.string().trim().min(1).max(100),
+  reason: z.string().trim().min(1).max(2_000),
+});
+
 export const runtimeGeneratedSpecSchema = z.object({
+  requirements: z
+    .array(runtimeSpecRequirementSchema)
+    .min(1)
+    .max(100)
+    .optional(),
+  uncoveredRequirements: z
+    .array(runtimeUncoveredRequirementSchema)
+    .max(100)
+    .optional(),
   assumptions: z
     .array(z.string().trim().min(1).max(5_000))
     .max(100)
@@ -230,6 +254,7 @@ export const runtimeGeneratedSpecSchema = z.object({
 });
 
 export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
+  specFormat: z.literal("COMPACT").optional(),
   attemptNumber: z.number().int().positive(),
   deadlineAt: z.string().datetime(),
   issueRef: z.string().trim().min(1).max(500),
@@ -809,3 +834,4 @@ export type RuntimeTaskOutcomeInput = z.infer<
   typeof runtimeTaskOutcomeInputSchema
 >;
 export { specPullRequestCoverage } from "./spec-source-coverage.js";
+export { specRequirementCoverageError } from "./spec-requirement-coverage.js";

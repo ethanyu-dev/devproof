@@ -225,6 +225,48 @@ describe("TaskExecutionService Spec completion before profile resolution", () =>
     },
   );
 
+  it.each([
+    ["PASSED", "SPEC_REQUIREMENT_UNCOVERED", "INCONCLUSIVE"],
+    ["FAILED", "SPEC_REQUIREMENT_UNCOVERED", "FAILED"],
+    ["PASSED", "GITHUB_PR_NOT_LINKED", "PASSED"],
+  ])("projects %s with %s as %s", async (childVerdict, code, verdict) => {
+    const state = setup({ analysisStatus: "SUCCEEDED" });
+    Object.assign(state.task, {
+      profileBinding: { status: "RESOLVED" },
+      deployments: [{ id: "deployment-1" }],
+      specificationSnapshots: [
+        { cases: [{ id: "case-1" }], diagnostics: [{ code }] },
+      ],
+      caseExecutions: [
+        {
+          caseId: "case-1",
+          deploymentId: "deployment-1",
+          executionOrdinal: 1,
+          dispatchStatus: "LINKED",
+          dispatchAttempts: 1,
+          run: {
+            id: "run-1",
+            lifecycle: "COMPLETED",
+            executionDisposition: "EXECUTED",
+            verdict: childVerdict,
+            finishedAt: new Date(),
+            tasks: [],
+          },
+        },
+      ],
+    });
+    state.task.stages[1]!.status = "RUNNING";
+    expect(await state.service.projectTask(state.task.id)).toMatchObject({
+      lifecycle: "COMPLETED",
+      verdict,
+    });
+    expect(state.tx.taskExecution.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ verdict }),
+      }),
+    );
+  });
+
   it("preserves a failed verdict when the complete deployment matrix finished before the deadline", async () => {
     const state = setup({ analysisStatus: "SUCCEEDED", expired: true });
     Object.assign(state.task, {

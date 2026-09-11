@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConflictException } from "@nestjs/common";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { userBrowserProfileVerifyInputSchema } from "@devproof/contracts";
 import { UserBrowserProfilesService } from "./user-browser-profiles.service.js";
 
@@ -68,9 +69,32 @@ function fixture(changes: Record<string, unknown> = {}) {
   return { service, sessions, updateMany, prisma };
 }
 
+beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Profile verification opt-in and source authentication", () => {
+  it.each(["verify", "closePreparation"] as const)(
+    "preserves the login session and profile when recovery is paused before %s",
+    async (operation) => {
+      vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "false");
+      const { service, sessions, updateMany, prisma } = fixture();
+      sessions.close.mockRejectedValue(
+        new ConflictException({
+          code: "RECOVERY_DISABLED",
+          message: "Session recovery is paused for deployment.",
+        }),
+      );
+      await expect(
+        service[operation](current as never, "profile-1"),
+      ).rejects.toThrow("Session recovery is paused");
+      expect(updateMany).not.toHaveBeenCalled();
+      expect(sessions.execute).not.toHaveBeenCalled();
+      expect(sessions.publishProfileSnapshot).not.toHaveBeenCalled();
+      expect(sessions.close).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+
   it("defaults old verify requests to serial preparation and rejects unknown options", () => {
     expect(userBrowserProfileVerifyInputSchema.parse({})).toEqual({
       prepareIsolatedAuth: false,

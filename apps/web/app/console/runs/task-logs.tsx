@@ -120,9 +120,6 @@ export function TaskLogs({
               : "查看任务创建、执行与通知等事件；浏览器操作日志请进入执行详情。"}
         </p>
         <span>{activeView === "events" ? "最新在前" : "按分析时间正序"}</span>
-        {eventsLoading && events.length > 0 && (
-          <span role="status">更新中…</span>
-        )}
       </div>
       {exportError && (
         <div className={styles.feedback}>

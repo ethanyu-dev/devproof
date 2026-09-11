@@ -1352,7 +1352,9 @@ export class BrowserVerificationExecutor {
               !parsed.data.observations?.some(
                 (item) =>
                   item.target === target.label &&
-                  item.quote.includes(target.expectedText) &&
+                  [target.expectedText, ...(target.alternatives ?? [])].some(
+                    (text) => item.quote.includes(text),
+                  ) &&
                   input.observations?.hasDeliveredQuote(
                     item.observationId,
                     item.cursor,
@@ -2360,7 +2362,7 @@ SCROLL_TARGET_NOT_SCROLLABLE 要求从新快照改用真实容器 ref；SCROLL_N
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或 SCROLL_TARGET_NOT_SCROLLABLE 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
-验收证据必须对应标准里的具体页面区域、控件和业务对象。记录 PASSED 时，必须逐个覆盖 observationTargets：在 observations 中提供对应 target（label）、observationId、cursor 和逐字 quote，quote 必须包含该对象的 expectedText 且来自已交付观察。仅看见下拉候选列表不证明选择后表单已经切换，必须引用实际选中状态及对应表单；多个对象不能只验证其中一个。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
+验收证据必须对应标准里的具体页面区域、控件和业务对象。记录 PASSED 时，必须逐个覆盖 observationTargets：在 observations 中提供对应 target（label）、observationId、cursor 和逐字 quote，quote 必须包含该对象的 expectedText 或 alternatives 中任一等价文本，且来自已交付观察。同一对象的文本是任选其一，不同 target 则必须全部覆盖。仅看见下拉候选列表不证明选择后表单已经切换，必须引用实际选中状态及对应表单；多个对象不能只验证其中一个。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
 TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。写入前只读核对环境、账号和所需类型的唯一键是否已有记录；已存在则请求独立账号，禁止删除既有记录来满足新建前置条件。默认并发执行，不假设其他 Case 的数据归属。缺账号继续使用 TEST_ACCOUNT，请在 context 中说明 usage="CREATE_OR_MODIFY"、requiredTypes 和 uniquenessConstraint；仅查看已有记录的筛选 Case 优先复用已有数据，必要时以 usage="READ_EXISTING" 请求账号，并保持只读。获得的账号只属于本 Case 的所声明用途，READ_EXISTING 答复不授权写入。记录实际创建的 ID、类型和证据，不能假设备注字段存在。
 正向业务验证需要已有测试账号时，只使用任务或 humanResume.response.account 明确提供的账号；不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。缺少账号，或提交后明确观察到该账号不存在/不可用时，调用现有 request_human_input，kind="TEST_ACCOUNT"，用简体中文请求一个当前环境可用于本次测试的账号（页面支持手机号或 UUID 时说明即可），context 中保留字段、原始错误与证据引用。用户只需提供账号，不需要接管浏览器。恢复后先重新观察保留的页面，用 humanResume.response.account 填写并核对结果；不要因为任务正文中的旧示例而覆盖用户答复。HITL 禁用时将缺数据的标准记为 INCONCLUSIVE，不盲目试号。若验收目标就是无效账号应被拒绝，则保留负向测试输入，按实际错误验证，不索取有效账号。
 result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。

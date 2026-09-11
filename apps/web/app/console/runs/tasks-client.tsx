@@ -270,7 +270,7 @@ export function TasksClient() {
             <span>
               {hasTaskFilters(appliedFilters)
                 ? "调整或清空筛选条件后重试。"
-                : "前往集成试验场，粘贴 Issue 或创建直接执行任务。"}
+                : "发起任务后，可在这里查看执行进度和结果。"}
             </span>
           </div>
         ) : (

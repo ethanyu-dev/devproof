@@ -18,6 +18,19 @@ function fixture() {
 }
 
 describe("RuntimeHumanControlRelay", () => {
+  it("forwards high quality preview options without changing the refresh interval", async () => {
+    const { relay, send, session } = fixture();
+    const close = await relay.subscribe(session, vi.fn(), {
+      pixelRatio: 2,
+      quality: 85,
+    });
+    expect(send).toHaveBeenCalledWith(
+      session.runtimeId,
+      expect.objectContaining({ intervalMs: 500, pixelRatio: 2, quality: 85 }),
+    );
+    await close();
+  });
+
   it("forwards only frames that match the active session fence", async () => {
     const { relay, send, session } = fixture();
     const emit = vi.fn();

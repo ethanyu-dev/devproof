@@ -17,6 +17,14 @@
   line-height: 1.6;
 }
 
+.failureMessage {
+  flex: 1;
+}
+
+.failureRetry {
+  flex-shrink: 0;
+}
+
 .taskIdentifier {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) 28px;

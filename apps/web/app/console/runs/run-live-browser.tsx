@@ -6,7 +6,14 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { CircleAlert, LoaderCircle, MonitorPlay, Radio, X } from "lucide-react";
+import {
+  CircleAlert,
+  LoaderCircle,
+  MonitorPlay,
+  MoveDiagonal2,
+  Radio,
+  X,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -474,7 +481,13 @@ export function RunLiveBrowser({
       </div>
 
       <footer>
-        <Radio /> 只读实时画面 · 无法向浏览器发送键盘、鼠标或触控输入
+        <span title="无法向浏览器发送键盘、鼠标或触控输入">
+          <Radio /> 只读实时画面
+        </span>
+        <span className="dp-run-live-preview-resize-hint">
+          <MoveDiagonal2 aria-hidden="true" />
+          {resizing ? "正在调整大小" : "拖拽四角缩放"}
+        </span>
       </footer>
 
       {RESIZE_HANDLES.map(({ corner, label }) => (
@@ -488,9 +501,11 @@ export function RunLiveBrowser({
           onPointerDown={(event) => startResizing(event, corner)}
           onPointerMove={resizePanel}
           onPointerUp={stopResizing}
-          title={label}
+          title={`${label}（也可使用方向键）`}
           type="button"
-        />
+        >
+          <MoveDiagonal2 aria-hidden="true" />
+        </button>
       ))}
     </section>
   );

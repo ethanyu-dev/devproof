@@ -4,6 +4,7 @@ import {
   runtimeCriterionSchema,
   runtimeFailureClassSchema,
   runtimePoolSchema,
+  runtimeGeneratedSpecSchema,
 } from "@devproof/agent-runtime-protocol";
 import {
   runtimeActionCommandInputSchema as protocolRuntimeCommandInputSchema,
@@ -1101,6 +1102,7 @@ export const specificationContextDiagnosticSchema = z.object({
 export const testGenerationContextSchema = z
   .object({
     issue: specificationIssueContextSchema,
+    specification: runtimeGeneratedSpecSchema.omit({ cases: true }).optional(),
     knowledge: z
       .array(specificationKnowledgeContextSchema)
       .max(100)

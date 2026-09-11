@@ -20,6 +20,7 @@ import { AuditService } from "../console/audit.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../infrastructure/redis.service.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
+import { requireRecoveryEnabled } from "../runtime/session-recovery.enabled.js";
 import {
   RuntimeHumanControlRelay,
   type HumanPreviewEvent,
@@ -848,6 +849,9 @@ export class UserBrowserProfilesService {
         );
       }
     }
+    // Saving requires verified closure. Reject a paused rollout before
+    // changing the profile or probing credentials in the live browser.
+    requireRecoveryEnabled();
     const claimedVersion = profile.version + 1;
     const claimed = await this.prisma.userBrowserProfile.updateMany({
       data: {
@@ -1079,6 +1083,8 @@ export class UserBrowserProfilesService {
       return this.serialize(await this.owned(current, id));
     }
 
+    // A deployment pause does not mean the still-running login session is lost.
+    requireRecoveryEnabled();
     const claimedVersion = profile.version + 1;
     const claimed = await this.prisma.userBrowserProfile.updateMany({
       data: {
@@ -1199,10 +1205,12 @@ export class UserBrowserProfilesService {
     current: AuthContext,
     id: string,
     emit: (event: HumanPreviewEvent) => void,
+    pixelRatio = 1,
   ) {
     return this.humanRelay.subscribe(
       await this.controlledSession(current, id),
       emit,
+      { pixelRatio, quality: 85 },
     );
   }
 

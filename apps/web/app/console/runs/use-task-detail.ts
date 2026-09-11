@@ -50,7 +50,7 @@ export function useTaskDetail(id: string, showLogs: boolean) {
       eventsRequest.current?.abort();
       const controller = new AbortController();
       eventsRequest.current = controller;
-      setEventsLoading(true);
+      if (foreground) setEventsLoading(true);
       try {
         const next = await consoleApi<TaskEvent[]>(
           `/tasks/${encodeURIComponent(id)}/events`,
@@ -82,23 +82,30 @@ export function useTaskDetail(id: string, showLogs: boolean) {
   }, [loadDetail]);
 
   useEffect(() => {
-    if (!active) return;
-    const timer = window.setInterval(() => void loadDetail(), 2_000);
-    return () => window.clearInterval(timer);
-  }, [active, loadDetail]);
+    const refreshVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadDetail();
+      if (showLogs) void loadEvents();
+    };
+    // A completed task can be retried from another tab or the API.
+    const timer = window.setInterval(refreshVisible, active ? 2_000 : 15_000);
+    window.addEventListener("focus", refreshVisible);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisible);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [active, loadDetail, loadEvents, showLogs]);
 
   useEffect(() => {
     if (!showLogs) return;
     void loadEvents(true);
-    const timer = active
-      ? window.setInterval(() => void loadEvents(), 2_000)
-      : null;
     return () => {
-      if (timer !== null) window.clearInterval(timer);
       eventsRequest.current?.abort();
       eventsRequest.current = null;
     };
-  }, [active, loadEvents, showLogs]);
+  }, [loadEvents, showLogs]);
 
   function refresh() {
     void loadDetail(true);

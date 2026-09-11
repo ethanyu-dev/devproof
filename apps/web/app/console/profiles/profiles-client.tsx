@@ -11,6 +11,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  ChevronDown,
   CircleAlert,
   Clock3,
   Globe2,
@@ -689,8 +690,9 @@ function ProfileBrowser({
   useEffect(() => {
     lastFrameAt.current = Date.now();
     setStreamStatus("connecting");
+    const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     const source = new EventSource(
-      `/console/api/browser-profiles/${profile.id}/browser/stream`,
+      `/console/api/browser-profiles/${profile.id}/browser/stream?pixelRatio=${pixelRatio}`,
       { withCredentials: true },
     );
     source.onmessage = (message) => {
@@ -771,7 +773,7 @@ function ProfileBrowser({
   const busy = operation !== null || profile.status === "VERIFYING";
   const panel = (
     <section
-      className={`dp-browser-handoff dp-profile-browser-handoff is-floating${fullscreen ? " is-fullscreen" : ""}`}
+      className={`dp-browser-handoff dp-profile-browser-handoff ${styles.handoffPanel} is-floating${fullscreen ? " is-fullscreen" : ""}`}
     >
       <header>
         <span>
@@ -814,38 +816,62 @@ function ProfileBrowser({
         </div>
       </header>
 
-      <div className="dp-browser-handoff-copy">
-        <strong>完成登录或 MFA</strong>
-        <p>请在原浏览器会话中完成身份验证，然后点击“验证并保存”。</p>
-        <small>
-          <ShieldCheck />
-          输入只会通过临时控制通道发送到浏览器执行节点，不会进入 Agent
-          提示词、验证轨迹或制品。
-        </small>
-      </div>
-
-      {profile.assignedRuntime ? (
-        <div
-          aria-label={`已分配浏览器执行节点 ${profile.assignedRuntime.name}`}
-          className="dp-browser-handoff-runtime"
-        >
-          <Monitor />
-          <span>
-            <small>已分配浏览器执行节点</small>
-            <b>{profile.assignedRuntime.name}</b>
-            <small>
-              {profile.assignedRuntime.deviceInfo ||
-                `Runtime ${profile.assignedRuntime.id.slice(0, 8)}`}
-              {profile.assignedRuntime.lastSeenAt
-                ? ` · 最近心跳 ${formatDate(profile.assignedRuntime.lastSeenAt)}`
-                : ""}
-            </small>
+      <details className={styles.handoffDetails}>
+        <summary className={styles.handoffSummary}>
+          <span className={styles.handoffPrompt}>
+            完成登录或 MFA 后，点击“验证并保存”。
           </span>
-          <Badge tone={runtimeTone(profile.assignedRuntime.status)}>
-            {displayLabel(profile.assignedRuntime.status)}
-          </Badge>
+          {profile.assignedRuntime ? (
+            <span
+              aria-label={`已分配浏览器执行节点 ${profile.assignedRuntime.name}`}
+              className={styles.handoffRuntime}
+            >
+              <Monitor />
+              <span
+                className={styles.handoffRuntimeName}
+                title={profile.assignedRuntime.name}
+              >
+                {profile.assignedRuntime.name}
+              </span>
+              <Badge tone={runtimeTone(profile.assignedRuntime.status)}>
+                {displayLabel(profile.assignedRuntime.status)}
+              </Badge>
+            </span>
+          ) : null}
+          <span className={styles.handoffDetailsToggle}>
+            详情 <ChevronDown />
+          </span>
+        </summary>
+        <div className={styles.handoffDetailsContent}>
+          <p>
+            <ShieldCheck />
+            <span>
+              输入只会通过临时控制通道发送到浏览器执行节点，不会进入 Agent
+              提示词、验证轨迹或制品。
+            </span>
+          </p>
+          {profile.assignedRuntime ? (
+            <dl>
+              <div>
+                <dt>执行节点</dt>
+                <dd>{profile.assignedRuntime.name}</dd>
+              </div>
+              {profile.assignedRuntime.deviceInfo ? (
+                <div>
+                  <dt>系统</dt>
+                  <dd>{profile.assignedRuntime.deviceInfo}</dd>
+                </div>
+              ) : null}
+              {profile.assignedRuntime.lastSeenAt ? (
+                <div>
+                  <dt>最近心跳</dt>
+                  <dd>{formatDate(profile.assignedRuntime.lastSeenAt)}</dd>
+                </div>
+              ) : null}
+            </dl>
+          ) : null}
         </div>
-      ) : null}
+      </details>
 
       {operationError || error ? (
         <div className="dp-browser-handoff-error">
@@ -943,25 +969,31 @@ function ProfileBrowser({
           ) : null}
         </div>
         <div className="dp-browser-handoff-controls">
-          <div className="dp-browser-handoff-guide">
-            <Keyboard />
-            点击画面定位输入焦点，可使用键盘、粘贴、点击和滚轮完成登录。
+          <div className={styles.handoffInstructions}>
+            <div className="dp-browser-handoff-guide">
+              <Keyboard />
+              <span>
+                点击画面定位输入焦点，可使用键盘、粘贴、点击和滚轮完成登录。
+              </span>
+            </div>
+            {profile.isolatedExecutionAvailable &&
+            profile.executionMode !== "ISOLATED_AUTH" ? (
+              <label className={styles.concurrentLogin}>
+                <input
+                  type="checkbox"
+                  checked={prepareIsolatedAuth}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setPrepareIsolatedAuth(event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>验证并发登录：</strong>使用 4
+                  个独立会话检查兼容性。部分站点可能要求重新登录；未勾选时只保存串行登录状态。
+                </span>
+              </label>
+            ) : null}
           </div>
-          {profile.isolatedExecutionAvailable &&
-          profile.executionMode !== "ISOLATED_AUTH" ? (
-            <label>
-              <input
-                type="checkbox"
-                checked={prepareIsolatedAuth}
-                disabled={busy}
-                onChange={(event) =>
-                  setPrepareIsolatedAuth(event.target.checked)
-                }
-              />{" "}
-              验证并发登录：使用 4
-              个独立会话检查兼容性。部分站点可能要求重新登录；未勾选时只保存串行登录状态。
-            </label>
-          ) : null}
           <div className="dp-browser-handoff-actions">
             <Button disabled={busy} onClick={onReload} variant="secondary">
               {operation === "prepare" ? <LoaderCircle /> : <RefreshCw />}
@@ -980,7 +1012,15 @@ function ProfileBrowser({
     </section>
   );
 
-  return overlayHost ? createPortal(panel, overlayHost) : null;
+  return overlayHost
+    ? createPortal(
+        <>
+          <div aria-hidden="true" className={styles.handoffBackdrop} />
+          {panel}
+        </>,
+        overlayHost,
+      )
+    : null;
 }
 
 function RemoteKeyboard({

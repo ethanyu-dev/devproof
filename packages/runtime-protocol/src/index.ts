@@ -1240,6 +1240,7 @@ export const runtimeHumanPreviewSubscribeSchema = z.object({
   fencingToken: z.string().regex(/^\d+$/u),
   intervalMs: z.number().int().min(500).max(5000),
   leaseToken: z.string().uuid(),
+  pixelRatio: z.number().min(1).max(2).optional(),
   quality: z.number().int().min(30).max(85),
   sessionId: z.string().uuid(),
   streamId: z.string().uuid(),

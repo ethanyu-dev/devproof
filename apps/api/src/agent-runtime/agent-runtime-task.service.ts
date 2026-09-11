@@ -1876,9 +1876,11 @@ function leaseWhere(
 }
 
 async function databaseNow(tx: Prisma.TransactionClient) {
+  // The pg adapter replaces timestamptz offsets with UTC without shifting the
+  // clock value. Normalize in PostgreSQL before decoding lease/deadline times.
   const [row] = await tx.$queryRaw<
     Array<{ now: Date }>
-  >`SELECT clock_timestamp() AS now`;
+  >`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
   return row!.now;
 }
 

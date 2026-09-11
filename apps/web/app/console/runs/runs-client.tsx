@@ -37,6 +37,16 @@ import { displayLabel } from "@/lib/display-text";
 import { RunHitlBrowser } from "./run-hitl-browser";
 import { RunLiveBrowser } from "./run-live-browser";
 import { runOutcome } from "./run-outcome";
+import {
+  currentRunFailures,
+  summarizeTaskFailures,
+  type FailureSummary,
+} from "./run-failure";
+import {
+  recoveryClosureLabel,
+  recoveryGuidance,
+  recoveryWriteLabel,
+} from "../access/runtime-recovery-display";
 import { RunTrajectory } from "./run-trajectory";
 import { mergeTrajectoryRecords } from "./run-trajectory-records";
 
@@ -56,6 +66,9 @@ interface RunDetail extends RunSummary {
     id: string;
     closureState: string;
     writeOutcomeState: string;
+    sessionId?: string;
+    lastErrorCode?: string | null;
+    resolvedAt?: string | null;
   }>;
   attempts: Array<{
     error: unknown;
@@ -67,6 +80,7 @@ interface RunDetail extends RunSummary {
     attemptId: string;
     id: string;
     runtimeSessionId: string | null;
+    error?: unknown;
     runtimeSession: {
       commands: Array<{
         commandType: string;
@@ -348,50 +362,6 @@ function formatByteSize(byteSize: number) {
   return `${(byteSize / 1_048_576).toFixed(1)} MB`;
 }
 
-interface FailureSummary {
-  code: string;
-  detail: string;
-  message: string;
-  occurrences: number;
-  raw: string;
-  signature: string;
-}
-
-function summarizeTaskFailures(tasks: RunDetail["tasks"]): FailureSummary[] {
-  const failures = new Map<string, FailureSummary>();
-  for (const task of tasks) {
-    if (!task.error) continue;
-    const error = isRecord(task.error) ? task.error : {};
-    const detail =
-      typeof error.message === "string"
-        ? error.message
-        : typeof task.error === "string"
-          ? task.error
-          : "执行任务失败。";
-    const invalidToolSchema =
-      /invalid schema for function|is not a valid format/iu.test(detail);
-    const code =
-      typeof error.code === "string" ? error.code : "RUNTIME_TASK_FAILED";
-    const signature = `${code}:${detail}`;
-    const existing = failures.get(signature);
-    if (existing) {
-      existing.occurrences += 1;
-      continue;
-    }
-    failures.set(signature, {
-      code,
-      detail,
-      message: invalidToolSchema
-        ? "Agent Runtime 的 browser_command 工具 Schema 不兼容，模型请求在执行浏览器命令前就被拒绝了；这不是浏览器执行节点不可用。"
-        : detail,
-      occurrences: 1,
-      raw: JSON.stringify(task.error, null, 2),
-      signature,
-    });
-  }
-  return [...failures.values()];
-}
-
 function hasInvalidToolSchemaFailure(failures: FailureSummary[]) {
   return failures.some((failure) =>
     /invalid schema for function|is not a valid format/iu.test(failure.detail),
@@ -546,6 +516,15 @@ function RunDetailClient({ id }: { id: string }) {
     ? ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(detail.lifecycle)
     : false;
   const taskFailures = detail ? summarizeTaskFailures(detail.tasks) : [];
+  const currentFailures = detail ? currentRunFailures(detail) : [];
+  const pendingRecoveries =
+    detail?.recoveries?.filter(
+      (item) =>
+        !item.resolvedAt &&
+        item.closureState !== "OBSERVED" &&
+        (item.closureState !== "VERIFIED" ||
+          ["UNKNOWN", "UNASSESSED"].includes(item.writeOutcomeState)),
+    ) ?? [];
   const criteria = detail ? displayCriteria(detail) : [];
   const pendingIntervention =
     detail?.interventions.find(
@@ -565,13 +544,19 @@ function RunDetailClient({ id }: { id: string }) {
     [olderCursor, olderHasMore, olderRecords, trajectory],
   );
   const displayedExecutionDisposition = detail
-    ? hasInvalidToolSchemaFailure(taskFailures)
+    ? detail.executionDisposition !== "BLOCKED" &&
+      hasInvalidToolSchemaFailure(currentFailures)
       ? "AGENT_ERROR"
       : detail.executionDisposition
     : null;
   const runtimeIsRunning = detail?.lifecycle === "RUNNING";
   const outcome = detail
-    ? runOutcome(detail, displayedExecutionDisposition, taskFailures, criteria)
+    ? runOutcome(
+        detail,
+        displayedExecutionDisposition,
+        currentFailures,
+        criteria,
+      )
     : null;
   const videos = detail?.evidences.filter(isVideoEvidence) ?? [];
   const stepScreenshots = (detail?.evidences.filter(isStepScreenshot) ?? [])
@@ -654,26 +639,6 @@ function RunDetailClient({ id }: { id: string }) {
       ) : (
         <>
           {message ? <FormMessage message={message} tone="error" /> : null}
-          {detail.recoveries
-            ?.filter(
-              (recovery) =>
-                recovery.closureState !== "OBSERVED" &&
-                ["UNKNOWN", "UNASSESSED"].includes(recovery.writeOutcomeState),
-            )
-            .map((recovery) => (
-              <Card key={recovery.id} className="dp-run-card">
-                <h2>执行已中断，重试前需核对业务状态</h2>
-                <p>
-                  {recovery.closureState === "VERIFIED"
-                    ? "浏览器已确认关闭。"
-                    : "正在确认浏览器是否已关闭。"}
-                  本次操作的写入结果尚未确认，因此未自动重跑；这不代表产品验证失败。
-                </p>
-                <Link href={`/console/access/recoveries/${recovery.id}`}>
-                  查看恢复记录并核对写入结果
-                </Link>
-              </Card>
-            ))}
           <div className="dp-run-layout">
             {outcome ? (
               <Card
@@ -683,7 +648,8 @@ function RunDetailClient({ id }: { id: string }) {
                   <span className="dp-run-outcome-icon" aria-hidden="true">
                     {outcome.tone === "success" ? (
                       <CircleCheckBig />
-                    ) : outcome.tone === "danger" ? (
+                    ) : outcome.tone === "danger" ||
+                      outcome.tone === "warning" ? (
                       <TriangleAlert />
                     ) : (
                       <Activity />
@@ -693,6 +659,14 @@ function RunDetailClient({ id }: { id: string }) {
                     <Badge tone={outcome.tone}>{outcome.label}</Badge>
                     <h2>{outcome.title}</h2>
                     <p>{outcome.description}</p>
+                    {outcome.reasonCode && (
+                      <code className="dp-run-reason-code">
+                        {outcome.reasonCode}
+                      </code>
+                    )}
+                    {outcome.nextStep && pendingRecoveries.length === 0 && (
+                      <p>建议：{outcome.nextStep}</p>
+                    )}
                   </div>
                 </div>
                 <div className="dp-run-outcome-metrics" aria-label="结果摘要">
@@ -728,6 +702,61 @@ function RunDetailClient({ id }: { id: string }) {
                     <small>浏览器节点</small>
                   </span>
                 </div>
+                {pendingRecoveries.map((recovery) => {
+                  const attemptId = detail.browserExecutions.find(
+                    (item) => item.runtimeSessionId === recovery.sessionId,
+                  )?.attemptId;
+                  const failure = attemptId
+                    ? currentRunFailures(detail, attemptId)[0]
+                    : recovery.sessionId
+                      ? undefined
+                      : currentFailures[0];
+                  const needsWriteReview = ["UNKNOWN", "UNASSESSED"].includes(
+                    recovery.writeOutcomeState,
+                  );
+                  return (
+                    <div
+                      className="dp-run-recovery-notice"
+                      key={recovery.id}
+                      role="status"
+                    >
+                      <TriangleAlert aria-hidden="true" />
+                      <div>
+                        <b>
+                          {needsWriteReview
+                            ? "重试前需核对业务状态"
+                            : "浏览器会话需要恢复处理"}
+                        </b>
+                        {failure && failure.message !== outcome.description && (
+                          <p>中断原因：{failure.message}</p>
+                        )}
+                        <p>
+                          {recoveryClosureLabel(recovery.closureState)} ·{" "}
+                          {recoveryWriteLabel(recovery.writeOutcomeState)}
+                        </p>
+                        {recovery.closureState !== "VERIFIED" && (
+                          <p>
+                            {recoveryGuidance(
+                              recovery.closureState,
+                              recovery.lastErrorCode ?? null,
+                            )}
+                          </p>
+                        )}
+                        {needsWriteReview && (
+                          <p>
+                            为避免重复写入，已停止自动重试；这不代表产品验证失败。请核对实际业务数据并记录结果。
+                          </p>
+                        )}
+                        <Link
+                          href={`/console/access/recoveries/${recovery.id}`}
+                        >
+                          查看恢复记录
+                          {needsWriteReview ? "并核对业务结果" : "并处理阻塞"} →
+                        </Link>
+                      </div>
+                    </div>
+                  );
+                })}
               </Card>
             ) : null}
 

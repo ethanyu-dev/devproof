@@ -15,6 +15,27 @@ import {
 } from "./index.js";
 
 describe("Runtime protocol", () => {
+  it("accepts bounded preview pixel ratios while preserving legacy subscriptions", () => {
+    const message = {
+      type: "human.preview.subscribe",
+      fencingToken: "1",
+      intervalMs: 500,
+      leaseToken: "11111111-1111-4111-8111-111111111111",
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      streamId: "33333333-3333-4333-8333-333333333333",
+      quality: 85,
+    };
+    expect(runtimeServerMessageSchema.parse(message)).toEqual(message);
+    expect(
+      runtimeServerMessageSchema.parse({ ...message, pixelRatio: 2 }),
+    ).toHaveProperty("pixelRatio", 2);
+    for (const pixelRatio of [0, 3, Infinity])
+      expect(
+        runtimeServerMessageSchema.safeParse({ ...message, pixelRatio })
+          .success,
+      ).toBe(false);
+  });
+
   it("validates an explicit recovery challenge while keeping legacy close payloads compatible", () => {
     const recovery = {
       recoveryId: "11111111-1111-4111-8111-111111111111",

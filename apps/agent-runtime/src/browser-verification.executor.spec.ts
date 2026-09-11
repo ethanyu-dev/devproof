@@ -245,68 +245,85 @@ describe("context delivery and slow models", () => {
     expect(controlPlane.browserCommand).toHaveBeenCalledTimes(5);
   });
 
-  it("requires observed evidence for every declared target before accepting PASSED", async () => {
-    let step = 0;
-    let selected = "Legacy";
-    let legacy: Record<string, unknown>;
-    const create = vi.fn(async (request: Request) => {
-      const page = contextData(request, "current_browser_page").data.snapshot;
-      const quote = {
-        target: selected,
-        observationId: page.observationId,
-        cursor: page.cursor,
-        quote: page.content,
-      };
-      const current = step++;
-      if (current === 0) legacy = quote;
-      if (current === 1) {
-        expect(operationOutput(request, "call-0").error).toContain("Mapping");
+  it.each([false, true])(
+    "requires every target while allowing equivalent text (%s)",
+    async (useAlternatives) => {
+      let step = 0;
+      let selected = "Legacy";
+      let legacy: Record<string, unknown>;
+      const create = vi.fn(async (request: Request) => {
+        const page = contextData(request, "current_browser_page").data.snapshot;
+        const quote = {
+          target: selected,
+          observationId: page.observationId,
+          cursor: page.cursor,
+          quote: page.content,
+        };
+        const current = step++;
+        if (current === 0) legacy = quote;
+        if (current === 1) {
+          expect(operationOutput(request, "call-0").error).toContain("Mapping");
+          return reply(
+            "browser_command",
+            {
+              commandType: "page.select",
+              payload: { target: { ref: "e1" }, values: ["Mapping"] },
+            },
+            current,
+          );
+        }
+        if (current === 3)
+          return reply(
+            "finish_verification",
+            { verdict: "PASSED", summary: "已分别验证两个类型。" },
+            current,
+          );
         return reply(
-          "browser_command",
+          "record_criterion",
           {
-            commandType: "page.select",
-            payload: { target: { ref: "e1" }, values: ["Mapping"] },
+            criterionId: "page-visible",
+            status: "PASSED",
+            summary: "两个类型显示正确。",
+            evidenceRefs: [],
+            observations: current === 0 ? [quote] : [legacy!, quote],
           },
           current,
         );
-      }
-      if (current === 3)
-        return reply(
-          "finish_verification",
-          { verdict: "PASSED", summary: "已分别验证两个类型。" },
-          current,
-        );
-      return reply(
-        "record_criterion",
+      });
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      runTask.snapshot.criteria[0]!.observationTargets = [
         {
-          criterionId: "page-visible",
-          status: "PASSED",
-          summary: "两个类型显示正确。",
-          evidenceRefs: [],
-          observations: current === 0 ? [quote] : [legacy!, quote],
+          label: "Legacy",
+          expectedText: useAlternatives
+            ? "旧版对公转账白名单"
+            : 'value="Legacy"',
+          ...(useAlternatives ? { alternatives: ['value="Legacy"'] } : {}),
         },
-        current,
+        {
+          label: "Mapping",
+          expectedText: useAlternatives
+            ? "合规模型映射白名单"
+            : 'value="Mapping"',
+          ...(useAlternatives ? { alternatives: ['value="Mapping"'] } : {}),
+        },
+      ];
+      controlPlane.browserCommand.mockImplementation(
+        async (_lease, command) => {
+          if (command.commandType === "page.select") selected = "Mapping";
+          return {
+            status: "SUCCEEDED",
+            result: {
+              content: `- <select value="${selected}"> "${selected}" [ref=e1]`,
+            },
+          };
+        },
       );
-    });
-    const { executor, controlPlane, runTask } = convergenceHarness(create);
-    runTask.snapshot.criteria[0]!.observationTargets = [
-      { label: "Legacy", expectedText: 'value="Legacy"' },
-      { label: "Mapping", expectedText: 'value="Mapping"' },
-    ];
-    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
-      if (command.commandType === "page.select") selected = "Mapping";
-      return {
-        status: "SUCCEEDED",
-        result: {
-          content: `- <select value="${selected}"> "${selected}" [ref=e1]`,
-        },
-      };
-    });
-    expect(
-      await executor.execute(runTask, lease, new AbortController().signal),
-    ).toMatchObject({ verdict: "PASSED" });
-    expect(create).toHaveBeenCalledTimes(4);
-  });
+      expect(
+        await executor.execute(runTask, lease, new AbortController().signal),
+      ).toMatchObject({ verdict: "PASSED" });
+      expect(create).toHaveBeenCalledTimes(4);
+    },
+  );
 
   it("reports a timed-out browser tool as FAILED in its outer trace", async () => {
     let step = 0;

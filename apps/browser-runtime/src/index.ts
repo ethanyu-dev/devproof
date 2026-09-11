@@ -2,6 +2,7 @@
 import { DomObservations } from "./dom-observation.js";
 import { VisualObservations } from "./visual-observation.js";
 import { scrollElement } from "./scroll.js";
+import { captureHighDensityPreview } from "./preview-screenshot.js";
 import {
   ActionFeedbackTracker,
   actionTarget,
@@ -4385,11 +4386,22 @@ export class BrowserSessionManager {
         height: 720,
         width: 1280,
       };
-      const data = await this.screenshot(session.page, {
-        format: "jpeg",
-        fullPage: false,
-        quality: message.quality,
-      });
+      const pixelRatio = message.pixelRatio ?? 1;
+      const highDensityData =
+        pixelRatio > 1
+          ? await captureHighDensityPreview(session.page, {
+              pixelRatio,
+              quality: message.quality,
+              maxBytes: INLINE_SCREENSHOT_MAX_BYTES,
+            }).catch(() => undefined)
+          : undefined;
+      const data =
+        highDensityData ??
+        (await this.screenshot(session.page, {
+          format: "jpeg",
+          fullPage: false,
+          quality: message.quality,
+        }));
       this.emitPreview({
         capturedAt: new Date().toISOString(),
         dataBase64: data.toString("base64"),
