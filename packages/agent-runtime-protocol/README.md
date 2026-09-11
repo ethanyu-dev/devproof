@@ -73,6 +73,19 @@ progress receive at most the bootstrap extension.
 Apply migration `20260910143000_agent_meaningful_progress`, deploy the API, then
 both Agent pools. The optional trace field is wire compatible; new Agents require
 the API update for progress-aware deadlines. Browser Runtime/protocol is unchanged.
+
+Protocol v2.16 adds optional `observationTargets` to Spec and execution criteria,
+`requireObservedEvidence` to execution criteria, and `observations` to criterion
+results. Each target declares a label and source-grounded expected text; a PASSED
+result must quote delivered browser observations covering every declared target.
+New Spec generation requires targets, while historical Specs remain parseable.
+Newly dispatched Agent Specs without targets cannot pass until regenerated.
+
+Deploy the API before both Agent pools, and drain older workers before relying on
+the coverage guard: old workers ignore the optional fields. Browser Runtime
+0.2.26 fixes scoped references separately and must be installed on execution hosts.
+No database migration or Browser wire-protocol change is required. See
+[execution reliability notes](../../docs/execution-reliability-followup.md).
 See [context delivery and progress](../../docs/agent-context-progress.md).
 
 The current contract accepts only `SPEC_ANALYSIS` and `BROWSER_EXECUTION`.

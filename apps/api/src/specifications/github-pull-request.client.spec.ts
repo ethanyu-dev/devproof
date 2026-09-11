@@ -4,6 +4,131 @@ import { GithubPullRequestClient } from "./github-pull-request.client.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
+describe("Issue pull request discovery", () => {
+  const issueUrl = "https://linear.app/acme/issue/ENG-123/refund";
+  const candidate = {
+    token: "test",
+    repositories: ["acme/web"],
+    organizations: [],
+  };
+  const client = (candidates = [candidate]) =>
+    new GithubPullRequestClient({
+      discoveryCandidates: vi.fn().mockResolvedValue(candidates),
+    } as never);
+
+  it("accepts only exact Issue backlinks in the configured repository and skips malformed results", async () => {
+    const item = (number: number, body: string, repository = "acme/web") => ({
+      pull_request: {},
+      body,
+      html_url: `https://github.com/${repository}/pull/${number}`,
+    });
+    const fetcher = vi.fn().mockResolvedValue(
+      Response.json({
+        total_count: 6,
+        items: [
+          {
+            ...item(1, issueUrl),
+            html_url: "https://evil.test/acme/web/pull/1",
+          },
+          item(2, "https://linear.app/acme/issue/ENG-1234/other"),
+          item(3, "https://linear.app/other/issue/ENG-123/refund"),
+          item(4, issueUrl, "outside/private"),
+          item(5, "Similar refund title but no explicit association"),
+          item(6, `[Issue](https://linear.app/acme/issue/ENG-123/renamed)`),
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await client([
+      candidate,
+      candidate,
+    ]).discoverIssuePullRequests("team", issueUrl);
+    expect(result.pullRequestUrls).toEqual([
+      "https://github.com/acme/web/pull/6",
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const query = new URL(String(fetcher.mock.calls[0]![0])).searchParams.get(
+      "q",
+    );
+    expect(query).toContain(
+      '"https://linear.app/acme/issue/eng-123" in:body repo:acme/web',
+    );
+  });
+
+  it("bounds searches and preserves incomplete discovery warnings", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({ total_count: 101, incomplete_results: true, items: [] }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await client([
+      {
+        ...candidate,
+        repositories: Array.from({ length: 12 }, (_, i) => `acme/repo-${i}`),
+      },
+    ]).discoverIssuePullRequests("team", issueUrl);
+    expect(fetcher).toHaveBeenCalledTimes(8);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "GITHUB_PR_DISCOVERY_PARTIAL",
+        level: "WARNING",
+      }),
+    );
+  });
+
+  it("tries another credential after a failed query and reports failure", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ items: [] }));
+    vi.stubGlobal("fetch", fetcher);
+    const result = await client([
+      candidate,
+      { ...candidate, token: "other" },
+    ]).discoverIssuePullRequests("team", issueUrl);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "GITHUB_PR_DISCOVERY_FAILED" }),
+    );
+  });
+
+  it("does not treat an empty result from one credential as complete repository coverage", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ items: [] }))
+      .mockResolvedValueOnce(
+        Response.json({
+          items: [
+            {
+              pull_request: {},
+              body: issueUrl,
+              html_url: "https://github.com/acme/web/pull/9",
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await client([
+      candidate,
+      { ...candidate, token: "private-repository-access" },
+    ]).discoverIssuePullRequests("team", issueUrl);
+    expect(result.pullRequestUrls).toEqual([
+      "https://github.com/acme/web/pull/9",
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not search without a team scope or a canonical Linear URL", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    expect(
+      (await client([]).discoverIssuePullRequests("team", issueUrl))
+        .diagnostics[0]?.code,
+    ).toBe("GITHUB_PR_DISCOVERY_SCOPE_MISSING");
+    await client().discoverIssuePullRequests("team", "ENG-123");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
 describe("GithubPullRequestClient credential fallback", () => {
   it("distinguishes unavailable checks from a PR with no checks", async () => {
     vi.stubGlobal(

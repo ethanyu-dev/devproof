@@ -3038,6 +3038,8 @@ function taskCaseRunRequest(
           id: criterion.id,
           required: criterion.required,
           requiredEvidenceKinds: criterion.requiredEvidenceKinds,
+          requireObservedEvidence: true,
+          observationTargets: criterion.observationTargets,
         }))
       : legacyDefinition!.expected.map((expected, index) => ({
           description: expected,

@@ -619,83 +619,110 @@ describe("SpecAnalysisRuntimeService", () => {
     expect(result.sourceRefs).toHaveLength(1);
   });
 
-  it("executes Linear through the control plane and persists an immutable source", async () => {
-    const sourceCreate = vi.fn().mockResolvedValue({ id: "source-1" });
-    const prisma = {
-      taskAnalysisSource: {
-        aggregate: vi.fn().mockResolvedValue({
-          _count: { _all: 0 },
-          _sum: { byteSize: null },
-        }),
-        create: sourceCreate,
-      },
-      taskStageAttempt: {
-        findUnique: vi.fn().mockResolvedValue({
-          fencingToken: 4n,
-          id: attemptId,
-          leaseExpiresAt: new Date(Date.now() + 60_000),
-          leaseOwner: "worker-1",
-          leaseToken,
-          stage: {
-            taskExecution: {
-              id: taskExecutionId,
-              inputSnapshot: issueTaskInput(),
-              teamId,
+  it.each(["LINKED", "EXPLICIT", "DISCOVERED"])(
+    "persists resolved PR links in the immutable Issue source (%s)",
+    async (mode) => {
+      const sourceCreate = vi.fn().mockResolvedValue({ id: "source-1" });
+      const prisma = {
+        taskAnalysisSource: {
+          aggregate: vi.fn().mockResolvedValue({
+            _count: { _all: 0 },
+            _sum: { byteSize: null },
+          }),
+          create: sourceCreate,
+        },
+        taskStageAttempt: {
+          findUnique: vi.fn().mockResolvedValue({
+            fencingToken: 4n,
+            id: attemptId,
+            leaseExpiresAt: new Date(Date.now() + 60_000),
+            leaseOwner: "worker-1",
+            leaseToken,
+            stage: {
+              taskExecution: {
+                id: taskExecutionId,
+                inputSnapshot: {
+                  ...issueTaskInput(),
+                  ...(mode === "EXPLICIT"
+                    ? {
+                        pullRequestUrls: [
+                          "https://github.com/acme/web/pull/42/",
+                        ],
+                      }
+                    : {}),
+                },
+                teamId,
+              },
             },
-          },
-          status: "RUNNING",
-        }),
-      },
-    };
-    Object.assign(prisma, {
-      $queryRaw: vi.fn().mockResolvedValue([]),
-      $transaction: async (operation: (tx: unknown) => unknown) =>
-        operation(prisma),
-    });
-    const linearResult = {
-      issue: {
-        assignee: null,
-        description: "Users must be able to request a refund.",
-        id: "linear-issue-1",
-        identifier: "ENG-123",
-        labels: ["payments"],
-        priority: 2,
-        state: "In Review",
-        title: "Refund flow",
-        url: "https://linear.app/acme/issue/ENG-123/refund-flow",
-      },
-      pullRequestUrls: ["https://github.com/acme/web/pull/42"],
-    };
-    const service = new SpecAnalysisRuntimeService(
-      prisma as never,
-      {} as never,
-      { getIssue: vi.fn().mockResolvedValue(linearResult) } as never,
-      {} as never,
-    );
+            status: "RUNNING",
+          }),
+        },
+      };
+      Object.assign(prisma, {
+        $queryRaw: vi.fn().mockResolvedValue([]),
+        $transaction: async (operation: (tx: unknown) => unknown) =>
+          operation(prisma),
+      });
+      const linearResult = {
+        issue: {
+          assignee: null,
+          description: "Users must be able to request a refund.",
+          id: "linear-issue-1",
+          identifier: "ENG-123",
+          labels: ["payments"],
+          priority: 2,
+          state: "In Review",
+          title: "Refund flow",
+          url: "https://linear.app/acme/issue/ENG-123/refund-flow",
+        },
+        pullRequestUrls:
+          mode === "LINKED" ? ["https://github.com/acme/web/pull/42"] : [],
+      };
+      const discoverIssuePullRequests = vi.fn().mockResolvedValue({
+        pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+        diagnostics: [],
+      });
+      const service = new SpecAnalysisRuntimeService(
+        prisma as never,
+        {} as never,
+        { getIssue: vi.fn().mockResolvedValue(linearResult) } as never,
+        { discoverIssuePullRequests } as never,
+      );
 
-    const output = await service.executeTool(teamId, attemptId, {
-      arguments: { analysisSummary: "Read the authoritative Issue." },
-      callId: "call-1",
-      fencingToken: "4",
-      leaseToken,
-      name: "linear_get_issue",
-      workerId: "worker-1",
-    });
+      const output = await service.executeTool(teamId, attemptId, {
+        arguments: { analysisSummary: "Read the authoritative Issue." },
+        callId: "call-1",
+        fencingToken: "4",
+        leaseToken,
+        name: "linear_get_issue",
+        workerId: "worker-1",
+      });
 
-    expect(output.sourceRefs).toHaveLength(1);
-    expect(output.sourceRefs[0]).toMatchObject({
-      kind: "LINEAR_ISSUE",
-      label: "ENG-123 · Refund flow",
-    });
-    expect(sourceCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        content: linearResult,
-        contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      expect(output.sourceRefs).toHaveLength(1);
+      expect(output.sourceRefs[0]).toMatchObject({
         kind: "LINEAR_ISSUE",
-        stageAttemptId: attemptId,
-        taskExecutionId,
-        teamId,
-      }),
-    });
-  });
+        label: "ENG-123 · Refund flow",
+      });
+      expect(sourceCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          content: {
+            ...linearResult,
+            pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+            discoveryDiagnostics: [],
+          },
+          contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          kind: "LINEAR_ISSUE",
+          stageAttemptId: attemptId,
+          taskExecutionId,
+          teamId,
+        }),
+      });
+      if (mode === "DISCOVERED")
+        expect(discoverIssuePullRequests).toHaveBeenCalledWith(
+          teamId,
+          linearResult.issue.url,
+        );
+      else expect(discoverIssuePullRequests).not.toHaveBeenCalled();
+    },
+  );
 });

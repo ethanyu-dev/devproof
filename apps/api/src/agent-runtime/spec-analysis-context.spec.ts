@@ -62,6 +62,28 @@ function file(
 }
 
 describe("Spec analysis source completeness", () => {
+  it("preserves discovery warnings even when the found PR has complete source coverage", () => {
+    const source = issue();
+    const diagnostic = {
+      code: "LINEAR_COMMENTS_UNAVAILABLE",
+      source: "LINEAR",
+      level: "WARNING",
+      message: "部分评论不可用。",
+      reference: source.uri,
+    };
+    source.content = {
+      ...(source.content as object),
+      discoveryDiagnostics: [diagnostic],
+    };
+    const context = buildSpecAnalysisContext([
+      source,
+      metadata(),
+      file("GITHUB_DIFF"),
+      file("GITHUB_FILE"),
+    ]);
+    expect(context.resolution.completeness).toBe("PARTIAL");
+    expect(context.resolution.diagnostics).toContainEqual(diagnostic);
+  });
   it("marks the incident's Issue-only result PARTIAL with an actionable diagnostic", () => {
     const context = buildSpecAnalysisContext([issue([])]);
     expect(context.pullRequests).toEqual([]);

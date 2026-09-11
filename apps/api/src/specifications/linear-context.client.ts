@@ -1,6 +1,7 @@
 import {
   specificationIssueContextSchema,
   type SpecificationIssueContext,
+  type SpecificationContextDiagnostic,
 } from "@devproof/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -27,6 +28,7 @@ interface McpToolDefinition {
 export interface LinearIssueResolution {
   issue: SpecificationIssueContext;
   pullRequestUrls: string[];
+  diagnostics?: SpecificationContextDiagnostic[];
 }
 
 @Injectable()
@@ -93,7 +95,39 @@ export class LinearContextClient {
       if ("isError" in result && result.isError) {
         throw new Error(toolErrorMessage(result));
       }
-      return normalizeIssueResult(result, issueRef);
+      const resolution = normalizeIssueResult(result, issueRef);
+      const comments = (listed.tools as unknown as McpToolDefinition[]).find(
+        (item) =>
+          /(?:get|list|read).*comments?/iu.test(item.name) && isReadOnly(item),
+      );
+      if (!resolution.pullRequestUrls.length && comments) {
+        try {
+          const response = await client.callTool(
+            {
+              name: comments.name,
+              arguments: issueToolArguments(comments, resolution.issue.id),
+            },
+            undefined,
+            {
+              signal: AbortSignal.timeout(configuration.LINEAR_MCP_TIMEOUT_MS),
+            },
+          );
+          if ("isError" in response && response.isError)
+            throw new Error("Comments unavailable");
+          resolution.pullRequestUrls = prioritizedPullRequestUrls(response);
+        } catch {
+          resolution.diagnostics = [
+            {
+              source: "LINEAR",
+              level: "WARNING",
+              code: "LINEAR_COMMENTS_UNAVAILABLE",
+              message: "未能读取 Issue 评论，PR 关联发现可能不完整。",
+              reference: issueRef,
+            },
+          ];
+        }
+      }
+      return resolution;
     } catch (error) {
       if (error instanceof ContextSourceError) throw error;
       throw new ContextSourceError(
@@ -109,12 +143,14 @@ export class LinearContextClient {
 
   private async getIssueFromGraphql(
     issueRef: string,
+    after: string | null = null,
+    remainingPages = 5,
   ): Promise<LinearIssueResolution> {
     const configuration = env();
     const issueId = normalizeIssueRef(issueRef);
     const response = await fetch(configuration.LINEAR_API_URL, {
       body: JSON.stringify({
-        query: `query DevProofIssue($id: String!) {
+        query: `query DevProofIssue($id: String!, $after: String) {
           organization { id }
           issue(id: $id) {
             id identifier title description url priority
@@ -122,9 +158,10 @@ export class LinearContextClient {
             labels { nodes { name } }
             assignee { id name email }
             attachments { nodes { url } }
+            comments(first: 100, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } }
           }
         }`,
-        variables: { id: issueId },
+        variables: { id: issueId, after },
       }),
       headers: {
         authorization:
@@ -189,9 +226,49 @@ export class LinearContextClient {
         httpUrl(firstString(issue, ["url"])) ??
         `https://linear.app/issue/${encodeURIComponent(issueId)}`,
     });
+    const pullRequestUrls = prioritizedPullRequestUrls(result);
+    const diagnostics: SpecificationContextDiagnostic[] = [];
+    const pageInfo =
+      isRecord(issue.comments) && isRecord(issue.comments.pageInfo)
+        ? issue.comments.pageInfo
+        : {};
+    if (pageInfo.hasNextPage === true) {
+      const cursor = pageInfo.endCursor;
+      if (
+        remainingPages > 1 &&
+        typeof cursor === "string" &&
+        cursor !== after
+      ) {
+        try {
+          const next = await this.getIssueFromGraphql(
+            issueRef,
+            cursor,
+            remainingPages - 1,
+          );
+          pullRequestUrls.push(...next.pullRequestUrls);
+          diagnostics.push(...(next.diagnostics ?? []));
+        } catch {
+          diagnostics.push({
+            source: "LINEAR",
+            level: "WARNING",
+            code: "LINEAR_COMMENTS_UNAVAILABLE",
+            message: "后续 Issue 评论读取失败，PR 关联发现不完整。",
+            reference: issueRef,
+          });
+        }
+      } else
+        diagnostics.push({
+          source: "LINEAR",
+          level: "WARNING",
+          code: "LINEAR_COMMENTS_TRUNCATED",
+          message: "Issue 评论超出读取范围，请在任务中补充实现 PR。",
+          reference: issueRef,
+        });
+    }
     return {
       issue: normalized,
-      pullRequestUrls: prioritizedPullRequestUrls(result),
+      pullRequestUrls: [...new Set(pullRequestUrls)].slice(0, 25),
+      ...(diagnostics.length ? { diagnostics } : {}),
     };
   }
 }

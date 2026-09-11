@@ -68,21 +68,31 @@ export class DomObservations {
     const references = new Map<string, Locator>();
     this.references.set(page, references);
     const roots = target
-      ? [target]
+      ? [{ root: target, frame: undefined }]
       : // Microfrontends can put another <body> in an open shadow root. A
         // piercing "body" selector then fails strict resolution for the frame.
-        page.frames().map((frame) => frame.locator(":root > body"));
+        page
+          .frames()
+          .map((frame) => ({ root: frame.locator(":root > body"), frame }));
     const sections: string[] = [];
     let limited = false;
     let focusRef: string | undefined;
-    for (const root of roots) {
+    for (const { root, frame: knownFrame } of roots) {
       if (Date.now() >= deadline) {
         limited = true;
         break;
       }
       const prefix = `f${++nextScope}e`;
+      let handle: Awaited<ReturnType<Locator["elementHandle"]>> | null = null;
       try {
-        const captured = await root.evaluate(
+        // Resolve the target before replacing its ref registry. New locators must
+        // start at its frame, never at a root locator containing an expired ref.
+        handle = await root.elementHandle({
+          timeout: Math.max(1, deadline - Date.now()),
+        });
+        if (!handle)
+          throw new Error("Snapshot target is no longer attached to a frame.");
+        const captured = await handle.evaluate(
           (body, input) => {
             // Use the evaluating frame's realm. Microfrontends can override a
             // connected node's ownerDocument/getRootNode with a sandbox document.
@@ -298,10 +308,35 @@ export class DomObservations {
             scrollOverflows: SCROLL_OVERFLOWS,
             focusRef: previousFocus,
           },
-          { timeout: Math.max(1, deadline - Date.now()) },
         );
-        for (const ref of captured.refs)
-          references.set(ref, root.locator(`devproofdom=${ref}`));
+        if (captured.refs.length) {
+          // ownerFrame can follow a microfrontend's overridden ownerDocument.
+          // Find the actual realm whose registry contains this unique new ref.
+          let frame = knownFrame;
+          if (!frame) {
+            const frames = page.frames();
+            const owners = await Promise.all(
+              frames.map((frame) =>
+                frame
+                  .evaluate(
+                    ({ key, ref }) =>
+                      (
+                        globalThis as unknown as Record<
+                          string,
+                          Map<string, Element>
+                        >
+                      )[key]?.has(ref) ?? false,
+                    { key: registryKey, ref: captured.refs[0]! },
+                  )
+                  .catch(() => false),
+              ),
+            );
+            frame = frames[owners.indexOf(true)];
+          }
+          if (!frame) throw new Error("Snapshot frame is no longer available.");
+          for (const ref of captured.refs)
+            references.set(ref, frame.locator(`devproofdom=${ref}`));
+        }
         sections.push(
           `DOM viewport scope ${prefix.slice(0, -1)} (coordinates local to this frame):\n${captured.content}`,
         );
@@ -317,6 +352,8 @@ export class DomObservations {
             .split("\n")[0]!
             .slice(0, 240)}`,
         );
+      } finally {
+        await handle?.dispose().catch(() => undefined);
       }
     }
     return {

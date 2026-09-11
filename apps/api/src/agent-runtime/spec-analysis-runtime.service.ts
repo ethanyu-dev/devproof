@@ -396,7 +396,28 @@ export class SpecAnalysisRuntimeService {
 
     if (input.name === "linear_get_issue") {
       analysisSummarySchema.parse(input.arguments.analysisSummary);
-      const result = await this.linear.getIssue(createInput.issueRef);
+      const linear = await this.linear.getIssue(createInput.issueRef);
+      const directUrls = [
+        ...new Set(
+          [
+            ...(createInput.pullRequestUrls ?? []),
+            ...linear.pullRequestUrls,
+          ].map((url) => url.replace(/\/$/u, "")),
+        ),
+      ];
+      const discovery = directUrls.length
+        ? null
+        : await this.github.discoverIssuePullRequests(teamId, linear.issue.url);
+      const result = {
+        ...linear,
+        pullRequestUrls: [
+          ...new Set([...directUrls, ...(discovery?.pullRequestUrls ?? [])]),
+        ].slice(0, 25),
+        discoveryDiagnostics: [
+          ...(linear.diagnostics ?? []),
+          ...(discovery?.diagnostics ?? []),
+        ],
+      };
       const source = await this.persistSource(attempt, {
         content: result,
         excerpt: result.issue.description.slice(0, 2_000),
@@ -1405,7 +1426,7 @@ function canonicalValue(value: unknown): unknown {
 function requireAllowedPullRequest(url: string, allowed: ReadonlySet<string>) {
   if (!allowed.has(url)) {
     throw new BadRequestException(
-      "GitHub tools may read only pull requests linked from the Linear Issue.",
+      "GitHub tools may read only pull requests resolved for this Issue task.",
     );
   }
 }
@@ -1458,6 +1479,7 @@ export function buildSpecAnalysisContext(
     .array(z.string().url())
     .parse(issuePayload.pullRequestUrls ?? []);
   const diagnostics: SpecificationContextDiagnostic[] = [
+    { diagnostics: issuePayload.discoveryDiagnostics ?? [] },
     ...metadata.values(),
   ].flatMap((payload) =>
     z

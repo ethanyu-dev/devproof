@@ -14,9 +14,10 @@ The package README is the canonical field-level changelog: [`packages/runtime-pr
 
 The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. Browser Runtime has its own release version and is compatible based on protocol negotiation, not matching application version numbers.
 
-The separate Agent protocol is currently v2.15. It carries Spec source grounding,
+The separate Agent protocol is currently v2.16. It carries Spec source grounding,
 diagnostic finalization checkpoints, locator recovery exhaustion reasons, and
-optional meaningful tool-progress telemetry for adaptive deadlines;
+optional meaningful tool-progress telemetry for adaptive deadlines, and
+per-object observation targets and delivered quotations for criterion results;
 see its [changelog](../packages/agent-runtime-protocol/README.md).
 
 ## Current capability milestones

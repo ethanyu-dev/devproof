@@ -185,6 +185,31 @@ export class GithubAccessService {
       }));
   }
 
+  async discoveryCandidates(teamId: string) {
+    const rows = await this.prisma.githubAccessCredential.findMany({
+      where: {
+        enabled: true,
+        teamId,
+        OR: [
+          { organizations: { isEmpty: false } },
+          { repositories: { isEmpty: false } },
+        ],
+      },
+      orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
+      take: 25,
+      select: { organizations: true, repositories: true, tokenEncrypted: true },
+    });
+    // A broad PAT is not a repository hint for a particular Issue. Reverse
+    // discovery stays inside the team's explicitly configured scopes.
+    return rows
+      .filter((row) => row.organizations.length || row.repositories.length)
+      .map((row) => ({
+        organizations: row.organizations.map((value) => value.toLowerCase()),
+        repositories: row.repositories.map((value) => value.toLowerCase()),
+        token: this.cipher.decrypt(row.tokenEncrypted),
+      }));
+  }
+
   async hasCandidateForRepository(
     teamId: string,
     ownerValue: string,

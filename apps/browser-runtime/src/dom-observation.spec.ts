@@ -26,6 +26,31 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it.each([false, true])(
+    "keeps scoped refs usable after clearing the old root registry (iframe=%s)",
+    async (inFrame) => {
+      const html =
+        '<div tabindex="0">Dialog<button onclick="this.textContent=\'Saved\'">OK</button></div>';
+      await page.setContent(
+        inFrame ? "<button>OK</button><iframe></iframe>" : html,
+      );
+      if (inFrame) await page.frames()[1]!.setContent(html);
+      const dom = new DomObservations();
+      const full = await dom.snapshot(page);
+      const oldRoot = ref(full.content, '"Dialog"');
+      const scoped = await dom.snapshot(page, dom.locator(page, oldRoot));
+      expect(() => dom.locator(page, oldRoot)).toThrow(/expired/);
+      const button = ref(scoped.content, '"OK"');
+      expect(await dom.locator(page, button).count()).toBe(1);
+      const nested = await dom.snapshot(page, dom.locator(page, button));
+      await dom.locator(page, ref(nested.content, '"OK"')).click();
+      const frame = inFrame ? page.frames()[1]! : page.mainFrame();
+      expect(await frame.getByText("Saved", { exact: true }).count()).toBe(1);
+      if (inFrame)
+        expect(await page.getByText("OK", { exact: true }).count()).toBe(1);
+    },
+  );
+
   it("exposes adopted controls with distinct refs and redacts cross-realm password values", async () => {
     await page.setContent(
       '<input placeholder="请输入用户账号"><div id="host"></div><iframe hidden></iframe>',

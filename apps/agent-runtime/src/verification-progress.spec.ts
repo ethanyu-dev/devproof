@@ -17,6 +17,45 @@ function snapshot(content: string, index: number) {
 }
 
 describe("verification progress", () => {
+  it("stops recapturing the same DOM through changing depth, limits and subsets", () => {
+    let now = 0;
+    const progress = new VerificationProgress(() => now);
+    const lines = [
+      '- <span> "Background" [ref=f1e1] [box=0,0,20,20]',
+      '- <button> "OK" [ref=f1e2] [box=10,10,20,20]',
+    ];
+    progress.observe(snapshot(lines.join("\n"), 0).output);
+    let stopped = false;
+    for (let i = 0; i < 12 && !stopped; i++) {
+      now += 10_000;
+      stopped = progress.tool({
+        ...snapshot(
+          (i % 2 ? lines : lines.slice(1))
+            .join("\n")
+            .replaceAll("f1", `f${i + 2}`),
+          i,
+        ),
+        arguments: JSON.stringify({
+          commandType: "page.snapshot",
+          payload: {
+            depth: 10 + i,
+            maxChars: 12000 + i * 100,
+            target: { ref: `f${i}e1` },
+          },
+        }),
+      });
+    }
+    expect(stopped).toBe(true);
+    expect(progress.state().sequence).toBe(1);
+    expect(progress.tool(snapshot('- <button> "Saved" [ref=f99e1]', 99))).toBe(
+      false,
+    );
+    expect(progress.state()).toMatchObject({
+      meaningful: true,
+      repeatedSteps: 0,
+    });
+  });
+
   it("credits changed automatic DOM, but not refresh identities or animations", () => {
     const progress = new VerificationProgress();
     progress.observe(snapshot('- button "Open" [ref=f1e1]', 1).output);

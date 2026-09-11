@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   extractGithubPullRequestUrls,
@@ -6,7 +6,78 @@ import {
   normalizeIssueRef,
   normalizeIssueResult,
   selectIssueTool,
+  LinearContextClient,
 } from "./linear-context.client.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
+
+describe("Linear comment discovery", () => {
+  const issue = (pageInfo: object, body = "No PR here") =>
+    Response.json({
+      data: {
+        organization: { id: "org" },
+        issue: {
+          id: "id",
+          identifier: "ENG-123",
+          title: "Refund",
+          description: "Refund flow",
+          url: "https://linear.app/acme/issue/ENG-123",
+          comments: { nodes: [{ body }], pageInfo },
+        },
+      },
+    });
+
+  it("finds a PR in a later comment page", async () => {
+    vi.stubEnv("LINEAR_API_TOKEN", "test");
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(issue({ hasNextPage: true, endCursor: "next" }))
+      .mockResolvedValueOnce(
+        issue(
+          { hasNextPage: false },
+          "Implemented in https://github.com/acme/web/pull/7",
+        ),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await new LinearContextClient().getIssue("ENG-123");
+    expect(result.pullRequestUrls).toEqual([
+      "https://github.com/acme/web/pull/7",
+    ]);
+    expect(JSON.parse(fetcher.mock.calls[1]![1].body).variables).toEqual({
+      id: "ENG-123",
+      after: "next",
+    });
+  });
+
+  it("keeps the Issue and reports unavailable later comments", async () => {
+    vi.stubEnv("LINEAR_API_TOKEN", "test");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(issue({ hasNextPage: true, endCursor: "next" }))
+        .mockResolvedValueOnce(new Response(null, { status: 503 })),
+    );
+    const result = await new LinearContextClient().getIssue("ENG-123");
+    expect(result.issue.identifier).toBe("ENG-123");
+    expect(result.diagnostics?.[0]?.code).toBe("LINEAR_COMMENTS_UNAVAILABLE");
+  });
+
+  it("bounds comment pages and reports truncation", async () => {
+    vi.stubEnv("LINEAR_API_TOKEN", "test");
+    let page = 0;
+    const fetcher = vi.fn(async () =>
+      issue({ hasNextPage: true, endCursor: `page-${++page}` }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await new LinearContextClient().getIssue("ENG-123");
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(result.diagnostics?.[0]?.code).toBe("LINEAR_COMMENTS_TRUNCATED");
+  });
+});
 
 describe("Linear MCP issue context", () => {
   it("prefers an exact read-only Issue lookup tool", () => {
