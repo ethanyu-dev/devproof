@@ -26,6 +26,43 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it("exposes adopted controls with distinct refs and redacts cross-realm password values", async () => {
+    await page.setContent(
+      '<input placeholder="请输入用户账号"><div id="host"></div><iframe hidden></iframe>',
+    );
+    await page.locator("#host").evaluate((host) => {
+      const virtualDocument =
+        document.querySelector("iframe")!.contentDocument!;
+      const body = virtualDocument.createElement("div");
+      body.innerHTML =
+        '<label>弹窗账号<input placeholder="请输入用户账号"></label><input type="password" value="must-not-leak"><input type="checkbox" checked><textarea readonly>说明</textarea><select><option value="legacy">旧版类型</option></select>';
+      host.attachShadow({ mode: "open" }).append(body);
+      for (const node of [body, ...body.querySelectorAll("*")]) {
+        Object.defineProperty(node, "ownerDocument", {
+          get: () => virtualDocument,
+        });
+        node.getRootNode = () => virtualDocument;
+      }
+      if (body.querySelector("input") instanceof HTMLInputElement)
+        throw new Error("Fixture must retain the other realm's prototype");
+    });
+    const dom = new DomObservations();
+    const observed = await dom.snapshot(page);
+    expect(
+      observed.content.match(/placeholder="请输入用户账号"/gu),
+    ).toHaveLength(2);
+    expect(observed.content).not.toContain("must-not-leak");
+    expect(observed.content).toContain("checked=true");
+    expect(observed.content).toContain("readonly");
+    expect(observed.content).toContain('"value":"legacy"');
+    await dom
+      .locator(page, ref(observed.content, 'label="弹窗账号"'))
+      .fill("test-user");
+    expect(await page.locator(":root > body > input").inputValue()).toBe("");
+    expect(await page.locator("#host input").first().inputValue()).toBe(
+      "test-user",
+    );
+  });
   it("resolves connected microfrontend nodes whose document and root are virtualized", async () => {
     await page.setContent(
       '<div id="microfrontend"></div><iframe hidden></iframe>',

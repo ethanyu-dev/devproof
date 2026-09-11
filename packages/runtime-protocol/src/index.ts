@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 16,
+  minor: 17,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
@@ -10,10 +10,13 @@ export const RUNTIME_CLOSURE_EVIDENCE_MINOR = 14;
 export const RUNTIME_NO_LAUNCH_MINOR = 15;
 export const RUNTIME_NO_LAUNCH_CAPABILITY = "no-launch-evidence-v1";
 export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
+export const RUNTIME_SCROLL_FEEDBACK_MINOR = 17;
+export const RUNTIME_SCROLL_FEEDBACK_CAPABILITY = "scroll-feedback-v1";
 export const RUNTIME_CAPABILITIES = [
   "browser",
   "dom-vision-v1",
   "action-feedback-v1",
+  RUNTIME_SCROLL_FEEDBACK_CAPABILITY,
   "auth-snapshot-v1",
   "session-permits-v1",
   RUNTIME_CLOSURE_EVIDENCE_CAPABILITY,
@@ -883,7 +886,11 @@ const runtimeActionCommandPayloadVariants = [
       .object({
         deltaX: z.number().finite().min(-100_000).max(100_000).default(0),
         deltaY: z.number().finite().min(-100_000).max(100_000),
-        target: runtimeLocatorSchema.optional(),
+        target: runtimeLocatorSchema
+          .optional()
+          .describe(
+            "下拉框滚动须指定快照中带 scrollY/scrollX 的真实容器 ref；选项行不是滚动容器。返回 scrollFeedback 时按实际位移和边界判断效果。",
+          ),
       })
       .strict(),
   }),

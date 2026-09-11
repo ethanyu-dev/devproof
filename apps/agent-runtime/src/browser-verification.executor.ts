@@ -413,6 +413,7 @@ export class BrowserVerificationExecutor {
                 return await finalize("FINALIZATION_RESERVE_REACHED");
             }
             const currentPage = observations.currentPage();
+            const observationIndex = observations.index(8 * 1024);
             view = context.build(
               requestBase,
               {
@@ -428,7 +429,9 @@ export class BrowserVerificationExecutor {
                   }),
                 ),
                 locatorRecovery: locatorRecoveryState,
-                observations: observations?.index() ?? [],
+                observations: observationIndex,
+                observationIndexOmitted:
+                  observations.index().length - observationIndex.length,
                 latestActionFeedback: observations.latestActionFeedback(),
                 remainingToolCalls: this.toolLimit - callCount,
                 timeBudget: {
@@ -472,6 +475,7 @@ export class BrowserVerificationExecutor {
                 details: {
                   requestBytes: error.bytes,
                   maxBytes: error.limit,
+                  componentBytes: error.components,
                   acceptedCriteria: [...criterionResults.values()],
                   evidence: [...evidence.values()].map(
                     ({ externalId, kind }) => ({ externalId, kind }),
@@ -1035,6 +1039,12 @@ export class BrowserVerificationExecutor {
         );
       }
       const command = browserArguments.command;
+      const scrollCorrection = input.observations?.scrollCorrection(command);
+      if (scrollCorrection)
+        return {
+          browserCommandCount: input.browserCommandCount,
+          output: scrollCorrection,
+        };
       if (
         this.toolLimit >= 3 &&
         (input.remainingToolCalls ?? Infinity) < 3 &&
@@ -1157,6 +1167,7 @@ export class BrowserVerificationExecutor {
             "LOCATOR_AMBIGUOUS",
             "STALE_DOM_REFERENCE",
             "STALE_VISUAL_OBSERVATION",
+            "SCROLL_TARGET_NOT_SCROLLABLE",
           ].includes(String(commandError?.code))
         ) {
           const recoveryState: LocatorRecoveryState = {
@@ -2275,9 +2286,11 @@ page.snapshot 提供实际 DOM 节点、文本、原生标签、值和 ref，同
 current_browser_viewport 中的 image_url 才是你实际看到的图片；截图编号或文件名不代表看过图。DOM 不足（自定义控件、Canvas、封闭 Shadow DOM）时，结合截图判断，用 page.click 的 point 和该图 observationId 作为 visualObservationId 操作；不能猜坐标。滚动、导航、窗口变化或旧图失效后重新观察。图片缺失时先 page.screenshot，不能假装视觉成功。
 原生 <select> 才能使用 page.select；自定义下拉先点击展开，再观察 DOM + 图片，点击当前可见选项，最后检查显示值和业务反馈。看到隐藏、重复候选时不能 first/nth 猜测。Canvas/自绘输入先视觉点击聚焦，再启用 input 工具组用不带 target 的 page.type 输入文本，必要时 page.press；操作后验证结果。
 DOM 快照仅覆盖当前视口与未被滚动容器裁剪的内容；captureTruncated/sourceTruncated/nextCursor 也表示证据尚不完整。断言选项“不存在”之前，必须在已确认支持搜索的控件中使用合理短关键词并确认搜索完成，或从列表顶部逐段滚动到末尾、观察每一段。使用带 scrollY/scrollX 的容器 ref 作为 page.scroll.target，避免滚动背景页面；atEnd=false 表示还有未见内容，到末尾一次也不代表已检查中间全部内容。无 DOM 时根据图片中的滚动条判断，在下拉内部点击聚焦后滚动，并重新截图确认选项确实变化。虚拟列表、搜索无效或范围无法穷尽时记录 INCONCLUSIVE，不能凭当前几项判 FAILED。
+page.scroll 的 target 必须是滚动容器本身，不是列表中的选项行。overflow:hidden 也可能是可程序化滚动容器，按快照中的 scrollY/scrollX 判断。每次滚动约容器可见高度的 75%，保留重叠内容；滚动后先检查新快照的选项是否变化。scrollFeedback.status=MOVED 只证明位移，AT_BOUNDARY 表示本方向边界，NO_MOVEMENT 表示没有效果，UNVERIFIED 或缺少该字段时效果尚未确认；settled 只表示局部短暂稳定，不保证异步业务加载完成。
+SCROLL_TARGET_NOT_SCROLLABLE 要求从新快照改用真实容器 ref；SCROLL_NO_PROGRESS 表示当前方案已经无效，不能只更换 ref、距离或重复读取缓存。改用其他容器、反向滚动或已确认支持的搜索输入框；输入短关键词并确认过滤完成，再选择实际显示的目标。搜索改变条件后重新计算覆盖范围。观察索引可省略较旧条目（observationIndexOmitted），已有 observationId 仍可按缓存可用性读取；未列出不表示已读取或已删除。
 下拉搜索要从实际页面文案出发：完整业务名称或内部枚举搜不到时，尝试较短关键词，再检查可见选项。连续清空并重复同一搜索而无进展时更换观察方式，不要循环。选项名称相似不能证明其内部枚举映射；要读取实际 DOM 值或对应网络证据。键盘组合使用 Control+A，不能使用 CTRL+A。
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
-browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE 或 STALE_VISUAL_OBSERVATION 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
+browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或 SCROLL_TARGET_NOT_SCROLLABLE 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
 验收证据必须对应标准里的具体页面区域、控件和业务对象。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
 TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。写入前只读核对环境、账号和所需类型的唯一键是否已有记录；已存在则请求独立账号，禁止删除既有记录来满足新建前置条件。默认并发执行，不假设其他 Case 的数据归属。缺账号继续使用 TEST_ACCOUNT，请在 context 中说明 usage="CREATE_OR_MODIFY"、requiredTypes 和 uniquenessConstraint；仅查看已有记录的筛选 Case 优先复用已有数据，必要时以 usage="READ_EXISTING" 请求账号，并保持只读。获得的账号只属于本 Case 的所声明用途，READ_EXISTING 答复不授权写入。记录实际创建的 ID、类型和证据，不能假设备注字段存在。

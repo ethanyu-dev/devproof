@@ -22,6 +22,7 @@ export class ContextBudgetExceeded extends Error {
   constructor(
     readonly bytes: number,
     readonly limit: number,
+    readonly components?: Record<string, number>,
   ) {
     super("任务要求与必要执行状态超过模型输入预算，无法安全压缩。");
   }
@@ -122,8 +123,20 @@ export class ModelContext {
       view = messages();
       bytes = jsonBytes({ ...baseRequest, messages: view });
     }
+    const components = {
+      initial: jsonBytes(this.initial),
+      tools: jsonBytes(baseRequest.tools ?? []),
+      state: jsonBytes({
+        ...(state as Record<string, unknown>),
+        executionMemory: this.memory.state(),
+      }),
+      operations: jsonBytes(
+        presentOperationSummaries(this.summaries, currentPage),
+      ),
+      page: jsonBytes(currentPage ?? null),
+    };
     if (this.bounded && bytes > this.maxBytes)
-      throw new ContextBudgetExceeded(bytes, this.maxBytes);
+      throw new ContextBudgetExceeded(bytes, this.maxBytes, components);
     const textRequestBytes = bytes;
     if (image) {
       const { dataBase64, contentType, ...metadata } =
@@ -156,6 +169,7 @@ export class ModelContext {
       metrics: {
         requestBytes: bytes,
         textRequestBytes,
+        componentBytes: components,
         imageCount: image ? 1 : 0,
         imageBytes: image ? Buffer.byteLength(image.dataBase64, "base64") : 0,
         toolSchemaBytes: jsonBytes(baseRequest.tools ?? []),

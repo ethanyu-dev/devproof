@@ -173,6 +173,148 @@ describe("context delivery and slow models", () => {
     ],
   };
 
+  it("recovers an option-row scroll error using the new container ref", async () => {
+    let step = 0;
+    let snapshots = 0;
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      const current = step++;
+      if (current === 0)
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.scroll",
+            payload: { target: { ref: "f1e2" }, deltaY: 192 },
+          },
+          current,
+        );
+      if (current === 1) {
+        expect(JSON.stringify(request.messages)).toContain(
+          "SCROLL_TARGET_NOT_SCROLLABLE",
+        );
+        expect(
+          contextData(request, "current_browser_page").data.snapshot.content,
+        ).toContain("[ref=f2e1]");
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.scroll",
+            locatorRecoveryToken: "call-0",
+            payload: { target: { ref: "f2e1" }, deltaY: 192 },
+          },
+          current,
+        );
+      }
+      expect(
+        contextData(request, "browser_working_state").data.locatorRecovery,
+      ).toBeNull();
+      return reply("finish_verification", finish, current);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, input) => {
+      const cmd = input as {
+        commandType: string;
+        payload: { target?: { ref?: string } };
+      };
+      if (cmd.commandType === "page.snapshot") {
+        snapshots++;
+        return {
+          status: "SUCCEEDED",
+          result: {
+            content: `- <div scrollY=0/288> "" [ref=f${snapshots}e1]\n- <div> "选项" [ref=f${snapshots}e2]`,
+          },
+        };
+      }
+      if (cmd.payload.target?.ref === "f1e2")
+        return {
+          status: "FAILED",
+          error: {
+            code: "SCROLL_TARGET_NOT_SCROLLABLE",
+            message: "Use the container",
+          },
+        } as never;
+      return {
+        status: "SUCCEEDED",
+        result: { scrollFeedback: { version: 1, status: "MOVED" } },
+      } as never;
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+    });
+    expect(
+      controlPlane.browserCommand.mock.calls.map(
+        (call) => (call[1] as { commandType: string }).commandType,
+      ),
+    ).toEqual([
+      "page.snapshot",
+      "page.scroll",
+      "page.snapshot",
+      "page.scroll",
+      "page.snapshot",
+    ]);
+  });
+
+  it("rejects a third ineffective scroll before dispatch while allowing search recovery", async () => {
+    let step = 0;
+    let snapshots = 0;
+    const create = vi.fn().mockImplementation(async (request: Request) => {
+      const current = step++;
+      if (current < 3)
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.scroll",
+            payload: {
+              target: { ref: `f${snapshots}e1` },
+              deltaY: 192 + current,
+            },
+          },
+          current,
+        );
+      if (current === 3) {
+        expect(operationOutput(request, "call-2").code).toBe(
+          "SCROLL_NO_PROGRESS",
+        );
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.fill",
+            payload: { target: { ref: `f${snapshots}e2` }, text: "旧版" },
+          },
+          current,
+        );
+      }
+      return reply("finish_verification", finish, current);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, input) => {
+      const cmd = input as { commandType: string };
+      if (cmd.commandType === "page.snapshot") {
+        snapshots++;
+        return {
+          status: "SUCCEEDED",
+          result: {
+            content: `- <div scrollY=0/288> "" [ref=f${snapshots}e1]\n- <input placeholder="搜索"> "" [ref=f${snapshots}e2]`,
+          },
+        };
+      }
+      return {
+        status: "SUCCEEDED",
+        result: { scrollFeedback: { version: 1, status: "NO_MOVEMENT" } },
+      } as never;
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    const commands = controlPlane.browserCommand.mock.calls.map(
+      (call) => (call[1] as { commandType: string }).commandType,
+    );
+    expect(commands.filter((name) => name === "page.scroll")).toHaveLength(2);
+    expect(commands).toContain("page.fill");
+  });
+
   it("delivers the slow read result and fresh actionable refs before the next decision", async () => {
     vi.useFakeTimers();
     let step = 0;

@@ -36,6 +36,135 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("delivers the scroll focus without claiming intervening pages were read", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const content = Array.from(
+      { length: 200 },
+      (_, i) => `- <div> "选项${i} ${"内容".repeat(30)}" [ref=f2e${i + 1}]\n`,
+    ).join("");
+    cache.capture(command("page.snapshot"), {
+      status: "SUCCEEDED",
+      result: { content, focusRef: "f2e180" },
+    });
+    const view = cache.currentPage();
+    expect(view.snapshot?.content).toContain("[ref=f2e180]");
+    expect(view.snapshot?.cursor).toBeGreaterThan(0);
+    cache.deliverCurrentPage(view);
+    expect(cache.staleRef(click("f2e180"))).toBe(false);
+    expect(cache.unreadRef(click("f2e1"))).toBe(true);
+    expect(cache.currentPage().snapshot?.nextUnreadCursor).toBe(0);
+  });
+
+  it("bounds the request index while preserving pinned observations and historical reads", () => {
+    const cache = new BrowserObservations();
+    const first = capture(cache, "历史选项").page;
+    for (let i = 0; i < 180; i++)
+      capture(cache, `内容${i} [ref=f${i + 1}e1]`, {
+        url: `https://example.com/${"route".repeat(40)}`,
+      });
+    const current = cache.currentPage().snapshot!;
+    cache.read(String(first.observationId));
+    const bounded = cache.index(8192);
+    expect(jsonBytes(bounded)).toBeLessThanOrEqual(8192);
+    expect(bounded.map((item) => item.observationId)).toEqual(
+      expect.arrayContaining([first.observationId, current.observationId]),
+    );
+    expect(bounded.length).toBeLessThan(cache.index().length);
+    const context = new ModelContext([
+      { role: "system", content: "指令".repeat(1500) },
+    ]);
+    const base = { tools: [{ description: "schema".repeat(4000) }] };
+    expect(() =>
+      context.build(
+        base,
+        { observations: cache.index() },
+        undefined,
+        cache.currentPage(),
+      ),
+    ).toThrow(/预算/);
+    expect(
+      context.build(
+        base,
+        { observations: bounded },
+        undefined,
+        cache.currentPage(),
+      ).metrics.textRequestBytes,
+    ).toBeLessThan(96 * 1024);
+    expect(cache.read(String(first.observationId)).content).toBe("历史选项");
+  });
+
+  it("blocks two ineffective scrolls across fresh refs, preserving reverse and search recovery", () => {
+    const cache = new BrowserObservations();
+    const snapshot = (scope: number) =>
+      capture(
+        cache,
+        `- <div scrollY=0/288 atEnd=false> "" [ref=f${scope}e1] [box=0,0,200,256]\n- <div> "首项" [ref=f${scope}e2]`,
+      );
+    const scroll = (scope: number, deltaY = 192) =>
+      command("page.scroll", { target: { ref: `f${scope}e1` }, deltaY });
+    snapshot(1);
+    for (let i = 1; i <= 2; i++) {
+      expect(cache.scrollCorrection(scroll(i))).toBeUndefined();
+      cache.capture(scroll(i), {
+        status: "SUCCEEDED",
+        result: {
+          scrolled: false,
+          scrollFeedback: { version: 1, status: "NO_MOVEMENT" },
+        },
+      });
+      snapshot(i + 1);
+    }
+    expect(cache.scrollCorrection(scroll(3, 300))).toMatchObject({
+      code: "SCROLL_NO_PROGRESS",
+    });
+    expect(cache.scrollCorrection(scroll(3, -192))).toBeUndefined();
+    cache.capture(
+      command("page.fill", { target: { selector: "input" }, text: "旧版" }),
+      { status: "SUCCEEDED" },
+    );
+    snapshot(4);
+    expect(cache.scrollCorrection(scroll(4))).toBeUndefined();
+  });
+
+  it("does not treat legacy success as measured movement or block after it", () => {
+    const cache = new BrowserObservations();
+    const scroll = command("page.scroll", {
+      target: { selector: "#holder" },
+      deltaY: 192,
+    });
+    for (let i = 0; i < 3; i++) {
+      capture(cache, "选项");
+      cache.capture(scroll, {
+        status: "SUCCEEDED",
+        result: { scrolled: true },
+      });
+    }
+    capture(cache, "选项");
+    expect(cache.scrollCorrection(scroll)).toBeUndefined();
+  });
+
+  it("blocks a measured boundary only while the page and direction remain unchanged", () => {
+    const cache = new BrowserObservations();
+    const snapshot = (scope: number, row = "末项") =>
+      capture(
+        cache,
+        `- <div scrollY=288/288 atEnd=true> "" [ref=f${scope}e1]\n- <div> "${row}" [ref=f${scope}e2]`,
+      );
+    const scroll = (scope: number, deltaY = 192) =>
+      command("page.scroll", { target: { ref: `f${scope}e1` }, deltaY });
+    snapshot(1);
+    cache.capture(scroll(1), {
+      status: "SUCCEEDED",
+      result: { scrollFeedback: { version: 1, status: "AT_BOUNDARY" } },
+    });
+    snapshot(2);
+    expect(cache.scrollCorrection(scroll(2))).toMatchObject({
+      code: "SCROLL_NO_PROGRESS",
+    });
+    expect(cache.scrollCorrection(scroll(2, -192))).toBeUndefined();
+    snapshot(3, "异步更新的选项");
+    expect(cache.scrollCorrection(scroll(3))).toBeUndefined();
+  });
   it.each([false, true])(
     "delivers a requested current tail after a slow model and refresh (page changed=%s)",
     (changed) => {
