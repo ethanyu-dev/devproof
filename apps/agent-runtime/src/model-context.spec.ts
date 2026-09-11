@@ -47,6 +47,49 @@ function turn(context: ModelContext, index: number, content = "observed") {
 }
 
 describe("bounded model context", () => {
+  it("selects complete DOM at the exact request budget and paginates when it no longer fits", () => {
+    const complete = { snapshot: { content: '"中文😀"\\\n'.repeat(1500) } };
+    const paged = { snapshot: { content: "First page", nextCursor: 10 } };
+    const request = { tools: [{ description: '"tool"\\\n'.repeat(500) }] };
+    const state = {
+      acceptedCriteria: [{ id: "preserved", summary: "已验证" }],
+    };
+    const probe = new ModelContext(initial);
+    for (let i = 0; i < 4; i++) turn(probe, i);
+    const exactBytes = probe.build(request, state, undefined, complete).metrics
+      .textRequestBytes;
+
+    for (const maxBytes of [exactBytes, exactBytes - 1]) {
+      const context = new ModelContext(initial, { maxBytes });
+      for (let i = 0; i < 4; i++) turn(context, i);
+      const view = context.build(request, state, undefined, complete, paged);
+      expect(view.currentPage).toBe(maxBytes === exactBytes ? complete : paged);
+      expect(view.metrics).toMatchObject({
+        usedPageFallback: maxBytes !== exactBytes,
+        retainedTurns: 4,
+        compactedTurns: 0,
+      });
+      expect(view.metrics.textRequestBytes).toBe(
+        jsonBytes({ ...request, messages: view.messages }),
+      );
+      expect(view.metrics.textRequestBytes).toBeLessThanOrEqual(maxBytes);
+      expect(JSON.stringify(view.messages)).toContain("preserved");
+    }
+  });
+
+  it("still rejects an over-budget fallback instead of silently dropping required state", () => {
+    const context = new ModelContext(initial, { maxBytes: 1_000 });
+    expect(() =>
+      context.build(
+        {},
+        { required: "x".repeat(2000) },
+        undefined,
+        { snapshot: { content: "x".repeat(20_000) } },
+        { snapshot: { content: "First page" } },
+      ),
+    ).toThrow(ContextBudgetExceeded);
+  });
+
   it("only points a summary at content present in that request and demotes old refs", () => {
     const context = new ModelContext(initial);
     const page = {

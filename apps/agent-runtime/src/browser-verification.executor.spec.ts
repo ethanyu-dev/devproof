@@ -315,6 +315,53 @@ describe("context delivery and slow models", () => {
     expect(commands).toContain("page.fill");
   });
 
+  it("clicks the modal button beyond 12 KiB without a pagination or resnapshot round trip", async () => {
+    const content =
+      '- <span> "Navigation background" [ref=f1e1] [box=0,0,80,20]\n'.repeat(
+        260,
+      ) + '- <button> "OK" [ref=f1e206] [box=864,464,52,32]\n';
+    expect(Buffer.byteLength(content)).toBeGreaterThan(12 * 1024);
+    const create = vi.fn(async (request: Request) => {
+      if (create.mock.calls.length === 1) {
+        const page = contextData(request, "current_browser_page").data.snapshot;
+        expect(page).toMatchObject({
+          content,
+          cursor: 0,
+          nextCursor: null,
+          nextUnreadCursor: null,
+        });
+        expect(page).not.toHaveProperty("nextAction");
+        return reply(
+          "browser_command",
+          {
+            commandType: "page.click",
+            payload: { target: { ref: "f1e206" } },
+          },
+          0,
+        );
+      }
+      return reply("finish_verification", finish, 1);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content },
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(
+      controlPlane.browserCommand.mock.calls.map((call) => call[1].commandType),
+    ).toEqual(["page.snapshot", "page.click", "page.snapshot"]);
+    const modelEvent = controlPlane.appendEvent.mock.calls.find(
+      (call) => call[1] === "agent.model.started",
+    )![2];
+    expect(modelEvent.inputPreview.context).toMatchObject({
+      usedPageFallback: false,
+    });
+  });
+
   it("delivers the slow read result and fresh actionable refs before the next decision", async () => {
     vi.useFakeTimers();
     let step = 0;
@@ -361,7 +408,8 @@ describe("context delivery and slow models", () => {
           ? {
               content:
                 '- text "Background"\n'.repeat(700) +
-                `- button "Modal type" [ref=f${++snapshot}e206]\n`,
+                `- button "Modal type" [ref=f${++snapshot}e206]\n` +
+                '- text "Remaining background"\n'.repeat(4_000),
             }
           : { clicked: true },
     }));
@@ -1450,7 +1498,9 @@ describe("browser verification bounded context", () => {
     });
     const { runTask, controlPlane } = convergenceHarness(create);
     const content =
-      '- text "Padding"\n'.repeat(800) + '- button "Target" [ref=e900]\n';
+      '- text "Padding"\n'.repeat(800) +
+      '- button "Target" [ref=e900]\n' +
+      '- text "Remaining background"\n'.repeat(4_000);
     controlPlane.browserCommand.mockImplementation(async (_lease, command) => ({
       status: "SUCCEEDED",
       result:
