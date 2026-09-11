@@ -36,6 +36,99 @@ function capture(
 }
 
 describe("browser observations", () => {
+  const modalContent =
+    '- <span> "Navigation background" [ref=f9e1] [box=0,0,80,20]\n'.repeat(
+      260,
+    ) + '- <button> "OK" [ref=f9e206] [box=864,464,52,32]\n';
+
+  it("delivers a complete captured DOM without exposing refs from discarded candidates", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const { page } = capture(cache, modalContent, { truncated: true });
+    const full = cache.currentPage(true);
+    expect(full.snapshot).toMatchObject({
+      content: modalContent,
+      cursor: 0,
+      nextCursor: null,
+      nextUnreadCursor: null,
+      sourceTruncated: true,
+    });
+    expect(full.snapshot).not.toHaveProperty("nextAction");
+    expect(cache.staleRef(click("f9e206"))).toBe(true);
+    expect(cache.hasDeliveredQuote(String(page.observationId), 0, '"OK"')).toBe(
+      false,
+    );
+
+    const forged = structuredClone(full);
+    forged.snapshot!.content += '\n- <button> "Invented" [ref=e999]\n';
+    cache.deliverCurrentPage(forged);
+    expect(cache.staleRef(click("f9e206"))).toBe(true);
+    expect(cache.staleRef(click("e999"))).toBe(true);
+
+    cache.deliverCurrentPage(full);
+    expect(cache.staleRef(click("f9e206"))).toBe(false);
+    expect(cache.hasDeliveredQuote(String(page.observationId), 0, '"OK"')).toBe(
+      true,
+    );
+    expect(cache.index()[0]?.nextUnreadCursor).toBeNull();
+  });
+
+  it("keeps an unselected complete candidate unread when only a page fits the request", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const { page } = capture(cache, modalContent);
+    const full = cache.currentPage(true);
+    const fallback = cache.currentPage();
+    const context = new ModelContext([], { maxBytes: 15_000 });
+    const view = context.build({}, {}, undefined, full, fallback);
+    expect(view.metrics.usedPageFallback).toBe(true);
+    expect(view.metrics.textRequestBytes).toBeLessThanOrEqual(15_000);
+    cache.deliverCurrentPage(view.currentPage!);
+    expect(cache.staleRef(click("f9e206"))).toBe(true);
+    expect(cache.hasDeliveredQuote(String(page.observationId), 0, '"OK"')).toBe(
+      false,
+    );
+    const correction = cache.unreadRefCorrection(click("f9e206"))!;
+    expect(correction).toMatchObject({
+      code: "OBSERVATION_NOT_READ",
+      nextAction: { arguments: { cursor: page.nextCursor } },
+    });
+  });
+
+  it("can retarget a previously delivered tail after the context falls back to pagination", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const { page } = capture(cache, modalContent);
+    cache.deliverCurrentPage(cache.currentPage(true));
+    cache.deliverCurrentPage(cache.currentPage());
+    expect(cache.staleRef(click("f9e206"))).toBe(true);
+    const correction = cache.unreadRefCorrection(click("f9e206"))!;
+    expect(correction).toMatchObject({
+      code: "OBSERVATION_NOT_READ",
+      nextAction: { arguments: { cursor: page.nextCursor } },
+    });
+    cache.read(String(page.observationId), Number(page.nextCursor));
+    cache.deliverCurrentPage(cache.currentPage());
+    expect(cache.staleRef(click("f9e206"))).toBe(false);
+    expect(cache.hasDeliveredQuote(String(page.observationId), 0, '"OK"')).toBe(
+      true,
+    );
+    expect(cache.index()[0]?.nextUnreadCursor).toBeNull();
+  });
+
+  it("preserves complete reads across equivalent refreshes without exposing the new refs early", () => {
+    const cache = new BrowserObservations(undefined, true);
+    const { page } = capture(cache, modalContent);
+    cache.deliverCurrentPage(cache.currentPage(true));
+    capture(cache, modalContent.replaceAll("f9", "f10"));
+    const refreshed = cache.currentPage(true);
+    expect(refreshed.snapshot).toMatchObject({
+      readProgressInheritedFrom: page.observationId,
+      nextUnreadCursor: null,
+    });
+    expect(cache.staleRef(click("f10e206"))).toBe(true);
+    cache.deliverCurrentPage(refreshed);
+    expect(cache.staleRef(click("f9e206"))).toBe(true);
+    expect(cache.staleRef(click("f10e206"))).toBe(false);
+  });
+
   it("delivers the scroll focus without claiming intervening pages were read", () => {
     const cache = new BrowserObservations(undefined, true);
     const content = Array.from(

@@ -30,6 +30,7 @@ interface Observation {
   visualObservationId?: string;
   contentKey: string;
   readProgressInheritedFrom?: string;
+  completeSnapshotRead?: boolean;
 }
 
 export const READ_COMMANDS = new Set([
@@ -192,7 +193,17 @@ export class BrowserObservations {
         (ref): ref is string =>
           typeof ref === "string" && !this.exposedRefs.has(ref),
       );
-    const previouslyReadCursor = [...entry.readPages.keys()].find((cursor) => {
+    // A complete delivery may cover several fallback pages. Locate the requested
+    // ref in those pages if a later request has less room for the same snapshot.
+    const readCursors = [...entry.readPages.keys()];
+    if (entry.completeSnapshotRead) {
+      let cursor: number | null = 0;
+      while (cursor !== null) {
+        readCursors.push(cursor);
+        cursor = this.page(entry, cursor, false).nextCursor as number | null;
+      }
+    }
+    const previouslyReadCursor = readCursors.find((cursor) => {
       const page = this.page(entry, cursor, false);
       return (
         !page.omittedLine &&
@@ -243,7 +254,7 @@ export class BrowserObservations {
   }
 
   /** The most recently read DOM page is pinned independently of operation summaries. */
-  currentPage(): {
+  currentPage(completeSnapshot = false): {
     visualStatus: "AVAILABLE" | "UNAVAILABLE";
     snapshot: Record<string, unknown> | null;
     latestObservation: Record<string, unknown> | undefined;
@@ -260,7 +271,9 @@ export class BrowserObservations {
       snapshot:
         entry && !this.pageDirty
           ? {
-              ...this.page(entry, entry.lastReadCursor ?? 0, false),
+              ...(completeSnapshot
+                ? this.completePage(entry)
+                : this.page(entry, entry.lastReadCursor ?? 0, false)),
               visualObservationId: entry.visualObservationId,
             }
           : null,
@@ -483,7 +496,10 @@ export class BrowserObservations {
       quote.trim() &&
       entry?.content !== undefined &&
       entry.readPages.has(cursor) &&
-      String(this.page(entry, cursor, false).content).includes(quote),
+      (cursor === 0 && entry.completeSnapshotRead
+        ? entry.content
+        : String(this.page(entry, cursor, false).content)
+      ).includes(quote),
     );
   }
 
@@ -865,8 +881,29 @@ export class BrowserObservations {
     };
   }
 
+  /** A candidate only: refs and read progress are committed after the request fits. */
+  private completePage(entry: Observation): Record<string, unknown> {
+    return {
+      ...this.descriptor(entry),
+      content: entry.content,
+      cursor: 0,
+      nextCursor: null,
+      totalCapturedChars: entry.content?.length ?? 0,
+      lastReadCursor: 0,
+      readCursors: [...new Set([0, ...entry.readPages.keys()])],
+      nextUnreadCursor: null,
+    };
+  }
+
   private inheritReadProgress(previous: Observation, entry: Observation) {
     if (previous.content === undefined || entry.content === undefined) return;
+    if (previous.completeSnapshotRead) {
+      entry.completeSnapshotRead = true;
+      entry.readPages.set(0, null);
+      entry.lastReadCursor = 0;
+      entry.readProgressInheritedFrom = previous.id;
+      return;
+    }
     // Ref width may change (f9 -> f10), so offsets cannot be copied verbatim.
     const lineAt = (text: string, offset: number) =>
       text.slice(0, offset).split("\n").length - 1;
@@ -913,13 +950,22 @@ export class BrowserObservations {
     )
       return;
     // Only an exact page from our captured observation can expose refs.
-    const expected = this.page(entry, page.cursor, false);
+    const completeSnapshot =
+      entry.snapshot &&
+      page.cursor === 0 &&
+      page.nextCursor === null &&
+      page.content === entry.content &&
+      !page.omittedLine;
+    const expected = completeSnapshot
+      ? this.completePage(entry)
+      : this.page(entry, page.cursor, false);
     if (
       expected.content !== page.content ||
       expected.nextCursor !== page.nextCursor
     )
       return;
     entry.lastReadCursor = page.cursor;
+    if (completeSnapshot) entry.completeSnapshotRead = true;
     entry.readPages.set(page.cursor, page.nextCursor as number | null);
     Object.assign(page, this.descriptor(entry));
     delete page.nextAction;
@@ -931,6 +977,7 @@ export class BrowserObservations {
   }
 
   private nextUnreadCursor(entry: Observation): number | null {
+    if (entry.completeSnapshotRead) return null;
     let cursor: number | null = 0;
     while (cursor !== null && entry.readPages.has(cursor))
       cursor = entry.readPages.get(cursor)!;

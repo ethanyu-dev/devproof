@@ -74,12 +74,14 @@ export class ModelContext {
       );
   }
 
-  build(
+  build<Page>(
     baseRequest: Record<string, unknown>,
     state: unknown,
     image?: VisualObservation,
-    currentPage?: unknown,
+    currentPage?: Page,
+    fallbackPage?: Page,
   ) {
+    let selectedPage = currentPage;
     const messages = (): ModelMessage[] => [
       ...this.initial,
       ...(this.bounded
@@ -102,14 +104,14 @@ export class ModelContext {
               role: "user" as const,
               content: JSON.stringify({
                 kind: "recent_operations",
-                turns: presentOperationSummaries(this.summaries, currentPage),
+                turns: presentOperationSummaries(this.summaries, selectedPage),
               }),
             },
             {
               role: "user" as const,
               content: JSON.stringify({
                 kind: "current_browser_page",
-                data: currentPage ?? null,
+                data: selectedPage ?? null,
               }),
             },
           ]
@@ -117,6 +119,13 @@ export class ModelContext {
     ];
     let view = messages();
     let bytes = jsonBytes({ ...baseRequest, messages: view });
+    // Try the complete DOM against the actual serialized request, including tools,
+    // state, summaries and JSON escaping. Only paginate when that request cannot fit.
+    if (this.bounded && bytes > this.maxBytes && fallbackPage !== undefined) {
+      selectedPage = fallbackPage;
+      view = messages();
+      bytes = jsonBytes({ ...baseRequest, messages: view });
+    }
     while (this.bounded && bytes > this.maxBytes && this.summaries.length > 1) {
       this.summaries.shift();
       this.compactedTurns += 1;
@@ -131,9 +140,9 @@ export class ModelContext {
         executionMemory: this.memory.state(),
       }),
       operations: jsonBytes(
-        presentOperationSummaries(this.summaries, currentPage),
+        presentOperationSummaries(this.summaries, selectedPage),
       ),
-      page: jsonBytes(currentPage ?? null),
+      page: jsonBytes(selectedPage ?? null),
     };
     if (this.bounded && bytes > this.maxBytes)
       throw new ContextBudgetExceeded(bytes, this.maxBytes, components);
@@ -165,10 +174,12 @@ export class ModelContext {
       bytes = jsonBytes({ ...baseRequest, messages: view });
     }
     return {
+      currentPage: selectedPage,
       messages: structuredClone(view),
       metrics: {
         requestBytes: bytes,
         textRequestBytes,
+        usedPageFallback: selectedPage !== currentPage,
         componentBytes: components,
         imageCount: image ? 1 : 0,
         imageBytes: image ? Buffer.byteLength(image.dataBase64, "base64") : 0,
