@@ -9,13 +9,53 @@ const candidate = {
 };
 
 describe("model health", () => {
+  it("excludes a missing model immediately across retries and resumes, with a bounded reprobe", () => {
+    let now = 0;
+    const health = new ModelHealth(() => now);
+    const sibling = { ...candidate, modelId: "available" };
+    const attempts = health.attempts([candidate, sibling]);
+    expect(attempts.next().value?.candidate).toEqual(candidate);
+    health.failure(
+      candidate,
+      Object.assign(
+        new Error("The model does not exist or you do not have access to it"),
+        { status: 404 },
+      ),
+    );
+    expect(
+      [...attempts].every((item) => item.candidate.modelId === "available"),
+    ).toBe(true);
+    expect([...health.attempts([candidate])]).toEqual([]);
+    expect(health.available({ ...candidate, apiKey: "changed" })).toBe(true);
+    now = 30 * 60_000;
+    expect(health.available(candidate)).toBe(true);
+  });
+  it("restores definitive failures when human input resumes on another worker", () => {
+    const first = new ModelHealth(() => 1000);
+    const failure = first.failure(
+      candidate,
+      Object.assign(new Error("model not found"), { status: 404 }),
+    );
+    const resumed = new ModelHealth(() => 2000);
+    resumed.restore({
+      [failure.key]: {
+        until: failure.until,
+        reason: failure.reason,
+        failures: failure.consecutiveFailures,
+      },
+    });
+    expect(resumed.available(candidate)).toBe(false);
+    expect(resumed.available({ ...candidate, modelId: "available" })).toBe(
+      true,
+    );
+    expect(JSON.stringify(failure)).not.toContain(candidate.apiKey);
+  });
   it("does not exclude sibling models for a model-specific permission failure", () => {
     const health = new ModelHealth();
     const error = Object.assign(new Error("Model permission denied"), {
       status: 403,
     });
-    health.failure(candidate, error);
-    health.failure(candidate, error);
+    for (let i = 0; i < 5; i++) health.failure(candidate, error);
     expect(health.available(candidate)).toBe(false);
     expect(health.available({ ...candidate, modelId: "other-model" })).toBe(
       true,
@@ -48,9 +88,11 @@ describe("model health", () => {
   it("backs off rate limits and repeated timeouts, resetting consecutive failures after success", () => {
     let now = 0;
     const health = new ModelHealth(() => now);
-    health.failure(candidate, new Error("模型响应超过 90 秒。"));
-    expect(health.available(candidate)).toBe(true);
-    health.failure(candidate, new Error("模型响应超过 90 秒。"));
+    for (let i = 0; i < 4; i++) {
+      health.failure(candidate, new Error("模型响应超过 300 秒。"));
+      expect(health.available(candidate)).toBe(true);
+    }
+    health.failure(candidate, new Error("模型响应超过 300 秒。"));
     expect(health.available(candidate)).toBe(false);
     expect(health.available({ ...candidate, modelId: "model-b" })).toBe(true);
     now = 300_000;
@@ -62,5 +104,33 @@ describe("model health", () => {
     expect(health.available(candidate)).toBe(false);
     now += 60_000;
     expect(health.available(candidate)).toBe(true);
+  });
+
+  it("keeps five attempts for each admitted model despite transient cooldowns", () => {
+    const health = new ModelHealth();
+    const candidates = [candidate, { ...candidate, modelId: "model-b" }];
+    const attempts = [];
+    for (const attempt of health.attempts(candidates)) {
+      attempts.push([attempt.candidate.modelId, attempt.modelAttempt]);
+      health.failure(attempt.candidate, { status: 429 });
+    }
+    expect(attempts).toEqual(
+      [1, 2, 3, 4, 5].flatMap((attempt) => [
+        ["model-a", attempt],
+        ["model-b", attempt],
+      ]),
+    );
+    expect([...health.attempts(candidates)]).toEqual([]);
+  });
+
+  it("stops retrying credentials that become unavailable, including admitted aliases", () => {
+    const health = new ModelHealth();
+    const attempts = health.attempts([
+      candidate,
+      { ...candidate, modelId: "alias" },
+    ]);
+    expect(attempts.next().value).toMatchObject({ modelAttempt: 1 });
+    health.failure(candidate, { status: 401 });
+    expect(attempts.next().done).toBe(true);
   });
 });

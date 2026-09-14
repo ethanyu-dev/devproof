@@ -128,6 +128,7 @@ describe("forced finalization write audit", () => {
     "TOOL_LIMIT_REACHED",
     "FINALIZATION_RESERVE_REACHED",
     "REPEATED_OPERATIONS",
+    "EVIDENCE_SUBMISSION_FAILED",
     "TEXT_ONLY_LOOP",
     "LOCATOR_RECOVERY_EXHAUSTED",
   ])(

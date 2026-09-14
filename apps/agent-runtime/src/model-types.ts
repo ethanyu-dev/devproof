@@ -5,6 +5,9 @@ import type {
   ChatCompletionMessageParam,
 } from "openai/resources/chat/completions";
 
+export const DEFAULT_MODEL_CALL_SECONDS = 300;
+export const MAX_MODEL_ATTEMPTS = 5;
+
 /** Legacy replay preserves provider reasoning; bounded decisions retain tool facts only. */
 export interface ModelAssistantMessage extends ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
@@ -33,6 +36,7 @@ export interface ModelClient {
     request: Record<string, unknown>,
     options?: {
       signal?: AbortSignal;
+      timeoutMs?: number;
       onRequestAttempt?: (attempt: ModelRequestAttempt) => void;
     },
   ): Promise<ModelCompletion>;

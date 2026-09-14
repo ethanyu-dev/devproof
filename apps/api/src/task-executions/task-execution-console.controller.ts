@@ -194,12 +194,13 @@ export class TaskExecutionConsoleController {
     @Param("caseId") caseId: string,
     @Body() body: unknown,
   ) {
-    return this.tasks.rerunCaseAsTask(
+    // Compatibility alias: old clients also append to the original task.
+    return this.tasks.rerunCase(
       taskToolContext(current),
       id,
       caseId,
+      undefined,
       parseBody(taskCaseRerunInputSchema, body),
-      { kind: "USER", triggerSource: "CONSOLE", userId: current.user.id },
     );
   }
 
@@ -208,8 +209,15 @@ export class TaskExecutionConsoleController {
     @CurrentAuth() current: AuthContext,
     @Param("id") id: string,
     @Param("caseId") caseId: string,
+    @Body() body: unknown,
   ) {
-    return this.tasks.rerunCase(taskToolContext(current), id, caseId);
+    return this.tasks.rerunCase(
+      taskToolContext(current),
+      id,
+      caseId,
+      undefined,
+      parseBody(taskCaseRerunInputSchema.optional(), body),
+    );
   }
 
   @Post(":id/cases/:caseId/deployments/:deploymentId/rerun")
@@ -218,12 +226,14 @@ export class TaskExecutionConsoleController {
     @Param("id") id: string,
     @Param("caseId") caseId: string,
     @Param("deploymentId") deploymentId: string,
+    @Body() body: unknown,
   ) {
     return this.tasks.rerunCase(
       taskToolContext(current),
       id,
       caseId,
       deploymentId,
+      parseBody(taskCaseRerunInputSchema.optional(), body),
     );
   }
 

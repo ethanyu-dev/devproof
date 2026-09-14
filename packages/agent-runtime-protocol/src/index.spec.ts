@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentProviderSchema,
+  browserExecutionCriterion,
+  browserExecutionSnapshot,
   missingRequiredEvidenceKinds,
   runtimeBrowserAcquireOutputSchema,
   runtimeCriterionSchema,
@@ -13,10 +15,98 @@ import {
   runtimeSpecAnalysisTaskLeaseSchema,
   runtimeSpecAnalysisToolNameSchema,
   runtimeTaskSnapshotSchema,
+  runtimeTaskLeaseSchema,
   runtimeTraceEventSchema,
 } from "./index.js";
 
 describe("agent runtime protocol", () => {
+  it("removes analysis provenance at the browser lease boundary without changing stored input", () => {
+    const stored = runtimeTaskSnapshotSchema.parse({
+      attemptId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+      attemptNumber: 1,
+      businessReferences: [
+        {
+          externalId: "reference://spec/source",
+          kind: "BUSINESS_REFERENCE",
+          metadata: { excerpt: "private source code" },
+        },
+      ],
+      criteria: [
+        {
+          id: "visible",
+          description: "类型下拉显示合规模型映射。",
+          basis: {
+            quote: "analysis rationale",
+            sourceRefs: ["reference://spec/source"],
+          },
+          observationTargets: [
+            { label: "类型下拉", expectedText: "合规模型映射" },
+          ],
+          requireObservedEvidence: true,
+          requiredEvidenceKinds: ["DOM", "SCREENSHOT", "BUSINESS_REFERENCE"],
+        },
+      ],
+      deadlineAt: new Date().toISOString(),
+      goal: "核对白名单类型。",
+      runId: "285146a8-5230-4b02-832a-5eef19e8dc8a",
+      teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
+      traceId: "1234567890abcdef1234567890abcdef",
+      executionPolicy: { resume: { response: { account: "test-account" } } },
+    });
+    const before = runtimeTaskSnapshotSchema.parse(stored);
+    const lease = runtimeTaskLeaseSchema.parse({
+      taskId: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
+      fencingToken: "1",
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed1",
+      leaseExpiresAt: new Date().toISOString(),
+      snapshot: stored,
+    });
+    expect(lease.snapshot.businessReferences).toEqual([]);
+    expect(lease.snapshot.criteria[0]).toEqual({
+      id: "visible",
+      description: "类型下拉显示合规模型映射。",
+      required: true,
+      requireObservedEvidence: true,
+      observationTargets: before.criteria[0]!.observationTargets,
+      requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
+    });
+    expect(lease.snapshot.executionPolicy).toEqual(before.executionPolicy);
+    expect(JSON.stringify(lease.snapshot)).not.toMatch(
+      /private source code|analysis rationale|reference:\/\//u,
+    );
+    expect(stored).toEqual(before);
+    expect(browserExecutionSnapshot(lease.snapshot)).toEqual(lease.snapshot);
+  });
+
+  it("requires actual browser evidence for a legacy source-only criterion", () => {
+    const criterion = runtimeCriterionSchema.parse({
+      id: "legacy",
+      description: "The page matches the requirement.",
+      requiredEvidenceKinds: ["BUSINESS_REFERENCE"],
+    });
+    expect(browserExecutionCriterion(criterion).requiredEvidenceKinds).toEqual([
+      "DOM",
+      "SCREENSHOT",
+    ]);
+    expect(
+      missingRequiredEvidenceKinds(
+        browserExecutionCriterion(criterion),
+        [],
+        [],
+      ),
+    ).toEqual(["DOM", "SCREENSHOT"]);
+  });
+
+  it("accepts negotiated check references and legacy Spec generation formats", () => {
+    const format = runtimeSpecAnalysisTaskLeaseSchema.shape.snapshot.pick({
+      specFormat: true,
+    });
+    expect(format.parse({})).toEqual({});
+    for (const specFormat of ["COMPACT", "CHECK_REFERENCES"])
+      expect(format.parse({ specFormat })).toEqual({ specFormat });
+    expect(format.safeParse({ specFormat: "UNKNOWN" }).success).toBe(false);
+  });
+
   it("rejects the retired knowledge tool while accepting Issue and GitHub tools", () => {
     expect(
       runtimeSpecAnalysisToolNameSchema.safeParse("knowledge_search").success,
@@ -218,6 +308,19 @@ describe("agent runtime protocol", () => {
         id: "page-visible",
       }),
     ).toMatchObject({ requiredEvidenceKinds: [] });
+
+    const basis = {
+      observationTarget: "类型下拉",
+      quote: "需求中的实际类型名称",
+      sourceRefs: ["reference://task/source"],
+    };
+    expect(
+      runtimeCriterionSchema.parse({
+        description: "类型下拉中可以找到指定类型。",
+        id: "type-visible",
+        basis,
+      }).basis,
+    ).toEqual(basis);
 
     expect(
       missingRequiredEvidenceKinds(

@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { actionTarget } from "./action-feedback.js";
 import { DomObservations } from "./dom-observation.js";
 import { VisualObservations } from "./visual-observation.js";
 
@@ -26,6 +27,22 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it("exposes custom switch state and changes the action fingerprint after toggling", async () => {
+    await page.setContent(
+      `<button role="switch" aria-checked="true" onclick="this.setAttribute('aria-checked',this.getAttribute('aria-checked')==='true'?'false':'true')"><span>启用禁用</span></button>`,
+    );
+    const dom = new DomObservations();
+    expect((await dom.snapshot(page)).content).toContain('aria-checked="true"');
+    const target = page.locator("button span");
+    const before = await actionTarget(target);
+    await target.click();
+    expect((await dom.snapshot(page)).content).toContain(
+      'aria-checked="false"',
+    );
+    const after = await actionTarget(target);
+    expect(after.targetKey).toBe(before.targetKey);
+    expect(after.stateKey).not.toBe(before.stateKey);
+  });
   it.each([false, true])(
     "keeps scoped refs usable after clearing the old root registry (iframe=%s)",
     async (inFrame) => {

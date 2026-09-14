@@ -9,7 +9,7 @@ import {
 describe("recovery reads", () => {
   it("distinguishes empty protection scopes without claiming a no-write proof", () => {
     expect(recoveryWriteReviewGuidance([])).toContain("诊断记录");
-    expect(recoveryWriteReviewGuidance([])).toContain("重试原执行");
+    expect(recoveryWriteReviewGuidance([])).toContain("确认重试");
     expect(
       recoveryWriteReviewGuidance([{ mode: "WRITE", quarantined: true }]),
     ).toContain("才能释放");
@@ -37,6 +37,15 @@ describe("recovery reads", () => {
   });
 });
 describe("recovery next action", () => {
+  it("allows optional business review after a retry was authorized", () => {
+    expect(
+      recoveryNeedsWriteReview({
+        closureState: "VERIFIED",
+        writeOutcomeState: "RETRY_AUTHORIZED",
+        resolvedAt: "2026-09-14",
+      }),
+    ).toBe(true);
+  });
   it("offers business review only after closure, and never for a settled outcome", () => {
     const item = {
       closureState: "NEEDS_OPERATOR",

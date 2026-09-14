@@ -86,13 +86,17 @@ export function useTaskActions({
     }
     try {
       const task = await consoleApi<TaskDetail>(
-        `/tasks/${encodeURIComponent(id)}/cases/${encodeURIComponent(caseId)}/rerun-task`,
+        `/tasks/${encodeURIComponent(id)}/cases/${encodeURIComponent(caseId)}/rerun`,
         { method: "POST", body: JSON.stringify({ idempotencyKey }) },
       );
       caseRerunKeys.current.delete(requestKey);
-      onRerun(task);
+      onUpdated(task);
+      setMessage({
+        text: "已在当前任务下重跑此用例，历史执行记录保留。",
+        tone: "success",
+      });
     } catch (error) {
-      // Keep the key after a timeout: the server may have committed the task.
+      // Keep the key after a timeout: the server may have queued the execution.
       setMessage({ text: (error as Error).message, tone: "error" });
     } finally {
       caseRerunPending.current = false;

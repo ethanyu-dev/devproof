@@ -14,6 +14,10 @@ export interface FailureSummary {
 }
 
 const reasons: Record<string, [string, string]> = {
+  EVIDENCE_SUBMISSION_FAILED: [
+    "验收证据在两次纠正后仍未通过校验，验证结果未确认。",
+    "检查节点引用和必需证据类型；核对业务状态后再重跑。",
+  ],
   REPEATED_OPERATIONS: [
     "重复操作未产生新的页面观察或验收进展，自动执行已停止。",
     "查看最后几步操作与页面反馈，确认目标控件和前置条件后再重试。",

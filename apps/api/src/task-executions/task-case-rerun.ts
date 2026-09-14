@@ -51,9 +51,17 @@ export function caseRerunBlockReason(
       tasks?: { recoveryStatus: string | null }[];
     } | null;
   }[],
-  task?: { lifecycle: string; environmentSnapshot: unknown },
+  task?: {
+    lifecycle: string;
+    environmentSnapshot: unknown;
+    cancelRequestedAt?: Date | null;
+  },
+  options: { inPlace?: boolean } = {},
 ): string | null {
+  if (options.inPlace && task?.cancelRequestedAt)
+    return "任务已取消，无法在其中重跑用例。";
   const allowUnstarted =
+    !options.inPlace &&
     task &&
     ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle) &&
     caseRerunSource(task.environmentSnapshot) !== null;
@@ -84,7 +92,11 @@ export function caseRerunBlockReason(
     );
     if (item.executionPolicy != null && !policy.success)
       return "用例执行策略无效，请先核对执行策略。";
-    if (policy.success && policy.data.dependsOnCaseIds?.length)
+    if (
+      !options.inPlace &&
+      policy.success &&
+      policy.data.dependsOnCaseIds?.length
+    )
       return "该用例配置了前置用例，暂不支持单独创建重跑任务。";
   }
   return null;

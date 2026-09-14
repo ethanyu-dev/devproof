@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+import { caseExecutionGoal } from "./task-case-context.js";
+
+describe("case execution goal", () => {
+  it("keeps case prerequisites, data and cleanup while excluding analysis and duplicate checks", () => {
+    const generated = {
+      name: "白名单类型选项核对（只读）",
+      preconditions: ["已登录，具备白名单页面读取权限。"],
+      testData: ["使用已有 ZDR 记录，只读。"],
+      steps: [
+        {
+          order: 1,
+          action: "展开白名单类型下拉。",
+          expectedObservation: "记录实际结果，并按验收标准进行判定。",
+        },
+      ],
+      cleanup: ["关闭弹窗，不提交表单。"],
+      criteria: [{ description: "合规模型映射选项存在。" }],
+      assumptions: ["其他写入用例需要四个账号。"],
+      risks: ["PR checks 返回 403。"],
+      rationale: "src/views/whitelist-config/index.tsx",
+      sourceRefs: ["analysis-source://source"],
+    };
+    const goal = caseExecutionGoal(generated);
+    for (const required of [
+      generated.name,
+      ...generated.preconditions,
+      ...generated.testData,
+      generated.steps[0]!.action,
+      ...generated.cleanup,
+    ])
+      expect(goal).toContain(required);
+    for (const excluded of [
+      generated.steps[0]!.expectedObservation,
+      generated.criteria[0]!.description,
+      ...generated.assumptions,
+      ...generated.risks,
+      generated.rationale,
+      ...generated.sourceRefs,
+    ])
+      expect(goal).not.toContain(excluded);
+  });
+
+  it("supports old cases without test data or cleanup", () => {
+    const goal = caseExecutionGoal({
+      name: "旧用例",
+      preconditions: ["已登录"],
+      steps: [{ order: 1, action: "查看页面" }],
+    });
+    expect(goal).toContain("查看页面");
+    expect(goal).not.toMatch(/undefined|测试数据|清理/u);
+  });
+});

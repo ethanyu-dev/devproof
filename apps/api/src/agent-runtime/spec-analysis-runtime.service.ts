@@ -15,6 +15,7 @@ import {
   runtimeTraceEventSchema,
   specPullRequestCoverage,
   specRequirementCoverageError,
+  specCapabilityError,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskOutcomeInput,
   type RuntimeSpecAnalysisToolInput,
@@ -236,9 +237,10 @@ export class SpecAnalysisRuntimeService {
           leaseToken: attempt.leaseToken!,
           serverTime: serverTime.toISOString(),
           snapshot: {
-            ...(input.protocol.minor >= 17
-              ? { specFormat: "COMPACT" as const }
-              : {}),
+            specFormat:
+              input.protocol.minor >= 19
+                ? ("CHECK_REFERENCES" as const)
+                : ("COMPACT" as const),
             attemptNumber: attempt.number,
             deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
             issueRef: createInput.issueRef,
@@ -728,6 +730,21 @@ export class SpecAnalysisRuntimeService {
     outcome: Extract<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
   ) {
     const spec = runtimeGeneratedSpecSchema.parse(outcome.spec);
+    const issueTexts = new Map(
+      attempt.analysisSources
+        .filter((source) => source.kind === "LINEAR_ISSUE")
+        .map((source) => {
+          const issue = record(record(sourceContent(source.content)).issue);
+          return [
+            source.externalId,
+            [issue.title, issue.description]
+              .filter((v) => typeof v === "string")
+              .join("\n"),
+          ] as const;
+        }),
+    );
+    const capabilityError = specCapabilityError(spec, issueTexts);
+    if (capabilityError) throw new BadRequestException(capabilityError);
     const coverageError = specRequirementCoverageError(spec);
     if (coverageError) throw new BadRequestException(coverageError);
     const available = new Map(

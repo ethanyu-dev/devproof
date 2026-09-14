@@ -1,3 +1,4 @@
+import { notificationConfigurationError } from "./notification-error.js";
 import { createHmac, randomUUID } from "node:crypto";
 
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
@@ -388,15 +389,21 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
       const message = redactText(
         error instanceof Error ? error.message : String(error),
       );
+      const configurationError =
+        row.channel === "FEISHU"
+          ? notificationConfigurationError(message)
+          : null;
       const backoffSeconds = Math.min(3600, 2 ** row.attempts * 5);
       await this.prisma.$transaction(async (tx) => {
         const acknowledged = await tx.notificationOutbox.updateMany({
           data: {
-            lastError: message.slice(0, 4000),
+            lastError: configurationError
+              ? `${configurationError.code}: ${configurationError.message}`
+              : message.slice(0, 4000),
             leaseExpiresAt: null,
             leaseToken: null,
             nextAttemptAt: new Date(Date.now() + backoffSeconds * 1000),
-            status: "FAILED",
+            status: configurationError ? "CANCELLED" : "FAILED",
           },
           where: ownedWhere(),
         });
@@ -408,7 +415,8 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
               kind: "notification.failed",
               payload: {
                 channel: row.channel,
-                errorCode: "NOTIFICATION_DELIVERY_FAILED",
+                errorCode:
+                  configurationError?.code ?? "NOTIFICATION_DELIVERY_FAILED",
                 message,
                 outboxId: row.id,
               },
@@ -421,7 +429,8 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
             data: {
               actor: "SYSTEM",
               durationMs: Date.now() - started,
-              errorCode: "NOTIFICATION_DELIVERY_FAILED",
+              errorCode:
+                configurationError?.code ?? "NOTIFICATION_DELIVERY_FAILED",
               errorMessage: message.slice(0, 4_000),
               kind: "notification.failed",
               payload: { channel: row.channel, message, outboxId: row.id },
@@ -438,7 +447,8 @@ export class NotificationOutboxWorker implements OnModuleInit, OnModuleDestroy {
               kind: "notification.failed",
               payload: {
                 channel: row.channel,
-                errorCode: "NOTIFICATION_DELIVERY_FAILED",
+                errorCode:
+                  configurationError?.code ?? "NOTIFICATION_DELIVERY_FAILED",
                 message,
                 outboxId: row.id,
               },

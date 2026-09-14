@@ -5,6 +5,24 @@ runtime. DevProof owns run state, retries, cancellation, HITL, and cleanup. The
 runtime leases one task, executes it, emits observations, and submits one
 structured outcome.
 
+Browser execution receives only case-local instructions and observable acceptance
+criteria. The control plane retains Spec analysis, source excerpts and criterion
+`basis` for audit, but removes them from new Runtime snapshots and from claims of
+older snapshots. The worker also strips provenance when parsing a lease. The
+wire-compatible `businessReferences` field is empty; model prompts and execution
+evidence indexes do not contain business references.
+
+Browser criteria retain IDs, descriptions, required flags, observation targets
+and observed evidence kinds. `BUSINESS_REFERENCE` is no longer required to pass a
+browser check; a historical source-only requirement instead requires DOM and
+screenshot evidence. Node/quote coverage and actual artifact validation still
+apply. New generated goals contain the case name, prerequisites, test data,
+actions and cleanup, without task-wide assumptions, risks, repeated acceptance
+criteria or per-step expected-observation prose. Historical stored goals are not
+rewritten. Deploy the API before the Browser Execution Agent so both enforce the
+same evidence requirements. No database migration or Browser Runtime update is
+needed.
+
 The package also defines the typed `agent.segment.*`, `agent.model.*`, and
 `agent.tool.*` trajectory vocabulary. Producers correlate events with a segment,
 attempt, model step, and tool call ID; preview fields must already be bounded and
@@ -121,3 +139,29 @@ Linked GitHub PRs still require metadata, diffs and related file reads before
 requirements are fixed and the Spec is submitted (including changed Route Specs).
 No linked PR or unavailable optional GitHub tools permit an explicitly partial
 Spec. The compact format does not bypass source coverage checks.
+
+Protocol v2.19 adds `specFormat: "CHECK_REFERENCES"` for Spec workers advertising
+minor 19 or newer. Minor 18 workers continue receiving `COMPACT`; the existing
+minimum Spec-worker minor remains 18. An older API can still assign `COMPACT` to
+a new worker during rollout.
+
+After `define_requirements`, the local `define_checks` tool validates batches of
+criteria and returns stable `checkId` values. Valid entries are retained even
+when another entry fails. Corrections include the current `expectedRevision`;
+an existing `checkId` replaces only that check and cannot change its requirement
+mapping. `supportingSourceRefs` can explicitly add observed UI/implementation
+sources while the original requirement `basis` stays fixed. Errors identify the
+input item, requirement, field, value, bound sources and candidate supporting
+sources; candidates are never attached automatically.
+
+Final Cases contain `name`, ordered `steps`, and `checkIds`, with optional
+preconditions, test data and cleanup. The worker expands references into the
+existing `agent-spec-v3` execution envelope, including full observation targets,
+evidence kinds and provenance. A reused check becomes a distinct criterion in
+each Case (`case-N-check-M`), requiring independent execution evidence. Unknown
+or duplicate IDs and inline criterion overrides are rejected. Fixed-requirement
+coverage and source coverage still run on the expanded Spec.
+
+The check catalog is local to one Spec attempt; it is not a durable checkpoint
+across worker restarts. No database migration or Browser Runtime protocol change
+is required. See [the generation workflow](../../docs/spec-check-references.md).

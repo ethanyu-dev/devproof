@@ -138,6 +138,182 @@ async function executeCalls(
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("registers checks once, repairs only the unsupported item and expands ID-only cases", async () => {
+    const issue = {
+      ...source,
+      excerpt: "新增旧版对公转账白名单，样式参考 ZDR。",
+    };
+    const ui = {
+      ...requiredPrSources[2]!,
+      externalId: `${source.externalId}-i18n`,
+      excerpt: "旧版对公转账白名单，零数据留存 (ZDR)",
+    };
+    const executeSpecTool = vi.fn().mockResolvedValue({
+      result: requiredPrResult,
+      sourceRefs: [issue, ...requiredPrSources, ui],
+    });
+    const option = {
+      requirementId: "requirement-1",
+      description: "类型下拉可以选择旧版对公转账白名单。",
+      observationTargets: [
+        { label: "对公转账类型", expectedText: "旧版对公转账白名单" },
+      ],
+    };
+    const style = {
+      requirementId: "requirement-2",
+      description: "旧版对公转账配置区域的结构和交互与 ZDR 一致。",
+      observationTargets: [
+        { label: "对公转账配置", expectedText: "旧版对公转账白名单" },
+        { label: "ZDR 配置", expectedText: "零数据留存 (ZDR)" },
+      ],
+      requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
+    };
+    const spec = {
+      summary: "验证新增白名单类型",
+      cases: [
+        {
+          name: "检查白名单配置",
+          steps: ["独立打开旧版对公转账与 ZDR 配置界面并对照。"],
+          checkIds: ["check-1", "check-2"],
+        },
+      ],
+    };
+    const { create, outcome, appendSpecEvent } = await executeCalls(
+      [
+        call(
+          "linear_get_issue",
+          { analysisSummary: "读取需求和代码证据。" },
+          "issue",
+        ),
+        call(
+          "define_checks",
+          {
+            analysisSummary: "提前定义标准。",
+            expectedRevision: 0,
+            checks: [option],
+          },
+          "premature",
+        ),
+        call(
+          "define_requirements",
+          {
+            analysisSummary: "固定完整需求。",
+            requirements: [
+              {
+                description: "支持旧版对公转账",
+                sourceRef: issue.externalId,
+                quote: "新增旧版对公转账白名单",
+              },
+              {
+                description: "配置样式参考 ZDR",
+                sourceRef: issue.externalId,
+                quote: "样式参考 ZDR",
+              },
+            ],
+          },
+          "requirements",
+        ),
+        call(
+          "define_checks",
+          {
+            analysisSummary: "分批校验标准。",
+            expectedRevision: 0,
+            checks: [option, style],
+          },
+          "checks",
+        ),
+        call(
+          "define_checks",
+          {
+            analysisSummary: "补充样式标准的界面证据。",
+            expectedRevision: 1,
+            checks: [{ ...style, supportingSourceRefs: [ui.externalId] }],
+          },
+          "repair",
+        ),
+        call(
+          "finish_spec",
+          {
+            analysisSummary: "检查引用完整性。",
+            spec: {
+              ...spec,
+              cases: [{ ...spec.cases[0], checkIds: ["check-1", "invented"] }],
+            },
+          },
+          "unknown",
+        ),
+        call(
+          "finish_spec",
+          { analysisSummary: "提交已校验标准引用。", spec },
+          "finish",
+        ),
+      ],
+      executeSpecTool,
+      {
+        ...task,
+        snapshot: { ...task.snapshot, specFormat: "CHECK_REFERENCES" },
+      },
+    );
+    expect(outcome.kind).toBe("SPEC_GENERATED");
+    if (outcome.kind !== "SPEC_GENERATED") throw new Error(outcome.summary);
+    expect(outcome.spec.cases[0]!.criteria).toMatchObject([
+      { id: "case-1-check-1", required: true, sourceRefs: [issue.externalId] },
+      {
+        id: "case-1-check-2",
+        requirementId: "requirement-2",
+        required: true,
+        basis: { sourceRef: issue.externalId, quote: "样式参考 ZDR" },
+        sourceRefs: [issue.externalId, ui.externalId],
+        observationTargets: style.observationTargets,
+        requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
+      },
+    ]);
+    expect(outcome.sourceRefs.map((item) => item.externalId)).toContain(
+      ui.externalId,
+    );
+    expect(executeSpecTool).toHaveBeenCalledTimes(1);
+    const toolsAt = (index: number) => create.mock.calls[index]![0].tools;
+    expect(
+      toolsAt(1).map(
+        (tool: { function: { name: string } }) => tool.function.name,
+      ),
+    ).not.toContain("define_checks");
+    expect(
+      toolsAt(3).map(
+        (tool: { function: { name: string } }) => tool.function.name,
+      ),
+    ).not.toContain("finish_spec");
+    const definitionAt = (index: number, name: string) =>
+      toolsAt(index).find(
+        (tool: { function: { name: string } }) => tool.function.name === name,
+      ).function;
+    expect(
+      definitionAt(4, "define_checks").parameters.properties.expectedRevision
+        .const,
+    ).toBe(1);
+    expect(
+      definitionAt(4, "define_checks").parameters.properties.checks.items
+        .properties.supportingSourceRefs.items.enum,
+    ).toContain(ui.externalId);
+    const caseInput = definitionAt(5, "finish_spec").parameters.properties.spec
+      .properties.cases.items;
+    expect(caseInput.required).toEqual(["name", "steps", "checkIds"]);
+    expect(caseInput.properties.criteria).toBeUndefined();
+    expect(caseInput.properties.checkIds.items.enum).toEqual([
+      "check-1",
+      "check-2",
+    ]);
+    const transcript = JSON.stringify(create.mock.calls.at(-1)![0].messages);
+    expect(transcript).toContain("TARGET_TEXT_UNSUPPORTED");
+    expect(transcript).toContain("candidateSourceRefs");
+    expect(transcript).toContain("未知或未通过校验的 checkId");
+    expect(
+      appendSpecEvent.mock.calls.some(
+        (args) => args[1] === "agent.spec.generated",
+      ),
+    ).toBe(true);
+  });
+
   it("negotiates compact cases and preserves uncovered requirements across corrections", async () => {
     const compactTask = {
       ...task,
@@ -609,12 +785,18 @@ describe("SpecAnalysisExecutor", () => {
     const events = appendSpecEvent.mock.calls.filter((call) =>
       call[1].startsWith("agent.model."),
     );
-    expect(events.map((call) => call[1])).toEqual([
-      "agent.model.started",
-      "agent.model.failed",
-      "agent.model.started",
-      "agent.model.failed",
+    expect(create).toHaveBeenCalledTimes(10);
+    expect(events.map((call) => call[1])).toEqual(
+      Array.from({ length: 10 }, () => [
+        "agent.model.started",
+        "agent.model.failed",
+      ]).flat(),
+    );
+    const starts = events.filter((call) => call[1] === "agent.model.started");
+    expect(starts.map((call) => call[2].inputPreview.modelAttempt)).toEqual([
+      1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
     ]);
+    expect(new Set(starts.map((call) => call[2].modelCallId)).size).toBe(10);
     const firstId = events[0]![2].modelCallId;
     const secondId = events[2]![2].modelCallId;
     expect(firstId).toEqual(expect.any(String));

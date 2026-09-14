@@ -129,10 +129,12 @@ export class TaskExecutionController {
     @Body() body: unknown,
   ) {
     requireToolScope(current, "run:write");
-    return this.tasks.rerunCaseAsTask(
+    // Compatibility alias: old clients also append to the original task.
+    return this.tasks.rerunCase(
       current,
       id,
       caseId,
+      undefined,
       parseBody(taskCaseRerunInputSchema, body),
     );
   }
@@ -142,9 +144,16 @@ export class TaskExecutionController {
     @CurrentToolAuth() current: ToolAuthContext,
     @Param("id") id: string,
     @Param("caseId") caseId: string,
+    @Body() body: unknown,
   ) {
     requireToolScope(current, "run:write");
-    return this.tasks.rerunCase(current, id, caseId);
+    return this.tasks.rerunCase(
+      current,
+      id,
+      caseId,
+      undefined,
+      parseBody(taskCaseRerunInputSchema.optional(), body),
+    );
   }
 
   @Post(":id/cases/:caseId/deployments/:deploymentId/rerun")
@@ -153,9 +162,16 @@ export class TaskExecutionController {
     @Param("id") id: string,
     @Param("caseId") caseId: string,
     @Param("deploymentId") deploymentId: string,
+    @Body() body: unknown,
   ) {
     requireToolScope(current, "run:write");
-    return this.tasks.rerunCase(current, id, caseId, deploymentId);
+    return this.tasks.rerunCase(
+      current,
+      id,
+      caseId,
+      deploymentId,
+      parseBody(taskCaseRerunInputSchema.optional(), body),
+    );
   }
 
   @Post(":id/cancel")

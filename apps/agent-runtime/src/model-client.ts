@@ -2,8 +2,9 @@ import OpenAI from "openai";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import type { RuntimeModelCandidate } from "@devproof/agent-runtime-protocol";
 import type { ModelRequestAttempt, ModelClient } from "./model-types.js";
+import { DEFAULT_MODEL_CALL_SECONDS } from "./model-types.js";
 
-/** Keep SDK retry behavior, measuring each actual transport attempt separately. */
+/** Executors own retries, so one model attempt is exactly one HTTP request. */
 export function createChatCompletionsClient(
   candidate: RuntimeModelCandidate,
   modelFetch: typeof fetch,
@@ -14,6 +15,8 @@ export function createChatCompletionsClient(
       const client = new OpenAI({
         apiKey: candidate.apiKey,
         baseURL: candidate.baseUrl,
+        maxRetries: 0,
+        timeout: DEFAULT_MODEL_CALL_SECONDS * 1_000,
         fetch: async (input, init) => {
           const attempt: ModelRequestAttempt = {
             attempt: ++attemptCount,
@@ -38,7 +41,10 @@ export function createChatCompletionsClient(
       });
       const response = await client.chat.completions.create(
         { ...request, stream: false } as ChatCompletionCreateParamsNonStreaming,
-        { signal: options?.signal },
+        {
+          signal: options?.signal,
+          timeout: options?.timeoutMs ?? DEFAULT_MODEL_CALL_SECONDS * 1_000,
+        },
       );
       const message = response.choices[0]?.message;
       if (!message || message.role !== "assistant") {

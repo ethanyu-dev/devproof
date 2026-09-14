@@ -13,12 +13,18 @@ export interface ToolCorrection {
   accepted: false;
   code:
     | "INVALID_JSON"
+    | "QUOTE_NOT_EXACT"
+    | "UNKNOWN_EVIDENCE_REF"
+    | "MISSING_EVIDENCE_KIND"
+    | "CITATION_NOT_AVAILABLE"
+    | "INVALID_EVIDENCE_STAGE"
     | "INVALID_ARGUMENTS"
     | "UNKNOWN_COMMAND"
     | "UNKNOWN_TOOL"
     | "TOOL_GROUP_REQUIRED"
     | "COMMAND_NOT_ALLOWED";
   requiredGroup?: string;
+  criterionId?: string;
   error: string;
   issues: CorrectionIssue[];
   suggestions: string[];
@@ -43,6 +49,7 @@ export function toolCorrection(
   options: {
     code?: ToolCorrection["code"];
     requiredGroup?: string;
+    criterionId?: string;
     issues?: CorrectionIssue[];
     suggestions?: string[];
     nextAction?: string;
@@ -51,6 +58,9 @@ export function toolCorrection(
   const result: ToolCorrection = {
     accepted: false,
     code: options.code ?? "INVALID_ARGUMENTS",
+    ...(options.criterionId
+      ? { criterionId: boundedText(options.criterionId, 160) }
+      : {}),
     ...(options.requiredGroup
       ? { requiredGroup: boundedText(options.requiredGroup, 40) }
       : {}),

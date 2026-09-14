@@ -1,9 +1,23 @@
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 import { z } from "zod";
+export {
+  businessTestAccountSchema,
+  executionRecordSchema,
+  executionStateSchema,
+  readExecutionState,
+} from "./execution-state.js";
+export type { ExecutionRecord, ExecutionState } from "./execution-state.js";
+export { observedValueMatches } from "./observed-value.js";
+export {
+  specCapabilityError,
+  localizationRequirementError,
+  requiresNetworkEvidence,
+  SPEC_EXECUTION_SCOPE_GUIDANCE,
+} from "./spec-capabilities.js";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 18,
+  minor: 19,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -127,6 +141,13 @@ export const runtimeObservationTargetSchema = z.object({
 
 export const runtimeCriterionSchema = z.object({
   description: z.string().trim().min(1).max(4_000),
+  basis: z
+    .object({
+      observationTarget: z.string().trim().min(1).max(500).optional(),
+      quote: z.string().trim().min(1).max(2_000).optional(),
+      sourceRefs: z.array(z.string().trim().min(1).max(500)).max(100),
+    })
+    .optional(),
   id: z.string().trim().min(1).max(160),
   required: z.boolean().default(true),
   requireObservedEvidence: z.boolean().optional(),
@@ -216,6 +237,13 @@ export const runtimeGeneratedSpecCaseSchema = z.object({
 });
 
 export const runtimeSpecRequirementSchema = z.object({
+  testScope: z.enum(["FUNCTIONAL", "LOCALIZATION"]).optional(),
+  issueEvidence: z
+    .object({
+      sourceRef: z.string().min(1).max(500),
+      quote: z.string().min(1).max(2000),
+    })
+    .optional(),
   id: z.string().trim().min(1).max(100),
   description: z.string().trim().min(1).max(2_000),
   sourceRef: z.string().trim().min(1).max(500),
@@ -254,7 +282,7 @@ export const runtimeGeneratedSpecSchema = z.object({
 });
 
 export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
-  specFormat: z.literal("COMPACT").optional(),
+  specFormat: z.enum(["COMPACT", "CHECK_REFERENCES"]).optional(),
   attemptNumber: z.number().int().positive(),
   deadlineAt: z.string().datetime(),
   issueRef: z.string().trim().min(1).max(500),
@@ -342,13 +370,41 @@ export const runtimeTaskSnapshotSchema = z.object({
   traceId: z.string().regex(/^[a-f0-9]{32}$/u),
 });
 
+/** Analysis provenance stays in the control plane; execution verifies observations. */
+export function browserExecutionCriterion(
+  criterion: z.infer<typeof runtimeCriterionSchema>,
+) {
+  const { basis: _basis, ...execution } = criterion;
+  const observedKinds = execution.requiredEvidenceKinds.filter(
+    (kind) => kind !== "BUSINESS_REFERENCE",
+  );
+  return {
+    ...execution,
+    // A legacy source-only check must still obtain browser evidence to pass.
+    requiredEvidenceKinds:
+      observedKinds.length === 0 && execution.requiredEvidenceKinds.length > 0
+        ? (["DOM", "SCREENSHOT"] as const).map((kind) => kind)
+        : observedKinds,
+  };
+}
+
+export function browserExecutionSnapshot(
+  snapshot: z.infer<typeof runtimeTaskSnapshotSchema>,
+): z.infer<typeof runtimeTaskSnapshotSchema> {
+  return {
+    ...snapshot,
+    businessReferences: [],
+    criteria: snapshot.criteria.map(browserExecutionCriterion),
+  };
+}
+
 export const runtimeTaskLeaseSchema = z.object({
   fencingToken: z.string().regex(/^\d+$/u),
   leaseExpiresAt: z.string().datetime(),
   leaseToken: z.string().uuid(),
   serverTime: z.string().datetime().optional(),
   leaseDurationMs: z.number().nonnegative().optional(),
-  snapshot: runtimeTaskSnapshotSchema,
+  snapshot: runtimeTaskSnapshotSchema.transform(browserExecutionSnapshot),
   taskId: z.string().uuid(),
 });
 
@@ -626,6 +682,7 @@ export const runtimeCriterionResultSchema = z.object({
 
 export const runtimeVerificationTerminationReasonSchema = z.enum([
   "FINALIZATION_RESERVE_REACHED",
+  "EVIDENCE_SUBMISSION_FAILED",
   "REPEATED_OPERATIONS",
   "TEXT_ONLY_LOOP",
   "TOOL_LIMIT_REACHED",

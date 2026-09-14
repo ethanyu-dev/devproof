@@ -41,6 +41,8 @@ export const RESOLVED_WRITE_STATES = [
   "NO_WRITE_VERIFIED",
   "CONFIRMED",
   "RESOLVED",
+  // An operator explicitly permits replay; this does not verify the old write.
+  "RETRY_AUTHORIZED",
 ] as const;
 export const TERMINAL_RUN_STATES = [
   "COMPLETED",

@@ -12,24 +12,24 @@ import { useTaskActions } from "./use-task-actions";
 describe("single Case rerun requests", () => {
   beforeEach(() => api.mockReset());
 
-  it("navigates to the new task and uses the same request key after uncertain failures", async () => {
+  it("updates the original task and uses the same request key after uncertain failures", async () => {
     const onRerun = vi.fn();
     const onUpdated = vi.fn();
     const actions = useTaskActions({ id: "original-task", onRerun, onUpdated });
     api.mockRejectedValueOnce(new Error("请求超时"));
     await actions.rerunCase("selected-case");
-    api.mockResolvedValueOnce({ id: "new-task" } as TaskDetail);
+    api.mockResolvedValueOnce({ id: "original-task" } as TaskDetail);
     await actions.rerunCase("selected-case");
     expect(api.mock.calls[0]).toEqual(api.mock.calls[1]);
     expect(api.mock.calls[1]![0]).toBe(
-      "/tasks/original-task/cases/selected-case/rerun-task",
+      "/tasks/original-task/cases/selected-case/rerun",
     );
     expect(JSON.parse(api.mock.calls[1]![1].body).idempotencyKey).toMatch(
       /^case-rerun:/,
     );
-    expect(onRerun).toHaveBeenCalledWith({ id: "new-task" });
-    expect(onUpdated).not.toHaveBeenCalled();
-    api.mockResolvedValueOnce({ id: "another-task" });
+    expect(onUpdated).toHaveBeenCalledWith({ id: "original-task" });
+    expect(onRerun).not.toHaveBeenCalled();
+    api.mockResolvedValueOnce({ id: "original-task" });
     await actions.rerunCase("selected-case");
     expect(api.mock.calls[2]![1].body).not.toEqual(api.mock.calls[1]![1].body);
   });
@@ -50,7 +50,7 @@ describe("single Case rerun requests", () => {
     const pending = actions.rerunCase("case");
     await actions.rerunCase("case");
     expect(api).toHaveBeenCalledTimes(1);
-    complete({ id: "new-task" } as TaskDetail);
+    complete({ id: "original-task" } as TaskDetail);
     await pending;
   });
 });

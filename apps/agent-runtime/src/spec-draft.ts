@@ -4,6 +4,7 @@ import {
   runtimeSpecCriterionSchema,
   runtimeSpecRequirementSchema,
   runtimeUncoveredRequirementSchema,
+  localizationRequirementError,
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 
@@ -18,6 +19,18 @@ export const requirementPlanSchema = z.object({
 });
 
 export type SpecRequirement = z.infer<typeof runtimeSpecRequirementSchema>;
+
+export const specCheckSchema = z.object({
+  requirementId: z.string().trim().min(1).max(100),
+  description: text,
+  observationTargets: z.array(runtimeObservationTargetSchema).min(1).max(20),
+  supportingSourceRefs: z
+    .array(z.string().trim().min(1).max(500))
+    .max(99)
+    .default([]),
+  requiredEvidenceKinds:
+    runtimeSpecCriterionSchema.shape.requiredEvidenceKinds.default(["DOM"]),
+});
 
 /** Model-facing input; repeated audit fields are filled by the runtime. */
 export const compactSpecSchema = z.object({
@@ -36,28 +49,48 @@ export const compactSpecSchema = z.object({
         preconditions: notes,
         testData: notes,
         cleanup: runtimeGeneratedSpecSchema.shape.cases.element.shape.cleanup,
-        criteria: z
-          .array(
-            z.object({
-              requirementId: z.string().trim().min(1).max(100),
-              description: text,
-              observationTargets: z
-                .array(runtimeObservationTargetSchema)
-                .min(1)
-                .max(20),
-              requiredEvidenceKinds:
-                runtimeSpecCriterionSchema.shape.requiredEvidenceKinds.default([
-                  "DOM",
-                ]),
-            }),
-          )
-          .min(1)
-          .max(100),
+        criteria: z.array(specCheckSchema).min(1).max(100),
       }),
     )
     .min(1)
     .max(100),
 });
+
+/** Only the generation format changes; execution still receives full criteria. */
+export const referencedSpecSchema = compactSpecSchema.extend({
+  cases: z
+    .array(
+      compactSpecSchema.shape.cases.element
+        .omit({ criteria: true })
+        .extend({
+          checkIds: z.array(z.string().trim().min(1).max(100)).min(1).max(100),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(100),
+});
+
+export function expandSpecCheck(
+  check: z.infer<typeof specCheckSchema>,
+  requirement: SpecRequirement,
+  id: string,
+) {
+  const { supportingSourceRefs, ...criterion } = check;
+  return runtimeSpecCriterionSchema.parse({
+    ...criterion,
+    id,
+    sourceRefs: [...new Set([requirement.sourceRef, ...supportingSourceRefs])],
+    basis: {
+      sourceRef: requirement.sourceRef,
+      quote: requirement.quote,
+      observationTarget: check.observationTargets
+        .map((target) => target.label)
+        .join("、")
+        .slice(0, 500),
+    },
+  });
+}
 
 export function normalizeCompactSpec(
   raw: unknown,
@@ -79,19 +112,11 @@ export function normalizeCompactSpec(
           throw new Error(
             `未知需求编号：${criterion.requirementId}。请使用 define_requirements 返回的编号。`,
           );
-        return {
-          ...criterion,
-          id: `case-${caseIndex + 1}-criterion-${index + 1}`,
-          sourceRefs: [requirement.sourceRef],
-          basis: {
-            sourceRef: requirement.sourceRef,
-            quote: requirement.quote,
-            observationTarget: criterion.observationTargets
-              .map((target) => target.label)
-              .join("、")
-              .slice(0, 500),
-          },
-        };
+        return expandSpecCheck(
+          criterion,
+          requirement,
+          `case-${caseIndex + 1}-criterion-${index + 1}`,
+        );
       });
       return {
         ...testCase,
@@ -124,6 +149,7 @@ export function normalizeCompactSpec(
 export function defineSpecRequirements(
   raw: unknown,
   sourceContents: ReadonlyMap<string, string>,
+  issueTexts: ReadonlyMap<string, string> = new Map(),
 ): SpecRequirement[] {
   const plan = requirementPlanSchema.parse(raw);
   return plan.requirements.map((item, index) => {
@@ -134,6 +160,9 @@ export function defineSpecRequirements(
       throw new Error(
         `需求「${item.description}」必须引用实际读取来源中的原文。`,
       );
-    return { ...item, id: `requirement-${index + 1}` };
+    const requirement = { ...item, id: `requirement-${index + 1}` };
+    const scopeError = localizationRequirementError(requirement, issueTexts);
+    if (scopeError) throw new Error(scopeError);
+    return requirement;
   });
 }

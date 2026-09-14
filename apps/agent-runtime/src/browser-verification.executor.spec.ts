@@ -146,6 +146,118 @@ function operationOutput(
   return output;
 }
 
+describe("criterion evidence submission", () => {
+  const content =
+    '- <div title="合规模型映射"> "合规模型映射" [ref=f262e201] [box=615,152,192,32]';
+  function setup(invalid = false) {
+    let calls = 0;
+    const create = vi.fn().mockImplementation(async (request) => {
+      const snapshot = contextData(request, "current_browser_page").data
+        .snapshot;
+      return {
+        id: `response-${calls}`,
+        message: {
+          role: "assistant",
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              {
+                verdict: "PASSED",
+                summary: "已在类型下拉中找到合规模型映射。",
+                criteria: [
+                  {
+                    criterionId: "case-2-criterion-1",
+                    status: "PASSED",
+                    summary: "已找到合规模型映射。",
+                    ...(invalid
+                      ? {
+                          evidenceRefs: [
+                            "artifact://dom",
+                            "artifact://screenshot",
+                          ],
+                          observations: [
+                            {
+                              target: "合规模型映射",
+                              observationId: snapshot.observationId,
+                              cursor: 0,
+                              quote: `拼接原文${calls}；合规模型映射`,
+                            },
+                          ],
+                        }
+                      : {
+                          citations: [
+                            { target: "合规模型映射", ref: "f262e201" },
+                          ],
+                        }),
+                  },
+                ],
+              },
+              calls++,
+            ),
+          ],
+        },
+      };
+    });
+    const harness = convergenceHarness(create);
+    harness.runTask.snapshot.criteria = [
+      {
+        id: "case-2-criterion-1",
+        description: "类型下拉中可以找到合规模型映射。",
+        required: true,
+        requireObservedEvidence: true,
+        requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
+        observationTargets: [
+          { label: "合规模型映射", expectedText: "合规模型映射" },
+        ],
+      },
+    ];
+    harness.controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content },
+      artifacts: [
+        { id: "dom", kind: "DOM", metadata: {} },
+        { id: "screenshot", kind: "SCREENSHOT", metadata: {} },
+      ],
+    });
+    return { ...harness, create };
+  }
+  it("completes the case using one node citation without copying raw quotes or artifact IDs", async () => {
+    const { executor, runTask, create } = setup();
+    const result = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "PASSED",
+      criteria: [
+        {
+          criterionId: "case-2-criterion-1",
+          evidenceRefs: ["artifact://dom", "artifact://screenshot"],
+          observations: [{ quote: content, target: "合规模型映射" }],
+        },
+      ],
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+  it("preserves the concrete evidence error and stops after two unsuccessful corrections", async () => {
+    const { executor, runTask, create } = setup(true);
+    const result = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "EVIDENCE_SUBMISSION_FAILED" },
+    });
+    expect(result.summary).toContain("通过结论缺少已观察原文覆盖");
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("context delivery and slow models", () => {
   type Request = { model: string; messages: Array<Record<string, unknown>> };
   const reply = (
@@ -642,30 +754,269 @@ describe("context delivery and slow models", () => {
     ]);
   });
 
-  it("bounds a hung primary to 90 seconds when a fallback is available", async () => {
+  it.each(["ADAPTIVE", "FIXED"])(
+    "defaults to 300 seconds with a fallback in %s mode",
+    async (mode) => {
+      vi.useFakeTimers();
+      const create = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValue(reply("finish_verification", finish, 1));
+      const { executor, runTask } = convergenceHarness(create);
+      runTask.snapshot.executionPolicy.deadline = { mode };
+      runTask.snapshot.deadlineAt = new Date(
+        Date.now() + 600_000,
+      ).toISOString();
+      runTask.snapshot.modelCandidates!.push({
+        ...runTask.snapshot.modelCandidates![0]!,
+        modelId: "fallback",
+      });
+      const execution = executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      await vi.advanceTimersByTimeAsync(90_001);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(create.mock.calls[0]![1].signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(210_000);
+      expect(await execution).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+      expect(create.mock.calls[0]![1].signal.aborted).toBe(true);
+      expect(create.mock.calls[0]![1].timeoutMs).toBe(300_000);
+      expect(create.mock.calls.map((call) => call[0].model)).toEqual([
+        "gpt-test",
+        "fallback",
+      ]);
+    },
+  );
+
+  it("honors a configured timeout above the 300-second default", async () => {
     vi.useFakeTimers();
     const create = vi
       .fn()
       .mockImplementationOnce(() => new Promise(() => {}))
       .mockResolvedValue(reply("finish_verification", finish, 1));
     const { executor, runTask } = convergenceHarness(create);
-    runTask.snapshot.deadlineAt = new Date(Date.now() + 600_000).toISOString();
-    runTask.snapshot.modelCandidates!.push({
-      ...runTask.snapshot.modelCandidates![0]!,
-      modelId: "fallback",
-    });
+    runTask.snapshot.deadlineAt = new Date(Date.now() + 900_000).toISOString();
+    runTask.snapshot.executionPolicy.deadline = {
+      mode: "ADAPTIVE",
+      maxModelCallSeconds: 450,
+    };
     const execution = executor.execute(
       runTask,
       lease,
       new AbortController().signal,
     );
-    await vi.advanceTimersByTimeAsync(90_001);
+    await vi.advanceTimersByTimeAsync(300_001);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![1].signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(150_000);
     expect(await execution).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
-    expect(create.mock.calls[0]![1].signal.aborted).toBe(true);
-    expect(create.mock.calls.map((call) => call[0].model)).toEqual([
-      "gpt-test",
-      "fallback",
+    expect(create.mock.calls[0]![1].timeoutMs).toBe(450_000);
+  });
+
+  it("exhausts five attempts per available model before stopping, with separate trace IDs", async () => {
+    const create = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    await expect(
+      executor.execute(runTask, lease, new AbortController().signal),
+    ).rejects.toThrow("All configured model providers failed");
+    expect(create.mock.calls.map(([request]) => request.model)).toEqual(
+      Array.from({ length: 5 }, () => ["gpt-test", "fallback"]).flat(),
+    );
+    const starts = controlPlane.appendEvent.mock.calls.filter(
+      (call) => call[1] === "agent.model.started",
+    );
+    const failures = controlPlane.appendEvent.mock.calls.filter(
+      (call) => call[1] === "agent.model.failed",
+    );
+    expect(starts.map((call) => call[2].inputPreview.modelAttempt)).toEqual([
+      1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
     ]);
+    expect(new Set(starts.map((call) => call[2].modelCallId)).size).toBe(10);
+    expect(failures.map((call) => call[2].modelCallId)).toEqual(
+      starts.map((call) => call[2].modelCallId),
+    );
+  });
+
+  it("continues on the fifth attempt and resets retry numbering for the next decision", async () => {
+    let calls = 0;
+    const create = vi.fn(async () => {
+      if (++calls <= 4) throw new Error("temporary failure");
+      if (calls === 5)
+        return reply(
+          "browser_command",
+          { commandType: "page.get_title", payload: {} },
+          1,
+        );
+      return reply("finish_verification", finish, 2);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(create).toHaveBeenCalledTimes(6);
+    const starts = controlPlane.appendEvent.mock.calls.filter(
+      (call) => call[1] === "agent.model.started",
+    );
+    expect(starts.map((call) => call[2].inputPreview.modelAttempt)).toEqual([
+      1, 2, 3, 4, 5, 1,
+    ]);
+    expect(
+      controlPlane.browserCommand.mock.calls.filter(
+        (call) => call[1].commandType === "page.get_title",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("gives every timeout retry a fresh 300-second budget", async () => {
+    vi.useFakeTimers();
+    const create = vi.fn(() => new Promise(() => {}));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.deadlineAt = new Date(
+      Date.now() + 3_600_000,
+    ).toISOString();
+    const execution = expect(
+      executor.execute(runTask, lease, new AbortController().signal),
+    ).rejects.toThrow("模型响应超过 300 秒");
+    await vi.advanceTimersByTimeAsync(1_500_001);
+    await execution;
+    expect(create).toHaveBeenCalledTimes(5);
+    expect(
+      controlPlane.appendEvent.mock.calls
+        .filter((call) => call[1] === "agent.model.failed")
+        .map((call) => call[2].durationMs),
+    ).toEqual([300_000, 300_000, 300_000, 300_000, 300_000]);
+  });
+
+  it("does not retry model requests after cancellation", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const create = vi.fn(() => new Promise(() => {}));
+    const { executor, runTask } = convergenceHarness(create);
+    const execution = expect(
+      executor.execute(runTask, lease, controller.signal),
+    ).rejects.toThrow("user cancelled");
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort(new Error("user cancelled"));
+    await execution;
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([null, undefined])(
+    "honors an explicit conflict release but not an omitted reply (%s)",
+    async (accountConflict) => {
+      let step = 0;
+      const create = vi.fn(async (request: Request) => {
+        const state = contextData(request, "browser_working_state").data
+          .executionState;
+        expect(state.accountConflict).toBe(
+          accountConflict === null ? undefined : "TEST_ACCOUNT_CONFLICT",
+        );
+        return ++step === 1
+          ? reply(
+              "browser_command",
+              { commandType: "page.click", payload: { target: { ref: "e1" } } },
+              step,
+            )
+          : reply("finish_verification", finish, step);
+      });
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      runTask.snapshot.executionPolicy.executionState = {
+        account: "original",
+        accountAliases: ["uuid-original"],
+        accountConflict: "TEST_ACCOUNT_CONFLICT",
+      };
+      controlPlane.appendEvent.mockImplementation(async (_lease, kind) =>
+        kind === "execution.checkpoint" ? { accountConflict } : {},
+      );
+      controlPlane.browserCommand.mockResolvedValue({
+        status: "SUCCEEDED",
+        result: { content: '- button "继续" [ref=e1]' },
+      });
+      await executor.execute(runTask, lease, new AbortController().signal);
+      expect(
+        controlPlane.browserCommand.mock.calls.filter(
+          (call) => call[1].commandType === "page.click",
+        ),
+      ).toHaveLength(accountConflict === null ? 1 : 0);
+    },
+  );
+
+  it("does not finish while an observed record is still awaiting its creation receipt", async () => {
+    const create = vi
+      .fn()
+      .mockImplementation(async () => reply("finish_verification", finish, 1));
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.executionPolicy.executionState = {
+      pendingRecords: [
+        { id: "123", type: "MAPPING", evidenceRefs: ["network-proof"] },
+      ],
+    };
+    await executor.execute(runTask, lease, new AbortController().signal);
+    const finishes = controlPlane.appendEvent.mock.calls.filter(
+      (call) =>
+        call[1] === "agent.tool.completed" &&
+        call[2].name === "finish_verification",
+    );
+    expect(finishes.length).toBeGreaterThan(0);
+    expect(finishes.every((call) => call[2].status === "FAILED")).toBe(true);
+    expect(JSON.stringify(finishes[0]?.[2].outputPreview)).toContain(
+      "创建回执尚未确认",
+    );
+  });
+
+  it("rejects record_progress account changes before reserving a different account", async () => {
+    let step = 0;
+    const create = vi.fn(async (request: Request) => {
+      const page = contextData(request, "current_browser_page").data.snapshot;
+      const state = contextData(request, "browser_working_state").data
+        .executionState;
+      expect(state.account).toBe("original");
+      if (++step === 1)
+        return reply(
+          "record_progress",
+          {
+            phase: "核对账号",
+            observations: [
+              {
+                observationId: page.observationId,
+                cursor: page.cursor,
+                quote: "继续",
+              },
+            ],
+            nextAction: "继续核对",
+            executionState: { ...state, account: "replacement" },
+          },
+          step,
+        );
+      return reply("finish_verification", finish, step);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.executionPolicy.executionState = {
+      account: "original",
+      accountAliases: ["uuid-original"],
+    };
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content: '- button "继续" [ref=e1]' },
+    });
+    await executor.execute(runTask, lease, new AbortController().signal);
+    const claims = controlPlane.appendEvent.mock.calls.filter(
+      (call) => call[1] === "execution.account.claim",
+    );
+    expect(claims.map((call) => call[2].account)).toEqual(["original"]);
+    expect(
+      controlPlane.appendEvent.mock.calls.find(
+        (call) =>
+          call[1] === "agent.tool.completed" &&
+          call[2].name === "record_progress",
+      )?.[2],
+    ).toMatchObject({ status: "FAILED" });
   });
 
   it("rejects invented progress quotes and keeps a verified checkpoint beyond four turns", async () => {
@@ -2194,6 +2545,10 @@ describe("browser verification bounded context", () => {
         },
       },
     });
+    if (outcome.kind === "WAITING_HUMAN")
+      expect(
+        Date.parse(outcome.intervention.expiresAt!) - Date.now(),
+      ).toBeGreaterThan(3500_000);
     expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
   });
 
@@ -2347,7 +2702,7 @@ describe("browser verification argument corrections", () => {
         summary: "页面通过。",
         evidenceRefs: ["artifact://invented"],
       }),
-      code: "INVALID_ARGUMENTS",
+      code: "UNKNOWN_EVIDENCE_REF",
     },
     {
       name: "request_human_input",
@@ -3675,98 +4030,73 @@ describe("Agent Runtime browser verification executor", () => {
     ).toEqual(["page.snapshot"]);
   });
 
-  it("supplies business references and rejects passing criteria with missing evidence kinds", async () => {
+  it("excludes analysis from every model turn while still requiring observed evidence kinds", async () => {
+    const screenshotRef = "artifact://11111111-1111-4111-8111-111111111111";
+    const domRef = "artifact://22222222-2222-4222-8222-222222222222";
+    const sourceRef = "reference://spec/spec-1/issue";
     const referencedTask: RuntimeTaskLease = {
       ...task,
       snapshot: {
         ...task.snapshot,
         businessReferences: [
           {
-            externalId: "reference://spec/spec-1/issue",
+            externalId: sourceRef,
             kind: "BUSINESS_REFERENCE",
-            label: "ENG-1",
-            metadata: { source: "LINEAR", title: "Requirement" },
+            label: "src/whitelist.tsx",
+            metadata: { excerpt: "ANALYSIS_SOURCE_CODE".repeat(4_000) },
           },
         ],
         criteria: [
           {
-            description: "The requirement is visible.",
+            description: "页面显示合规模型映射。",
             id: "page-visible",
             required: true,
-            requiredEvidenceKinds: ["SCREENSHOT", "BUSINESS_REFERENCE"],
+            basis: { quote: "ANALYSIS_BASIS", sourceRefs: [sourceRef] },
+            requiredEvidenceKinds: ["SCREENSHOT", "DOM", "BUSINESS_REFERENCE"],
           },
         ],
       },
     };
-    const screenshotRef = "artifact://11111111-1111-4111-8111-111111111111";
-    const create = vi
-      .fn()
-      .mockResolvedValueOnce({
-        id: "response-1",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "browser_command",
-              { commandType: "page.screenshot", payload: {} },
-              1,
-            ),
-          ],
+    const calls = [
+      functionCall(
+        "browser_command",
+        { commandType: "page.screenshot", payload: {} },
+        1,
+      ),
+      functionCall(
+        "record_criterion",
+        {
+          criterionId: "page-visible",
+          evidenceRefs: [screenshotRef],
+          status: "PASSED",
+          summary: "页面可见。",
         },
-      })
-      .mockResolvedValueOnce({
-        id: "response-2",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "record_criterion",
-              {
-                criterionId: "page-visible",
-                evidenceRefs: [screenshotRef],
-                status: "PASSED",
-                summary: "页面当前可见。",
-              },
-              2,
-            ),
-          ],
+        2,
+      ),
+      functionCall(
+        "record_criterion",
+        {
+          criterionId: "page-visible",
+          evidenceRefs: [screenshotRef, domRef],
+          status: "PASSED",
+          summary: "页面显示合规模型映射。",
         },
-      })
-      .mockResolvedValueOnce({
-        id: "response-3",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "record_criterion",
-              {
-                criterionId: "page-visible",
-                evidenceRefs: [screenshotRef, "reference://spec/spec-1/issue"],
-                status: "PASSED",
-                summary: "页面符合来源中的要求。",
-              },
-              3,
-            ),
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        id: "response-4",
-        message: {
-          role: "assistant" as const,
-          content: null,
-          tool_calls: [
-            functionCall(
-              "finish_verification",
-              { summary: "验证已完成。", verdict: "PASSED" },
-              4,
-            ),
-          ],
-        },
-      });
+        3,
+      ),
+      functionCall(
+        "finish_verification",
+        { summary: "验证已完成。", verdict: "PASSED" },
+        4,
+      ),
+    ];
+    const create = vi.fn().mockImplementation(async () => ({
+      id: `response-${calls.length}`,
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [calls.shift()!],
+      },
+    }));
     const controlPlane = {
       acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
       appendEvent: vi.fn().mockResolvedValue({}),
@@ -3777,8 +4107,9 @@ describe("Agent Runtime browser verification executor", () => {
             kind: "SCREENSHOT",
             metadata: {},
           },
+          { id: domRef.slice("artifact://".length), kind: "DOM", metadata: {} },
         ],
-        evidenceRefs: [screenshotRef],
+        evidenceRefs: [screenshotRef, domRef],
         status: "SUCCEEDED",
       }),
       releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
@@ -3788,35 +4119,37 @@ describe("Agent Runtime browser verification executor", () => {
       controlPlane as never,
       10,
     );
-
     const outcome = await executor.execute(
       referencedTask,
       lease,
       new AbortController().signal,
     );
-
     expect(outcome).toMatchObject({
       kind: "VERIFICATION_COMPLETED",
       verdict: "PASSED",
     });
-    if (outcome.kind !== "VERIFICATION_COMPLETED") {
+    if (outcome.kind !== "VERIFICATION_COMPLETED")
       throw new Error("Expected completed verification.");
+    expect(outcome.evidence.map((item) => item.kind).sort()).toEqual([
+      "DOM",
+      "SCREENSHOT",
+    ]);
+    expect(create).toHaveBeenCalledTimes(4);
+    expect(operationOutput(create.mock.calls[2]![0], "call-2")).toMatchObject({
+      accepted: false,
+    });
+    expect(
+      JSON.stringify(operationOutput(create.mock.calls[2]![0], "call-2")),
+    ).toContain("DOM");
+    for (const [request] of create.mock.calls) {
+      const input = JSON.stringify(request.messages);
+      expect(input).toContain("页面显示合规模型映射");
+      expect(input).not.toMatch(
+        /ANALYSIS_SOURCE_CODE|ANALYSIS_BASIS|reference:\/\/|src\/whitelist|BUSINESS_REFERENCE/u,
+      );
+      expect(jsonBytes(request)).toBeLessThan(96 * 1_024);
     }
-    expect(outcome.evidence).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "SCREENSHOT" }),
-        expect.objectContaining({ kind: "BUSINESS_REFERENCE" }),
-      ]),
-    );
-    expect(create.mock.calls[2]?.[0].messages).toContainEqual(
-      expect.objectContaining({
-        content: expect.stringContaining("BUSINESS_REFERENCE"),
-        role: "user",
-      }),
-    );
-    expect(JSON.stringify(create.mock.calls[0]?.[0].messages)).toContain(
-      "reference://spec/spec-1/issue",
-    );
+    expect(referencedTask.snapshot.businessReferences).toHaveLength(1);
   });
 
   it("resnapshots after an ambiguous locator and accepts a precise retarget", async () => {
@@ -4526,3 +4859,64 @@ function locatorAmbiguousControlPlane(options?: {
     releaseBrowser: vi.fn().mockResolvedValue({ released: true }),
   };
 }
+
+describe("durable progress recovery", () => {
+  it.each(["same-attempt", "new-attempt", "new-account"])(
+    "only reuses criteria for the same attempt and subject (%s)",
+    async (mode) => {
+      const create = vi.fn().mockResolvedValue({
+        id: "pause",
+        message: {
+          role: "assistant",
+          tool_calls: [
+            functionCall(
+              "request_human_input",
+              {
+                kind: "BROWSER_HITL",
+                prompt: "请核对当前页面。",
+                summary: "等待核对页面。",
+              },
+              0,
+            ),
+          ],
+        },
+      });
+      const { executor, runTask } = convergenceHarness(create);
+      runTask.snapshot.executionPolicy.verificationCheckpoint = {
+        attemptId:
+          mode === "new-attempt"
+            ? "another-attempt"
+            : runTask.snapshot.attemptId,
+        ...(mode === "new-account" ? { account: "old-account" } : {}),
+        criteria: [
+          {
+            criterionId: "page-visible",
+            status: "PASSED",
+            summary: "页面可见",
+            evidenceRefs: ["artifact://proof"],
+          },
+        ],
+        evidence: [
+          {
+            externalId: "artifact://proof",
+            kind: "DOM",
+            label: "",
+            metadata: {},
+          },
+        ],
+      };
+      if (mode === "new-account")
+        runTask.snapshot.executionPolicy.resume = {
+          response: { account: "new-account" },
+        };
+      await executor.execute(runTask, lease, new AbortController().signal);
+      const state = contextData(
+        create.mock.calls[0]![0],
+        "browser_working_state",
+      ).data;
+      expect(state.acceptedCriteria).toHaveLength(
+        mode === "same-attempt" ? 1 : 0,
+      );
+    },
+  );
+});

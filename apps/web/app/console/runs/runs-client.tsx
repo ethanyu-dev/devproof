@@ -14,9 +14,7 @@ import {
   Download,
   ExternalLink,
   Film,
-  ImageIcon,
   Monitor,
-  MonitorPlay,
   RefreshCw,
   TriangleAlert,
   XCircle,
@@ -37,6 +35,8 @@ import { displayLabel } from "@/lib/display-text";
 import { RunHitlBrowser } from "./run-hitl-browser";
 import { RunLiveBrowser } from "./run-live-browser";
 import { runOutcome } from "./run-outcome";
+import { displayCriteria } from "./run-criteria";
+import { CaseRetryButton } from "./case-retry-button";
 import {
   currentRunFailures,
   summarizeTaskFailures,
@@ -49,6 +49,7 @@ import {
 } from "../access/runtime-recovery-display";
 import { RunTrajectory } from "./run-trajectory";
 import { mergeTrajectoryRecords } from "./run-trajectory-records";
+import { RunScreenshotCarousel } from "./run-screenshot-carousel";
 
 interface RunSummary {
   createdAt: string;
@@ -62,6 +63,18 @@ interface RunSummary {
 }
 
 interface RunDetail extends RunSummary {
+  executionPolicy?: {
+    executionState?: {
+      records: Array<{
+        id: string;
+        type?: string;
+        account?: string;
+        cleanup?: { status: string; instruction: string; note?: string };
+      }>;
+    };
+  };
+  taskExecutionId?: string | null;
+  environmentSnapshot?: { caseId?: string };
   recoveries?: Array<{
     id: string;
     closureState: string;
@@ -346,11 +359,6 @@ function isStepScreenshot(evidence: RunDetail["evidences"][number]) {
   );
 }
 
-function stepIndex(evidence: RunDetail["evidences"][number]) {
-  const value = evidenceMetadata(evidence).stepIndex;
-  return typeof value === "number" ? value : Number.MAX_SAFE_INTEGER;
-}
-
 function stepCommand(evidence: RunDetail["evidences"][number]) {
   const value = evidenceMetadata(evidence).commandType;
   return typeof value === "string" ? value : "browser.step";
@@ -374,8 +382,13 @@ export function RunsClient({ initialId }: { initialId: string }) {
 
 function RunDetailClient({ id }: { id: string }) {
   const searchParams = useSearchParams();
-  const returnTo = executionReturnHref(searchParams.get("returnTo"));
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const returnTo = executionReturnHref(
+    searchParams.get("returnTo") ??
+      (detail?.taskExecutionId
+        ? `/console/runs/${detail.taskExecutionId}`
+        : null),
+  );
   const [trajectory, setTrajectory] = useState<RunTrajectoryPage | null>(null);
   const [olderRecords, setOlderRecords] = useState<RunTrajectoryRecord[]>([]);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
@@ -387,8 +400,6 @@ function RunDetailClient({ id }: { id: string }) {
   const [runtimeView, setRuntimeView] = useState<"browser" | "trajectory">(
     "browser",
   );
-  const [livePreviewOpen, setLivePreviewOpen] = useState(false);
-  const previewAutoOpenedRunId = useRef<string | null>(null);
   const loadingRef = useRef(false);
   const load = useCallback(
     async (mode: "background" | "foreground") => {
@@ -462,17 +473,6 @@ function RunDetailClient({ id }: { id: string }) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [detail?.lifecycle, load]);
-  useEffect(() => {
-    if (!detail || detail.id !== id) return;
-    if (detail.lifecycle === "RUNNING") {
-      if (previewAutoOpenedRunId.current !== id) {
-        previewAutoOpenedRunId.current = id;
-        setLivePreviewOpen(true);
-      }
-      return;
-    }
-    setLivePreviewOpen(false);
-  }, [detail, id]);
 
   async function cancel() {
     if (
@@ -527,10 +527,14 @@ function RunDetailClient({ id }: { id: string }) {
     ) ?? [];
   const criteria = detail ? displayCriteria(detail) : [];
   const pendingIntervention =
-    detail?.interventions.find(
-      (intervention) =>
-        intervention.status === "PENDING" && intervention.expiresAt,
-    ) ?? null;
+    !terminal && detail?.id === id
+      ? (detail.interventions.find(
+          (intervention) =>
+            intervention.status === "PENDING" &&
+            intervention.expiresAt &&
+            Date.parse(intervention.expiresAt) > Date.now(),
+        ) ?? null)
+      : null;
   const trajectoryPage = useMemo<RunTrajectoryPage>(
     () => ({
       hasMore: olderRecords.length
@@ -558,10 +562,24 @@ function RunDetailClient({ id }: { id: string }) {
         criteria,
       )
     : null;
-  const videos = detail?.evidences.filter(isVideoEvidence) ?? [];
-  const stepScreenshots = (detail?.evidences.filter(isStepScreenshot) ?? [])
-    .filter((evidence) => evidence.downloadUrl)
-    .sort((left, right) => stepIndex(left) - stepIndex(right));
+  const videos =
+    detail?.evidences.filter(
+      (evidence) => isVideoEvidence(evidence) && Boolean(evidence.downloadUrl),
+    ) ?? [];
+  // Evidence arrives in chronological order; stepIndex restarts for each attempt.
+  const stepScreenshots = (
+    detail?.evidences.filter(isStepScreenshot) ?? []
+  ).flatMap((evidence) =>
+    evidence.downloadUrl
+      ? [
+          {
+            id: evidence.id,
+            downloadUrl: evidence.downloadUrl,
+            commandType: stepCommand(evidence),
+          },
+        ]
+      : [],
+  );
   const videoFailure =
     detail?.browserExecutions
       .map((execution) =>
@@ -590,6 +608,29 @@ function RunDetailClient({ id }: { id: string }) {
       <PageHeader
         actions={
           <>
+            {pendingIntervention ? (
+              <RunHitlBrowser
+                key={`${id}:${pendingIntervention.id}`}
+                intervention={{
+                  expiresAt: pendingIntervention.expiresAt!,
+                  id: pendingIntervention.id,
+                  kind: pendingIntervention.kind,
+                  prompt: pendingIntervention.prompt,
+                  ...(pendingIntervention.notifications.find((n) =>
+                    ["FAILED", "CANCELLED"].includes(n.status),
+                  )?.lastError
+                    ? {
+                        notificationError:
+                          pendingIntervention.notifications.find((n) =>
+                            ["FAILED", "CANCELLED"].includes(n.status),
+                          )!.lastError!,
+                      }
+                    : {}),
+                }}
+                onComplete={() => load("foreground")}
+                runId={id}
+              />
+            ) : null}
             {!terminal && detail ? (
               <Button
                 disabled={cancelling}
@@ -598,16 +639,6 @@ function RunDetailClient({ id }: { id: string }) {
               >
                 <XCircle />
                 {cancelling ? "取消中…" : "取消执行"}
-              </Button>
-            ) : null}
-            {runtimeIsRunning ? (
-              <Button
-                aria-pressed={livePreviewOpen}
-                onClick={() => setLivePreviewOpen(true)}
-                variant="secondary"
-              >
-                <MonitorPlay />
-                查看实时运行状态
               </Button>
             ) : null}
             <Button
@@ -702,6 +733,36 @@ function RunDetailClient({ id }: { id: string }) {
                     <small>浏览器节点</small>
                   </span>
                 </div>
+                {detail.executionPolicy?.executionState?.records
+                  .filter(
+                    (record) =>
+                      record.cleanup && record.cleanup.status !== "COMPLETED",
+                  )
+                  .map((record) => (
+                    <div
+                      className="dp-run-recovery-notice"
+                      key={`${record.type}:${record.id}`}
+                      role="status"
+                    >
+                      <TriangleAlert aria-hidden="true" />
+                      <div>
+                        <strong>
+                          {record.cleanup?.status === "BLOCKED"
+                            ? "业务数据清理受阻"
+                            : "业务数据待清理"}
+                        </strong>
+                        <p>
+                          记录 {record.id}
+                          {record.type ? ` · ${record.type}` : ""}
+                          {record.account ? ` · 账号 ${record.account}` : ""}
+                        </p>
+                        <p>{record.cleanup?.instruction}</p>
+                        {record.cleanup?.note ? (
+                          <p>{record.cleanup.note}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
                 {pendingRecoveries.map((recovery) => {
                   const attemptId = detail.browserExecutions.find(
                     (item) => item.runtimeSessionId === recovery.sessionId,
@@ -724,7 +785,7 @@ function RunDetailClient({ id }: { id: string }) {
                       <div>
                         <b>
                           {needsWriteReview
-                            ? "重试前需核对业务状态"
+                            ? "上次写入结果未确认"
                             : "浏览器会话需要恢复处理"}
                         </b>
                         {failure && failure.message !== outcome.description && (
@@ -744,7 +805,7 @@ function RunDetailClient({ id }: { id: string }) {
                         )}
                         {needsWriteReview && (
                           <p>
-                            为避免重复写入，已停止自动重试；这不代表产品验证失败。请核对实际业务数据并记录结果。
+                            已停止自动重试；这不代表产品验证失败。可点击“重试用例”手动确认重试，或在恢复记录中核实业务结果。
                           </p>
                         )}
                         <Link
@@ -757,92 +818,102 @@ function RunDetailClient({ id }: { id: string }) {
                     </div>
                   );
                 })}
+                {terminal &&
+                  detail.taskExecutionId &&
+                  detail.environmentSnapshot?.caseId && (
+                    <div className="col-span-full flex justify-end">
+                      <CaseRetryButton
+                        key={id}
+                        taskId={detail.taskExecutionId}
+                        runId={id}
+                      />
+                    </div>
+                  )}
               </Card>
             ) : null}
 
             <div
-              className={`dp-run-decision-grid ${videos.length === 0 && stepScreenshots.length === 0 ? "is-without-media" : ""}`}
+              className={`dp-run-decision-grid ${!runtimeIsRunning && videos.length === 0 && stepScreenshots.length === 0 ? "is-without-media" : ""}`}
             >
-              {videos.length > 0 || stepScreenshots.length > 0 ? (
+              {runtimeIsRunning ||
+              videos.length > 0 ||
+              stepScreenshots.length > 0 ? (
                 <Card className="dp-verification-detail dp-run-card dp-run-media-card">
-                  <div className="dp-section-head">
-                    <span>
-                      <Film />
-                      <b>操作回放</b>
-                    </span>
-                    <small>
-                      {videos.length > 0
-                        ? "真实浏览器操作回放"
-                        : terminal
-                          ? videoFailure
-                            ? `视频生成失败（${videoFailure.code}），步骤截图已保留`
-                            : "本次执行未生成操作视频，步骤截图已保留"
-                          : "视频生成中，步骤截图已可查看"}
-                    </small>
-                  </div>
-                  {videos.map((video) => (
-                    <div className="dp-run-video" key={video.id}>
-                      {video.downloadUrl ? (
-                        <video
-                          controls
-                          playsInline
-                          poster={
-                            stepScreenshots.at(-1)?.downloadUrl ?? undefined
-                          }
-                          preload="metadata"
-                          src={video.downloadUrl}
-                        >
-                          当前浏览器不支持 WebM 视频，请使用下方链接下载查看。
-                        </video>
-                      ) : null}
-                      <div>
+                  {runtimeIsRunning ? (
+                    <RunLiveBrowser
+                      key={id}
+                      runId={id}
+                      fallback={
+                        stepScreenshots.length > 0 ? (
+                          <RunScreenshotCarousel
+                            screenshots={stepScreenshots}
+                          />
+                        ) : null
+                      }
+                    />
+                  ) : (
+                    <>
+                      <div className="dp-section-head">
                         <span>
-                          <b>{video.label || "完整操作视频"}</b>
-                          <small>
-                            {evidenceMetadata(video).frameCount
-                              ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
-                              : ""}
-                            {video.runtimeArtifact
-                              ? formatByteSize(video.runtimeArtifact.byteSize)
-                              : "已上传对象存储"}
-                          </small>
+                          <Film />
+                          <b>操作回放</b>
                         </span>
-                        {video.downloadUrl ? (
-                          <a href={video.downloadUrl} download>
-                            <Download /> 下载视频
-                          </a>
-                        ) : null}
+                        <small>
+                          {videos.length > 0
+                            ? "真实浏览器操作回放"
+                            : terminal
+                              ? videoFailure
+                                ? `视频生成失败（${videoFailure.code}），步骤截图已保留`
+                                : "本次执行未生成操作视频，步骤截图已保留"
+                              : "视频生成中，步骤截图已可查看"}
+                        </small>
                       </div>
-                    </div>
-                  ))}
-                  {stepScreenshots.length > 0 ? (
-                    <details className="dp-run-step-details">
-                      <summary>
-                        <ImageIcon /> 查看全部 {stepScreenshots.length}{" "}
-                        个操作步骤
-                      </summary>
-                      <div className="dp-run-step-grid">
-                        {stepScreenshots.map((screenshot, index) => (
-                          <a
-                            href={screenshot.downloadUrl ?? undefined}
-                            key={screenshot.id}
-                            rel="noreferrer"
-                            target="_blank"
-                          >
-                            <img
-                              alt={`步骤 ${index + 1}：${stepCommand(screenshot)}`}
-                              loading="lazy"
-                              src={screenshot.downloadUrl ?? undefined}
-                            />
+                      {videos.map((video) => (
+                        <div className="dp-run-video" key={video.id}>
+                          {video.downloadUrl ? (
+                            <video
+                              controls
+                              playsInline
+                              poster={
+                                stepScreenshots.at(-1)?.downloadUrl ?? undefined
+                              }
+                              preload="metadata"
+                              src={video.downloadUrl}
+                            >
+                              当前浏览器不支持 WebM
+                              视频，请使用下方链接下载查看。
+                            </video>
+                          ) : null}
+                          <div>
                             <span>
-                              <b>步骤 {index + 1}</b>
-                              <small>{stepCommand(screenshot)}</small>
+                              <b>{video.label || "完整操作视频"}</b>
+                              <small>
+                                {evidenceMetadata(video).frameCount
+                                  ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
+                                  : ""}
+                                {video.runtimeArtifact
+                                  ? formatByteSize(
+                                      video.runtimeArtifact.byteSize,
+                                    )
+                                  : "已上传对象存储"}
+                              </small>
                             </span>
-                          </a>
-                        ))}
-                      </div>
-                    </details>
-                  ) : null}
+                            {video.downloadUrl ? (
+                              <a href={video.downloadUrl} download>
+                                <Download /> 下载视频
+                              </a>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                      {videos.length === 0 && stepScreenshots.length > 0 ? (
+                        <RunScreenshotCarousel
+                          key={id}
+                          screenshots={stepScreenshots}
+                        />
+                      ) : null}
+                    </>
+                  )}
                 </Card>
               ) : (
                 <Card className="dp-verification-detail dp-run-card dp-run-media-empty">
@@ -884,10 +955,10 @@ function RunDetailClient({ id }: { id: string }) {
                     {criteria.length === 0 ? (
                       <p className="dp-run-card-copy">未声明验收标准。</p>
                     ) : (
-                      criteria.map((criterion) => (
+                      criteria.map((criterion, index) => (
                         <div className="dp-run-criterion" key={criterion.id}>
                           <div className="dp-run-criterion-head">
-                            <b>{criterion.id}</b>
+                            <b>标准 {index + 1}</b>
                             {criterion.status ? (
                               <Badge tone={tone(criterion.status)}>
                                 {displayLabel(criterion.status)}
@@ -900,6 +971,17 @@ function RunDetailClient({ id }: { id: string }) {
                           {criterion.summary ? (
                             <small>{criterion.summary}</small>
                           ) : null}
+                          <details className="mt-2 text-xs text-muted-foreground">
+                            <summary className="cursor-pointer">
+                              查看依据
+                            </summary>
+                            <div className="mt-2 space-y-2 whitespace-pre-wrap break-words">
+                              <div>标准编号：{criterion.id}</div>
+                              {criterion.basis.map((item, index) => (
+                                <div key={index}>{item}</div>
+                              ))}
+                            </div>
+                          </details>
                         </div>
                       ))
                     )}
@@ -979,7 +1061,9 @@ function RunDetailClient({ id }: { id: string }) {
                     {taskFailures.map((failure) => (
                       <div className="dp-run-failure" key={failure.signature}>
                         <div>
-                          <Badge tone="danger">{failure.code}</Badge>
+                          <Badge tone="danger">
+                            {failure.causeCode ?? failure.code}
+                          </Badge>
                           {failure.occurrences > 1 ? (
                             <small>
                               {failure.occurrences} 次尝试发生相同错误
@@ -1155,66 +1239,8 @@ function RunDetailClient({ id }: { id: string }) {
               </div>
             </details>
           </div>
-
-          {pendingIntervention ? (
-            <RunHitlBrowser
-              intervention={{
-                expiresAt: pendingIntervention.expiresAt!,
-                id: pendingIntervention.id,
-                kind: pendingIntervention.kind,
-                prompt: pendingIntervention.prompt,
-              }}
-              onComplete={() => load("foreground")}
-              runId={id}
-            />
-          ) : null}
-          {runtimeIsRunning && livePreviewOpen ? (
-            <RunLiveBrowser
-              onClose={() => setLivePreviewOpen(false)}
-              runId={id}
-            />
-          ) : null}
         </>
       )}
     </div>
   );
-}
-
-interface DisplayCriterion {
-  description: string;
-  id: string;
-  required: boolean;
-  status: string | null;
-  summary: string | null;
-}
-
-function displayCriteria(detail: RunDetail): DisplayCriterion[] {
-  const definitions = Array.isArray(detail.criteriaSnapshot)
-    ? detail.criteriaSnapshot.flatMap((value): DisplayCriterion[] => {
-        if (!isRecord(value) || typeof value.id !== "string") return [];
-        const result = detail.criterionResults.find(
-          (candidate) => candidate.criterionId === value.id,
-        );
-        return [
-          {
-            description:
-              typeof value.description === "string"
-                ? value.description
-                : value.id,
-            id: value.id,
-            required: value.required !== false,
-            status: result?.status ?? null,
-            summary: result?.summary ?? null,
-          },
-        ];
-      })
-    : [];
-  if (definitions.length > 0) return definitions;
-  return detail.criterionResults.map((result) => ({
-    description: result.summary,
-    id: result.criterionId,
-    required: true,
-    status: result.status,
-    summary: null,
-  }));
 }

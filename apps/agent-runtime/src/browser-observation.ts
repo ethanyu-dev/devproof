@@ -31,6 +31,7 @@ interface Observation {
   contentKey: string;
   readProgressInheritedFrom?: string;
   completeSnapshotRead?: boolean;
+  evidenceRefs: string[];
 }
 
 export const READ_COMMANDS = new Set([
@@ -405,6 +406,15 @@ export class BrowserObservations {
       result,
     );
     this.capturedResults.set(response.result, entry);
+    entry.evidenceRefs = (
+      Array.isArray(response.artifacts) ? response.artifacts : []
+    ).flatMap((artifact) => {
+      const item = record(artifact);
+      return typeof item.id === "string" &&
+        ["DOM", "SCREENSHOT"].includes(String(item.kind))
+        ? [`artifact://${item.id}`]
+        : [];
+    });
     if (snapshot && typeof result.content === "string") {
       if (response.status === "SUCCEEDED" || response.ok === true) {
         this.currentSnapshot = entry.id;
@@ -503,6 +513,30 @@ export class BrowserObservations {
     );
   }
 
+  /** Resolve only a delivered node in the current, unchanged observation.
+   * The model selects the node; source text and artifact identities stay ours.
+   */
+  citation(ref: string) {
+    const entry = this.entries.get(this.currentSnapshot ?? "");
+    if (!entry?.content || this.pageDirty || !this.exposedRefs.has(ref)) return;
+    const lines = entry.content
+      .split("\n")
+      .filter((line) => line.includes(`[ref=${ref}]`));
+    if (lines.length !== 1) return;
+    const quote = lines[0]!.trim();
+    if (!quote || quote.length > 4_000) return;
+    const cursor = [...entry.readPages.keys()].find((page) =>
+      this.hasDeliveredQuote(entry.id, page, quote),
+    );
+    if (cursor === undefined) return;
+    return {
+      observationId: entry.id,
+      cursor,
+      quote,
+      evidenceRefs: [...entry.evidenceRefs],
+    };
+  }
+
   project(raw: unknown, bounded = true): unknown {
     const observationStage = this.responseStages.get(record(raw));
     const observationNotice =
@@ -521,6 +555,7 @@ export class BrowserObservations {
         entry?.id === this.currentSnapshot &&
         typeof record(source.result).content === "string"
       ) {
+        this.deliverPage(this.completePage(entry));
         for (const match of String(record(source.result).content).matchAll(
           /\[ref=((?:f\d+)?e\d+)\]/gu,
         ))
@@ -770,6 +805,7 @@ export class BrowserObservations {
       ),
       cursors: new Set([0]),
       readPages: new Map(),
+      evidenceRefs: [],
     };
     this.entries.set(entry.id, entry);
     this.bytes += entry.bytes;
