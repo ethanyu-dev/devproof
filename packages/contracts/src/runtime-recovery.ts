@@ -16,6 +16,7 @@ export const runtimeRecoveryWriteOutcomeStateSchema = z.enum([
   "NO_WRITE_VERIFIED",
   "CONFIRMED",
   "RESOLVED",
+  "RETRY_AUTHORIZED",
 ]);
 export const runtimeRecoveryQuerySchema = z.object({
   cursor: z.string().uuid().optional(),
@@ -42,6 +43,13 @@ export const runtimeRecoveryRequestSchema = z
   .strict();
 export const runtimeRecoveryRetrySchema = z
   .object({ expectedVersion: z.number().int().min(1) })
+  .strict();
+export const runtimeRecoveryAuthorizeRetrySchema = z
+  .object({
+    expectedVersion: z.number().int().min(1),
+    idempotencyKey: z.string().uuid(),
+    acknowledgeUnknownWrite: z.literal(true),
+  })
   .strict();
 export const runtimeRecoveryResolveWriteOutcomeSchema = z
   .object({

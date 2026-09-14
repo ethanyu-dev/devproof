@@ -57,6 +57,7 @@ import {
   resumeAnalysisWithInput,
 } from "./task-analysis-input.js";
 import { refreshedTaskDeadline } from "./task-deadline.js";
+import { caseExecutionGoal } from "./task-case-context.js";
 import { taskDeploymentMatrix } from "./task-deployment-matrix.js";
 import { TaskLogBundleService } from "./task-log-bundle.service.js";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
@@ -1009,19 +1010,57 @@ export class TaskExecutionService {
     id: string,
     caseId: string,
     deploymentId?: string,
+    input?: { idempotencyKey: string },
   ) {
     const now = new Date();
-    const dispatchDeadline = new Date(
-      now.getTime() + MINIMUM_CHILD_RUN_WINDOW_MS,
-    );
     try {
       await this.prisma.$transaction(async (tx) => {
+        await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
+        if (input) {
+          const previousRequest = await tx.taskExecutionEvent.findFirst({
+            where: {
+              teamId: current.team.id,
+              taskExecutionId: id,
+              kind: "task.case.rerun_queued",
+              payload: {
+                path: ["idempotencyKey"],
+                equals: input.idempotencyKey,
+              },
+            },
+            select: { payload: true },
+          });
+          if (previousRequest) {
+            const previous = record(previousRequest.payload);
+            if (
+              previous.caseId !== caseId ||
+              previous.requestedDeploymentId !== (deploymentId ?? null)
+            )
+              throw new ConflictException(
+                "该重跑请求标识已用于其他用例或环境，请刷新后重试。",
+              );
+            return;
+          }
+        }
         const task = await tx.taskExecution.findFirst({
           include: {
             caseExecutions: {
-              include: { run: { select: { lifecycle: true } }, testCase: true },
+              include: {
+                run: {
+                  select: { lifecycle: true, tasks: currentAgentTaskInclude },
+                },
+                testCase: true,
+              },
               orderBy: { executionOrdinal: "desc" },
-              where: { caseId, ...(deploymentId ? { deploymentId } : {}) },
+              where: {
+                caseId,
+                deployment: { enabled: true },
+                ...(deploymentId ? { deploymentId } : {}),
+              },
+            },
+            specificationSnapshots: {
+              orderBy: { generatedAt: "desc" },
+              take: 1,
+              select: { id: true },
             },
             stages: true,
           },
@@ -1038,11 +1077,6 @@ export class TaskExecutionService {
         if (task.cancelRequestedAt) {
           throw new ConflictException(
             "A Runtime from a cancelled task cannot be rerun.",
-          );
-        }
-        if (task.deadlineAt <= dispatchDeadline) {
-          throw new ConflictException(
-            "The task deadline cannot accommodate another Runtime; create a new task instead.",
           );
         }
         const latestExecutions = latestCaseExecutions(task.caseExecutions);
@@ -1066,6 +1100,47 @@ export class TaskExecutionService {
             "Only terminal Spec Runtimes can be rerun.",
           );
         }
+        if (
+          latestExecutions.some((execution) =>
+            execution.run?.tasks?.some(
+              (agent) => agent.recoveryStatus === "WRITE_OUTCOME_UNKNOWN",
+            ),
+          )
+        )
+          throw new ConflictException(
+            "上次写入结果尚未确认，请先确认重试或核实业务结果。",
+          );
+        const runIds = latestExecutions.flatMap((execution) =>
+          execution.runId ? [execution.runId] : [],
+        );
+        if (
+          runIds.length &&
+          (await tx.browserRuntimeSession.count({
+            where: {
+              browserExecutions: { some: { runId: { in: runIds } } },
+              closureVerifiedAt: null,
+            },
+          }))
+        )
+          throw new ConflictException(
+            "旧浏览器会话尚未确认关闭，请等待恢复完成后重试。",
+          );
+        const snapshotId = task.specificationSnapshots?.[0]?.id;
+        if (
+          snapshotId &&
+          latestExecutions.some(
+            (execution) => execution.testCase.snapshotId !== snapshotId,
+          )
+        )
+          throw new ConflictException(
+            "该用例不属于当前任务规格，请从最新用例列表重跑。",
+          );
+        const deadlineAt = new Date(
+          Math.max(
+            task.deadlineAt.getTime(),
+            refreshedTaskDeadline(task.inputSnapshot, now).getTime(),
+          ),
+        );
         const executionStage = task.stages.find(
           (stage) => stage.type === "SPEC_EXECUTION",
         );
@@ -1078,6 +1153,8 @@ export class TaskExecutionService {
           const policy = executionConcurrencyPolicySchema.safeParse(
             latest.executionPolicy,
           );
+          if (latest.executionPolicy != null && !policy.success)
+            throw new ConflictException("用例执行策略无效，请先核对执行策略。");
           const dependencies = policy.success
             ? (policy.data.dependsOnCaseIds ?? [])
             : [];
@@ -1134,6 +1211,7 @@ export class TaskExecutionService {
         });
         const reopened = await tx.taskExecution.updateMany({
           data: {
+            deadlineAt,
             currentStage: "SPEC_EXECUTION",
             executionDisposition: null,
             finishedAt: null,
@@ -1145,7 +1223,6 @@ export class TaskExecutionService {
           },
           where: {
             cancelRequestedAt: null,
-            deadlineAt: { gt: dispatchDeadline },
             id: task.id,
             teamId: current.team.id,
           },
@@ -1173,6 +1250,10 @@ export class TaskExecutionService {
                   deploymentId: nextExecution.deploymentId,
                   executionOrdinal: nextExecution.executionOrdinal,
                   previousCaseExecutionId: previous.id,
+                  idempotencyKey: input?.idempotencyKey,
+                  requestedDeploymentId: deploymentId ?? null,
+                  previousDeadlineAt: task.deadlineAt.toISOString(),
+                  deadlineAt: deadlineAt.toISOString(),
                   requestedByCredentialId: current.credential.id,
                 },
               ),
@@ -3194,24 +3275,20 @@ function taskCaseRunRequest(
         ),
     criteria: agentDefinition.success
       ? agentDefinition.data.criteria.map((criterion) => ({
-          description: [
-            criterion.description,
+          description: criterion.description.slice(0, 4_000),
+          basis: {
             ...(criterion.basis
-              ? [
-                  `验收对象：${criterion.basis.observationTarget}`,
-                  `来源原文：${criterion.basis.quote}`,
-                ]
-              : []),
-            `Spec 来源：${criterion.sourceRefs
+              ? {
+                  observationTarget: criterion.basis.observationTarget,
+                  quote: criterion.basis.quote,
+                }
+              : {}),
+            sourceRefs: criterion.sourceRefs
               .map((sourceRef) =>
                 runtimeReferenceByAnalysisSource.get(sourceRef),
               )
-              .filter((sourceRef): sourceRef is string => Boolean(sourceRef))
-              .join(", ")}`,
-          ]
-            .filter(Boolean)
-            .join("\n")
-            .slice(0, 4_000),
+              .filter((sourceRef): sourceRef is string => Boolean(sourceRef)),
+          },
           id: criterion.id,
           required: criterion.required,
           requiredEvidenceKinds: criterion.requiredEvidenceKinds,
@@ -3252,64 +3329,9 @@ function taskCaseRunRequest(
       targetUrl,
       taskExecutionId: item.taskExecutionId,
     },
-    goal: [
-      `${context.issue.identifier} · ${context.issue.title}`,
-      ...(context.specification?.assumptions.length
-        ? [
-            "待核实假设（不能作为产品失败依据）：",
-            ...context.specification.assumptions.map((value) => `- ${value}`),
-          ]
-        : []),
-      ...(context.specification?.risks.length
-        ? [
-            "规格分析风险：",
-            ...context.specification.risks.map((value) => `- ${value}`),
-          ]
-        : []),
-      ...(context.specification?.scope.outOfScope.length
-        ? [
-            "本次验证范围之外：",
-            ...context.specification.scope.outOfScope.map(
-              (value) => `- ${value}`,
-            ),
-          ]
-        : []),
-      agentDefinition.success
-        ? agentDefinition.data.name
-        : legacyDefinition!.name,
-      "前置条件：",
-      ...(agentDefinition.success
-        ? agentDefinition.data.preconditions
-        : legacyDefinition!.preconditions
-      ).map((value) => `- ${value}`),
-      ...(agentDefinition.success && agentDefinition.data.testData.length
-        ? [
-            "测试数据：",
-            ...agentDefinition.data.testData.map((value) => `- ${value}`),
-          ]
-        : []),
-      "操作步骤：",
-      ...(agentDefinition.success
-        ? agentDefinition.data.steps.map(
-            (step) =>
-              `${step.order}. ${step.action}\n   预期现象：${step.expectedObservation}`,
-          )
-        : legacyDefinition!.steps.map(
-            (step) => `${step.order}. ${step.action}`,
-          )),
-      "验收标准：",
-      ...(agentDefinition.success
-        ? agentDefinition.data.criteria.map(
-            (criterion) => `- ${criterion.description}`,
-          )
-        : legacyDefinition!.expected.map((value) => `- ${value}`)),
-      ...(agentDefinition.success && agentDefinition.data.cleanup.length
-        ? [
-            "清理步骤：",
-            ...agentDefinition.data.cleanup.map((value) => `- ${value}`),
-          ]
-        : []),
-    ].join("\n"),
+    goal: caseExecutionGoal(
+      agentDefinition.success ? agentDefinition.data : legacyDefinition!,
+    ),
     hitlPolicy: input.hitlPolicy,
     idempotencyKey: `task:${item.taskExecutionId}:snapshot:${item.testCase.snapshot.id}:case:${item.caseId}:deployment:${item.deploymentId}:execution:${item.executionOrdinal}`,
     ...(input.model ? { model: input.model } : {}),
@@ -3533,6 +3555,7 @@ function toTaskDetail(row: TaskDetailRow) {
         ),
       ),
       row,
+      { inPlace: true },
     ),
     latestRerunTaskId:
       ((row.events ?? [])

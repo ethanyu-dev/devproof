@@ -4,6 +4,7 @@ import {
   runtimeDrainAttestSchema,
   runtimeDrainResumeSchema,
   runtimeRecoveryResolveWriteOutcomeSchema,
+  runtimeRecoveryAuthorizeRetrySchema,
 } from "./runtime-recovery.js";
 
 const evidence = {
@@ -12,6 +13,27 @@ const evidence = {
   evidenceRefs: ["operations://incident/123"],
 };
 describe("recovery requests", () => {
+  it("accepts retry consent without requiring a claimed business outcome", () => {
+    const input = {
+      expectedVersion: 1,
+      idempotencyKey: evidence.idempotencyKey,
+      acknowledgeUnknownWrite: true,
+    };
+    expect(runtimeRecoveryAuthorizeRetrySchema.safeParse(input).success).toBe(
+      true,
+    );
+    for (const change of [
+      { acknowledgeUnknownWrite: false },
+      { acknowledgeUnknownWrite: undefined },
+      { expectedVersion: 0 },
+      { idempotencyKey: "invalid" },
+      { outcome: "NO_WRITE" },
+    ])
+      expect(
+        runtimeRecoveryAuthorizeRetrySchema.safeParse({ ...input, ...change })
+          .success,
+      ).toBe(false);
+  });
   it("requires current drain evidence and preserved storage for recovery tickets", () => {
     const valid = {
       snapshotDigest: "current-drain",

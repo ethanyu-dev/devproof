@@ -202,6 +202,13 @@ export class DomObservations {
                   "title",
                   "alt",
                   "name",
+                  "role",
+                  "aria-label",
+                  "aria-checked",
+                  "aria-pressed",
+                  "aria-expanded",
+                  "aria-selected",
+                  "aria-disabled",
                 ]) {
                   const value = text(element.getAttribute(name));
                   if (value)

@@ -111,7 +111,9 @@ export function RuntimeRecoveryDetailView({
               <div>
                 <Button asChild variant="secondary">
                   <Link href={`/console/executions/${item.sourceRunId}`}>
-                    查看关联执行
+                    {item.writeOutcomeState === "RESOLVED"
+                      ? "返回执行，继续重跑"
+                      : "查看关联执行"}
                     <ArrowRight />
                   </Link>
                 </Button>
@@ -212,7 +214,7 @@ export function RuntimeRecoveryDetailView({
                       setReview(emptyReview);
                       setReviewVersion(null);
                       action.setNotice(
-                        "核实结果已保存，符合条件的数据保护已释放。",
+                        "核实结果已保存。可返回关联执行，再进入任务详情重跑此用例；原执行结果与证据保留。",
                       );
                     } finally {
                       await resource.refresh();

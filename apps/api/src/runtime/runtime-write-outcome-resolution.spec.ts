@@ -177,6 +177,109 @@ function fixture() {
 beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
 afterEach(() => vi.unstubAllEnvs());
 
+describe("explicit Case retry authorization", () => {
+  const authorization = {
+    expectedVersion: 1,
+    idempotencyKey: "retry-key",
+    acknowledgeUnknownWrite: true as const,
+  };
+
+  it("releases a closed execution for retry without attesting NO_WRITE or requiring evidence", async () => {
+    const { service, tx, recovery, owner, getLease } = fixture();
+    expect(
+      await service.authorizeRetry(current, recovery.id, authorization),
+    ).toMatchObject({
+      writeOutcomeState: "RETRY_AUTHORIZED",
+      released: 1,
+    });
+    expect(recovery).toMatchObject({
+      resolutionOutcome: "RETRY_AUTHORIZED",
+      outcomeEvidenceRefs: [],
+      writeResolvedAt: null,
+      resolvedBy: current.user.id,
+    });
+    expect(owner.recoveryStatus).toBe("RESOLVED");
+    expect(getLease()).toBeNull();
+    expect(tx.auditEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "runtime.retry.authorized" }),
+    });
+    await releaseVerifiedSessionResources(tx as never, "session-1");
+    expect(getLease()).toBeNull();
+    expect(recovery.writeOutcomeState).toBe("RETRY_AUTHORIZED");
+    expect(tx.runAttempt.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps retry authorization idempotent after response loss", async () => {
+    const { service, tx } = fixture();
+    await service.authorizeRetry(current, "recovery-1", authorization);
+    expect(
+      await service.authorizeRetry(current, "recovery-1", authorization),
+    ).toMatchObject({
+      writeOutcomeState: "RETRY_AUTHORIZED",
+      released: 0,
+    });
+    expect(tx.auditEvent.create).toHaveBeenCalledOnce();
+  });
+
+  it("allows a current member to retry their own task without administrator review", async () => {
+    const { service, tx, session } = fixture();
+    tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+    Object.assign(session.browserExecutions[0]!.run, {
+      taskExecution: { requestedByUserId: current.user.id },
+    });
+    expect(
+      await service.authorizeRetry(current, "recovery-1", authorization),
+    ).toMatchObject({
+      writeOutcomeState: "RETRY_AUTHORIZED",
+    });
+  });
+
+  it("allows a later evidence-based review without confusing retry consent with verification", async () => {
+    const { service, recovery } = fixture();
+    await service.authorizeRetry(current, "recovery-1", authorization);
+    await service.resolveWriteOutcome(current, "recovery-1", {
+      ...input,
+      expectedVersion: recovery.version,
+    });
+    expect(recovery).toMatchObject({
+      writeOutcomeState: "RESOLVED",
+      resolutionOutcome: "VERIFIED",
+      writeResolvedAt: expect.any(Date),
+    });
+  });
+
+  it.each([
+    "unconfirmed",
+    "active",
+    "stale",
+    "member",
+    "other-team",
+    "fence",
+    "proof",
+  ])(
+    "rejects %s authorization before releasing any resource",
+    async (condition) => {
+      const { service, session, owner, tx } = fixture();
+      const request = { ...authorization };
+      if (condition === "unconfirmed") session.closureVerifiedAt = null;
+      if (condition === "active") owner.status = "RUNNING";
+      if (condition === "stale") request.expectedVersion = 99;
+      if (condition === "member")
+        tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+      if (condition === "other-team")
+        tx.runtimeSessionRecovery.findFirst.mockResolvedValue(null as never);
+      if (condition === "fence") session.ownerFencingToken = 99n;
+      if (condition === "proof")
+        tx.sessionClosureEvidence.findUnique.mockResolvedValue(null as never);
+      await expect(
+        service.authorizeRetry(current, "recovery-1", request),
+      ).rejects.toThrow();
+      expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+      expect(tx.runtimeSessionRecovery.update).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe("manual reconciliation through durable session recovery", () => {
   it("requires recovery ownership by the current team", async () => {
     const { service, tx } = fixture();

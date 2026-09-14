@@ -62,6 +62,12 @@ export class VerificationProgress {
   private readonly semanticObservations = new Set<string>();
   private readonly rejectedSubmissions = new Map<string, number>();
   private readonly observedRejections = new Set<string>();
+  private readonly evidenceCorrections = new Map<
+    string,
+    { sequence: number; count: number }
+  >();
+  evidenceSubmissionFailed = false;
+  evidenceSubmissionError: string | undefined;
   private readonly interactions = new Map<string, Record<string, unknown>>();
   private repeatedSteps = 0;
   private textOnlySteps = 0;
@@ -152,6 +158,28 @@ export class VerificationProgress {
       typeof input.output === "object" &&
       "accepted" in input.output &&
       input.output.accepted === false;
+    const rejection = record(input.output);
+    if (
+      rejected &&
+      typeof rejection.criterionId === "string" &&
+      ["record_criterion", "finish_verification"].includes(input.name)
+    ) {
+      const prior = this.evidenceCorrections.get(rejection.criterionId);
+      const count =
+        prior?.sequence === this.progressSequence ? prior.count + 1 : 1;
+      this.evidenceCorrections.set(rejection.criterionId, {
+        sequence: this.progressSequence,
+        count,
+      });
+      // Initial submission plus two corrections; unrelated error wording and
+      // recapturing the same DOM cannot buy more model calls.
+      if (count >= 3) {
+        this.evidenceSubmissionFailed = true;
+        this.evidenceSubmissionError =
+          typeof rejection.error === "string" ? rejection.error : undefined;
+        return true;
+      }
+    }
     const criterionId =
       argumentsValue !== null && typeof argumentsValue === "object"
         ? (argumentsValue as Record<string, unknown>).criterionId

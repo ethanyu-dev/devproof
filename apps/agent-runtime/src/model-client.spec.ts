@@ -191,7 +191,25 @@ describe("Chat Completions transport", () => {
 });
 
 describe("model request attempt telemetry", () => {
-  it("measures SDK retries without putting transport metadata in model input", async () => {
+  it.each([undefined, 450_000])(
+    "passes the default or overridden timeout to the SDK (%s)",
+    async (timeoutMs) => {
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValue(response());
+      await createChatCompletionsClient(candidate, fetch).complete(
+        request,
+        timeoutMs === undefined ? {} : { timeoutMs },
+      );
+      const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
+      expect(headers.get("x-stainless-timeout")).toBe(
+        timeoutMs === undefined ? "300" : "450",
+      );
+      expect(headers.get("x-stainless-retry-count")).toBe("0");
+    },
+  );
+
+  it("leaves retries to the executor and measures one HTTP request per call", async () => {
     const attempts: ModelRequestAttempt[] = [];
     const fetch = vi
       .fn<typeof globalThis.fetch>()
@@ -202,19 +220,23 @@ describe("model request attempt telemetry", () => {
         }),
       )
       .mockResolvedValueOnce(response());
-    const result = await createChatCompletionsClient(candidate, fetch).complete(
-      request,
-      {
+    const client = createChatCompletionsClient(candidate, fetch);
+    await expect(
+      client.complete(request, {
         onRequestAttempt: (attempt) => attempts.push(attempt),
-      },
-    );
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const result = await client.complete(request, {
+      onRequestAttempt: (attempt) => attempts.push(attempt),
+    });
     expect(result).toMatchObject({
       id: "response-1",
       usage: { prompt_tokens: 10 },
     });
     expect(attempts).toMatchObject([
       { attempt: 1, status: 429, outcome: "RESPONSE" },
-      { attempt: 2, status: 200, outcome: "RESPONSE" },
+      { attempt: 1, status: 200, outcome: "RESPONSE" },
     ]);
     expect(
       attempts.every(

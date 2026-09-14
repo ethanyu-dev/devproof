@@ -96,7 +96,7 @@ async function fixtureServer() {
       <footer><a href="/solution/ai">人工智能解决方案</a></footer>
       <div id="custom-select" onclick="this.textContent='展开选项'">自定义下拉</div>
       <canvas style="position:fixed;left:850px;top:20px;width:120px;height:80px" onclick="document.querySelector('#count').textContent='canvas clicked'"></canvas>
-      <form onsubmit="event.preventDefault();fetch('/save-account',{method:'POST'}).then(r=>r.json()).then(body=>document.querySelector('#save-error').textContent=body.code)">
+      <form onsubmit="event.preventDefault();fetch('/save-account',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({account:'invalid-example',config:{value:true},token:'secret-request-token'})}).then(r=>r.json()).then(body=>document.querySelector('#save-error').textContent=body.code)">
         <input name="account" value="invalid-example">
         <button id="save-account">Save account</button><span id="save-error"></span>
       </form>
@@ -180,8 +180,25 @@ describe("BrowserSessionManager E2E", () => {
       );
       const observed = (await execute("page.snapshot", {
         maxChars: 64_000,
-      })) as { result?: { content?: string } };
+      })) as {
+        result?: { content?: string };
+        artifacts?: Array<{
+          kind: string;
+          contentType: string;
+          dataBase64: string;
+        }>;
+      };
       const snapshot = observed.result?.content ?? "";
+      const domEvidence = observed.artifacts?.find(
+        (artifact) => artifact.kind === "DOM",
+      );
+      expect(domEvidence?.contentType).toBe("text/plain; charset=utf-8");
+      expect(Buffer.from(domEvidence!.dataBase64, "base64").toString()).toBe(
+        snapshot,
+      );
+      expect(
+        observed.artifacts?.some((artifact) => artifact.kind === "SCREENSHOT"),
+      ).toBe(true);
       const incrementLine = snapshot
         .split("\n")
         .find((line) => line.includes('<button> "Increment"'));
@@ -432,7 +449,12 @@ describe("BrowserSessionManager E2E", () => {
       });
       const saveObservation = (await execute("page.snapshot", {})) as {
         result: {
-          actionFeedback: { requests: Array<{ responseSummary: string }> };
+          actionFeedback: {
+            requests: Array<{
+              responseSummary: string;
+              requestSummary: string;
+            }>;
+          };
         };
         artifacts: Array<{ kind: string }>;
       };
@@ -441,6 +463,23 @@ describe("BrowserSessionManager E2E", () => {
         association: "temporal",
         requests: [expect.objectContaining({ method: "POST", status: 400 })],
       });
+      expect(
+        saveObservation.result.actionFeedback.requests[0]?.requestSummary,
+      ).toContain('"config":{"value":true}');
+      expect(
+        saveObservation.result.actionFeedback.requests[0]?.requestSummary,
+      ).not.toContain("secret-request-token");
+      const requestEvidence = (await execute("page.network", {
+        includeResponseBodies: true,
+        urlIncludes: "/save-account",
+      })) as { result: { content: string } };
+      expect(requestEvidence.result.content).toContain('"requestBody"');
+      expect(requestEvidence.result.content).toContain(
+        '"account":"invalid-example"',
+      );
+      expect(requestEvidence.result.content).not.toContain(
+        "secret-request-token",
+      );
       expect(
         saveObservation.result.actionFeedback.requests[0]?.responseSummary,
       ).toContain("USER_NOT_FOUND");

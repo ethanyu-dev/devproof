@@ -225,6 +225,7 @@ export function TaskDetailClient({ id }: { id: string }) {
           </nav>
           <TaskDetailContent
             onRerunCase={rerunCase}
+            onCaseRetried={updateDetail}
             busy={busy}
             detail={detail}
             onMutate={mutate}

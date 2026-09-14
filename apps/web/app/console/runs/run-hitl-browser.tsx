@@ -16,6 +16,7 @@ import {
   MonitorPlay,
   RotateCcw,
   ShieldCheck,
+  X,
 } from "lucide-react";
 import type {
   ClipboardEvent,
@@ -67,6 +68,7 @@ interface RunBrowserHitlProps {
     id: string;
     kind?: string;
     prompt: string;
+    notificationError?: string;
   };
   onComplete: () => Promise<void>;
   runId: string;
@@ -112,12 +114,43 @@ function TestAccountInput({
   onComplete,
   runId,
 }: RunBrowserHitlProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const accountInput = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(true);
   const [account, setAccount] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [mode, setMode] = useState<"account" | "instructions">("account");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      dialog.current?.showModal();
+      accountInput.current?.focus({ preventScroll: true });
+    } else dialog.current?.close();
+  }, [open]);
+
+  function close() {
+    if (busy) return;
+    setOpen(false);
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!account.trim() || busy) return;
+    if (busy) return;
+    if (
+      mode === "account" &&
+      (!/^[\p{L}\p{N}][\p{L}\p{N}._@+:-]*$/u.test(account.trim()) ||
+        /删除|重新创建|允许你|先把|再创建|帮我|重试/u.test(account))
+    ) {
+      setError("请填写账号标识；删除或重建说明请切换到处置意见。");
+      return;
+    }
+    if (mode === "instructions" && instructions.trim().length < 5) {
+      setError("请说明具体处置意见（至少 5 个字符）。");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -125,7 +158,12 @@ function TestAccountInput({
         `/runs/${runId}/interventions/${intervention.id}/resolve`,
         {
           method: "POST",
-          body: JSON.stringify({ response: { account: account.trim() } }),
+          body: JSON.stringify({
+            response:
+              mode === "account"
+                ? { account: account.trim() }
+                : { instructions: instructions.trim() },
+          }),
         },
       );
       await onComplete();
@@ -136,27 +174,142 @@ function TestAccountInput({
     }
   }
   return (
-    <section className="dp-browser-handoff">
-      <header>
-        <b>提供测试账号</b>
-      </header>
-      <p>{intervention.prompt}</p>
-      <form onSubmit={(event) => void submit(event)}>
-        <Field label="测试账号">
-          <Input
-            autoComplete="off"
-            maxLength={200}
-            onChange={(event) => setAccount(event.target.value)}
-            required
-            value={account}
-          />
-        </Field>
-        {error ? <p role="alert">{error}</p> : null}
-        <Button disabled={busy || !account.trim()} type="submit">
-          {busy ? "正在提交…" : "提交并继续执行"}
-        </Button>
-      </form>
-    </section>
+    <>
+      <Button
+        ref={trigger}
+        aria-haspopup="dialog"
+        onClick={() => setOpen(true)}
+      >
+        <Hand /> 待人工处理
+      </Button>
+      <dialog
+        ref={dialog}
+        aria-labelledby={`account-title-${intervention.id}`}
+        aria-describedby={`account-prompt-${intervention.id}`}
+        onClose={() => {
+          setOpen(false);
+          trigger.current?.focus({ preventScroll: true });
+        }}
+        onCancel={(event) => {
+          event.preventDefault();
+          close();
+        }}
+        className="m-auto max-h-[85vh] w-[min(640px,calc(100vw_-_32px))] overflow-y-auto rounded-xl border bg-card p-6 text-foreground shadow-xl backdrop:bg-black/40"
+      >
+        <div className="flex items-center justify-between gap-4">
+          <h2
+            id={`account-title-${intervention.id}`}
+            className="flex items-center gap-2 text-lg font-semibold"
+          >
+            <Hand className="size-5 text-primary" /> 提供测试账号
+          </h2>
+          <Button
+            aria-label="关闭人工处理弹窗"
+            disabled={busy}
+            onClick={close}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <X />
+          </Button>
+        </div>
+        <p
+          id={`account-prompt-${intervention.id}`}
+          className="my-4 whitespace-pre-wrap break-words text-sm leading-6"
+        >
+          {intervention.prompt}
+        </p>
+        <form className="grid gap-4" onSubmit={(event) => void submit(event)}>
+          <div className="flex gap-2" role="group" aria-label="处理方式">
+            <Button
+              type="button"
+              disabled={busy}
+              variant={mode === "account" ? "default" : "secondary"}
+              onClick={() => {
+                setMode("account");
+                setError(null);
+              }}
+            >
+              提供新账号
+            </Button>
+            <Button
+              type="button"
+              disabled={busy}
+              variant={mode === "instructions" ? "default" : "secondary"}
+              onClick={() => {
+                setMode("instructions");
+                setError(null);
+              }}
+            >
+              提交处置意见
+            </Button>
+          </div>
+          {intervention.notificationError ? (
+            <p role="status" className="text-sm text-amber-700">
+              通知未送达：{intervention.notificationError}
+            </p>
+          ) : null}
+          <p className="text-xs text-muted-foreground">
+            等待截止：{new Date(intervention.expiresAt).toLocaleString("zh-CN")}
+          </p>
+          {mode === "account" ? (
+            <Field label="测试账号">
+              <Input
+                ref={accountInput}
+                autoComplete="off"
+                disabled={busy}
+                maxLength={200}
+                onChange={(event) => setAccount(event.target.value)}
+                required
+                value={account}
+              />
+            </Field>
+          ) : (
+            <Field label="处置意见">
+              <textarea
+                className="min-h-24 w-full rounded-md border p-3 text-sm"
+                value={instructions}
+                onChange={(event) => setInstructions(event.target.value)}
+                maxLength={2000}
+                disabled={busy}
+                required
+              />
+              <p className="text-xs text-muted-foreground">
+                保留原账号。Agent
+                将结合记录归属和实际状态判断能否执行你的处置意见。
+              </p>
+            </Field>
+          )}
+          {error ? (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          ) : null}
+          <p className="text-xs leading-5 text-muted-foreground">
+            用例正在等待处理。关闭后可从页面顶部“待人工处理”重新打开。
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              disabled={busy}
+              onClick={close}
+              type="button"
+              variant="secondary"
+            >
+              稍后处理
+            </Button>
+            <Button
+              disabled={
+                busy ||
+                !(mode === "account" ? account.trim() : instructions.trim())
+              }
+              type="submit"
+            >
+              {busy ? "正在提交…" : "提交并继续执行"}
+            </Button>
+          </div>
+        </form>
+      </dialog>
+    </>
   );
 }
 

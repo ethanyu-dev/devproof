@@ -26,6 +26,7 @@ import { displayLabel } from "@/lib/display-text";
 import { retainedProfilePolicy } from "./profile-policy";
 import { TaskAnalysisInputCard } from "./task-analysis-input";
 import { TaskLogs } from "./task-logs";
+import { CaseRetryButton } from "./case-retry-button";
 import { caseDescription, latestTaskCaseExecutions } from "./task-case-display";
 import styles from "./task-detail.module.css";
 import { executionHref, taskDetailHref } from "./task-navigation";
@@ -79,6 +80,7 @@ function downloadJson(value: unknown, filename: string) {
 
 export function TaskDetailContent({
   onRerunCase,
+  onCaseRetried,
   busy,
   detail,
   onMutate,
@@ -91,6 +93,7 @@ export function TaskDetailContent({
   taskHref,
 }: {
   onRerunCase: (caseId: string) => Promise<void>;
+  onCaseRetried: (task: TaskDetail) => void;
   busy: boolean;
   detail: TaskDetail;
   onMutate: (path: string, body?: unknown) => Promise<TaskDetail | null>;
@@ -569,10 +572,12 @@ export function TaskDetailContent({
                     }
                     key={testCase.id}
                     onRerun={() => void onRerunCase(testCase.id)}
+                    onRetried={onCaseRetried}
                     onSavePolicy={(executionId, policy) =>
                       onMutate(`/cases/${executionId}/policy`, policy)
                     }
                     testCase={testCase}
+                    taskId={detail.id}
                     taskHref={taskHref}
                   />
                 ))}
@@ -700,19 +705,23 @@ function CaseCard({
   busy,
   canEditPolicy,
   onRerun,
+  onRetried,
   onSavePolicy,
   testCase,
+  taskId,
   taskHref,
 }: {
   allCases: TaskCase[];
   busy: boolean;
   canEditPolicy: boolean;
   onRerun: () => void;
+  onRetried: (task: TaskDetail) => void;
   onSavePolicy: (
     executionId: string,
     policy: ExecutionConcurrencyPolicy,
   ) => Promise<unknown>;
   testCase: TaskCase;
+  taskId: string;
   taskHref: string;
 }) {
   const { active, aggregateOutcome, executions, pending, status } =
@@ -786,26 +795,40 @@ function CaseCard({
           )}
         </div>
         <div className={styles.caseActions}>
-          {rerunnable && (
-            <Button
-              disabled={busy || Boolean(testCase.rerunBlockReason)}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "创建一个仅执行此用例的新任务？将复用原用例规格和验证环境，保留当前任务及证据。",
-                  )
-                ) {
-                  onRerun();
-                }
+          {rerunnable && testCase.rerunBlockReason && selected?.run ? (
+            <CaseRetryButton
+              taskId={taskId}
+              runId={selected.run.runId}
+              disabled={busy}
+              onRetried={(task) => {
+                setSelectedId(null);
+                onRetried(task);
               }}
-              size="sm"
-              title={
-                testCase.rerunBlockReason ?? "创建新任务重跑此用例，保留原记录"
-              }
-              variant="ghost"
-            >
-              <RotateCcw /> 重跑
-            </Button>
+            />
+          ) : (
+            rerunnable && (
+              <Button
+                disabled={busy || Boolean(testCase.rerunBlockReason)}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "在当前任务下重跑此用例？将复用原规格和验证环境，保留历次执行记录与证据。",
+                    )
+                  ) {
+                    setSelectedId(null);
+                    onRerun();
+                  }
+                }}
+                size="sm"
+                title={
+                  testCase.rerunBlockReason ??
+                  "在当前任务下重跑此用例，保留历史执行"
+                }
+                variant="ghost"
+              >
+                <RotateCcw /> 重跑
+              </Button>
+            )
           )}
           {testCase.latestRerunTaskId && (
             <Link
@@ -826,7 +849,7 @@ function CaseCard({
           ) : null}
         </div>
       </div>
-      {rerunnable && testCase.rerunBlockReason && (
+      {rerunnable && testCase.rerunBlockReason && !selected?.run && (
         <p className={styles.rerunReason} role="status">
           {testCase.rerunBlockReason}
         </p>

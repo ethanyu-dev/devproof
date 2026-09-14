@@ -114,6 +114,56 @@ describe("ExecutionRunService events", () => {
 });
 
 describe("ExecutionRunService HITL resume", () => {
+  it("rejects prose in the account field but preserves the account when instructions are submitted separately", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({
+        kind: "TEST_ACCOUNT",
+        task: {
+          snapshot: {
+            ...snapshot,
+            executionPolicy: {
+              ...snapshot.executionPolicy,
+              executionState: { account: "13962083614" },
+            },
+          },
+        },
+      }),
+    );
+    const service = new ExecutionRunService(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      } as never,
+      {} as never,
+    );
+    await expect(
+      service.resolveIntervention(current, runId, interventionId, {
+        response: { account: "允许你删除再重新创建" },
+      }),
+    ).rejects.toThrow("处置意见");
+    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { instructions: "核对本次创建记录后进行清理" },
+    });
+    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          snapshot: expect.objectContaining({
+            executionPolicy: expect.objectContaining({
+              resume: expect.objectContaining({
+                response: {
+                  account: "13962083614",
+                  instructions: "核对本次创建记录后进行清理",
+                },
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("keeps a conflicting business account reply pending and preserves default scheduling", async () => {
     const tx = transactionClient();
     const original = intervention({
@@ -167,6 +217,50 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
+  it("releases historical HITL allocations after the previous case is cleaned", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findMany.mockResolvedValue([
+      {
+        response: { account: "reusable" },
+        context: {},
+        run: {
+          id: "old-run",
+          lifecycle: "COMPLETED",
+          environmentSnapshot: { targetUrl: "https://test.example.com" },
+          executionPolicy: {
+            executionState: {
+              records: [
+                {
+                  id: "123",
+                  ownership: "CREATED_THIS_RUN",
+                  evidenceRefs: ["proof"],
+                  cleanup: { instruction: "delete", status: "COMPLETED" },
+                },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    await reserveCaseTestAccount(tx as never, {
+      account: "reusable",
+      context: {},
+      environment: { targetUrl: "https://test.example.com" },
+      runId,
+      taskExecutionId: "parent",
+      teamId: snapshot.teamId,
+    });
+    expect(tx.executionRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          executionPolicy: expect.objectContaining({
+            testAccountClaim: { account: "reusable", aliases: [] },
+          }),
+        },
+      }),
+    );
+  });
+
   it("allows independent accounts, environments and explicit read-only reuse", async () => {
     const tx = transactionClient();
     tx.humanIntervention.findMany.mockResolvedValue([
@@ -199,7 +293,7 @@ describe("ExecutionRunService HITL resume", () => {
     });
   });
 
-  it("copies the Run HITL policy into the immutable Runtime task snapshot", async () => {
+  it("keeps HITL and browser checks in the Runtime snapshot while storing provenance only on the Run", async () => {
     const tx = {
       agentRuntimeTask: { create: vi.fn() },
       browserExecution: { create: vi.fn() },
@@ -230,7 +324,14 @@ describe("ExecutionRunService HITL resume", () => {
         profile: { mode: "EPHEMERAL" },
         requiredCapabilities: ["browser"],
       },
-      criteria: snapshot.criteria,
+      criteria: snapshot.criteria.map((criterion) => ({
+        ...criterion,
+        basis: {
+          quote: "source-only-details",
+          sourceRefs: ["reference://spec/spec-1/issue"],
+        },
+        requiredEvidenceKinds: ["DOM", "SCREENSHOT", "BUSINESS_REFERENCE"],
+      })),
       deadlineSeconds: 600,
       environment: snapshot.environment,
       goal: snapshot.goal,
@@ -244,12 +345,12 @@ describe("ExecutionRunService HITL resume", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           snapshot: expect.objectContaining({
-            businessReferences: [
+            businessReferences: [],
+            criteria: expect.arrayContaining([
               expect.objectContaining({
-                externalId: "reference://spec/spec-1/issue",
-                kind: "BUSINESS_REFERENCE",
+                requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
               }),
-            ],
+            ]),
             executionPolicy: expect.objectContaining({
               hitl: snapshot.executionPolicy.hitl,
             }),
@@ -257,6 +358,19 @@ describe("ExecutionRunService HITL resume", () => {
         }),
       }),
     );
+    const runtimeSnapshot =
+      tx.agentRuntimeTask.create.mock.calls[0]![0].data.snapshot;
+    expect(JSON.stringify(runtimeSnapshot)).not.toContain(
+      "source-only-details",
+    );
+    expect(JSON.stringify(runtimeSnapshot)).not.toContain("reference://");
+    expect(tx.runAttempt.create.mock.calls[0]![0].data.inputSnapshot).toEqual(
+      runtimeSnapshot,
+    );
+    expect(
+      tx.executionRun.create.mock.calls[0]![0].data.criteriaSnapshot[0].basis
+        .quote,
+    ).toBe("source-only-details");
     expect(tx.browserExecution.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -393,7 +507,7 @@ describe("ExecutionRunService HITL resume", () => {
         service.resolveIntervention(current, runId, interventionId, {
           response: { account },
         }),
-      ).rejects.toThrow("请提供有效的测试账号");
+      ).rejects.toThrow("请填写手机号");
       expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
     },
   );
@@ -758,11 +872,19 @@ function transactionClient() {
   return {
     $queryRaw: vi.fn().mockResolvedValue([]),
     agentRuntimeTask: { update: vi.fn() },
-    browserExecution: { findUnique: vi.fn().mockResolvedValue(null) },
+    browserExecution: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     browserRuntimeProfileLease: { updateMany: vi.fn() },
     browserRuntimeSession: { updateMany: vi.fn() },
     browserRuntimeSlot: { updateMany: vi.fn() },
-    executionRun: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    executionRun: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findMany: vi.fn().mockResolvedValue([]),
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ executionPolicy: {} }),
+      update: vi.fn(),
+    },
     humanIntervention: {
       findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),

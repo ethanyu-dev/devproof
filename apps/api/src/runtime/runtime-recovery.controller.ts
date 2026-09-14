@@ -17,6 +17,7 @@ import {
   runtimeRecoveryResolveWriteOutcomeSchema,
   runtimeRecoveryRetrySchema,
   runtimeRecoveryQuerySchema,
+  runtimeRecoveryAuthorizeRetrySchema,
 } from "@devproof/contracts";
 import { AuthGuard } from "../auth/auth.guard.js";
 import { CurrentAuth } from "../auth/current-auth.decorator.js";
@@ -72,6 +73,18 @@ export class RuntimeRecoveryController {
       current,
       parseBody(idSchema, id),
       parseBody(runtimeRecoveryRetrySchema, body).expectedVersion,
+    );
+  }
+  @Post("runtime-recoveries/:id/authorize-retry")
+  authorizeRetry(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.recoveries.authorizeRetry(
+      current,
+      parseBody(idSchema, id),
+      parseBody(runtimeRecoveryAuthorizeRetrySchema, body),
     );
   }
   @Post("runtime-recoveries/:id/resolve-write-outcome")

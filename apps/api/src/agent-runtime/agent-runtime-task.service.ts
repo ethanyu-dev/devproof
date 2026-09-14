@@ -10,6 +10,9 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
+  browserExecutionCriterion,
+  businessTestAccountSchema,
+  browserExecutionSnapshot,
   missingRequiredEvidenceKinds,
   runtimeEvidenceKindSchema,
   runtimeFailureClassSchema,
@@ -45,6 +48,9 @@ import { potentialWriteCommandWhere } from "../runtime/session-write-audit.js";
 import { writeSettled } from "../runtime/session-recovery.state.js";
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
 import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
+
+import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
+import { claimTestAccount } from "../execution-runs/test-account-reservation.js";
 
 const MODEL_CONFIGURATION_PROTOCOL_MINOR = 2;
 
@@ -910,10 +916,12 @@ export class AgentRuntimeTaskService {
           leaseExpiresAt: claimed.leaseExpiresAt?.toISOString(),
           leaseToken: claimed.leaseToken,
           serverTime: new Date().toISOString(),
-          snapshot: runtimeTaskSnapshotSchema.parse({
-            ...snapshot,
-            modelCandidates,
-          }),
+          snapshot: browserExecutionSnapshot(
+            runtimeTaskSnapshotSchema.parse({
+              ...snapshot,
+              modelCandidates,
+            }),
+          ),
           taskId: claimed.id,
         },
       };
@@ -1132,6 +1140,73 @@ export class AgentRuntimeTaskService {
             teamId,
           },
         });
+        if (input.event.kind === "execution.account.claim") {
+          await claimTestAccount(tx, {
+            teamId,
+            runId: task.runId,
+            environment: task.run.environmentSnapshot,
+            account: businessTestAccountSchema.parse(
+              input.event.payload.account,
+            ),
+            aliases: businessTestAccountSchema
+              .array()
+              .max(20)
+              .parse(input.event.payload.aliases ?? []),
+          });
+        }
+        if (input.event.kind === "agent.model.failed") {
+          const payload = input.event.payload;
+          const preview =
+            payload.inputPreview && typeof payload.inputPreview === "object"
+              ? (payload.inputPreview as Record<string, unknown>)
+              : {};
+          const parsed = z
+            .object({
+              key: z.string().regex(/^[a-f0-9]{64}$/),
+              until: z.number().int(),
+              reason: z.enum(["MODEL_UNAVAILABLE", "CREDENTIAL_UNAVAILABLE"]),
+              consecutiveFailures: z.number().int().positive(),
+            })
+            .safeParse(preview.candidateHealth);
+          if (
+            parsed.success &&
+            parsed.data.until > now.getTime() &&
+            parsed.data.until <= now.getTime() + 30 * 60_000
+          ) {
+            const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+            const previous = snapshot.executionPolicy.modelCooldowns;
+            const cooldowns =
+              previous &&
+              typeof previous === "object" &&
+              !Array.isArray(previous)
+                ? (previous as Record<string, unknown>)
+                : {};
+            const modelCooldowns = {
+              ...Object.fromEntries(Object.entries(cooldowns).slice(-31)),
+              [parsed.data.key]: {
+                until: parsed.data.until,
+                reason: parsed.data.reason,
+                failures: parsed.data.consecutiveFailures,
+              },
+            };
+            await tx.agentRuntimeTask.update({
+              where: { id: task.id },
+              data: {
+                snapshot: json({
+                  ...snapshot,
+                  executionPolicy: {
+                    ...snapshot.executionPolicy,
+                    modelCooldowns,
+                  },
+                }),
+              },
+            });
+          }
+        }
+        const checkpointResult =
+          input.event.kind === "execution.checkpoint"
+            ? await saveExecutionCheckpoint(tx, task, input.event.payload)
+            : {};
         const traceEvent = runtimeTraceEventSchema.safeParse({
           kind: input.event.kind,
           payload: input.event.payload,
@@ -1144,7 +1219,11 @@ export class AgentRuntimeTaskService {
             event.createdAt,
           );
         }
-        return { accepted: true, sequence: event.sequence.toString() };
+        return {
+          accepted: true,
+          sequence: event.sequence.toString(),
+          ...checkpointResult,
+        };
       } catch (error) {
         if (!isUniqueConstraint(error)) throw error;
         const event = await tx.runEvent.findUnique({
@@ -1935,7 +2014,9 @@ export function completedOutcomeEvidenceError(
     metadata: unknown;
   }>,
 ) {
-  const criteria = new Map(snapshot.criteria.map((item) => [item.id, item]));
+  const criteria = new Map(
+    snapshot.criteria.map((item) => [item.id, browserExecutionCriterion(item)]),
+  );
   const results = new Map(
     outcome.criteria.map((item) => [item.criterionId, item]),
   );

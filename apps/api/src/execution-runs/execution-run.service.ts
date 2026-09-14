@@ -8,7 +8,12 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
+import {
+  browserExecutionSnapshot,
+  businessTestAccountSchema,
+  readExecutionState,
+  runtimeTaskSnapshotSchema,
+} from "@devproof/agent-runtime-protocol";
 import type {
   ExecutionRunCreateInput,
   RunInterventionResolveInput,
@@ -19,6 +24,10 @@ import {
   runHitlPolicySchema,
 } from "@devproof/contracts";
 
+import {
+  canReleaseTestAccount,
+  claimTestAccount,
+} from "./test-account-reservation.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { businessEnvironmentKey } from "../verification/execution-concurrency.js";
@@ -197,27 +206,29 @@ export class ExecutionRunService {
     const taskId = randomUUID();
     const traceId = randomBytes(16).toString("hex");
     const provider = input.model?.provider ?? "CODEX";
-    const snapshot = runtimeTaskSnapshotSchema.parse({
-      attemptId,
-      attemptNumber: 1,
-      businessReferences: input.businessReferences,
-      criteria: input.criteria,
-      deadlineAt: deadlineAt.toISOString(),
-      hardDeadlineAt: hardDeadlineAt.toISOString(),
-      environment: input.environment,
-      executionPolicy: {
-        browser: input.browserPolicy,
-        concurrency: input.concurrencyPolicy,
-        deadline: deadlinePolicy,
-        hitl: input.hitlPolicy,
-        retryPolicy: input.retryPolicy,
-      },
-      goal: input.goal,
-      ...(input.model ? { model: input.model } : {}),
-      runId,
-      teamId: current.team.id,
-      traceId,
-    });
+    const snapshot = browserExecutionSnapshot(
+      runtimeTaskSnapshotSchema.parse({
+        attemptId,
+        attemptNumber: 1,
+        businessReferences: input.businessReferences,
+        criteria: input.criteria,
+        deadlineAt: deadlineAt.toISOString(),
+        hardDeadlineAt: hardDeadlineAt.toISOString(),
+        environment: input.environment,
+        executionPolicy: {
+          browser: input.browserPolicy,
+          concurrency: input.concurrencyPolicy,
+          deadline: deadlinePolicy,
+          hitl: input.hitlPolicy,
+          retryPolicy: input.retryPolicy,
+        },
+        goal: input.goal,
+        ...(input.model ? { model: input.model } : {}),
+        runId,
+        teamId: current.team.id,
+        traceId,
+      }),
+    );
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -727,32 +738,53 @@ export class ExecutionRunService {
           `Human intervention is already ${intervention.status.toLowerCase()}.`,
         );
       }
-      if (
-        intervention.kind === "TEST_ACCOUNT" &&
-        (typeof input.response.account !== "string" ||
-          !input.response.account.trim() ||
-          input.response.account.length > 200)
-      ) {
-        throw new BadRequestException(
-          "请提供有效的测试账号（最多 200 个字符）。",
+      let response = input.response;
+      if (intervention.kind === "TEST_ACCOUNT") {
+        const account = businessTestAccountSchema.safeParse(
+          input.response.account,
         );
-      }
-      const response =
-        intervention.kind === "TEST_ACCOUNT"
-          ? { account: (input.response.account as string).trim() }
-          : input.response;
-      if (
-        intervention.kind === "TEST_ACCOUNT" &&
-        intervention.run.taskExecutionId
-      ) {
-        await reserveCaseTestAccount(tx, {
-          account: (response as { account: string }).account,
-          context: intervention.context,
-          environment: intervention.run.environmentSnapshot,
-          runId,
-          taskExecutionId: intervention.run.taskExecutionId,
-          teamId: current.team.id,
-        });
+        const instructions =
+          typeof input.response.instructions === "string"
+            ? input.response.instructions.trim()
+            : "";
+        if (instructions) {
+          if (
+            instructions.length < 5 ||
+            instructions.length > 2000 ||
+            input.response.account !== undefined
+          )
+            throw new BadRequestException(
+              "处置意见需为 5–2000 个字符，请与提供新账号分开提交。",
+            );
+          const policy =
+            isRecord(intervention.task.snapshot) &&
+            isRecord(intervention.task.snapshot.executionPolicy)
+              ? intervention.task.snapshot.executionPolicy
+              : {};
+          const previous =
+            readExecutionState(policy).account ??
+            (isRecord(policy.resume) && isRecord(policy.resume.response)
+              ? policy.resume.response.account
+              : undefined);
+          response = {
+            instructions,
+            ...(typeof previous === "string" ? { account: previous } : {}),
+          };
+        } else {
+          if (!account.success)
+            throw new BadRequestException(
+              "请填写手机号、UUID、邮箱或用户 ID；删除或重建说明请通过“处置意见”提交。",
+            );
+          response = { account: account.data };
+          await reserveCaseTestAccount(tx, {
+            account: account.data,
+            context: intervention.context,
+            environment: intervention.run.environmentSnapshot,
+            runId,
+            taskExecutionId: intervention.run.taskExecutionId ?? runId,
+            teamId: current.team.id,
+          });
+        }
       }
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
         throw new ConflictException("The run is not waiting for human input.");
@@ -1042,10 +1074,17 @@ export async function reserveCaseTestAccount(
     select: {
       response: true,
       context: true,
-      run: { select: { environmentSnapshot: true } },
+      run: {
+        select: {
+          id: true,
+          lifecycle: true,
+          executionPolicy: true,
+          environmentSnapshot: true,
+        },
+      },
     },
   });
-  const conflict = allocated.some(
+  const conflicts = allocated.filter(
     (item) =>
       !(isRecord(item.context) && item.context.usage === "READ_EXISTING") &&
       isRecord(item.response) &&
@@ -1054,10 +1093,17 @@ export async function reserveCaseTestAccount(
         input.account.trim().toLowerCase() &&
       sameTestEnvironment(item.run.environmentSnapshot, input.environment),
   );
-  if (conflict)
-    throw new ConflictException(
-      "该业务测试账号已分配给本任务同环境的其他 Case，可能已有相同类型的记录。请提供独立账号；不要删除已有业务记录。",
-    );
+  for (const conflict of conflicts)
+    if (!(await canReleaseTestAccount(tx, conflict.run)))
+      throw new ConflictException(
+        "该业务测试账号已分配给本任务同环境的其他 Case，可能已有相同类型的记录。请提供独立账号；不要删除已有业务记录。",
+      );
+  await claimTestAccount(tx, {
+    teamId: input.teamId,
+    runId: input.runId,
+    environment: input.environment,
+    account: input.account,
+  });
 }
 
 function testEnvironmentKey(value: unknown) {

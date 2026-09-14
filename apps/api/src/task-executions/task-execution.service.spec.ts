@@ -1057,10 +1057,17 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
   it("rejects a dependent Case rerun when its prerequisites have no execution in the new round", async () => {
     const dependencyId = "485146a8-5230-4b02-832a-5eef19e8dc8a";
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       taskExecution: {
         findFirst: vi.fn().mockResolvedValue({
           id: taskId,
           kind: "ISSUE_SPEC",
+          inputSnapshot: {
+            kind: "ISSUE_SPEC",
+            issueRef: "ENG-123",
+            idempotencyKey: "original-task",
+            deadlineSeconds: 3600,
+          },
           cancelRequestedAt: null,
           deadlineAt: new Date(Date.now() + 60_000),
           stages: [{ id: "stage", type: "SPEC_EXECUTION" }],
@@ -1125,6 +1132,12 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
       deadlineAt: new Date(Date.now() + 60 * 60 * 1_000),
       id: taskId,
       kind: "ISSUE_SPEC",
+      inputSnapshot: {
+        kind: "ISSUE_SPEC",
+        issueRef: "ENG-123",
+        idempotencyKey: "original-task",
+        deadlineSeconds: 3600,
+      },
       stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
     });
     const taskCaseExecutionCreate = vi.fn().mockResolvedValue({
@@ -1136,6 +1149,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
     const taskExecutionUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const taskExecutionEventCreate = vi.fn().mockResolvedValue({});
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       taskCaseExecution: { create: taskCaseExecutionCreate },
       taskExecution: {
         findFirst: taskExecutionFindFirst,
@@ -1219,6 +1233,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
 
   it("rejects a rerun while the latest Runtime is still active", async () => {
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       taskExecution: {
         findFirst: vi.fn().mockResolvedValue({
           cancelRequestedAt: null,
@@ -1233,6 +1248,12 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
           deadlineAt: new Date(Date.now() + 60 * 60 * 1_000),
           id: taskId,
           kind: "ISSUE_SPEC",
+          inputSnapshot: {
+            kind: "ISSUE_SPEC",
+            issueRef: "ENG-123",
+            idempotencyKey: "original-task",
+            deadlineSeconds: 3600,
+          },
           stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
         }),
       },

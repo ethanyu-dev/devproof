@@ -86,6 +86,9 @@ export class ActionFeedbackTracker {
           (value) => typeof value === "string" && value.length > 512,
         ),
         status: response?.status ?? null,
+        ...(response?.requestBody === undefined
+          ? {}
+          : { requestSummary: JSON.stringify(response.requestBody) }),
         errorText:
           typeof response?.errorText === "string"
             ? response.errorText.slice(0, 512)
@@ -150,18 +153,27 @@ export async function actionTarget(locator: Locator | ElementHandle<Element>) {
       }
       return parts.join("/");
     };
-    const target = node.closest("button,a,input,select,textarea") ?? node;
+    const target =
+      node.closest(
+        "button,a,input,select,textarea,[role='switch'],[role='checkbox'],[role='radio']",
+      ) ?? node;
     let region: Element =
       target.closest("form") ?? target.parentElement ?? target;
     for (
       let depth = 0;
-      !region.querySelector("input,select,textarea") &&
+      !region.querySelector(
+        "input,select,textarea,[aria-checked],[aria-pressed],[aria-selected]",
+      ) &&
       region.parentElement &&
       depth < 4;
       depth++
     )
       region = region.parentElement;
-    const fields = Array.from(region.querySelectorAll("input,select,textarea"))
+    const fields = Array.from(
+      region.querySelectorAll(
+        "input,select,textarea,[aria-checked],[aria-pressed],[aria-selected]",
+      ),
+    )
       .slice(0, 50)
       .map((field) => {
         const input = field as HTMLInputElement;
@@ -169,6 +181,9 @@ export async function actionTarget(locator: Locator | ElementHandle<Element>) {
           path: path(field),
           value: input.value,
           checked: input.checked,
+          ariaChecked: field.getAttribute("aria-checked"),
+          ariaPressed: field.getAttribute("aria-pressed"),
+          ariaSelected: field.getAttribute("aria-selected"),
         };
       });
     return {

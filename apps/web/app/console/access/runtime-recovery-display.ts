@@ -23,6 +23,7 @@ export function recoveryWriteLabel(state: string) {
         NO_WRITE_VERIFIED: "已证实没有写入",
         CONFIRMED: "业务结果已确认",
         RESOLVED: "业务结果已人工核实",
+        RETRY_AUTHORIZED: "已授权重试，原写入结果未核实",
       } as Record<string, string>
     )[state] ?? "业务结果状态待确认"
   );
@@ -30,7 +31,7 @@ export function recoveryWriteLabel(state: string) {
 
 export function recoveryWriteReviewGuidance(guards: unknown) {
   if (Array.isArray(guards) && guards.length === 0)
-    return "当前没有业务数据保护范围。这是写入结果未确认的诊断记录，不表示已发生写入或当前占用浏览器槽位。若需重试原执行或复用其数据，请先核对实际业务状态并记录证据。";
+    return "当前没有业务数据保护范围。这是写入结果未确认的诊断记录，不表示已发生写入或当前占用浏览器槽位。可返回原执行确认重试，也可在此核对实际业务状态并记录证据。";
   return "请核对实际业务状态并提供证据。关闭浏览器本身不能确认此前写入是否成功；符合条件后才能释放相关数据保护。";
 }
 
@@ -61,7 +62,8 @@ export function recoveryNeedsWriteReview(item: {
 }) {
   return (
     item.closureState === "VERIFIED" &&
-    !item.resolvedAt &&
-    ["UNKNOWN", "UNASSESSED"].includes(item.writeOutcomeState)
+    (item.writeOutcomeState === "RETRY_AUTHORIZED" ||
+      (!item.resolvedAt &&
+        ["UNKNOWN", "UNASSESSED"].includes(item.writeOutcomeState)))
   );
 }

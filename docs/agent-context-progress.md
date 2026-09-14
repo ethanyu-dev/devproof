@@ -40,10 +40,18 @@ visual polling but cannot replenish the deadline budget.
 The model receives remaining execution seconds separately from remaining tool
 calls. Browser tasks get at most one bootstrap extension without observed progress;
 each subsequent extension consumes a new progress key. A successful fallback is
-preferred for the rest of the segment. With multiple candidates, an adaptive
-browser model call is bounded by the lesser of its configured limit and 90 seconds.
-An expired page is refreshed before fallback, preserving any explicitly requested
-observation. Single-candidate and fixed-deadline limits remain unchanged.
+preferred for the rest of the segment. Model requests default to a 300-second
+timeout; browser calls honor the configured maxModelCallSeconds without a separate
+multi-candidate cap. Fixed-deadline browser calls also default to 300 seconds.
+Each decision cycles through the initially available models, up to five attempts
+per model, stopping as soon as one succeeds. Spec generation uses the same retry
+budget. Every attempt has its own timeout and trace ID; SDK retries are disabled
+so these are actual HTTP attempts, not groups of hidden requests. Transient
+cooldowns do not truncate an admitted decision's retry budget, while unavailable
+credentials and their aliases are excluded immediately. An expired page is
+refreshed before retry/fallback, preserving any explicitly requested observation.
+Cancellation, lease loss and the task's overall deadline/finalization reserve
+still take precedence; retries do not replenish the execution time budget.
 
 ## Task context
 

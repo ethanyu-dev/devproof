@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { DomObservations } from "./dom-observation.js";
+import { stepVideoPlan } from "./step-video-plan.js";
+import { observedRequestBody } from "./network-request.js";
 import { VisualObservations } from "./visual-observation.js";
 import { scrollElement } from "./scroll.js";
 import { captureHighDensityPreview } from "./preview-screenshot.js";
@@ -251,8 +253,6 @@ const MAX_RECORDED_STEP_FRAMES = 120;
 const VIDEO_FINALIZATION_DIAGNOSTIC_PROTOCOL_MINOR = 12;
 // `session.close` has a 60-second command budget. Keep each encoding attempt
 // short enough that the compatibility retry and browser cleanup can both run.
-const MAX_STEP_VIDEO_ATTEMPT_DURATION_MS = 24_000;
-const MAX_STEP_VIDEO_FRAME_DURATION_MS = 750;
 const STEP_SCREENSHOT_COMMANDS = new Set<RuntimeCommandType>([
   "page.snapshot",
   "frame.snapshot",
@@ -827,7 +827,9 @@ function withoutResponseBody(entry: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(entry).filter(
       ([key]) =>
-        !key.startsWith("responseBody") && key !== "responseContentType",
+        !key.startsWith("responseBody") &&
+        key !== "responseContentType" &&
+        key !== "requestBody",
     ),
   );
 }
@@ -1918,14 +1920,27 @@ export class BrowserSessionManager {
           locator,
           { ...parsed.payload, timeout },
         );
+        const content = redactText(snapshot.content);
         return {
+          artifacts: [
+            this.artifact(
+              "DOM",
+              "text/plain; charset=utf-8",
+              Buffer.from(content),
+              {
+                format: snapshot.format,
+                truncated: snapshot.captureLimited,
+                url: safeObservedUrl(session.page.url()),
+              },
+            ),
+          ],
           result: {
             format: snapshot.format,
             ...(this.scrollFeedbackEnabled && snapshot.focusRef
               ? { focusRef: snapshot.focusRef }
               : {}),
             captureTruncated: snapshot.captureLimited,
-            ...pageText(redactText(snapshot.content), parsed.payload),
+            ...pageText(content, parsed.payload),
             title: boundedUtf8Text(await session.page.title(), 1_000),
             url: safeObservedUrl(session.page.url()),
           },
@@ -2414,9 +2429,22 @@ export class BrowserSessionManager {
           this.frameLocator(session, parsed.payload.frame).locator("body"),
           { timeout },
         );
+        const content = redactText(snapshot.content);
         return {
+          artifacts: [
+            this.artifact(
+              "DOM",
+              "text/plain; charset=utf-8",
+              Buffer.from(content),
+              {
+                format: snapshot.format,
+                truncated: snapshot.captureLimited,
+                url: safeObservedUrl(session.page.url()),
+              },
+            ),
+          ],
           result: {
-            ...pageText(redactText(snapshot.content), parsed.payload),
+            ...pageText(content, parsed.payload),
             format: snapshot.format,
             captureTruncated: snapshot.captureLimited,
             url: safeObservedUrl(session.page.url()),
@@ -3426,8 +3454,19 @@ export class BrowserSessionManager {
       });
     });
     page.on("response", (response) => {
+      const request = response.request();
+      const requestBody =
+        new URL(response.url()).origin === new URL(page.url()).origin
+          ? observedRequestBody(
+              request.url(),
+              request.headers()["content-type"] ?? "",
+              request.postData(),
+              redactValue,
+            )
+          : undefined;
       const entry = redactValue({
-        method: response.request().method(),
+        method: request.method(),
+        ...(requestBody === undefined ? {} : { requestBody }),
         status: response.status(),
         timestamp: new Date().toISOString(),
         url: safeObservedUrl(response.url()),
@@ -3888,27 +3927,15 @@ export class BrowserSessionManager {
     session: LiveSession,
   ): Promise<RuntimeArtifactPayload | null> {
     if (session.stepFrames.length === 0) return null;
-    const frameDurationMs = Math.max(
-      180,
-      Math.min(
-        MAX_STEP_VIDEO_FRAME_DURATION_MS,
-        Math.floor(
-          MAX_STEP_VIDEO_ATTEMPT_DURATION_MS / session.stepFrames.length,
-        ),
-      ),
-    );
-    const durationMs = Math.max(
-      700,
-      session.stepFrames.length * frameDurationMs,
-    );
+    const { frames, frameDurationMs, durationMs, sourceFrameCount } =
+      stepVideoPlan(session.stepFrames);
     const profiles: StepVideoEncodingProfile[] = [
       {
-        mimeTypes: [
-          "video/webm;codecs=vp9",
-          "video/webm;codecs=vp8",
-          "video/webm",
-        ],
+        maxHeight: 720,
+        maxWidth: 1280,
+        mimeTypes: ["video/webm;codecs=vp8", "video/webm"],
         name: "native",
+        videoBitsPerSecond: 1_000_000,
       },
       {
         maxHeight: 540,
@@ -4045,7 +4072,7 @@ export class BrowserSessionManager {
             durationMs,
             encoding: profile,
             frameDurationMs,
-            frames: session.stepFrames.map((frame) => ({
+            frames: frames.map((frame) => ({
               dataBase64: frame.data.toString("base64"),
             })),
           },
@@ -4065,7 +4092,9 @@ export class BrowserSessionManager {
           encodingProfile: profile.name,
           fallbackUsed: profile.name === "compatibility",
           format: "STEP_SCREENSHOT_SLIDESHOW",
-          frameCount: session.stepFrames.length,
+          frameCount: frames.length,
+          sourceFrameCount,
+          sampled: frames.length < sourceFrameCount,
           height: encoded.height,
           width: encoded.width,
         });

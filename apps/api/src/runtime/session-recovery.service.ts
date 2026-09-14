@@ -475,14 +475,92 @@ export class SessionRecoveryService {
       evidenceRefs: string[];
     },
   ) {
+    return this.finishRecovery(current, id, input);
+  }
+
+  async authorizeRetry(
+    current: AuthContext,
+    id: string,
+    input: {
+      expectedVersion: number;
+      idempotencyKey: string;
+      acknowledgeUnknownWrite: true;
+    },
+  ) {
+    if (input.acknowledgeUnknownWrite !== true)
+      throw new ConflictException("请确认在上次写入结果未核实的情况下重试。");
+    return this.finishRecovery(current, id, {
+      expectedVersion: input.expectedVersion,
+      idempotencyKey: input.idempotencyKey,
+      outcome: "RETRY_AUTHORIZED",
+      note: "用户确认在旧浏览器已关闭、上次业务写入结果未核实的情况下重试用例。",
+      evidenceRefs: [],
+    });
+  }
+
+  private async finishRecovery(
+    current: AuthContext,
+    id: string,
+    input: {
+      expectedVersion: number;
+      idempotencyKey: string;
+      outcome: "NO_WRITE" | "VERIFIED" | "COMPENSATED" | "RETRY_AUTHORIZED";
+      note: string;
+      evidenceRefs: string[];
+    },
+  ) {
     requireRecoveryEnabled();
+    const authorizeRetry = input.outcome === "RETRY_AUTHORIZED";
     return this.prisma.$transaction(async (tx) => {
       await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
-      await this.requireAdmin(current, tx);
+      const membership = authorizeRetry
+        ? await tx.teamMembership.findUnique({
+            where: {
+              teamId_userId: {
+                teamId: current.team.id,
+                userId: current.user.id,
+              },
+            },
+          })
+        : null;
+      if (authorizeRetry && !membership)
+        throw new ForbiddenException(
+          "A current team membership is required to retry.",
+        );
+      if (!authorizeRetry) await this.requireAdmin(current, tx);
       const initial = await this.owned(current, id, tx);
       await lockRuntimeAndSession(tx, initial.runtimeId, initial.sessionId);
       await tx.$queryRaw`SELECT id FROM runtime_session_recoveries WHERE id = ${id}::uuid FOR UPDATE`;
       const row = await this.owned(current, id, tx);
+      const session = await tx.browserRuntimeSession.findUniqueOrThrow({
+        where: { id: row.sessionId },
+        include: {
+          browserExecutions: {
+            include: {
+              run: {
+                include: {
+                  taskExecution: { select: { requestedByUserId: true } },
+                },
+              },
+            },
+          },
+        },
+      });
+      // The requester can authorize replay of their own task. Attesting the
+      // business result, or authorizing someone else's task, still needs admin.
+      if (
+        authorizeRetry &&
+        membership?.role !== "ADMIN" &&
+        (!session.browserExecutions.length ||
+          session.browserExecutions.some(
+            (execution) =>
+              execution.run.taskExecution?.requestedByUserId !==
+              current.user.id,
+          ))
+      )
+        throw new ForbiddenException(
+          "仅原任务发起人或团队管理员可以确认重试。",
+        );
       const digest = leaseDigest(
         JSON.stringify({
           outcome: input.outcome,
@@ -499,15 +577,20 @@ export class SessionRecoveryService {
       }
       if (
         row.version !== input.expectedVersion ||
-        row.writeOutcomeState === "RESOLVED"
+        row.writeOutcomeState === "RESOLVED" ||
+        (authorizeRetry &&
+          !["UNKNOWN", "UNASSESSED"].includes(row.writeOutcomeState))
       )
         throw new ConflictException(
           "Recovery changed. Refresh before resolving its write outcome.",
         );
-      const session = await tx.browserRuntimeSession.findUniqueOrThrow({
-        where: { id: row.sessionId },
-        include: { browserExecutions: { include: { run: true } } },
-      });
+      if (
+        authorizeRetry &&
+        (session.purpose !== "EXECUTION" || !session.browserExecutions.length)
+      )
+        throw new ConflictException(
+          "Only a stopped browser execution can be authorized for retry.",
+        );
       if (
         session.fencingToken !== row.expectedSessionFence ||
         leaseDigest(session.leaseToken) !== row.expectedLeaseDigest ||
@@ -526,7 +609,10 @@ export class SessionRecoveryService {
         !evidence ||
         evidence.sessionId !== session.id ||
         evidence.sessionFence !== session.fencingToken ||
-        evidence.recoveryId !== row.id
+        evidence.leaseDigest !== row.expectedLeaseDigest ||
+        evidence.recoveryId !== row.id ||
+        row.closureEvidenceId !== evidence.id ||
+        !row.closureVerifiedAt
       )
         throw new ConflictException(
           "A durable closure evidence record is required before resolving writes.",
@@ -538,6 +624,7 @@ export class SessionRecoveryService {
           })
         : null;
       if (
+        (owner && owner.fencingToken !== session.ownerFencingToken) ||
         (owner &&
           (!terminalAgent(owner.status) ||
             !terminalRun(owner.run.lifecycle))) ||
@@ -576,14 +663,14 @@ export class SessionRecoveryService {
       const updated = await tx.runtimeSessionRecovery.update({
         where: { id },
         data: {
-          writeOutcomeState: "RESOLVED",
+          writeOutcomeState: authorizeRetry ? "RETRY_AUTHORIZED" : "RESOLVED",
           resolutionOutcome: input.outcome,
           resolutionNote: input.note,
           outcomeEvidenceRefs: recoveryJson(input.evidenceRefs),
           resolvedBy: current.user.id,
           resolutionKey: input.idempotencyKey,
           resolutionDigest: digest,
-          writeResolvedAt: new Date(),
+          writeResolvedAt: authorizeRetry ? null : new Date(),
           resolvedAt: new Date(),
           version: { increment: 1 },
         },
@@ -599,12 +686,20 @@ export class SessionRecoveryService {
         },
         data: { quarantinedAt: null },
       });
-      await this.audit(tx, current, id, "runtime.write_outcome.reconciled", {
-        outcome: input.outcome,
-        note: input.note,
-        evidenceRefs: input.evidenceRefs,
-        released: released.count,
-      });
+      await this.audit(
+        tx,
+        current,
+        id,
+        authorizeRetry
+          ? "runtime.retry.authorized"
+          : "runtime.write_outcome.reconciled",
+        {
+          outcome: input.outcome,
+          note: input.note,
+          evidenceRefs: input.evidenceRefs,
+          released: released.count,
+        },
+      );
       await emitRecoveryChanged(tx, updated);
       return { ...recoveryDto(updated), released: released.count };
     });

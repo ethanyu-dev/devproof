@@ -414,7 +414,7 @@ describe("SpecAnalysisRuntimeService", () => {
         protocol: { minor },
       });
       expect(result.task?.snapshot.specFormat).toBe(
-        minor >= 17 ? "COMPACT" : undefined,
+        minor >= 19 ? "CHECK_REFERENCES" : "COMPACT",
       );
 
       expect(result.task).toMatchObject({

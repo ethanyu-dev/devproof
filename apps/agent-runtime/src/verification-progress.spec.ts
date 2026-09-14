@@ -17,6 +17,30 @@ function snapshot(content: string, index: number) {
 }
 
 describe("verification progress", () => {
+  it("bounds criterion corrections even when the model rewrites quotes and artifact IDs", () => {
+    const progress = new VerificationProgress();
+    progress.observe(snapshot('- <div> "合规模型映射" [ref=f1e1]', 0).output);
+    const reject = (code: string, n: number) =>
+      progress.tool({
+        name: "finish_verification",
+        arguments: JSON.stringify({
+          criteria: [{ criterionId: "case-2", quote: `changed-${n}` }],
+        }),
+        criteria: [],
+        output: {
+          accepted: false,
+          code,
+          criterionId: "case-2",
+          error: "证据引用无效",
+        },
+      });
+    expect(reject("QUOTE_NOT_EXACT", 0)).toBe(false);
+    progress.observe(snapshot('- <div> "合规模型映射" [ref=f2e1]', 1).output);
+    expect(reject("QUOTE_NOT_EXACT", 1)).toBe(false);
+    expect(reject("UNKNOWN_EVIDENCE_REF", 2)).toBe(true);
+    expect(progress.evidenceSubmissionFailed).toBe(true);
+    expect(progress.evidenceSubmissionError).toBe("证据引用无效");
+  });
   it("stops recapturing the same DOM through changing depth, limits and subsets", () => {
     let now = 0;
     const progress = new VerificationProgress(() => now);
