@@ -26,10 +26,14 @@ describe("VerificationMcpService", () => {
       id: "72b2525c-b0d7-4451-82fc-ee210541016d",
       lifecycle: "QUEUED",
     }));
+    const provideAnalysisInput = vi.fn(async () => ({
+      id: "72b2525c-b0d7-4451-82fc-ee210541016d",
+      lifecycle: "QUEUED",
+    }));
     const service = new VerificationMcpService(
       invocations as never,
       {} as never,
-      { create: createTask } as never,
+      { create: createTask, provideAnalysisInput } as never,
     );
     const createServer = Reflect.get(service, "createServer") as (
       current: ToolAuthContext,
@@ -56,6 +60,7 @@ describe("VerificationMcpService", () => {
         "create_task",
         "list_tasks",
         "get_task",
+        "provide_task_analysis_input",
         "set_task_deployment_target",
         "retry_task_stage",
         "cancel_task",
@@ -84,6 +89,22 @@ describe("VerificationMcpService", () => {
         }),
       );
 
+      const taskId = "72b2525c-b0d7-4451-82fc-ee210541016d";
+      const analysisInput = {
+        expectedAttemptId: "11111111-1111-4111-8111-111111111111",
+        pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+      };
+      const resumed = await client.callTool({
+        name: "provide_task_analysis_input",
+        arguments: { taskId, ...analysisInput },
+      });
+      expect(resumed.structuredContent).toMatchObject({ lifecycle: "QUEUED" });
+      expect(provideAnalysisInput).toHaveBeenCalledWith(
+        current,
+        taskId,
+        expect.objectContaining(analysisInput),
+      );
+
       const resources = await client.listResources();
       expect(resources.resources).toEqual(
         expect.arrayContaining([
@@ -105,6 +126,7 @@ describe("VerificationMcpService", () => {
         controlPlane: "Task Execution",
         preferredTools: expect.arrayContaining([
           "create_task",
+          "provide_task_analysis_input",
           "read_run_evidence",
         ]),
       });
