@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   runInterventionResolveInputSchema,
   taskDeploymentTargetInputSchema,
+  taskAnalysisInputSchema,
   taskExecutionCreateInputSchema,
   taskExecutionStageTypeSchema,
   taskStageRetryInputSchema,
@@ -206,6 +207,24 @@ export class VerificationMcpService {
       async ({ taskId }) => {
         requireToolScope(current, "run:read");
         return result(await this.taskService().detail(current, taskId));
+      },
+    );
+
+    server.registerTool(
+      "provide_task_analysis_input",
+      {
+        description:
+          "Supply all missing Issue, PR and test environment inputs in one request to resume Spec analysis.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskAnalysisInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().provideAnalysisInput(current, taskId, input),
+        );
       },
     );
 

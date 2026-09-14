@@ -15,6 +15,8 @@ import {
   taskExecutionCreateInputSchema,
   taskProfileSelectionInputSchema,
   taskStageRetryInputSchema,
+  taskCaseRerunInputSchema,
+  taskAnalysisInputSchema,
   executionConcurrencyPolicySchema,
 } from "@devproof/contracts";
 
@@ -156,6 +158,19 @@ export class TaskExecutionConsoleController {
     );
   }
 
+  @Post(":id/analysis-input")
+  provideAnalysisInput(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.provideAnalysisInput(
+      taskToolContext(current),
+      id,
+      parseBody(taskAnalysisInputSchema, body),
+    );
+  }
+
   @Post(":id/stages/:stage/retry")
   retryStage(
     @CurrentAuth() current: AuthContext,
@@ -168,6 +183,23 @@ export class TaskExecutionConsoleController {
       id,
       stage,
       parseBody(taskStageRetryInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/:caseId/rerun-task")
+  @HttpCode(202)
+  rerunCaseAsTask(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.rerunCaseAsTask(
+      taskToolContext(current),
+      id,
+      caseId,
+      parseBody(taskCaseRerunInputSchema, body),
+      { kind: "USER", triggerSource: "CONSOLE", userId: current.user.id },
     );
   }
 

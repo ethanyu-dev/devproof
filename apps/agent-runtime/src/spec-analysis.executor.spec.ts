@@ -24,6 +24,19 @@ const source: RuntimeSpecSourceRef = {
   uri: "https://linear.app/acme/issue/ENG-123/refund-flow",
 };
 
+const requiredPrUrl = "https://github.com/acme/web/pull/42";
+const requiredPrSources: RuntimeSpecSourceRef[] = (
+  ["GITHUB_PULL_REQUEST", "GITHUB_DIFF", "GITHUB_FILE"] as const
+).map((kind) => ({
+  ...source,
+  externalId: `${source.externalId}-${kind}`,
+  kind,
+  uri: requiredPrUrl,
+  revision: "head-a",
+  locator: kind === "GITHUB_PULL_REQUEST" ? {} : { path: "src/refund.ts" },
+}));
+const requiredPrResult = { pullRequestUrls: [requiredPrUrl] };
+
 const task: RuntimeSpecAnalysisTaskLease = {
   fencingToken: "3",
   leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -171,8 +184,8 @@ describe("SpecAnalysisExecutor", () => {
       ],
     };
     const executeSpecTool = vi.fn().mockResolvedValue({
-      result: { pullRequestUrls: [] },
-      sourceRefs: [issue],
+      result: requiredPrResult,
+      sourceRefs: [issue, ...requiredPrSources],
     });
     const { create, outcome } = await executeCalls(
       [
@@ -270,7 +283,7 @@ describe("SpecAnalysisExecutor", () => {
     expect(transcript).toContain("不能为通过校验删除需求");
   });
 
-  it("rejects the incident's Linear URL passed to GitHub and hides tools without linked PRs", async () => {
+  it("rejects the incident's Linear URL passed to GitHub and refuses Issue-only Specs", async () => {
     const executeSpecTool = vi.fn().mockResolvedValue({
       result: { pullRequestUrls: [] },
       sourceRefs: [source],
@@ -304,7 +317,7 @@ describe("SpecAnalysisExecutor", () => {
       ],
       executeSpecTool,
     );
-    expect(outcome.kind).toBe("SPEC_GENERATED");
+    expect(outcome.kind).toBe("RETRYABLE_FAILURE");
     expect(executeSpecTool).toHaveBeenCalledTimes(1);
     expect(
       create.mock.calls[0]![0].tools.map(
@@ -323,7 +336,55 @@ describe("SpecAnalysisExecutor", () => {
         (args) => args[1] === "agent.tool.failed",
       ),
     ).toHaveLength(2);
-    expect(JSON.stringify(create.mock.calls.at(-1))).toContain("没有关联 PR");
+    expect(
+      appendSpecEvent.mock.calls.find(
+        (args) => args[1] === "agent.spec.validation_failed",
+      )?.[2],
+    ).toMatchObject({
+      errorMessage: expect.stringContaining("生成 Spec 前必须补充关联 PR"),
+    });
+  });
+
+  it("pauses immediately when prerequisite checks request missing input", async () => {
+    const inputRequest = {
+      missing: ["PULL_REQUEST", "DEPLOYMENT_TARGET"],
+      message: "请补充关联 PR 和测试环境。",
+      issueRef: "ENG-123",
+      pullRequestUrls: [],
+      deploymentCandidates: [],
+    };
+    const executeSpecTool = vi.fn().mockResolvedValue({
+      result: { pullRequestUrls: [] },
+      sourceRefs: [source],
+      inputRequest,
+    });
+    const { create, appendSpecEvent, outcome } = await executeCalls(
+      [
+        call(
+          "linear_get_issue",
+          { analysisSummary: "检查需求和测试环境。" },
+          "issue",
+        ),
+        call(
+          "finish_spec",
+          { analysisSummary: "不应生成规格。", spec: refundSpec() },
+          "finish",
+        ),
+      ],
+      executeSpecTool,
+    );
+    expect(outcome).toEqual({
+      kind: "INPUT_REQUIRED",
+      request: inputRequest,
+      summary: inputRequest.message,
+    });
+    expect(create).toHaveBeenCalledOnce();
+    expect(executeSpecTool).toHaveBeenCalledOnce();
+    expect(
+      appendSpecEvent.mock.calls.find(
+        (args) => args[1] === "agent.segment.completed",
+      )?.[2],
+    ).toMatchObject({ status: "WAITING_HUMAN" });
   });
 
   it("requires metadata, diffs, file reads and discovered Route Specs for every linked PR", () => {
@@ -506,8 +567,10 @@ describe("SpecAnalysisExecutor", () => {
     const input = {
       spec,
       calledTools: new Set(["linear_get_issue"]),
-      linkedPullRequests: [],
-      sources: new Map([[source.externalId, source]]),
+      linkedPullRequests: [{ url: requiredPrUrl, changedFiles: [] }],
+      sources: new Map(
+        [source, ...requiredPrSources].map((item) => [item.externalId, item]),
+      ),
       sourceContents: new Map([[source.externalId, text]]),
       unavailableTools: new Set<string>(),
     };
@@ -644,8 +707,10 @@ describe("SpecAnalysisExecutor", () => {
     const input = {
       spec,
       calledTools: new Set(["linear_get_issue"]),
-      linkedPullRequests: [],
-      sources: new Map([[source.externalId, source]]),
+      linkedPullRequests: [{ url: requiredPrUrl, changedFiles: [] }],
+      sources: new Map(
+        [source, ...requiredPrSources].map((item) => [item.externalId, item]),
+      ),
       sourceContents: new Map([[source.externalId, issueText]]),
       unavailableTools: new Set<string>(),
     };
@@ -787,7 +852,7 @@ describe("SpecAnalysisExecutor", () => {
     expect(appendSpecEvent.mock.calls.at(-1)?.[1]).toBe("agent.tool.started");
   });
 
-  it("records every analysis step and completes an Issue-only Spec without knowledge", async () => {
+  it("records every analysis step and completes a Spec with required Issue and PR sources", async () => {
     const spec = {
       cases: [
         {
@@ -909,9 +974,9 @@ describe("SpecAnalysisExecutor", () => {
     const executeSpecTool = vi.fn().mockResolvedValueOnce({
       result: {
         issue: { identifier: "ENG-123", title: "Refund flow" },
-        pullRequestUrls: [],
+        pullRequestUrls: [requiredPrUrl],
       },
-      sourceRefs: [source],
+      sourceRefs: [source, ...requiredPrSources],
     });
     const executor = new SpecAnalysisExecutor(
       () => ({ complete: create }) as never,
@@ -946,7 +1011,9 @@ describe("SpecAnalysisExecutor", () => {
           arguments_[1] === "agent.tool.completed" &&
           arguments_[2]?.callId === "call-1",
       )?.[2],
-    ).toMatchObject({ sourceRefs: [source.externalId] });
+    ).toMatchObject({
+      sourceRefs: [source, ...requiredPrSources].map((item) => item.externalId),
+    });
     expect(kinds).toContain("agent.spec.generated");
     expect(
       kinds.filter((kind) => kind === "agent.spec.validation_failed"),
@@ -985,7 +1052,9 @@ describe("SpecAnalysisExecutor", () => {
       "必须逐字选择一个已经由来源工具返回的 analysis-source。",
     );
     expect(finishSpecParameters).toContain(
-      JSON.stringify({ enum: [source.externalId] }).slice(1, -1),
+      JSON.stringify({
+        enum: [source, ...requiredPrSources].map((item) => item.externalId),
+      }).slice(1, -1),
     );
 
     const finalRequest = create.mock.calls[3]?.[0] as {
@@ -1003,7 +1072,9 @@ describe("SpecAnalysisExecutor", () => {
       allowedSourceRefs?: string[];
       error?: string;
     };
-    expect(correction.allowedSourceRefs).toEqual([source.externalId]);
+    expect(correction.allowedSourceRefs).toEqual(
+      [source, ...requiredPrSources].map((item) => item.externalId),
+    );
     expect(correction.error).toContain("2 个尚未观察到的来源（共 2 处）");
     expect(correction.error).toContain("spec.cases[0].sourceRefs[0]");
     expect(correction.error).toContain(

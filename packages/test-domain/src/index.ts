@@ -203,6 +203,18 @@ export function projectTaskExecution(
       null,
     );
   }
+  if (input.analysisStatus === "WAITING_INPUT") {
+    return {
+      ...taskProjection(
+        "SPEC_ANALYSIS",
+        "WAITING_INPUT",
+        input.executionStatus,
+        null,
+        null,
+      ),
+      waitingReason: "ANALYSIS_INPUT_REQUIRED",
+    };
+  }
   if (input.analysisStatus === "FAILED") {
     return taskProjection(
       "SPEC_ANALYSIS",

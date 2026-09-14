@@ -45,11 +45,23 @@ export class IssueContextResolverService {
   async resolve(
     issueRef: string,
     teamId: string,
+    explicitPullRequestUrls: string[] = [],
   ): Promise<ResolvedIssueContext> {
     const linear = await this.linear.getIssue(issueRef);
-    const diagnostics: SpecificationContextDiagnostic[] = [];
+    const directUrls = [
+      ...new Set([...explicitPullRequestUrls, ...linear.pullRequestUrls]),
+    ];
+    const discovery = directUrls.length
+      ? null
+      : await this.github.discoverIssuePullRequests(teamId, linear.issue.url);
+    const urls = [
+      ...new Set([...directUrls, ...(discovery?.pullRequestUrls ?? [])]),
+    ];
+    const diagnostics: SpecificationContextDiagnostic[] = [
+      ...(discovery?.diagnostics ?? []),
+    ];
     const pullRequests = await Promise.all(
-      linear.pullRequestUrls.map(async (url, index) => {
+      urls.map(async (url, index) => {
         try {
           const result = await this.github.getPullRequest(
             teamId,

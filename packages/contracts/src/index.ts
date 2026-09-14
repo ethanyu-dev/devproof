@@ -1021,9 +1021,34 @@ export const taskDeploymentsInputSchema = z.object({
   deployments: z.array(taskDeploymentSchema).min(1).max(20),
 });
 
+export const taskAnalysisInputSchema = z.object({
+  expectedAttemptId: z.string().uuid(),
+  issueRef: issueTaskExecutionCreateInputSchema.shape.issueRef.optional(),
+  pullRequestUrls: issueTaskExecutionCreateInputSchema.shape.pullRequestUrls,
+  deployments: issueTaskExecutionCreateInputSchema.shape.deployments.optional(),
+});
+export type TaskAnalysisInput = z.infer<typeof taskAnalysisInputSchema>;
+export {
+  specAnalysisInputRequestSchema,
+  type SpecAnalysisInputRequest,
+} from "@devproof/agent-runtime-protocol";
+
 export const taskStageRetryInputSchema = z.object({
   reason: z.string().trim().max(1_000).default("manual retry"),
 });
+
+export const taskCaseRerunInputSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200),
+});
+
+export const taskCaseRerunSourceSchema = z.object({
+  taskId: z.string().uuid(),
+  caseId: z.string().uuid(),
+  caseName: z.string(),
+  snapshotId: z.string().uuid(),
+  executionIds: z.array(z.string().uuid()).min(1),
+});
+export type TaskCaseRerunSource = z.infer<typeof taskCaseRerunSourceSchema>;
 
 // Issue-first specification generation ---------------------------------------
 
@@ -1069,6 +1094,7 @@ export const specificationPullRequestContextSchema = z.object({
     .default([]),
   commits: z.number().int().nonnegative().default(0),
   deletions: z.number().int().nonnegative().default(0),
+  deploymentCandidates: z.array(z.string().url()).max(10).optional(),
   deploymentUrl: z.string().url().nullable().default(null),
   headRef: z.string().trim().min(1).max(500).default("unknown"),
   headSha: z.string().trim().min(1).max(100).default("unknown"),

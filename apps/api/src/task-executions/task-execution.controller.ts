@@ -14,6 +14,8 @@ import {
   taskDeploymentsInputSchema,
   taskExecutionCreateInputSchema,
   taskStageRetryInputSchema,
+  taskCaseRerunInputSchema,
+  taskAnalysisInputSchema,
 } from "@devproof/contracts";
 
 import { parseBody } from "../common/validation.js";
@@ -88,6 +90,20 @@ export class TaskExecutionController {
     );
   }
 
+  @Post(":id/analysis-input")
+  provideAnalysisInput(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.provideAnalysisInput(
+      current,
+      id,
+      parseBody(taskAnalysisInputSchema, body),
+    );
+  }
+
   @Post(":id/stages/:stage/retry")
   retryStage(
     @CurrentToolAuth() current: ToolAuthContext,
@@ -101,6 +117,23 @@ export class TaskExecutionController {
       id,
       stage,
       parseBody(taskStageRetryInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/:caseId/rerun-task")
+  @HttpCode(202)
+  rerunCaseAsTask(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Param("caseId") caseId: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunCaseAsTask(
+      current,
+      id,
+      caseId,
+      parseBody(taskCaseRerunInputSchema, body),
     );
   }
 

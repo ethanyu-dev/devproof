@@ -66,7 +66,10 @@ export function projectSpecGenerationTrajectory(
         startedAt,
         status: trajectoryStatus(attempt.status),
         step: null,
-        title: `Spec 生成 · Attempt ${attempt.number}`,
+        title:
+          isRecord(attempt.result) && attempt.result.reused === true
+            ? "复用原用例规格"
+            : `Spec 生成 · Attempt ${attempt.number}`,
       };
     },
   );
@@ -89,6 +92,8 @@ function specGenerationEvent(event: TaskEvent, analysisStatus?: string) {
       "task.created",
       "task.rerun.created",
       "task.rerun.linked",
+      "task.case.rerun.created",
+      "task.spec.reused",
       "task.spec.shadow_compared",
     ].includes(event.kind)
   ) {

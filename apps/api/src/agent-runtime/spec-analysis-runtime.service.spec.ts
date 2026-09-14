@@ -12,7 +12,7 @@ const leaseToken = "70844616-602c-475b-95f6-393015b82ed1";
 const nextAttemptId = "cc61de8d-cf29-4561-b2cd-c67c304668a6";
 const now = new Date("2026-09-04T10:00:00.000Z");
 const identity = { fencingToken: "4", leaseToken, workerId: "worker-1" };
-const claimInput = { protocol: { minor: 3 }, workerId: "worker-2" };
+const claimInput = { protocol: { minor: 18 }, workerId: "worker-2" };
 
 function analysisAttempt(
   options: {
@@ -122,7 +122,7 @@ function issueTaskInput() {
 
 describe("SpecAnalysisRuntimeService", () => {
   it.each([false, true])(
-    "persists source and requirement coverage for Issue-only Specs (compact: %s)",
+    "requests PR and environment together without persisting Issue-only Specs (compact: %s)",
     async (compact) => {
       const source = {
         externalId: `analysis-source://${attemptId}/issue`,
@@ -234,58 +234,20 @@ describe("SpecAnalysisRuntimeService", () => {
           }),
         },
       });
-      expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
-        completeness: "PARTIAL",
-        diagnostics: expect.arrayContaining([
-          expect.objectContaining({ code: "GITHUB_PR_NOT_LINKED" }),
-        ]),
-      });
-      expect(
-        createSnapshot.mock.calls[0]![0].data.context.specification,
-      ).toMatchObject({
-        assumptions: ["当前身份具有退款权限，需先核实。"],
-        risks: ["尚未读取 GitHub 实现。"],
-        scope: { inScope: ["退款"] },
-      });
-      if (compact) {
-        expect(createSnapshot.mock.calls[0]![0].data).toMatchObject({
-          generatorVersion: "agent-spec-v3",
-          context: {
-            specification: {
-              requirements: [{ id: "requirement-1" }, { id: "requirement-2" }],
-              uncoveredRequirements: [{ requirementId: "requirement-2" }],
-            },
-          },
-          diagnostics: expect.arrayContaining([
-            expect.objectContaining({
-              code: "SPEC_REQUIREMENT_UNCOVERED",
-              message: expect.stringContaining("缺少异常分支"),
-            }),
-          ]),
-        });
-      }
-      const coverage = {
-        issueSources: 1,
-        pullRequestSources: 0,
-        diffSources: 0,
-        fileSources: 0,
-        searchSources: 0,
-        checksObserved: 0,
-      };
+      expect(createSnapshot).not.toHaveBeenCalled();
       expect(updateAttempt.mock.calls[0]![0].data.result).toMatchObject({
-        completeness: "PARTIAL",
-        sourceCoverage: coverage,
+        stageStatus: "WAITING_INPUT",
+        inputRequest: { missing: ["PULL_REQUEST", "DEPLOYMENT_TARGET"] },
       });
-      expect(createEvents.mock.calls[0]![0].data[0]).toMatchObject({
-        kind: "task.stage.succeeded",
-        payload: {
-          completeness: "PARTIAL",
-          diagnostics: expect.arrayContaining([
-            expect.objectContaining({ code: "GITHUB_PR_NOT_LINKED" }),
-          ]),
-          sourceCoverage: coverage,
-        },
-      });
+      expect(tx.taskExecution.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            lifecycle: "WAITING_INPUT",
+            waitingReason: "ANALYSIS_INPUT_REQUIRED",
+          }),
+        }),
+      );
+      expect(createEvents).not.toHaveBeenCalled();
     },
   );
 
@@ -346,7 +308,23 @@ describe("SpecAnalysisRuntimeService", () => {
           {
             externalId: sourceRef,
             kind: "LINEAR_ISSUE",
-            content: { description: "未描述退款行为。" },
+            uri: "https://linear.app/acme/issue/ENG-123",
+            content: {
+              issue: { description: "未描述退款行为。" },
+              pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+            },
+          },
+          {
+            externalId: "analysis-source://pr",
+            kind: "GITHUB_PULL_REQUEST",
+            uri: "https://github.com/acme/web/pull/42",
+            content: {
+              pullRequest: {
+                title: "退款",
+                headSha: "abc",
+                deploymentUrl: "https://preview.example.com",
+              },
+            },
           },
           {
             externalId: "analysis-source://another",
@@ -398,7 +376,7 @@ describe("SpecAnalysisRuntimeService", () => {
     resetEnvForTests();
   });
 
-  it.each([3, 17])(
+  it.each([18, 19])(
     "recovers and negotiates generation format for protocol %s",
     async (minor) => {
       const expired = analysisAttempt({
@@ -802,6 +780,7 @@ describe("SpecAnalysisRuntimeService", () => {
             _sum: { byteSize: null },
           }),
           create: sourceCreate,
+          findFirst: vi.fn().mockResolvedValue(null),
         },
         taskStageAttempt: {
           findUnique: vi.fn().mockResolvedValue({

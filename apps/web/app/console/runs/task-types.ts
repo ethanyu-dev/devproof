@@ -1,4 +1,8 @@
-import type { ExecutionConcurrencyPolicy } from "@devproof/contracts";
+import type {
+  ExecutionConcurrencyPolicy,
+  TaskCaseRerunSource,
+  SpecAnalysisInputRequest,
+} from "@devproof/contracts";
 
 export interface TaskScheduling {
   state: string;
@@ -54,6 +58,8 @@ export interface TaskCaseExecution {
 }
 
 export interface TaskCase {
+  rerunBlockReason?: string | null;
+  latestRerunTaskId?: string | null;
   definition: {
     authRole: string;
     criteria?: Array<{
@@ -102,6 +108,9 @@ export interface TaskStage {
 }
 
 export interface TaskDetail {
+  analysisInputRequest?:
+    (SpecAnalysisInputRequest & { attemptId: string }) | null;
+  caseRerunSource?: TaskCaseRerunSource | null;
   cancelRequestedAt: string | null;
   cases: TaskCase[];
   counts: {

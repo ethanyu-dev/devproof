@@ -24,10 +24,11 @@ import { FormMessage } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
 import { retainedProfilePolicy } from "./profile-policy";
+import { TaskAnalysisInputCard } from "./task-analysis-input";
 import { TaskLogs } from "./task-logs";
 import { caseDescription, latestTaskCaseExecutions } from "./task-case-display";
 import styles from "./task-detail.module.css";
-import { executionHref } from "./task-navigation";
+import { executionHref, taskDetailHref } from "./task-navigation";
 import {
   executionSchedulingLabel,
   schedulingWaitText,
@@ -77,6 +78,7 @@ function downloadJson(value: unknown, filename: string) {
 }
 
 export function TaskDetailContent({
+  onRerunCase,
   busy,
   detail,
   onMutate,
@@ -88,6 +90,7 @@ export function TaskDetailContent({
   onRetryEvents,
   taskHref,
 }: {
+  onRerunCase: (caseId: string) => Promise<void>;
   busy: boolean;
   detail: TaskDetail;
   onMutate: (path: string, body?: unknown) => Promise<TaskDetail | null>;
@@ -224,6 +227,24 @@ export function TaskDetailContent({
         aria-label={detail.kind === "ISSUE_SPEC" ? "执行用例" : "执行记录"}
         hidden={view !== "specs"}
       >
+        {detail.caseRerunSource && (
+          <div
+            className={`${styles.analysisNotice} ${styles.rerunNotice}`}
+            role="status"
+          >
+            <Badge tone="info">单用例重跑</Badge>
+            <p>
+              复用「{detail.caseRerunSource.caseName}
+              」的原规格，执行时间从本任务重新计算。
+            </p>
+            <Link
+              className={styles.detailLink}
+              href={taskDetailHref(detail.caseRerunSource.taskId)}
+            >
+              查看原任务 <ArrowRight />
+            </Link>
+          </div>
+        )}
         {profileError && <FormMessage message={profileError} tone="error" />}
         {failedStages.map((stage) => (
           <StageFailureNotice
@@ -239,6 +260,15 @@ export function TaskDetailContent({
           />
         ))}
 
+        {detail.waitingReason === "ANALYSIS_INPUT_REQUIRED" &&
+          detail.analysisInputRequest && (
+            <TaskAnalysisInputCard
+              key={detail.analysisInputRequest.attemptId}
+              request={detail.analysisInputRequest}
+              busy={busy}
+              onSubmit={(input) => onMutate("/analysis-input", input)}
+            />
+          )}
         {detail.waitingReason === "DEPLOYMENT_TARGET_REQUIRED" ? (
           <Card className="dp-task-input-card">
             <div className="dp-section-head">
@@ -532,13 +562,13 @@ export function TaskDetailContent({
                   <CaseCard
                     allCases={detail.cases}
                     busy={busy}
-                    canRerun={
+                    canEditPolicy={
                       detail.cancelRequestedAt === null &&
                       new Date(detail.deadlineAt).getTime() - Date.now() >=
                         30_000
                     }
                     key={testCase.id}
-                    onRerun={() => void onMutate(`/cases/${testCase.id}/rerun`)}
+                    onRerun={() => void onRerunCase(testCase.id)}
                     onSavePolicy={(executionId, policy) =>
                       onMutate(`/cases/${executionId}/policy`, policy)
                     }
@@ -668,7 +698,7 @@ function SpecificationSnapshot({ detail }: { detail: TaskDetail }) {
 function CaseCard({
   allCases,
   busy,
-  canRerun,
+  canEditPolicy,
   onRerun,
   onSavePolicy,
   testCase,
@@ -676,7 +706,7 @@ function CaseCard({
 }: {
   allCases: TaskCase[];
   busy: boolean;
-  canRerun: boolean;
+  canEditPolicy: boolean;
   onRerun: () => void;
   onSavePolicy: (
     executionId: string,
@@ -758,11 +788,11 @@ function CaseCard({
         <div className={styles.caseActions}>
           {rerunnable && (
             <Button
-              disabled={busy || !canRerun}
+              disabled={busy || Boolean(testCase.rerunBlockReason)}
               onClick={() => {
                 if (
                   window.confirm(
-                    "确认重跑此用例？当前执行及证据会保留，并新建一次执行。",
+                    "创建一个仅执行此用例的新任务？将复用原用例规格和验证环境，保留当前任务及证据。",
                   )
                 ) {
                   onRerun();
@@ -770,14 +800,20 @@ function CaseCard({
               }}
               size="sm"
               title={
-                canRerun
-                  ? "保留当前记录并重新执行用例"
-                  : "任务已取消或剩余时间不足，无法重跑"
+                testCase.rerunBlockReason ?? "创建新任务重跑此用例，保留原记录"
               }
               variant="ghost"
             >
               <RotateCcw /> 重跑
             </Button>
+          )}
+          {testCase.latestRerunTaskId && (
+            <Link
+              className={styles.detailLink}
+              href={taskDetailHref(testCase.latestRerunTaskId)}
+            >
+              查看重跑任务 <ArrowRight />
+            </Link>
           )}
           {selected?.run ? (
             <Link
@@ -790,6 +826,11 @@ function CaseCard({
           ) : null}
         </div>
       </div>
+      {rerunnable && testCase.rerunBlockReason && (
+        <p className={styles.rerunReason} role="status">
+          {testCase.rerunBlockReason}
+        </p>
+      )}
       {selected && !selected.run && (
         <div className={styles.pendingExecution}>
           <p>{executionSchedulingLabel(selected)}，执行创建后可查看详情。</p>
@@ -797,7 +838,7 @@ function CaseCard({
           {selectedFailure && <p>{selectedFailure}</p>}
           {["PENDING", "FAILED"].includes(selected.dispatch.status) &&
             selected.dispatch.attempts < 3 &&
-            canRerun && (
+            canEditPolicy && (
               <CasePolicyEditor
                 key={selected.id}
                 busy={busy}

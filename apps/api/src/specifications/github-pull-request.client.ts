@@ -205,7 +205,7 @@ export class GithubPullRequestClient {
     const headSha = stringValue(head.sha, "unknown");
     assertGithubRevision(expectedRevision, headSha, pullRequestUrl);
     const diagnostics: SpecificationContextDiagnostic[] = [];
-    const [files, checks, deployment] = await Promise.all([
+    const [files, checks, deploymentCandidates] = await Promise.all([
       this.collectChangedFiles(
         prefix,
         reference.number,
@@ -245,7 +245,7 @@ export class GithubPullRequestClient {
           return [];
         },
       ),
-      this.deployment(prefix, headSha, token, pullRequestUrl).catch(
+      this.deployments(prefix, headSha, token, pullRequestUrl).catch(
         (error: unknown) => {
           diagnostics.push(
             diagnostic(
@@ -255,11 +255,11 @@ export class GithubPullRequestClient {
               pullRequestUrl,
             ),
           );
-          return null;
+          return [];
         },
       ),
     ]);
-    if (!deployment) {
+    if (!deploymentCandidates.length) {
       diagnostics.push(
         diagnostic(
           "INFO",
@@ -286,7 +286,9 @@ export class GithubPullRequestClient {
       checks,
       commits: numberValue(raw.commits),
       deletions: numberValue(raw.deletions),
-      deploymentUrl: deployment,
+      deploymentCandidates,
+      deploymentUrl:
+        deploymentCandidates.length === 1 ? deploymentCandidates[0] : null,
       headRef: stringValue(head.ref, "unknown"),
       headSha,
       id: String(raw.node_id ?? raw.id ?? pullRequestUrl),
@@ -606,7 +608,7 @@ export class GithubPullRequestClient {
     }));
   }
 
-  private async deployment(
+  private async deployments(
     prefix: string,
     headSha: string,
     token: string,
@@ -617,6 +619,7 @@ export class GithubPullRequestClient {
       token,
       reference,
     );
+    const urls = new Set<string>();
     for (const deployment of Array.isArray(payload)
       ? payload.filter(isRecord)
       : []) {
@@ -628,11 +631,12 @@ export class GithubPullRequestClient {
       );
       if (!Array.isArray(statuses)) continue;
       const rows = statuses.filter(isRecord);
-      const selected = rows.find((row) => row.state === "success") ?? rows[0];
+      const selected = rows[0]?.state === "success" ? rows[0] : null;
       const url = httpUrl(selected?.environment_url);
-      if (url) return url;
+      if (url) urls.add(url);
     }
-    return null;
+    // Preserve every candidate so ambiguity survives aggregation across PRs.
+    return [...urls];
   }
 
   private async request(path: string, token: string, reference: string) {

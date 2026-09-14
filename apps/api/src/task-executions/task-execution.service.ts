@@ -1,3 +1,4 @@
+import { ContextSourceError } from "../specifications/context-source.error.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
@@ -14,6 +15,7 @@ import {
   type TaskDeploymentsInput,
   type TaskExecutionCreateInput,
   type TaskStageRetryInput,
+  type TaskAnalysisInput,
 } from "@devproof/contracts";
 import {
   caseExecutionPhase,
@@ -42,16 +44,28 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { GithubAccessService } from "../console/github-access.service.js";
 import { PrismaService } from "../database/prisma.service.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { redactText } from "../observability/observability.service.js";
 import { parsePullRequestUrl } from "../specifications/github-pull-request.client.js";
 import { IssueContextResolverService } from "../specifications/issue-context-resolver.service.js";
 import type { ToolAuthContext } from "../tool-auth/tool-auth.types.js";
 import { ProfileReservationService } from "./profile-reservation.service.js";
+import {
+  assessAnalysisInputs,
+  pauseAnalysisForInput,
+  resumeAnalysisWithInput,
+} from "./task-analysis-input.js";
 import { refreshedTaskDeadline } from "./task-deadline.js";
 import { taskDeploymentMatrix } from "./task-deployment-matrix.js";
 import { TaskLogBundleService } from "./task-log-bundle.service.js";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
+import {
+  caseRerunBlockReason,
+  caseRerunInclude,
+  caseRerunSource,
+  insertCaseRerunTask,
+} from "./task-case-rerun.js";
 import {
   enqueueTaskCompletionNotifications,
   taskNotificationContext,
@@ -85,6 +99,12 @@ export function taskDeadlineElapsed(input: {
 }
 
 const taskDetailInclude = {
+  events: {
+    where: { kind: "task.case.rerun.created" },
+    select: { payload: true, occurredAt: true },
+    orderBy: { occurredAt: "desc" as const },
+    take: 50,
+  },
   analysisSources: { orderBy: { createdAt: "asc" as const } },
   caseExecutions: {
     include: {
@@ -622,6 +642,15 @@ export class TaskExecutionService {
       );
     }
     return (await this.logBundles.build(current.team.id, id)).bundle;
+  }
+
+  async provideAnalysisInput(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskAnalysisInput,
+  ) {
+    await resumeAnalysisWithInput(this.prisma, current.team.id, id, input);
+    return this.detail(current, id);
   }
 
   async setDeploymentTarget(
@@ -1164,6 +1193,65 @@ export class TaskExecutionService {
     return this.detail(current, id);
   }
 
+  async rerunCaseAsTask(
+    current: ToolAuthContext,
+    id: string,
+    caseId: string,
+    input: { idempotencyKey: string },
+    actor: TaskRequestActor = { kind: "CREDENTIAL", triggerSource: "CONSOLE" },
+  ) {
+    const taskId = await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(
+        tx,
+        `case-rerun:${current.team.id}:${input.idempotencyKey}`,
+      );
+      const existing = await tx.taskExecution.findUnique({
+        where: {
+          teamId_idempotencyKey: {
+            teamId: current.team.id,
+            idempotencyKey: input.idempotencyKey,
+          },
+        },
+        select: { id: true, environmentSnapshot: true },
+      });
+      if (existing) {
+        const source = caseRerunSource(existing.environmentSnapshot);
+        if (source?.taskId !== id || source.caseId !== caseId)
+          throw new ConflictException(
+            "该重跑请求标识已被其他任务使用，请刷新后重试。",
+          );
+        return existing.id;
+      }
+      const source = await tx.taskExecution.findFirst({
+        where: { id, teamId: current.team.id },
+        include: {
+          ...caseRerunInclude,
+          caseExecutions: {
+            ...caseRerunInclude.caseExecutions,
+            where: { caseId, deployment: { enabled: true } },
+          },
+        },
+      });
+      if (!source)
+        throw new NotFoundException(`Task execution ${id} was not found.`);
+      if (source.kind !== "ISSUE_SPEC")
+        throw new ConflictException("仅 Issue 任务支持单用例重跑。");
+      const executions = latestCaseExecutions(source.caseExecutions);
+      if (!executions.length)
+        throw new NotFoundException(`Spec Case ${caseId} was not found.`);
+      return insertCaseRerunTask(
+        tx,
+        source,
+        executions,
+        input.idempotencyKey,
+        actor,
+      );
+    });
+    // The durable worker resolves identity and dispatches after commit. No
+    // external calls extend this request past the console's retry timeout.
+    return this.detail(current, taskId);
+  }
+
   async cancel(current: ToolAuthContext, id: string) {
     const task = await this.prisma.taskExecution.findFirst({
       include: { executionRuns: { select: { id: true, lifecycle: true } } },
@@ -1247,6 +1335,12 @@ export class TaskExecutionService {
         inputSnapshot: true,
         kind: true,
         notificationContext: true,
+        environmentSnapshot: true,
+        specificationSnapshots: {
+          orderBy: { generatedAt: "desc" },
+          take: 1,
+          select: { cases: { select: { id: true } } },
+        },
       },
       where: { id, teamId: current.team.id },
     });
@@ -1254,6 +1348,20 @@ export class TaskExecutionService {
       throw new NotFoundException(`Task execution ${id} was not found.`);
     if (task.kind === "LEGACY_RUN") {
       throw new ConflictException("Historical tasks cannot be rerun.");
+    }
+    if (caseRerunSource(task.environmentSnapshot)) {
+      const selected = task.specificationSnapshots[0]?.cases[0];
+      if (!selected)
+        throw new ConflictException("原用例规格已缺失，无法重跑。");
+      return this.rerunCaseAsTask(
+        current,
+        id,
+        selected.id,
+        {
+          idempotencyKey: `rerun:${id}:${randomUUID()}`,
+        },
+        actor,
+      );
     }
     const input = taskExecutionCreateInputSchema.parse(task.inputSnapshot);
     const rerunInput = taskExecutionCreateInputSchema.parse({
@@ -1388,9 +1496,11 @@ export class TaskExecutionService {
         tasks: run.tasks,
       },
     }));
-    const waitingForHuman = [...issueCases, ...directCases].some(
-      (item) => item.run?.lifecycle === "WAITING_HUMAN",
-    );
+    const waitingForHuman =
+      analysis.status === "WAITING_INPUT" ||
+      [...issueCases, ...directCases].some(
+        (item) => item.run?.lifecycle === "WAITING_HUMAN",
+      );
     const direct = task.kind === "DIRECT_RUN" || task.kind === "LEGACY_RUN";
     const matrix = taskDeploymentMatrix(
       task.id,
@@ -1454,16 +1564,19 @@ export class TaskExecutionService {
         typeof environment.targetUrl === "string",
       timedOut,
     });
+    const singleCaseRerun = caseRerunSource(task.environmentSnapshot) !== null;
     const diagnostics = task.specificationSnapshots[0]?.diagnostics;
     if (
       !direct &&
+      !singleCaseRerun &&
       projection.verdict === "PASSED" &&
       Array.isArray(diagnostics) &&
       diagnostics.some(
         (item) => record(item).code === "SPEC_REQUIREMENT_UNCOVERED",
       )
     ) {
-      // Passing the generated subset does not establish the omitted requirements.
+      // Full-task verdicts cover the original requirements. Single-Case reruns
+      // retain those diagnostics for context but only verify the selected Case.
       projection.verdict = "INCONCLUSIVE";
     }
     const now = new Date();
@@ -1491,6 +1604,7 @@ export class TaskExecutionService {
     const completionSpecification = task.specificationSnapshots[0] ?? null;
     const enableGithub =
       becameTerminal &&
+      !singleCaseRerun &&
       (await this.githubWritebackEnabled(
         task.teamId,
         completionSpecification?.primaryPullRequestUrl ?? null,
@@ -2134,22 +2248,72 @@ export class TaskExecutionService {
     if (input.kind !== "ISSUE_SPEC") {
       throw new ConflictException("Only Issue tasks have an analysis stage.");
     }
-    const resolved = await this.resolver.resolve(
-      input.issueRef,
-      attempt.stage.taskExecution.teamId,
+    const resolved = await this.resolver
+      .resolve(
+        input.issueRef,
+        attempt.stage.taskExecution.teamId,
+        input.pullRequestUrls,
+      )
+      .catch((error: unknown) => {
+        if (error instanceof ContextSourceError && error.source === "LINEAR")
+          return null;
+        throw error;
+      });
+    const context = resolved?.context;
+    const assessment = assessAnalysisInputs(
+      input,
+      context
+        ? [
+            {
+              kind: "LINEAR_ISSUE",
+              uri: context.issue.url,
+              content: {
+                issue: context.issue,
+                pullRequestUrls: context.pullRequests.map((pr) => pr.url),
+              },
+            },
+            ...context.pullRequests.map((pr) => ({
+              kind: "GITHUB_PULL_REQUEST",
+              uri: pr.url,
+              content: { pullRequest: pr },
+            })),
+          ]
+        : [],
     );
-    const context = resolved.context;
+    if (!resolved || !context || assessment.request) {
+      await this.prisma.$transaction(async (tx) => {
+        const lockedParent = await tx.taskExecution.updateMany({
+          where: {
+            id: attempt.stage.taskExecutionId,
+            cancelRequestedAt: null,
+            lifecycle: { in: ["QUEUED", "RUNNING"] },
+            deadlineAt: { gt: new Date() },
+          },
+          data: { projectionNeededAt: new Date() },
+        });
+        if (!lockedParent.count)
+          throw new ConflictException("The task is no longer active.");
+        const locked = await tx.taskStageAttempt.findUniqueOrThrow({
+          where: { id: attemptId },
+          include: { stage: { include: { taskExecution: true } } },
+        });
+        requireAnalysisLease(locked, leaseToken);
+        await pauseAnalysisForInput(
+          tx,
+          locked,
+          assessment.request!,
+          new Date(),
+        );
+      });
+      return;
+    }
     const generated = generateBusinessTestSpec(context);
     const cases = generated.cases.map((item) =>
       generatedTestCaseDefinitionSchema.parse(item),
     );
     const sourceHash = testGenerationContextHash(context);
     const primaryPullRequest = selectPrimaryPullRequest(context);
-    const targetUrl =
-      input.deployments[0]?.targetUrl ??
-      input.targetUrl ??
-      primaryPullRequest?.deploymentUrl ??
-      null;
+    const targetUrl = assessment.targetUrl;
     const normalizedTarget = targetUrl ? normalizeTargetUrl(targetUrl) : null;
     const target = normalizedTarget ? new URL(normalizedTarget) : null;
     const now = new Date();
@@ -3362,6 +3526,22 @@ function toTaskDetail(row: TaskDetailRow) {
     id: testCase.id,
     name: testCase.name,
     position: testCase.position,
+    rerunBlockReason: caseRerunBlockReason(
+      latestCaseExecutions(
+        (executionsByCase.get(testCase.id) ?? []).filter(
+          (item) => item.deployment.enabled !== false,
+        ),
+      ),
+      row,
+    ),
+    latestRerunTaskId:
+      ((row.events ?? [])
+        .map((item) => record(item.payload))
+        .find(
+          (payload) =>
+            payload.caseId === testCase.id &&
+            typeof payload.rerunTaskId === "string",
+        )?.rerunTaskId as string | undefined) ?? null,
   }));
   const allExecutions =
     row.kind === "DIRECT_RUN" || row.kind === "LEGACY_RUN"
@@ -3396,6 +3576,7 @@ function toTaskDetail(row: TaskDetailRow) {
     currentStage: row.currentStage,
     deadlineAt: row.deadlineAt.toISOString(),
     environment: row.environmentSnapshot,
+    caseRerunSource: caseRerunSource(row.environmentSnapshot),
     deployments: row.deployments.map((deployment) => ({
       enabled: deployment.enabled,
       environment: deployment.environmentSnapshot,
@@ -3487,6 +3668,10 @@ function toTaskDetail(row: TaskDetailRow) {
     updatedAt: row.updatedAt.toISOString(),
     verdict: row.verdict,
     waitingReason: row.waitingReason,
+    analysisInputRequest:
+      row.waitingReason === "ANALYSIS_INPUT_REQUIRED"
+        ? (record(row.environmentSnapshot).analysisInputRequest ?? null)
+        : null,
   };
 }
 

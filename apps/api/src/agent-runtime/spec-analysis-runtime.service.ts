@@ -42,9 +42,13 @@ import {
   GithubPullRequestClient,
 } from "../specifications/github-pull-request.client.js";
 import { LinearContextClient } from "../specifications/linear-context.client.js";
+import {
+  assessAnalysisInputs,
+  pauseAnalysisForInput,
+} from "../task-executions/task-analysis-input.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
 
-const SPEC_PROTOCOL_MINOR = 3;
+const SPEC_PROTOCOL_MINOR = 18;
 const SOURCE_PAGE_SIZE = 20;
 const MAX_SOURCE_BYTES = 2_000_000;
 const MAX_SOURCE_COUNT = 3_250;
@@ -240,8 +244,12 @@ export class SpecAnalysisRuntimeService {
             issueRef: createInput.issueRef,
             modelCandidates,
             stageAttemptId: attempt.id,
-            ...(createInput.targetUrl
-              ? { targetUrl: createInput.targetUrl }
+            ...((createInput.deployments[0]?.targetUrl ?? createInput.targetUrl)
+              ? {
+                  targetUrl:
+                    createInput.deployments[0]?.targetUrl ??
+                    createInput.targetUrl,
+                }
               : {}),
             taskExecutionId: attempt.stage.taskExecutionId,
             teamId,
@@ -400,40 +408,97 @@ export class SpecAnalysisRuntimeService {
 
     if (input.name === "linear_get_issue") {
       analysisSummarySchema.parse(input.arguments.analysisSummary);
-      const linear = await this.linear.getIssue(createInput.issueRef);
+      // Resolve every required input before asking once for missing information.
+      // Read PR metadata here so deployment discovery does not cause a second HITL.
+      const sourceRefs: RuntimeSpecSourceRef[] = [];
+      const sources: Array<{ kind: string; uri: string; content: unknown }> =
+        [];
+      let linear: Awaited<ReturnType<LinearContextClient["getIssue"]>> | null =
+        null;
+      try {
+        linear = await this.linear.getIssue(createInput.issueRef);
+      } catch {
+        // A corrected Issue reference or restored access can resume this task.
+      }
       const directUrls = [
         ...new Set(
           [
             ...(createInput.pullRequestUrls ?? []),
-            ...linear.pullRequestUrls,
+            ...(linear?.pullRequestUrls ?? []),
           ].map((url) => url.replace(/\/$/u, "")),
         ),
       ];
-      const discovery = directUrls.length
-        ? null
-        : await this.github.discoverIssuePullRequests(teamId, linear.issue.url);
+      const discovery =
+        !directUrls.length && linear
+          ? await this.github.discoverIssuePullRequests(
+              teamId,
+              linear.issue.url,
+            )
+          : null;
       const result = {
-        ...linear,
+        ...(linear ?? {}),
         pullRequestUrls: [
           ...new Set([...directUrls, ...(discovery?.pullRequestUrls ?? [])]),
         ].slice(0, 25),
         discoveryDiagnostics: [
-          ...(linear.diagnostics ?? []),
+          ...(linear?.diagnostics ?? []),
           ...(discovery?.diagnostics ?? []),
         ],
       };
-      const source = await this.persistSource(attempt, {
-        content: result,
-        excerpt: result.issue.description.slice(0, 2_000),
-        kind: "LINEAR_ISSUE",
-        label: `${result.issue.identifier} · ${result.issue.title}`,
-        locator: { issueId: result.issue.id },
-        revision: null,
-        uri: result.issue.url,
-      });
+      if (linear) {
+        const source = await this.persistSource(attempt, {
+          content: result,
+          excerpt: linear.issue.description.slice(0, 2_000),
+          kind: "LINEAR_ISSUE",
+          label: `${linear.issue.identifier} · ${linear.issue.title}`,
+          locator: { issueId: linear.issue.id },
+          revision: null,
+          uri: linear.issue.url,
+        });
+        sourceRefs.push(source);
+        sources.push({ ...source, content: result });
+      }
+      const pullRequests = [];
+      for (const url of result.pullRequestUrls) {
+        const revision = await this.pinnedRevision(attempt.id, url);
+        let resolved: Awaited<
+          ReturnType<GithubPullRequestClient["getPullRequest"]>
+        >;
+        try {
+          resolved = await this.github.getPullRequest(
+            teamId,
+            url,
+            url === result.pullRequestUrls[0],
+            revision,
+          );
+        } catch {
+          continue;
+        }
+        const pr = resolved.pullRequest;
+        const source = await this.persistSource(attempt, {
+          content: resolved,
+          excerpt: pr.body.slice(0, 2_000),
+          kind: "GITHUB_PULL_REQUEST",
+          label: `${pr.repository}#${pr.number} · ${pr.title}`,
+          locator: { pullRequestNumber: pr.number },
+          revision: pr.headSha,
+          uri: url,
+        });
+        sourceRefs.push(source);
+        sources.push({ ...source, content: resolved });
+        pullRequests.push({ ...resolved, sourceRef: source.externalId });
+      }
+      const assessment = assessAnalysisInputs(createInput, sources);
       return runtimeSpecAnalysisToolOutputSchema.parse({
-        result: { ...result, sourceRef: source.externalId },
-        sourceRefs: [source],
+        result: {
+          ...result,
+          pullRequests,
+          targetUrl: assessment.targetUrl,
+          sourceRef: sourceRefs.find((source) => source.kind === "LINEAR_ISSUE")
+            ?.externalId,
+        },
+        ...(assessment.request ? { inputRequest: assessment.request } : {}),
+        sourceRefs,
       });
     }
 
@@ -613,6 +678,44 @@ export class SpecAnalysisRuntimeService {
     if (attempt.status !== "RUNNING") {
       throw new ConflictException("The Spec analysis attempt is terminal.");
     }
+    if (
+      outcome.kind === "SPEC_GENERATED" ||
+      outcome.kind === "INPUT_REQUIRED"
+    ) {
+      const assessment = assessAnalysisInputs(
+        attempt.stage.taskExecution.inputSnapshot,
+        attempt.analysisSources,
+      );
+      if (assessment.request) {
+        return this.prisma.$transaction(async (tx) => {
+          if (
+            !(await this.lockActiveTask(
+              tx,
+              attempt.stage.taskExecutionId,
+              teamId,
+            ))
+          )
+            throw new ConflictException(
+              "The task no longer accepts analysis input requests.",
+            );
+          const locked = await this.findAttempt(tx, teamId, attempt.id);
+          const now = await databaseNow(tx);
+          this.requireLease(locked, input, now);
+          requireActiveTask(locked.stage.taskExecution, now);
+          return pauseAnalysisForInput(
+            tx,
+            locked,
+            assessment.request!,
+            now,
+            input.completionId,
+          );
+        });
+      }
+      if (outcome.kind === "INPUT_REQUIRED")
+        throw new BadRequestException(
+          "All required analysis inputs are already available.",
+        );
+    }
     if (outcome.kind !== "SPEC_GENERATED") {
       return this.persistFailure(attempt, input.completionId, outcome);
     }
@@ -661,6 +764,41 @@ export class SpecAnalysisRuntimeService {
       const uri = source.uri.split("/files#")[0]!;
       assertGithubRevision(revisions.get(uri), source.revision, uri);
       revisions.set(uri, source.revision);
+    }
+    const assessment = assessAnalysisInputs(
+      attempt.stage.taskExecution.inputSnapshot,
+      attempt.analysisSources,
+    );
+    for (const coverage of specPullRequestCoverage(
+      assessment.pullRequestUrls.map((url) => ({
+        url,
+        changedFiles: z
+          .array(z.string())
+          .parse(
+            record(
+              record(
+                attempt.analysisSources.findLast(
+                  (source) =>
+                    source.kind === "GITHUB_PULL_REQUEST" && source.uri === url,
+                )?.content,
+              ).pullRequest,
+            ).changedFiles ?? [],
+          ),
+      })),
+      attempt.analysisSources.map((source) => ({
+        ...source,
+        locator: record(source.locator),
+      })),
+    )) {
+      if (
+        !coverage.metadataRead ||
+        !coverage.diffSourceCount ||
+        !coverage.fileSourceCount ||
+        coverage.unreadRouteSpecs.length
+      )
+        throw new BadRequestException(
+          `生成 Spec 前必须读取关联 PR 的元数据、变更 diff 和相关代码（包含 Route Spec）：${coverage.url}`,
+        );
     }
     const context = buildSpecAnalysisContext(attempt.analysisSources);
     const { cases: _cases, ...specification } = spec;
@@ -716,11 +854,10 @@ export class SpecAnalysisRuntimeService {
     if (createInput.kind !== "ISSUE_SPEC") {
       throw new ConflictException("Only Issue tasks support generated Specs.");
     }
-    const targetUrl =
-      createInput.deployments[0]?.targetUrl ??
-      createInput.targetUrl ??
-      primaryPullRequest?.deploymentUrl ??
-      null;
+    const targetUrl = assessAnalysisInputs(
+      createInput,
+      attempt.analysisSources,
+    ).targetUrl;
     const normalizedTarget = targetUrl ? normalizeTargetUrl(targetUrl) : null;
     const target = normalizedTarget ? new URL(normalizedTarget) : null;
     const sourceHash = hashJson(
@@ -934,7 +1071,10 @@ export class SpecAnalysisRuntimeService {
   private async persistFailure(
     attempt: Awaited<ReturnType<SpecAnalysisRuntimeService["loadedAttempt"]>>,
     completionId: string,
-    outcome: Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
+    outcome: Extract<
+      RuntimeSpecAnalysisOutcome,
+      { kind: "FATAL_FAILURE" | "RETRYABLE_FAILURE" }
+    >,
   ) {
     return this.prisma.$transaction(async (tx) => {
       if (
@@ -999,7 +1139,10 @@ export class SpecAnalysisRuntimeService {
       executionDisposition: "RUNTIME_LOST",
       kind: "RETRYABLE_FAILURE",
       summary: `第 ${attempt.number} 次 Spec 分析失去租约。`,
-    } satisfies Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>;
+    } satisfies Extract<
+      RuntimeSpecAnalysisOutcome,
+      { kind: "FATAL_FAILURE" | "RETRYABLE_FAILURE" }
+    >;
     await this.finishFailedAttempt(tx, attempt, randomUUID(), outcome, now, {
       actor: "CONTROL_PLANE",
       where: {
@@ -1017,7 +1160,10 @@ export class SpecAnalysisRuntimeService {
     tx: Prisma.TransactionClient,
     attempt: AnalysisAttempt,
     completionId: string,
-    outcome: Exclude<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
+    outcome: Extract<
+      RuntimeSpecAnalysisOutcome,
+      { kind: "FATAL_FAILURE" | "RETRYABLE_FAILURE" }
+    >,
     now: Date,
     transition: {
       actor: "AGENT_RUNTIME" | "CONTROL_PLANE";
@@ -1655,7 +1801,9 @@ function acknowledgedOutcome(
   if (result.completionId !== completionId) return null;
   const nextAttemptScheduled = Boolean(result.nextAttemptScheduled);
   const stageStatus =
-    result.stageStatus === "FAILED" || result.stageStatus === "PENDING"
+    result.stageStatus === "FAILED" ||
+    result.stageStatus === "PENDING" ||
+    result.stageStatus === "WAITING_INPUT"
       ? result.stageStatus
       : "SUCCEEDED";
   return {
