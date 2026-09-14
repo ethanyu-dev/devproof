@@ -95,6 +95,10 @@ Console 默认使用普通成员视图，只展示团队全部任务及任务需
 
 `/v2/tasks` 是新的用户任务入口；`POST /v2/runs` 会兼容地创建 `DIRECT_RUN` Task 并返回其子 Run，其余 `/v2/runs` 接口用于下钻实际执行资源。旧 `/v2/specifications` 仅保留列表和详情读取，写接口返回 `410 Gone`，Console 不再提供独立 Spec 面板。旧 `/v1/verifications` 仅用于存量记录兼容和迁移期排空。DevProof API 是唯一能够推进 Task/Run 状态、安排重试和执行清理的组件。
 
+任务详情中的用例“重跑”会创建只包含该用例的新任务，复用原规格及当前验证环境，并重新计算执行期限、解析浏览器身份。原任务、执行记录和证据保留，新旧任务提供互相查看的入口。原任务过期不影响此操作；用例仍在执行、配置了显式前置依赖或存在未确认业务写入时会阻止重跑并提示原因。
+
+HTTP 使用 `POST /v2/tasks/:id/cases/:caseId/rerun-task`，请求体为 `{"idempotencyKey":"<本次重跑的唯一标识>"}`，需要 `run:write` 权限；超时重试应复用同一标识。Console 提供同路径的 `/console/api/tasks` 会话接口。单用例重跑结果不会作为完整任务的 GitHub PR 验证结果回写；在新任务上再次重跑仍保持单用例范围。
+
 ## 本地启动
 
 要求 Node.js 24、pnpm 10 和 Docker。

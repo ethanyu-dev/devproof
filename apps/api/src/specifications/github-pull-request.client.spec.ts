@@ -1,8 +1,125 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GithubPullRequestClient } from "./github-pull-request.client.js";
+import { IssueContextResolverService } from "./issue-context-resolver.service.js";
+import { assessAnalysisInputs } from "../task-executions/task-analysis-input.js";
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("deployment prerequisites", () => {
+  it.each(["AGENT", "DETERMINISTIC"])(
+    "preserves deployment ambiguity through %s context resolution",
+    async (mode) => {
+      const issue = {
+        id: "issue-1",
+        identifier: "ENG-123",
+        title: "Refund",
+        description: "Verify the refund behavior.",
+        url: "https://linear.app/acme/issue/ENG-123",
+      };
+      const pullRequestUrls = [
+        "https://github.com/acme/web/pull/42",
+        "https://github.com/acme/api/pull/7",
+      ];
+      const candidates = [
+        "https://preview.example.com/",
+        "https://staging.example.com/",
+        "https://api.example.com/",
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          if (/\/pulls\/\d+$/.test(url.pathname)) {
+            const number = Number(url.pathname.split("/").at(-1));
+            return Response.json({
+              id: number,
+              title: "Refund",
+              head: { sha: "abc123" },
+              changed_files: 0,
+            });
+          }
+          if (url.pathname.endsWith("/files")) return Response.json([]);
+          if (url.pathname.endsWith("/check-runs"))
+            return Response.json({ check_runs: [] });
+          if (url.pathname.endsWith("/deployments"))
+            return Response.json(
+              url.pathname.includes("/web/")
+                ? [{ id: 1 }, { id: 2 }]
+                : [{ id: 3 }],
+            );
+          const deployment = url.pathname.match(
+            /\/deployments\/(\d+)\/statuses$/,
+          );
+          if (deployment)
+            return Response.json([
+              {
+                state: "success",
+                environment_url: candidates[Number(deployment[1]) - 1],
+              },
+            ]);
+          throw new Error(`Unexpected URL: ${url}`);
+        }),
+      );
+      const github = new GithubPullRequestClient({
+        candidatesForRepository: vi
+          .fn()
+          .mockResolvedValue([{ token: "test-token" }]),
+      } as never);
+      const pullRequests =
+        mode === "AGENT"
+          ? await Promise.all(
+              pullRequestUrls.map(
+                async (url, i) =>
+                  (await github.getPullRequest("team", url, i === 0))
+                    .pullRequest,
+              ),
+            )
+          : (
+              await new IssueContextResolverService(
+                {
+                  getIssue: vi
+                    .fn()
+                    .mockResolvedValue({ issue, pullRequestUrls }),
+                } as never,
+                github,
+              ).resolve(issue.identifier, "team")
+            ).context.pullRequests;
+      expect(pullRequests[0]).toMatchObject({
+        deploymentUrl: null,
+        deploymentCandidates: candidates.slice(0, 2),
+      });
+      expect(pullRequests[1]).toMatchObject({
+        deploymentUrl: candidates[2],
+        deploymentCandidates: [candidates[2]],
+      });
+      const assessment = assessAnalysisInputs(
+        {
+          kind: "ISSUE_SPEC",
+          issueRef: issue.identifier,
+          idempotencyKey: "deployment-test",
+        },
+        [
+          {
+            kind: "LINEAR_ISSUE",
+            uri: issue.url,
+            content: { issue, pullRequestUrls },
+          },
+          ...pullRequests.map((pullRequest) => ({
+            kind: "GITHUB_PULL_REQUEST",
+            uri: pullRequest.url,
+            content: { pullRequest },
+          })),
+        ],
+      );
+      expect(assessment.targetUrl).toBeNull();
+      expect(assessment.request).toMatchObject({
+        missing: ["DEPLOYMENT_TARGET"],
+        deploymentCandidates: candidates,
+      });
+    },
+  );
+});
 
 describe("Issue pull request discovery", () => {
   const issueUrl = "https://linear.app/acme/issue/ENG-123/refund";

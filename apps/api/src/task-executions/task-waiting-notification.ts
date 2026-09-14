@@ -9,7 +9,7 @@ export interface TaskNotificationContext {
 
 export interface TaskWaitingNotificationInput {
   generation: number;
-  input: "BROWSER_PROFILE" | "DEPLOYMENT_TARGET";
+  input: "BROWSER_PROFILE" | "DEPLOYMENT_TARGET" | "ANALYSIS_CONTEXT";
   message: string;
   notificationContext: Prisma.JsonValue;
   profileId?: string | null;
@@ -197,6 +197,8 @@ export function taskNotificationContext(
 
 export function taskWaitingPrompt(reason: string) {
   switch (reason) {
+    case "ANALYSIS_INPUT_REQUIRED":
+      return "请打开任务，一次补齐页面列出的 Issue、关联 PR 和测试环境信息，提交后继续分析。";
     case "DEPLOYMENT_TARGET_REQUIRED":
       return "请打开任务并填写可访问的 Deployment URL，然后提交执行全部 Case。";
     case "PROFILE_ACCESS_APPROVAL_REQUIRED":

@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   runInterventionResolveInputSchema,
   taskDeploymentTargetInputSchema,
+  taskAnalysisInputSchema,
   taskExecutionCreateInputSchema,
   taskExecutionStageTypeSchema,
   taskStageRetryInputSchema,
@@ -25,6 +26,7 @@ const TASK_TOOL_GUIDE = {
     "create_task",
     "get_task",
     "list_tasks",
+    "provide_task_analysis_input",
     "set_task_deployment_target",
     "retry_task_stage",
     "cancel_task",
@@ -47,6 +49,7 @@ const MCP_TOOL_SCOPES: Readonly<Partial<Record<string, ToolCredentialScope>>> =
     get_run: "run:read",
     get_task: "run:read",
     list_tasks: "run:read",
+    provide_task_analysis_input: "run:write",
     read_run_evidence: "run:read",
     resolve_run_intervention: "run:write",
     retry_task_stage: "run:write",
@@ -206,6 +209,24 @@ export class VerificationMcpService {
       async ({ taskId }) => {
         requireToolScope(current, "run:read");
         return result(await this.taskService().detail(current, taskId));
+      },
+    );
+
+    server.registerTool(
+      "provide_task_analysis_input",
+      {
+        description:
+          "Supply all missing Issue, PR and test environment inputs in one request to resume Spec analysis.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskAnalysisInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().provideAnalysisInput(current, taskId, input),
+        );
       },
     );
 

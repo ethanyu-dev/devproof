@@ -102,6 +102,22 @@
   background: var(--card);
 }
 
+.rerunReason {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.rerunNotice {
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.rerunNotice p {
+  flex: 1 1 280px;
+}
+
 .caseHeader {
   display: flex;
   align-items: flex-start;

@@ -5,7 +5,7 @@ import { ContextSourceError } from "./context-source.error.js";
 import { IssueContextResolverService } from "./issue-context-resolver.service.js";
 
 describe("IssueContextResolverService", () => {
-  it("resolves a complete Issue-only context without knowledge configuration", async () => {
+  it("resolves available Issue content for prerequisite checks", async () => {
     const linear = {
       configured: () => true,
       configuredTool: () => null,
@@ -22,7 +22,13 @@ describe("IssueContextResolverService", () => {
     };
     const service = new IssueContextResolverService(
       linear as never,
-      { configured: async () => false } as never,
+      {
+        configured: async () => false,
+        discoverIssuePullRequests: async () => ({
+          pullRequestUrls: [],
+          diagnostics: [],
+        }),
+      } as never,
     );
 
     expect(await service.readiness("team-1")).toEqual({

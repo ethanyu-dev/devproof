@@ -114,7 +114,7 @@ export class SpecAnalysisExecutor {
     const unavailableTools = new Set<SourceToolName>();
     let linkedPullRequests: Array<{ url: string; changedFiles?: string[] }> =
       [];
-    let segmentStatus: "FAILED" | "SUCCEEDED" = "FAILED";
+    let segmentStatus: "FAILED" | "SUCCEEDED" | "WAITING_HUMAN" = "FAILED";
     let segmentError: string | undefined;
     let leaseRejected = false;
     let step = 0;
@@ -522,7 +522,7 @@ export class SpecAnalysisExecutor {
                   !linkedPullRequests.some(
                     (pr) => pr.url === record(parsedArguments).pullRequestUrl,
                   ))
-              ? "GitHub 工具只能使用 linear_get_issue 返回的 pullRequestUrls。不得传入 Linear 链接或猜测 PR；没有关联 PR 时应说明代码来源缺失，生成仅基于 Issue 的部分规格。"
+              ? "GitHub 工具只能使用 linear_get_issue 返回的 pullRequestUrls。不得传入 Linear 链接或猜测 PR；没有关联 PR 时必须等待用户补充，不能生成仅基于 Issue 的规格。"
               : null;
           if (sourceToolError) {
             await this.appendTrace(
@@ -557,6 +557,31 @@ export class SpecAnalysisExecutor {
               },
               signal,
             );
+            if (output.inputRequest) {
+              await this.appendTrace(lease, signal, {
+                kind: "agent.tool.completed",
+                payload: {
+                  attemptNumber: task.snapshot.attemptNumber,
+                  callId: call.id,
+                  durationMs: Date.now() - startedAt,
+                  name: call.function.name,
+                  inputPreview: tracePreview(parsedArguments),
+                  outputPreview: output.inputRequest,
+                  segmentId,
+                  sourceRefs: output.sourceRefs.map(
+                    (source) => source.externalId,
+                  ),
+                  status: "SUCCEEDED",
+                  step,
+                },
+              });
+              segmentStatus = "WAITING_HUMAN";
+              return {
+                kind: "INPUT_REQUIRED",
+                request: output.inputRequest,
+                summary: output.inputRequest.message,
+              };
+            }
             calledTools.add(call.function.name);
             sourceFailureCounts.delete(sourceToolName);
             output.sourceRefs.forEach((source) =>
@@ -573,7 +598,25 @@ export class SpecAnalysisExecutor {
               linkedPullRequests = z
                 .array(z.string().url())
                 .parse(result.pullRequestUrls ?? [])
-                .map((url) => ({ url }));
+                .map((url) => {
+                  const preloaded = (
+                    Array.isArray(result.pullRequests)
+                      ? result.pullRequests
+                      : []
+                  )
+                    .map((value) => record(record(value).pullRequest))
+                    .find((pr) => pr.url === url);
+                  return {
+                    url,
+                    ...(preloaded
+                      ? {
+                          changedFiles: z
+                            .array(z.string())
+                            .parse(preloaded.changedFiles ?? []),
+                        }
+                      : {}),
+                  };
+                });
             }
             if (call.function.name === "github_get_pull_request") {
               const pr = linkedPullRequests.find(
@@ -763,7 +806,12 @@ const sourceToolNames = new Set<SourceToolName>([
   "github_read_file",
   "github_search_code",
 ]);
-const requiredSourceToolNames = new Set<SourceToolName>(["linear_get_issue"]);
+const requiredSourceToolNames = new Set<SourceToolName>([
+  "linear_get_issue",
+  "github_get_pull_request",
+  "github_list_changed_files",
+  "github_read_file",
+]);
 
 function isSourceToolName(name: string): name is SourceToolName {
   return sourceToolNames.has(name as SourceToolName);
@@ -980,9 +1028,9 @@ function systemPrompt(compact = false) {
   return `你是 DevProof 的 Spec 分析 Agent。
 请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成一份完整、可执行的验证 Spec。
 必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
-GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pullRequestUrls，不能使用 Issue URL 或猜测链接。没有关联 PR 时，只能生成基于 Issue 的部分规格，并在 risks 中明确说明未读取 GitHub 代码、无法核验路由和实现；不能声称代码分析完整。
+GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pullRequestUrls，不能使用 Issue URL 或猜测链接。Issue 内容、关联 PR 内容和明确的测试环境地址都是生成 Spec 的必要条件。linear_get_issue 会同时检查这些信息，缺失时由系统统一请求人工补充；不得生成仅基于 Issue 的规格。该工具也会返回已读取的 PR 元数据与确定的 targetUrl，继续读取各 PR 的 diff 和必要实现文件。
 若变更包含 specs/routes 下的 Route Spec，必须用 github_read_file 读取它，并结合相关实现及界面文案核对。若 Issue、Route Spec 和实现存在名称或行为冲突，应在 risks 中注明来源与差异，把未确定部分作为待确认事项，不能擅自把其中一种说法设为硬性失败条件。
-同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Linear Issue 是后续来源的必要入口，如果它不可用，执行器会立即以明确的数据源错误终止。
+同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Issue 和 PR 元数据、diff、相关文件都是必需来源，必需工具持续不可用时停止生成；前置检查返回 inputRequest 时等待用户补齐。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 ${compact ? "每条需求引用实际返回的 analysis-source 和原文，由系统传递给 Case 及验收标准；不要手工重复来源字段。" : "每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。"}
@@ -993,7 +1041,7 @@ ${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定
 每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。把所需的类型可选性、参照界面、权限和数据检查写成本 Case 的具体只读步骤；不能把假设当作已经观察的事实。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，各写入 Case 使用独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，存在则请求新账号，不删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
-只有完成所有可用来源的调查后才能调用 finish_spec；无关联 PR 或数据源不可用时，明确标出缺失范围与风险，允许提交部分规格。绝不能泄露凭据。
+只有完成所有可用来源的调查后才能调用 finish_spec；Issue 或 PR 内容不可用时不得提交规格；代码来源不可用时应报告明确的数据源错误，不能以部分规格跳过必需来源。绝不能泄露凭据。
 ${
   compact
     ? `当前使用精简 Spec 协议。先读取所有可用来源，再调用 define_requirements 独立列出完整需求清单；不同业务对象及样式参照要求均需保留。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。
@@ -1083,27 +1131,18 @@ function sourceCoverageError(
   if (!input.calledTools.has("linear_get_issue")) {
     return "完成 Spec 前必须读取 Linear Issue。";
   }
+  if (!input.linkedPullRequests.length)
+    return "生成 Spec 前必须补充关联 PR，不能只依据 Issue 生成。";
   for (const coverage of specPullRequestCoverage(input.linkedPullRequests, [
     ...input.sources.values(),
   ])) {
-    if (
-      !coverage.metadataRead &&
-      !input.unavailableTools.has("github_get_pull_request")
-    ) {
+    if (!coverage.metadataRead) {
       return `完成 Spec 前必须读取关联 Pull Request 的元数据：${coverage.url}`;
     }
-    if (
-      (!coverage.diffSourceCount &&
-        !input.unavailableTools.has("github_list_changed_files")) ||
-      (!coverage.fileSourceCount &&
-        !input.unavailableTools.has("github_read_file"))
-    ) {
+    if (!coverage.diffSourceCount || !coverage.fileSourceCount) {
       return `完成 Spec 前必须同时检查该 PR 的变更 diff 和相关文件内容，代码搜索片段不能替代文件读取：${coverage.url}`;
     }
-    if (
-      coverage.unreadRouteSpecs.length &&
-      !input.unavailableTools.has("github_read_file")
-    ) {
+    if (coverage.unreadRouteSpecs.length) {
       return `完成 Spec 前必须读取 ${coverage.url} 的 Route Spec：${coverage.unreadRouteSpecs.join("、")}`;
     }
   }
@@ -1127,9 +1166,16 @@ function observedSourceContent(source: RuntimeSpecSourceRef, result: unknown) {
     : Array.isArray(output.matches)
       ? output.matches
       : null;
+  const { pullRequests, ...issueOutput } = output;
   const content = items
     ? items.find((item) => record(item).sourceRef === source.externalId)
-    : output;
+    : Array.isArray(pullRequests)
+      ? source.kind === "GITHUB_PULL_REQUEST"
+        ? pullRequests.find(
+            (item) => record(item).sourceRef === source.externalId,
+          )
+        : issueOutput
+      : output;
   return [source.excerpt, ...stringLeaves(content)].join("\n");
 }
 

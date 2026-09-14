@@ -1,5 +1,6 @@
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
+import { AGENT_RUNTIME_PROTOCOL } from "@devproof/agent-runtime-protocol";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -150,7 +151,7 @@ describe("Spec leases on PostgreSQL", () => {
     const claims = await Promise.all(
       Array.from({ length: 6 }, (_, index) =>
         service.claim(original.teamId, {
-          protocol: { minor: 11 },
+          protocol: AGENT_RUNTIME_PROTOCOL,
           workerId: `new-worker-${index}`,
         }),
       ),
@@ -210,7 +211,7 @@ describe("Spec leases on PostgreSQL", () => {
       service.heartbeat(original.teamId, original.attempt.id, original.lease),
       ...Array.from({ length: 4 }, (_, index) =>
         service.claim(original.teamId, {
-          protocol: { minor: 11 },
+          protocol: AGENT_RUNTIME_PROTOCOL,
           workerId: `competitor-${index}`,
         }),
       ),
@@ -234,7 +235,7 @@ describe("Spec leases on PostgreSQL", () => {
     const claims = await Promise.all(
       Array.from({ length: 4 }, (_, index) =>
         service.claim(original.teamId, {
-          protocol: { minor: 11 },
+          protocol: AGENT_RUNTIME_PROTOCOL,
           workerId: `competitor-${index}`,
         }),
       ),

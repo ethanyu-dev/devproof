@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 17,
+  minor: 18,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -293,7 +293,21 @@ export const runtimeSpecAnalysisToolNameSchema = z.enum([
   "github_search_code",
 ]);
 
+export const specAnalysisInputRequestSchema = z.object({
+  missing: z
+    .array(z.enum(["ISSUE", "PULL_REQUEST", "DEPLOYMENT_TARGET"]))
+    .min(1),
+  message: z.string().min(1).max(8_000),
+  issueRef: z.string(),
+  pullRequestUrls: z.array(z.string().url()).max(25),
+  deploymentCandidates: z.array(z.string().url()).max(25),
+});
+export type SpecAnalysisInputRequest = z.infer<
+  typeof specAnalysisInputRequestSchema
+>;
+
 export const runtimeSpecAnalysisToolOutputSchema = z.object({
+  inputRequest: specAnalysisInputRequestSchema.optional(),
   result: z.unknown(),
   sourceRefs: z.array(runtimeSpecSourceRefSchema).max(100).default([]),
 });
@@ -736,6 +750,11 @@ const specGeneratedOutcomeSchema = z.object({
 });
 
 export const runtimeSpecAnalysisOutcomeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("INPUT_REQUIRED"),
+    request: specAnalysisInputRequestSchema,
+    summary: z.string().min(1).max(8_000),
+  }),
   specGeneratedOutcomeSchema,
   retryableFailureOutcomeSchema,
   fatalFailureOutcomeSchema,
@@ -752,7 +771,13 @@ export const runtimeSpecAnalysisTaskOutcomeOutputSchema = z.object({
   accepted: z.boolean(),
   attemptNumber: z.number().int().positive(),
   nextAttemptScheduled: z.boolean(),
-  stageStatus: z.enum(["PENDING", "SUCCEEDED", "FAILED", "TIMED_OUT"]),
+  stageStatus: z.enum([
+    "PENDING",
+    "SUCCEEDED",
+    "FAILED",
+    "TIMED_OUT",
+    "WAITING_INPUT",
+  ]),
 });
 
 export const runtimeOutcomeSchema = z.discriminatedUnion("kind", [

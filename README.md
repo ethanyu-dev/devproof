@@ -95,6 +95,10 @@ This flag controls presentation in the current browser only; it is not an author
 
 `/v2/tasks` is the current user-facing task entry point. `POST /v2/runs` remains compatible by creating a `DIRECT_RUN` Task and returning its child Run; the remaining `/v2/runs` endpoints provide access to concrete execution resources. Legacy `/v2/specifications` endpoints retain only list and detail reads, while writes return `410 Gone`, and the Console no longer exposes a standalone Spec panel. Legacy `/v1/verifications` exists only for stored-record compatibility and migration drain-down. DevProof API is the only component allowed to advance Task/Run state, schedule retries, or perform execution cleanup.
 
+The Case **Rerun** action creates a new task containing only that Case, reusing its specification and current deployment targets with a fresh deadline and newly resolved browser identity. Original tasks, executions and evidence remain available, with links between the tasks. Expired tasks are supported; active executions, explicit Case dependencies and unresolved business writes prevent a rerun with an explanation.
+
+Use `POST /v2/tasks/:id/cases/:caseId/rerun-task` with `{"idempotencyKey":"<unique rerun request key>"}` and `run:write` scope. Reuse the key after a request timeout. The console exposes the corresponding session-authenticated route under `/console/api/tasks`. Case reruns do not publish a full-task GitHub PR verdict, and rerunning the new task preserves its single-Case scope.
+
 ## Local development
 
 Requirements: Node.js 24, pnpm 10, and Docker.

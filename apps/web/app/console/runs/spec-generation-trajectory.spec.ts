@@ -73,6 +73,23 @@ const event = (
 ): TaskEvent => ({ sequence, kind, payload, occurredAt, actor: "WORKER" });
 
 describe("task Spec trajectory", () => {
+  it("labels reused specifications without implying a new model analysis", () => {
+    const replay = structuredClone(detail);
+    replay.stages[0]!.attempts[0]!.result = { reused: true, caseCount: 1 };
+    const records = projectSpecGenerationTrajectory(replay, [
+      event("1", "task.spec.reused", {
+        stage: "SPEC_ANALYSIS",
+        sourceSnapshotId: "original",
+      }),
+    ]);
+    expect(records.map((item) => item.title)).toEqual(
+      expect.arrayContaining(["复用原用例规格", "已复用原用例规格"]),
+    );
+    expect(records.some((item) => item.title.includes("Spec 生成"))).toBe(
+      false,
+    );
+  });
+
   it("keeps Spec records and analysis attempts without including execution events", () => {
     const records = projectSpecGenerationTrajectory(detail, [
       event("1", "task.created", { issue: "DEV-1" }, detail.createdAt),
