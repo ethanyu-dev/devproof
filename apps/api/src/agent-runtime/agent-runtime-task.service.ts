@@ -1226,7 +1226,11 @@ export class AgentRuntimeTaskService {
             .object({
               key: z.string().regex(/^[a-f0-9]{64}$/),
               until: z.number().int(),
-              reason: z.enum(["MODEL_UNAVAILABLE", "CREDENTIAL_UNAVAILABLE"]),
+              reason: z.enum([
+                "MODEL_UNAVAILABLE",
+                "CREDENTIAL_UNAVAILABLE",
+                "MODEL_TIMEOUT",
+              ]),
               consecutiveFailures: z.number().int().positive(),
             })
             .safeParse(preview.candidateHealth);

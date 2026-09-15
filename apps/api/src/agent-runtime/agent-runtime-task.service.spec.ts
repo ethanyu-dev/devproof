@@ -43,72 +43,75 @@ const snapshot = runtimeTaskSnapshotSchema.parse({
 });
 
 describe("Agent Runtime ownership and recovery", () => {
-  it("persists unavailable-model cooldowns under the current lease for another worker's resume", async () => {
-    const now = new Date();
-    const key = "a".repeat(64);
-    const until = now.getTime() + 29 * 60_000;
-    const task = {
-      id: "task",
-      snapshot,
-      runId: snapshot.runId,
-      attemptId: snapshot.attemptId,
-      status: "RUNNING",
-      fencingToken: 1n,
-      leaseOwner: "worker",
-      leaseToken: "lease",
-      leaseExpiresAt: new Date(now.getTime() + 60_000),
-      modelLatencyEwmaMs: null,
-      modelLatencyMaxMs: 0,
-    };
-    const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
-      agentRuntimeTask: {
-        findFirst: vi.fn().mockResolvedValue(task),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        update: vi.fn(),
-      },
-      runEvent: {
-        create: vi.fn().mockResolvedValue({ createdAt: now, sequence: 1n }),
-      },
-    };
-    const service = new AgentRuntimeTaskService(
-      { $transaction: (fn: (tx: unknown) => unknown) => fn(tx) } as never,
-      {} as never,
-    );
-    await service.appendEvent(snapshot.teamId, "task", {
-      workerId: "worker",
-      leaseToken: "lease",
-      fencingToken: "1",
-      event: {
-        eventId: "failure",
-        kind: "agent.model.failed",
-        occurredAt: now.toISOString(),
-        payload: {
-          inputPreview: {
-            candidateHealth: {
-              key,
-              until,
-              reason: "MODEL_UNAVAILABLE",
-              consecutiveFailures: 1,
+  it.each(["MODEL_UNAVAILABLE", "CREDENTIAL_UNAVAILABLE", "MODEL_TIMEOUT"])(
+    "persists %s cooldowns under the current lease for another worker's resume",
+    async (reason) => {
+      const now = new Date();
+      const key = "a".repeat(64);
+      const until = now.getTime() + 29 * 60_000;
+      const task = {
+        id: "task",
+        snapshot,
+        runId: snapshot.runId,
+        attemptId: snapshot.attemptId,
+        status: "RUNNING",
+        fencingToken: 1n,
+        leaseOwner: "worker",
+        leaseToken: "lease",
+        leaseExpiresAt: new Date(now.getTime() + 60_000),
+        modelLatencyEwmaMs: null,
+        modelLatencyMaxMs: 0,
+      };
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+        agentRuntimeTask: {
+          findFirst: vi.fn().mockResolvedValue(task),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          update: vi.fn(),
+        },
+        runEvent: {
+          create: vi.fn().mockResolvedValue({ createdAt: now, sequence: 1n }),
+        },
+      };
+      const service = new AgentRuntimeTaskService(
+        { $transaction: (fn: (tx: unknown) => unknown) => fn(tx) } as never,
+        {} as never,
+      );
+      await service.appendEvent(snapshot.teamId, "task", {
+        workerId: "worker",
+        leaseToken: "lease",
+        fencingToken: "1",
+        event: {
+          eventId: "failure",
+          kind: "agent.model.failed",
+          occurredAt: now.toISOString(),
+          payload: {
+            inputPreview: {
+              candidateHealth: {
+                key,
+                until,
+                reason,
+                consecutiveFailures: 1,
+              },
             },
           },
         },
-      },
-    });
-    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          snapshot: expect.objectContaining({
-            executionPolicy: expect.objectContaining({
-              modelCooldowns: {
-                [key]: { until, reason: "MODEL_UNAVAILABLE", failures: 1 },
-              },
+      });
+      expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            snapshot: expect.objectContaining({
+              executionPolicy: expect.objectContaining({
+                modelCooldowns: {
+                  [key]: { until, reason, failures: 1 },
+                },
+              }),
             }),
-          }),
-        },
-      }),
-    );
-  });
+          },
+        }),
+      );
+    },
+  );
 
   it.each([
     {

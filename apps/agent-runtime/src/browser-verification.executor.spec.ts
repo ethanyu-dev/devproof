@@ -845,6 +845,37 @@ describe("context delivery and slow models", () => {
     expect(controlPlane.releaseBrowser).toHaveBeenCalledTimes(2);
   });
 
+  it("does not return to a schema-rejected model after the fallback later fails", async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("Invalid schema for function 'browser_command'"),
+      )
+      .mockResolvedValueOnce(
+        reply(
+          "browser_command",
+          { commandType: "page.get_title", payload: {} },
+          1,
+        ),
+      )
+      .mockRejectedValue(
+        Object.assign(new Error("model not found"), { status: 404 }),
+      );
+    const { executor, runTask } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    await expect(
+      executor.execute(runTask, lease, new AbortController().signal),
+    ).rejects.toThrow("Invalid schema");
+    expect(create.mock.calls.map(([request]) => request.model)).toEqual([
+      "gpt-test",
+      "fallback",
+      "fallback",
+    ]);
+  });
+
   it("falls back after a schema rejection and preserves the schema cause if all candidates fail", async () => {
     const schemaError = new Error(
       "400 Invalid schema for function 'record_progress'",
@@ -932,7 +963,7 @@ describe("context delivery and slow models", () => {
     ).toHaveLength(1);
   });
 
-  it("gives every timeout retry a fresh 300-second budget", async () => {
+  it("limits consecutive timeouts to two fresh 300-second attempts", async () => {
     vi.useFakeTimers();
     const create = vi.fn(() => new Promise(() => {}));
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -942,14 +973,14 @@ describe("context delivery and slow models", () => {
     const execution = expect(
       executor.execute(runTask, lease, new AbortController().signal),
     ).rejects.toThrow("模型响应超过 300 秒");
-    await vi.advanceTimersByTimeAsync(1_500_001);
+    await vi.advanceTimersByTimeAsync(600_001);
     await execution;
-    expect(create).toHaveBeenCalledTimes(5);
+    expect(create).toHaveBeenCalledTimes(2);
     expect(
       controlPlane.appendEvent.mock.calls
         .filter((call) => call[1] === "agent.model.failed")
         .map((call) => call[2].durationMs),
-    ).toEqual([300_000, 300_000, 300_000, 300_000, 300_000]);
+    ).toEqual([300_000, 300_000]);
   });
 
   it("does not retry model requests after cancellation", async () => {

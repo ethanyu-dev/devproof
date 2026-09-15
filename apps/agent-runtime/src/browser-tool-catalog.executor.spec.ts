@@ -20,7 +20,7 @@ type Request = {
       name: string;
       parameters: {
         type?: string;
-        anyOf?: Array<{ properties: { commandType: { const: string } } }>;
+        properties: { commandType: { enum: string[] } };
       };
     };
   }>;
@@ -53,11 +53,8 @@ const human: Call = {
   args: { prompt: "请完成访问确认。", summary: "等待人工确认。" },
 };
 const names = (request: Request) =>
-  request.tools
-    .find((tool) => tool.function.name === "browser_command")!
-    .function.parameters.anyOf!.map(
-      (variant) => variant.properties.commandType.const,
-    );
+  request.tools.find((tool) => tool.function.name === "browser_command")!
+    .function.parameters.properties.commandType.enum;
 const feedback = (request: Request, step: number, call = 0) =>
   operationOutput(request, `call-${step}-${call}`);
 
@@ -282,7 +279,7 @@ describe("browser tool module execution", () => {
     },
   );
 
-  it("completes a core form without discovery and advertises less than 60% of legacy tool bytes", async () => {
+  it("completes a core form without discovery and keeps grouped tools smaller after deduplicating both schema surfaces", async () => {
     const script = [
       browse("page.navigate", { url: "https://example.com/form" }),
       browse("page.fill", { target: { selector: "#name" }, text: "Test" }),
@@ -303,7 +300,9 @@ describe("browser tool module execution", () => {
     });
     const groupedTools = jsonBytes(grouped.requests[0]!.tools);
     const legacyTools = jsonBytes(legacy.requests[0]!.tools);
-    expect(groupedTools / legacyTools).toBeLessThanOrEqual(0.6);
+    // Both surfaces now deduplicate shared command fields. The previous 60%
+    // ratio depended on repeated fields in the legacy union, not extra capability.
+    expect(groupedTools / legacyTools).toBeLessThanOrEqual(0.8);
     expect(names(grouped.requests[0]!)).toHaveLength(15);
     expect(names(legacy.requests[0]!)).toHaveLength(39);
     expect(

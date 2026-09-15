@@ -188,6 +188,12 @@ export class BrowserVerificationExecutor {
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
     let preferredModel = modelCandidates[0]!;
+    // A schema rejection is deterministic for this execution's tool contract.
+    // Do not probe that provider again after every successful browser action.
+    const schemaRejectedCandidates = new Set<
+      (typeof modelCandidates)[number]
+    >();
+    let lastModelSchemaError: unknown;
     await this.appendTraceEvent(lease, {
       kind: "agent.segment.started",
       payload: {
@@ -593,16 +599,12 @@ export class BrowserVerificationExecutor {
         let selectedAttempts: ModelRequestAttempt[] = [];
         let selectedModelAttempt = 1;
         let lastModelError: unknown;
-        let lastModelSchemaError: unknown;
         const orderedCandidates = [
           preferredModel,
           ...modelCandidates.filter(
             (candidate) => candidate !== preferredModel,
           ),
         ];
-        const schemaRejectedCandidates = new Set<
-          (typeof modelCandidates)[number]
-        >();
         let candidateAttempt = 0;
         for (const {
           candidate,

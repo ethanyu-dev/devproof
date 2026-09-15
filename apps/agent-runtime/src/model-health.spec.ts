@@ -88,10 +88,8 @@ describe("model health", () => {
   it("backs off rate limits and repeated timeouts, resetting consecutive failures after success", () => {
     let now = 0;
     const health = new ModelHealth(() => now);
-    for (let i = 0; i < 4; i++) {
-      health.failure(candidate, new Error("模型响应超过 300 秒。"));
-      expect(health.available(candidate)).toBe(true);
-    }
+    health.failure(candidate, new Error("模型响应超过 300 秒。"));
+    expect(health.available(candidate)).toBe(true);
     health.failure(candidate, new Error("模型响应超过 300 秒。"));
     expect(health.available(candidate)).toBe(false);
     expect(health.available({ ...candidate, modelId: "model-b" })).toBe(true);
@@ -133,4 +131,15 @@ describe("model health", () => {
     health.failure(candidate, { status: 401 });
     expect(attempts.next().done).toBe(true);
   });
+});
+
+it("stops a model after two consecutive timeout attempts in the same decision", () => {
+  const health = new ModelHealth(() => 1000);
+  const attempts = health.attempts([candidate]);
+  expect(attempts.next().done).toBe(false);
+  health.failure(candidate, new Error("模型响应超过 300 秒。"));
+  expect(attempts.next().done).toBe(false);
+  health.failure(candidate, new Error("Request timed out"));
+  expect(attempts.next().done).toBe(true);
+  expect(health.available({ ...candidate, modelId: "fallback" })).toBe(true);
 });

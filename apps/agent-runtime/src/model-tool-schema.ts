@@ -8,15 +8,70 @@ import { z } from "zod";
  */
 export function openAiFunctionSchema(schema: z.ZodType): unknown {
   const parameters = z.toJSONSchema(schema);
-  // Zod emits object unions as a bare anyOf. Kimi also requires the explicit
-  // root type; retain every branch so command-specific constraints stay intact.
-  if (
-    parameters.type === undefined &&
-    parameters.anyOf?.length &&
-    parameters.anyOf.every((branch) => branch.type === "object")
-  ) {
+  // Function parameters must be a root object. Project object unions into
+  // properties; keep each field's alternatives and enforce cross-field rules
+  // with the canonical Zod parser when the tool is executed.
+  if (parameters.anyOf?.length) {
+    const branches = parameters.anyOf;
+    if (!branches.every((branch) => branch.type === "object"))
+      throw new Error("Model function parameters must be objects.");
+    const names = [
+      ...new Set(
+        branches.flatMap((branch) => Object.keys(branch.properties ?? {})),
+      ),
+    ];
+    parameters.properties = Object.fromEntries(
+      names.map((name) => {
+        const alternatives = [
+          ...new Map(
+            branches.flatMap((branch) => {
+              const field = branch.properties?.[name];
+              if (field === undefined) return [];
+              const object: z.core.JSONSchema.JSONSchema =
+                typeof field === "boolean" ? (field ? {} : { not: {} }) : field;
+              return [[JSON.stringify(object), object] as const];
+            }),
+          ).values(),
+        ];
+        const literals = alternatives.every(
+          (field) => field.const !== undefined,
+        );
+        return [
+          name,
+          alternatives.length === 1
+            ? alternatives[0]!
+            : literals
+              ? {
+                  ...(alternatives[0]!.type &&
+                  alternatives.every(
+                    (field) => field.type === alternatives[0]!.type,
+                  )
+                    ? { type: alternatives[0]!.type }
+                    : {}),
+                  enum: alternatives.map((field) => field.const!),
+                }
+              : { anyOf: alternatives },
+        ];
+      }),
+    );
+    parameters.required = names.filter((name) =>
+      branches.every((branch) => branch.required?.includes(name)),
+    );
+    parameters.additionalProperties = branches.every(
+      (branch) => branch.additionalProperties === false,
+    )
+      ? false
+      : true;
     parameters.type = "object";
+    delete parameters.anyOf;
   }
+  if (
+    parameters.type !== "object" ||
+    ["oneOf", "allOf", "enum", "const", "not"].some((key) => key in parameters)
+  )
+    throw new Error(
+      "Model function parameters require an object without root combinators.",
+    );
   return stripUnsupportedValidation(parameters);
 }
 

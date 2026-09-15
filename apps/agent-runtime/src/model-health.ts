@@ -37,7 +37,11 @@ export class ModelHealth {
         typeof item.until !== "number" ||
         item.until <= this.now() ||
         item.until > this.now() + 30 * 60_000 ||
-        !["MODEL_UNAVAILABLE", "CREDENTIAL_UNAVAILABLE"].includes(item.reason)
+        ![
+          "MODEL_UNAVAILABLE",
+          "CREDENTIAL_UNAVAILABLE",
+          "MODEL_TIMEOUT",
+        ].includes(item.reason)
       )
         continue;
       if ((this.failures.get(key)?.until ?? 0) < item.until)
@@ -69,8 +73,9 @@ export class ModelHealth {
         if (
           (this.failures.get(this.key(candidate, true))?.until ?? 0) >
             this.now() ||
-          (this.failures.get(this.key(candidate))?.reason ===
-            "MODEL_UNAVAILABLE" &&
+          (["MODEL_UNAVAILABLE", "MODEL_TIMEOUT"].includes(
+            this.failures.get(this.key(candidate))?.reason ?? "",
+          ) &&
             !this.available(candidate))
         )
           continue;
@@ -97,6 +102,9 @@ export class ModelHealth {
       /model.*(?:not.*(?:exist|found|available)|access|permission|denied)|(?:unknown|invalid|unsupported|unavailable).*model|model_not_found/iu.test(
         `${code} ${message}`,
       );
+    const timeout = /模型响应超过|timed?\s*out|timeout/iu.test(
+      `${code} ${message}`,
+    );
     const key = this.key(candidate, credential);
     const previous = this.failures.get(key);
     const failures = (previous?.failures ?? 0) + 1;
@@ -104,16 +112,19 @@ export class ModelHealth {
       ? "CREDENTIAL_UNAVAILABLE"
       : unavailable
         ? "MODEL_UNAVAILABLE"
-        : status === 429
-          ? "RATE_LIMITED"
-          : "MODEL_FAILED";
+        : timeout
+          ? "MODEL_TIMEOUT"
+          : status === 429
+            ? "RATE_LIMITED"
+            : "MODEL_FAILED";
     const cooldownMs = credential
       ? 30 * 60_000
       : unavailable
         ? 30 * 60_000
         : status === 429
           ? 60_000
-          : failures >= MAX_MODEL_ATTEMPTS
+          : (timeout && previous?.reason === "MODEL_TIMEOUT") ||
+              failures >= MAX_MODEL_ATTEMPTS
             ? 5 * 60_000
             : 0;
     this.failures.set(key, {

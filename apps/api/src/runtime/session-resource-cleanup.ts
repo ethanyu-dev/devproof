@@ -133,6 +133,7 @@ export async function releaseVerifiedSessionResources(
     });
     if (
       owner &&
+      !hasConfirmedBrowserOutcome(owner) &&
       session.ownerFencingToken !== null &&
       owner.fencingToken === session.ownerFencingToken &&
       ["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(
