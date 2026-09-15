@@ -22,7 +22,10 @@ import {
   type BrowserToolGroup,
   type BrowserToolSurfaceMode,
 } from "./browser-tool-catalog.js";
-import { openAiFunctionSchema } from "./model-tool-schema.js";
+import {
+  isInvalidModelToolSchema,
+  openAiFunctionSchema,
+} from "./model-tool-schema.js";
 import { taskTestAccount } from "./test-account.js";
 import { ExecutionJournal } from "./execution-journal.js";
 import { ModelHealth } from "./model-health.js";
@@ -613,12 +616,16 @@ export class BrowserVerificationExecutor {
         let selectedAttempts: ModelRequestAttempt[] = [];
         let selectedModelAttempt = 1;
         let lastModelError: unknown;
+        let lastModelSchemaError: unknown;
         const orderedCandidates = [
           preferredModel,
           ...modelCandidates.filter(
             (candidate) => candidate !== preferredModel,
           ),
         ];
+        const schemaRejectedCandidates = new Set<
+          (typeof modelCandidates)[number]
+        >();
         let candidateAttempt = 0;
         for (const {
           candidate,
@@ -626,6 +633,7 @@ export class BrowserVerificationExecutor {
           maxModelAttempts,
         } of this.modelHealth.attempts(orderedCandidates)) {
           signal.throwIfAborted();
+          if (schemaRejectedCandidates.has(candidate)) continue;
           if (finalizationDue(task, deadlinePolicy)) {
             return await finalize("FINALIZATION_RESERVE_REACHED");
           }
@@ -709,9 +717,15 @@ export class BrowserVerificationExecutor {
             const reserveReached =
               modelAbort.signal.reason instanceof
               FinalizationWindowReachedError;
-            const candidateHealth = reserveReached
-              ? null
-              : this.modelHealth.failure(candidate, responseError);
+            const schemaRejected = isInvalidModelToolSchema(responseError);
+            if (schemaRejected) {
+              schemaRejectedCandidates.add(candidate);
+              lastModelSchemaError = responseError;
+            }
+            const candidateHealth =
+              reserveReached || schemaRejected
+                ? null
+                : this.modelHealth.failure(candidate, responseError);
             if (reserveReached) beginFinalization();
             const failedTrace = this.appendTraceEvent(lease, {
               kind: "agent.model.failed",
@@ -746,7 +760,8 @@ export class BrowserVerificationExecutor {
         if (!response) {
           throw new Error(
             `All configured model providers failed: ${traceErrorMessage(
-              lastModelError ??
+              lastModelSchemaError ??
+                lastModelError ??
                 "Configured candidates are temporarily unavailable after previous provider failures.",
             )}`,
           );
@@ -2493,6 +2508,7 @@ function readHumanResume(policy: Record<string, unknown>) {
 function systemPrompt(boundedContext = true, groupedTools = true) {
   return `你是 DevProof 内部的浏览器验证执行 Agent。
 你只负责浏览器内的分析和操作；Run 生命周期、重试、租约、取消、HITL 和清理由 DevProof 管理。
+围绕任务已声明的验收标准执行最短必要业务路径，不自行追加通用回归、重复启停或逐字段网络核对。步骤是实现目标的指导，准备、定位和取证动作不是额外产品验收；同一业务阶段的证据足够时直接记录结果。合并的检查仍须验证全部对象与条件，不能只测代表对象。保留任务明确要求的前置条件、行为、证据和清理，不能以精简为由跳过必需验收。
 使用 browser_command 检查并操作真实页面。绝不能声称观察到了工具未返回的内容。
 任务提供目标地址时，首次导航由执行器使用原始地址完成，结果在 runtime_initial_navigation 或 recent_operations 中。导航成功后直接观察当前页，无需再次导航；失败时根据真实错误恢复。人工接管恢复时保留当前页，先观察接管后的状态。后续页面跳转按任务需要执行。
 ${groupedTools ? "browser_command 默认只公布核心操作。其他操作先通过 enable_browser_tools 启用相应模块；模块目录见该工具定义，完整参数在下一轮公布。启用模块不会执行操作，也不表示 Runtime 一定支持该操作。page.open 是别名，统一使用 page.navigate。\n" : ""}${

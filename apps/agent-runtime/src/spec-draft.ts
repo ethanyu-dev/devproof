@@ -5,6 +5,7 @@ import {
   runtimeSpecRequirementSchema,
   runtimeUncoveredRequirementSchema,
   localizationRequirementError,
+  requirementNecessityError,
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 
@@ -13,7 +14,13 @@ const notes = z.array(text).max(100).default([]);
 
 export const requirementPlanSchema = z.object({
   requirements: z
-    .array(runtimeSpecRequirementSchema.omit({ id: true }))
+    .array(
+      runtimeSpecRequirementSchema.omit({ id: true }).extend({
+        changeBasis: runtimeSpecRequirementSchema.shape.changeBasis.describe(
+          "依据来自次级来源时必填：引用 Issue 或实际 diff 增删行，并说明为何是本次必要验证。直接引用 Issue 的需求可省略。",
+        ),
+      }),
+    )
     .min(1)
     .max(100),
 });
@@ -37,6 +44,9 @@ export const compactSpecSchema = z.object({
   summary: text,
   assumptions: notes,
   risks: notes,
+  outOfScope: notes.describe(
+    "按需说明不属于本次变更的回归范围及原因；不能放入真正未覆盖的需求。",
+  ),
   uncoveredRequirements: z
     .array(runtimeUncoveredRequirementSchema)
     .max(100)
@@ -100,10 +110,11 @@ export function normalizeCompactSpec(
   const byId = new Map(requirements.map((item) => [item.id, item]));
   return runtimeGeneratedSpecSchema.parse({
     ...draft,
+    scopePolicy: "CHANGE_FOCUSED",
     requirements,
     scope: {
       inScope: requirements.map((item) => item.description),
-      outOfScope: [],
+      outOfScope: draft.outOfScope,
     },
     cases: draft.cases.map((testCase, caseIndex) => {
       const criteria = testCase.criteria.map((criterion, index) => {
@@ -149,6 +160,7 @@ export function normalizeCompactSpec(
 export function defineSpecRequirements(
   raw: unknown,
   sourceContents: ReadonlyMap<string, string>,
+  sources: ReadonlyMap<string, { kind: string }>,
   issueTexts: ReadonlyMap<string, string> = new Map(),
 ): SpecRequirement[] {
   const plan = requirementPlanSchema.parse(raw);
@@ -163,6 +175,11 @@ export function defineSpecRequirements(
     const requirement = { ...item, id: `requirement-${index + 1}` };
     const scopeError = localizationRequirementError(requirement, issueTexts);
     if (scopeError) throw new Error(scopeError);
+    const necessityError = requirementNecessityError(requirement, {
+      sources,
+      sourceContents,
+    });
+    if (necessityError) throw new Error(necessityError);
     return requirement;
   });
 }

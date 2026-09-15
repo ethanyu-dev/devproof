@@ -36,6 +36,10 @@ const requirements = defineSpecRequirements(
     ],
   },
   sources,
+  new Map([
+    [issue, { kind: "LINEAR_ISSUE" }],
+    [ui, { kind: "GITHUB_FILE" }],
+  ]),
 );
 const option = {
   requirementId: "requirement-1",

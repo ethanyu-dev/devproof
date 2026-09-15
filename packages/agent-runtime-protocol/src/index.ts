@@ -9,6 +9,11 @@ export {
 export type { ExecutionRecord, ExecutionState } from "./execution-state.js";
 export { observedValueMatches } from "./observed-value.js";
 export {
+  requirementNecessityError,
+  specNecessityError,
+  SPEC_NECESSITY_GUIDANCE,
+} from "./spec-necessity.js";
+export {
   specCapabilityError,
   localizationRequirementError,
   requiresNetworkEvidence,
@@ -237,6 +242,14 @@ export const runtimeGeneratedSpecCaseSchema = z.object({
 });
 
 export const runtimeSpecRequirementSchema = z.object({
+  // Needed for new requirements derived from secondary sources; old snapshots remain readable.
+  changeBasis: z
+    .object({
+      sourceRef: z.string().trim().min(1).max(500),
+      quote: z.string().trim().min(1).max(2_000),
+      reason: z.string().trim().min(1).max(2_000),
+    })
+    .optional(),
   testScope: z.enum(["FUNCTIONAL", "LOCALIZATION"]).optional(),
   issueEvidence: z
     .object({
@@ -256,6 +269,8 @@ export const runtimeUncoveredRequirementSchema = z.object({
 });
 
 export const runtimeGeneratedSpecSchema = z.object({
+  // Stamped by the generator, not chosen by the model.
+  scopePolicy: z.literal("CHANGE_FOCUSED").optional(),
   requirements: z
     .array(runtimeSpecRequirementSchema)
     .min(1)

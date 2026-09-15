@@ -10,6 +10,7 @@ import { LeaseLostError } from "./lease-supervisor.js";
 import {
   AgentRuntimeWorker,
   classifyFailure,
+  classifySpecFailure,
   RuntimeDeadlineController,
 } from "./worker.js";
 
@@ -328,6 +329,23 @@ describe("Agent Runtime failure classification", () => {
     );
 
     expect(outcome).toMatchObject({
+      error: {
+        code: "AGENT_TOOL_SCHEMA_INVALID",
+        failureClass: "TOOL_EXECUTION",
+      },
+      executionDisposition: "AGENT_ERROR",
+      kind: "FATAL_FAILURE",
+    });
+    expect(
+      classifySpecFailure(
+        new Error(
+          "All configured model providers failed: 400 Invalid schema for function 'finish_spec'",
+        ),
+        {
+          snapshot: { attemptNumber: 1 },
+        } as RuntimeSpecAnalysisTaskLease,
+      ),
+    ).toMatchObject({
       error: {
         code: "AGENT_TOOL_SCHEMA_INVALID",
         failureClass: "TOOL_EXECUTION",

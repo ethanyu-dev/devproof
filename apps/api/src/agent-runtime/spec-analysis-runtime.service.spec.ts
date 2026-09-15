@@ -251,26 +251,44 @@ describe("SpecAnalysisRuntimeService", () => {
     },
   );
 
-  it.each(["missing", "wrong-source"])(
+  it.each([
+    "missing",
+    "wrong-source",
+    "unrelated-page",
+    "invalid-change-basis",
+  ])(
     "rejects invalid requirement coverage at the API boundary: %s",
     async (mode) => {
       const sourceRef = `analysis-source://${attemptId}/issue`;
+      const focused =
+        mode === "unrelated-page" || mode === "invalid-change-basis";
+      const basisRef = focused ? "analysis-source://another" : sourceRef;
       const spec = runtimeGeneratedSpecSchema.parse({
+        ...(focused ? { scopePolicy: "CHANGE_FOCUSED" } : {}),
         summary: "验证退款",
         scope: { inScope: ["退款"] },
         requirements: [
           {
             id: "requirement-1",
             description: "支持退款",
-            sourceRef,
+            sourceRef: basisRef,
             quote: "支持退款。",
+            ...(mode === "invalid-change-basis"
+              ? {
+                  changeBasis: {
+                    sourceRef,
+                    quote: "这里没有引用真实的变更依据",
+                    reason: "本次需要验证",
+                  },
+                }
+              : {}),
           },
           ...(mode === "missing"
             ? [
                 {
                   id: "requirement-2",
                   description: "验证异常退款",
-                  sourceRef,
+                  sourceRef: basisRef,
                   quote: "支持退款。",
                 },
               ]
@@ -293,7 +311,7 @@ describe("SpecAnalysisRuntimeService", () => {
                 sourceRefs: [sourceRef],
                 requiredEvidenceKinds: ["DOM"],
                 basis: {
-                  sourceRef,
+                  sourceRef: basisRef,
                   quote: "支持退款。",
                   observationTarget: "退款结果",
                 },
@@ -356,7 +374,12 @@ describe("SpecAnalysisRuntimeService", () => {
           },
         }),
       ).rejects.toThrow(
-        mode === "missing" ? "遗漏需求" : "actual analysis source",
+        {
+          missing: "遗漏需求",
+          "wrong-source": "actual analysis source",
+          "unrelated-page": "缺少 changeBasis",
+          "invalid-change-basis": "未出现在对应来源",
+        }[mode],
       );
       expect(tx.taskExecutionStage.update).not.toHaveBeenCalled();
     },
