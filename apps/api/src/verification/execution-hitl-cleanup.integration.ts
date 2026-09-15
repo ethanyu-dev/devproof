@@ -314,6 +314,267 @@ async function waitingHumanFixture(transition: string) {
   };
 }
 
+async function resumableFixture(lost: boolean, uncertainWrite = false) {
+  const fixture = await waitingHumanFixture("resume");
+  const { run, task, session, current } = fixture;
+  const snapshot = runtimeTaskSnapshotSchema.parse({
+    attemptId: task.attemptId,
+    attemptNumber: 1,
+    criteria: [
+      {
+        id: "visible",
+        description: "The expected page is visible.",
+        required: true,
+      },
+    ],
+    deadlineAt: run.deadlineAt.toISOString(),
+    hardDeadlineAt: run.hardDeadlineAt.toISOString(),
+    environment: { targetUrl: "https://test-duo.paigod.work" },
+    executionPolicy: {
+      browser: {
+        availabilityPolicy: "WAIT",
+        profile: { mode: "EPHEMERAL" },
+        requiredCapabilities: ["browser"],
+      },
+      hitl: { enabled: true, notificationChannels: [], timeoutSeconds: 3600 },
+      retryPolicy: { maxAttempts: 3, retryOn: ["RUNTIME_LOST"] },
+      executionState: {
+        phase: "PREFLIGHT",
+        step: "check account",
+        account: "fixture-account",
+        writes: [],
+        records: [],
+      },
+    },
+    goal: run.goal,
+    runId: run.id,
+    teamId: run.teamId,
+    traceId: run.traceId,
+  });
+  await db.executionRun.update({
+    where: { id: run.id },
+    data: {
+      executionBudgetSeconds: 1800,
+      executionMaxExtensionSeconds: 0,
+      executionBudgetStartedAt: run.startedAt,
+    },
+  });
+  await db.agentRuntimeTask.update({
+    where: { id: task.id },
+    data: {
+      snapshot: snapshot as Prisma.InputJsonValue,
+      startedAt: run.startedAt,
+    },
+  });
+  await db.browserRuntimeSession.update({
+    where: { id: session.id },
+    data: {
+      status: lost ? "LOST" : "ACTIVE",
+      executionPermitExpiresAt: new Date(Date.now() + 120_000),
+      ...(lost
+        ? {
+            quarantinedAt: new Date(),
+            leaseExpiresAt: new Date(Date.now() - 1000),
+          }
+        : {}),
+    },
+  });
+  await db.browserExecution.update({
+    where: { attemptId: task.attemptId },
+    data: { status: "ACTIVE" },
+  });
+  if (!uncertainWrite)
+    await db.executionResourceLease.updateMany({
+      where: { sessionId: session.id },
+      data: { mode: "READ" },
+    });
+  const intervention = await db.humanIntervention.findFirstOrThrow({
+    where: { runId: run.id },
+  });
+  const toolCurrent = {
+    ...current,
+    credential: {
+      id: current.user.id,
+      name: "Console user",
+      scopes: ["run:write" as const],
+    },
+  };
+  const service = new ExecutionRunService(db as never, {} as never);
+  const resolve = () =>
+    service.resolveIntervention(toolCurrent, run.id, intervention.id, {
+      response: { approved: true, note: "Continue with the existing account." },
+    });
+  const worker = () =>
+    new AgentRuntimeTaskService(
+      db as never,
+      {} as never,
+      runner,
+      undefined,
+      recoveries,
+    );
+  return { ...fixture, resolve, worker, intervention };
+}
+
+describe("PostgreSQL human resume after browser loss", () => {
+  it("keeps a healthy preserved browser and refreshes the full budget exactly once", async () => {
+    const { run, task, session, resolve } = await resumableFixture(false);
+    const before = Date.now();
+    await Promise.all([resolve(), resolve()]);
+    const resumed = await db.executionRun.findUniqueOrThrow({
+      where: { id: run.id },
+    });
+    expect(resumed.deadlineAt.getTime()).toBeGreaterThanOrEqual(
+      before + 1_800_000,
+    );
+    expect(resumed.deadlineAt.getTime()).toBeLessThanOrEqual(
+      Date.now() + 1_800_000,
+    );
+    expect(resumed.deadlineExtensionCount).toBe(0);
+    expect(
+      await db.runEvent.count({
+        where: { runId: run.id, kind: "human.intervention.resolved" },
+      }),
+    ).toBe(1);
+    expect(
+      await db.agentRuntimeTask.findUnique({ where: { id: task.id } }),
+    ).toMatchObject({ status: "PENDING", fencingToken: 1n });
+    expect(
+      await db.browserRuntimeSession.findUnique({ where: { id: session.id } }),
+    ).toMatchObject({
+      status: "ACTIVE",
+      leaseExpiresAt: resumed.deadlineAt,
+      quarantinedAt: null,
+    });
+    expect(commands.execute).not.toHaveBeenCalled();
+  });
+
+  it("waits for closure, then concurrent recovery workers create only one fresh attempt with the human reply", async () => {
+    const { run, task, session, resolve, worker } =
+      await resumableFixture(true);
+    await resolve();
+    let allowClosure!: () => void;
+    const gate = new Promise<void>((resolveGate) => {
+      allowClosure = resolveGate;
+    });
+    commands.execute.mockImplementationOnce(async (input) => {
+      await gate;
+      return verifiedCommand(input);
+    });
+    const firstWorker = worker();
+    await firstWorker.recoverExpiredLeases();
+    expect(
+      await db.agentRuntimeTask.findUnique({ where: { id: task.id } }),
+    ).toMatchObject({
+      status: "FAILED",
+      recoveryStatus: "HITL_CLOSING",
+      fencingToken: 2n,
+    });
+    expect(await db.runAttempt.count({ where: { runId: run.id } })).toBe(1);
+    expect(
+      await db.browserRuntimeSlot.count({ where: { sessionId: session.id } }),
+    ).toBe(1);
+    allowClosure();
+    await vi.waitFor(
+      async () => {
+        expect(
+          (
+            await db.browserRuntimeSession.findUniqueOrThrow({
+              where: { id: session.id },
+            })
+          ).closureVerifiedAt,
+        ).not.toBeNull();
+        expect(
+          await db.browserExecution.findUnique({
+            where: { attemptId: task.attemptId },
+          }),
+        ).toMatchObject({ status: "RELEASED" });
+      },
+      { timeout: 5000 },
+    );
+    await db.agentRuntimeTask.update({
+      where: { id: task.id },
+      data: { recoveryNextAttemptAt: new Date(0) },
+    });
+    await Promise.all([
+      firstWorker.recoverExpiredLeases(),
+      worker().recoverExpiredLeases(),
+    ]);
+    expect(await db.runAttempt.count({ where: { runId: run.id } })).toBe(2);
+    const fresh = await db.agentRuntimeTask.findFirstOrThrow({
+      where: { runId: run.id, id: { not: task.id } },
+    });
+    expect(fresh).toMatchObject({ status: "PENDING", fencingToken: 0n });
+    expect(fresh.snapshot).toMatchObject({
+      attemptNumber: 2,
+      executionPolicy: {
+        resume: {
+          response: {
+            approved: true,
+            note: "Continue with the existing account.",
+          },
+        },
+        executionState: { account: "fixture-account", phase: "PREFLIGHT" },
+      },
+    });
+    expect(
+      await db.browserExecution.findUnique({
+        where: { attemptId: fresh.attemptId },
+      }),
+    ).toMatchObject({ status: "REQUESTED", runtimeSessionId: null });
+    expect(
+      await db.executionRun.findUnique({ where: { id: run.id } }),
+    ).toMatchObject({ lifecycle: "QUEUED", currentAttemptNumber: 2 });
+    expect(
+      await db.browserRuntimeSlot.count({ where: { sessionId: session.id } }),
+    ).toBe(0);
+  });
+
+  it("preserves write guards when a lost browser closes with an uncertain business outcome", async () => {
+    const { run, task, session, resolve, worker } = await resumableFixture(
+      true,
+      true,
+    );
+    await resolve();
+    const recoveryWorker = worker();
+    await recoveryWorker.recoverExpiredLeases();
+    await vi.waitFor(
+      async () => {
+        expect(
+          (
+            await db.browserRuntimeSession.findUniqueOrThrow({
+              where: { id: session.id },
+            })
+          ).closureVerifiedAt,
+        ).not.toBeNull();
+        expect(
+          await db.browserExecution.findUnique({
+            where: { attemptId: task.attemptId },
+          }),
+        ).toMatchObject({ status: "RELEASED" });
+      },
+      { timeout: 5000 },
+    );
+    await db.agentRuntimeTask.update({
+      where: { id: task.id },
+      data: { recoveryNextAttemptAt: new Date(0) },
+    });
+    await recoveryWorker.recoverExpiredLeases();
+    expect(await db.runAttempt.count({ where: { runId: run.id } })).toBe(1);
+    expect(
+      await db.executionRun.findUnique({ where: { id: run.id } }),
+    ).toMatchObject({
+      lifecycle: "COMPLETED",
+      executionDisposition: "BLOCKED",
+      verdict: null,
+    });
+    expect(
+      await db.executionResourceLease.count({
+        where: { sessionId: session.id, quarantined: true, mode: "WRITE" },
+      }),
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe("PostgreSQL uncertain writes after human intervention", () => {
   it("atomically assigns a business account to one parallel Case and permits an independent account", async () => {
     const { current } = await waitingHumanFixture("accounts");

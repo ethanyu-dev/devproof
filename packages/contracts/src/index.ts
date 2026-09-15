@@ -581,6 +581,8 @@ export const runDeadlinePolicySchema = z.discriminatedUnion("mode", [
   }),
 ]);
 
+export const DEFAULT_EXECUTION_BUDGET_SECONDS = 1_800;
+
 export const executionRunCreateInputSchema = z
   .object({
     concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
@@ -619,7 +621,12 @@ export const executionRunCreateInputSchema = z
         requiredCapabilities: ["browser"],
       }),
     criteria: z.array(runtimeCriterionSchema).min(1).max(100),
-    deadlineSeconds: z.number().int().min(30).max(86_400).default(900),
+    deadlineSeconds: z
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .default(DEFAULT_EXECUTION_BUDGET_SECONDS),
     deadlinePolicy: runDeadlinePolicySchema.default({ mode: "FIXED" }),
     environment: z.record(z.string(), z.unknown()).default({}),
     goal: z.string().trim().min(1).max(20_000),

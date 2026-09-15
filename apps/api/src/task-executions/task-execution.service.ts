@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { runtimeGeneratedSpecCaseSchema } from "@devproof/agent-runtime-protocol";
 import {
+  DEFAULT_EXECUTION_BUDGET_SECONDS,
   executionConcurrencyPolicySchema,
   generatedTestCaseDefinitionSchema,
   taskExecutionCreateInputSchema,
@@ -3308,7 +3309,7 @@ function taskCaseRunRequest(
     deadlineSeconds: Math.max(
       30,
       Math.min(
-        900,
+        DEFAULT_EXECUTION_BUDGET_SECONDS,
         Math.floor(
           (item.taskExecution.deadlineAt.getTime() - Date.now()) / 1_000,
         ),

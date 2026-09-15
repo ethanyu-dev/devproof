@@ -20,6 +20,7 @@ import type {
   RunTrajectoryRecord,
 } from "@devproof/contracts";
 import {
+  DEFAULT_EXECUTION_BUDGET_SECONDS,
   runDeadlinePolicySchema,
   runHitlPolicySchema,
 } from "@devproof/contracts";
@@ -28,6 +29,7 @@ import {
   canReleaseTestAccount,
   claimTestAccount,
 } from "./test-account-reservation.js";
+import { initializeExecutionBudget } from "./execution-budget.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { businessEnvironmentKey } from "../verification/execution-concurrency.js";
@@ -721,6 +723,7 @@ export class ExecutionRunService {
     input: RunInterventionResolveInput,
   ) {
     await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
       const intervention = await tx.humanIntervention.findFirst({
         include: {
           browserControlLease: true,
@@ -824,30 +827,30 @@ export class ExecutionRunService {
       const deadlinePolicy = runDeadlinePolicySchema.parse(
         policyValue.deadline ?? { mode: "FIXED" },
       );
-      const currentDeadlineAt =
-        intervention.run.deadlineAt ?? new Date(snapshot.deadlineAt);
-      const hardDeadlineAt =
-        intervention.run.hardDeadlineAt ?? currentDeadlineAt;
-      const refundHumanWait =
-        (deadlinePolicy.mode === "FIXED" || deadlinePolicy.refundHumanWait) &&
-        intervention.pausedExecutionRemainingMs !== null;
-      const resumedHardDeadlineAt = refundHumanWait
-        ? new Date(
-            Math.min(
-              hardDeadlineAt.getTime() +
-                Math.max(0, now.getTime() - intervention.requestedAt.getTime()),
-              refreshedParentDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
-            ),
-          )
-        : hardDeadlineAt;
-      const resumedDeadlineAt = refundHumanWait
-        ? new Date(
-            Math.min(
-              resumedHardDeadlineAt.getTime(),
-              now.getTime() + intervention.pausedExecutionRemainingMs!,
-            ),
-          )
-        : currentDeadlineAt;
+      // Generated cases also pick up the larger default when resuming an older
+      // Run. Explicit budgets on standalone Runs remain authoritative.
+      const executionBudgetSeconds =
+        intervention.run.sourceKind === "TASK_CASE"
+          ? Math.max(
+              DEFAULT_EXECUTION_BUDGET_SECONDS,
+              intervention.run.executionBudgetSeconds ?? 0,
+            )
+          : (intervention.run.executionBudgetSeconds ??
+            DEFAULT_EXECUTION_BUDGET_SECONDS);
+      const executionMaxExtensionSeconds =
+        deadlinePolicy.mode === "ADAPTIVE"
+          ? (intervention.run.executionMaxExtensionSeconds ??
+            deadlinePolicy.maxExtensionSeconds)
+          : 0;
+      const {
+        deadlineAt: resumedDeadlineAt,
+        hardDeadlineAt: resumedHardDeadlineAt,
+      } = initializeExecutionBudget({
+        now,
+        seconds: executionBudgetSeconds,
+        extensionSeconds: executionMaxExtensionSeconds,
+        parentDeadlineAt: refreshedParentDeadlineAt,
+      });
       const resumedSnapshot = runtimeTaskSnapshotSchema.parse({
         ...snapshot,
         deadlineAt: resumedDeadlineAt.toISOString(),
@@ -883,6 +886,12 @@ export class ExecutionRunService {
         data: {
           executionDisposition: null,
           deadlineAt: resumedDeadlineAt,
+          initialDeadlineAt: resumedDeadlineAt,
+          executionBudgetStartedAt: now,
+          executionBudgetSeconds,
+          executionMaxExtensionSeconds,
+          deadlineExtensionCount: 0,
+          deadlineExtendedMs: 0,
           finishedAt: null,
           hardDeadlineAt: resumedHardDeadlineAt,
           lifecycle: "QUEUED",
@@ -928,6 +937,8 @@ export class ExecutionRunService {
           finishedAt: null,
           result: Prisma.JsonNull,
           snapshot: json(resumedSnapshot),
+          lastDeadlineExtensionOperationKey: null,
+          lastDeadlineExtensionProgressKey: null,
           status: "PENDING",
         },
         where: { id: intervention.taskId },
@@ -954,7 +965,9 @@ export class ExecutionRunService {
                   parentTaskDeadlineAt: refreshedParentDeadlineAt.toISOString(),
                 }
               : {}),
-            refundedHumanWait: refundHumanWait,
+            refundedHumanWait: true,
+            executionBudgetRefreshed: true,
+            executionBudgetSeconds,
             resumedDeadlineAt: resumedDeadlineAt.toISOString(),
             resumedHardDeadlineAt: resumedHardDeadlineAt.toISOString(),
             resolvedAt: now.toISOString(),
@@ -968,7 +981,7 @@ export class ExecutionRunService {
         where: { attemptId: intervention.attemptId },
       });
       if (browserExecution?.runtimeSessionId) {
-        await tx.browserRuntimeSession.updateMany({
+        const renewed = await tx.browserRuntimeSession.updateMany({
           data: {
             leaseExpiresAt: resumedDeadlineAt,
             executionPermitExpiresAt: new Date(
@@ -977,16 +990,47 @@ export class ExecutionRunService {
           },
           where: {
             id: browserExecution.runtimeSessionId,
-            status: { in: ["OPENING", "ACTIVE", "HUMAN_CONTROL"] },
+            status: "ACTIVE",
+            ownerTaskId: intervention.taskId,
+            ownerFencingToken: intervention.task.fencingToken,
+            leaseExpiresAt: { gt: now },
+            quarantinedAt: null,
+            closureVerifiedAt: null,
+            closedAt: null,
           },
         });
-        await tx.browserRuntimeSlot.updateMany({
-          data: { expiresAt: resumedDeadlineAt },
-          where: { sessionId: browserExecution.runtimeSessionId },
-        });
-        await tx.browserRuntimeProfileLease.updateMany({
-          data: { expiresAt: resumedDeadlineAt },
-          where: { sessionId: browserExecution.runtimeSessionId },
+        if (renewed.count === 1) {
+          await tx.browserRuntimeSlot.updateMany({
+            data: { expiresAt: resumedDeadlineAt },
+            where: { sessionId: browserExecution.runtimeSessionId },
+          });
+          await tx.browserRuntimeProfileLease.updateMany({
+            data: { expiresAt: resumedDeadlineAt },
+            where: { sessionId: browserExecution.runtimeSessionId },
+          });
+        }
+        // A lost/closed session cannot be made claimable by renewing its lease.
+        // The recovery worker fences the old task and schedules a new Attempt
+        // only after verified closure and a settled business-write assessment.
+        await tx.taskCaseExecution.updateMany({
+          where: { runId },
+          data: {
+            scheduling: {
+              state: renewed.count === 1 ? "READY" : "RECOVERING",
+              reason: renewed.count === 1 ? null : "LEASE_RECOVERY",
+              waitingSince: now.toISOString(),
+              evaluatedAt: now.toISOString(),
+              blockedBy:
+                renewed.count === 1
+                  ? null
+                  : {
+                      resourceType: "SESSION",
+                      sessionId: browserExecution.runtimeSessionId,
+                    },
+              queue: null,
+              nextRetryAt: now.toISOString(),
+            },
+          },
         });
       }
       const hitlPolicy = runHitlPolicySchema.parse(policyValue.hitl ?? {});

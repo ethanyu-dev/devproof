@@ -1177,11 +1177,23 @@ function objectSchema(properties: Record<string, unknown>, required: string[]) {
 function stripFormats(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stripFormats);
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
+  const result = Object.fromEntries(
     Object.entries(value).flatMap(([key, child]) =>
       key === "format" ? [] : [[key, stripFormats(child)]],
     ),
   );
+  if (
+    result.properties &&
+    typeof result.properties === "object" &&
+    "accountRequirements" in result.properties
+  )
+    result.required = [
+      ...new Set([
+        ...(Array.isArray(result.required) ? result.required : []),
+        "accountRequirements",
+      ]),
+    ];
+  return result;
 }
 
 function systemPrompt(compact = false, checkReferences = false) {

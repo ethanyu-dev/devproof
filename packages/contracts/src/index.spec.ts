@@ -108,6 +108,7 @@ describe("DevProof contracts", () => {
       goal: "Verify the page.",
       idempotencyKey: "run-v2-hitl-default",
     });
+    expect(run.deadlineSeconds).toBe(1800);
     expect(run.hitlPolicy).toMatchObject({
       enabled: true,
       onTimeout: "INCONCLUSIVE",
