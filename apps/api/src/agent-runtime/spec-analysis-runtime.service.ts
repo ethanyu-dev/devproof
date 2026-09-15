@@ -16,6 +16,7 @@ import {
   specPullRequestCoverage,
   specRequirementCoverageError,
   specCapabilityError,
+  specNecessityError,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskOutcomeInput,
   type RuntimeSpecAnalysisToolInput,
@@ -765,6 +766,16 @@ export class SpecAnalysisRuntimeService {
       }
     }
     const revisions = new Map<string, string>();
+    const necessityError = specNecessityError(spec, {
+      sources: available,
+      sourceContents: new Map(
+        attempt.analysisSources.map((source) => [
+          source.externalId,
+          stringLeaves(sourceContent(source.content)).join("\n"),
+        ]),
+      ),
+    });
+    if (necessityError) throw new BadRequestException(necessityError);
     for (const requirement of spec.requirements ?? []) {
       const source = available.get(requirement.sourceRef)!;
       if (
@@ -1762,7 +1773,10 @@ export function buildSpecAnalysisContext(
 function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
   return Array.from(
     new Set([
-      ...(spec.requirements ?? []).map((item) => item.sourceRef),
+      ...(spec.requirements ?? []).flatMap((item) => [
+        item.sourceRef,
+        ...(item.changeBasis ? [item.changeBasis.sourceRef] : []),
+      ]),
       ...spec.cases.flatMap((testCase) => [
         ...testCase.sourceRefs,
         ...testCase.criteria.flatMap((criterion) => criterion.sourceRefs),

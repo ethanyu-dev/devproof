@@ -13,6 +13,7 @@ import {
 
 import type { BrowserVerificationExecutor } from "./browser-verification.executor.js";
 import type { ModelClientFactory } from "./model-types.js";
+import { isInvalidModelToolSchema } from "./model-tool-schema.js";
 import type { RuntimeConfig } from "./config.js";
 import {
   activeLease,
@@ -550,10 +551,7 @@ export function classifyFailure(
     return shutdownOutcome("browser_verification");
   const message = errorMessage(error);
   const deadline = /deadline|timed? out|timeout/iu.test(message);
-  const invalidToolSchema =
-    /invalid schema for function|invalid.*tool.*schema|is not a valid format/iu.test(
-      message,
-    );
+  const invalidToolSchema = isInvalidModelToolSchema(error);
   const browser =
     !invalidToolSchema &&
     /browser|execution runner|available slot|runtime session/iu.test(message);
@@ -615,6 +613,7 @@ export function classifySpecFailure(
     return shutdownOutcome("spec_analysis");
   const message = errorMessage(error);
   const deadline = /deadline|timed? out|timeout/iu.test(message);
+  const invalidToolSchema = isInvalidModelToolSchema(error);
   const provider = /openai|provider|response|rate limit|429/iu.test(message);
   const staleLease =
     error instanceof ControlPlaneError && error.status === 409
@@ -624,28 +623,34 @@ export function classifySpecFailure(
     error: {
       code: deadline
         ? "SPEC_ANALYSIS_DEADLINE_EXCEEDED"
-        : provider
-          ? "PROVIDER_FAILED"
-          : staleLease
-            ? "RUNTIME_LEASE_LOST"
-            : "SPEC_ANALYSIS_FAILED",
+        : invalidToolSchema
+          ? "AGENT_TOOL_SCHEMA_INVALID"
+          : provider
+            ? "PROVIDER_FAILED"
+            : staleLease
+              ? "RUNTIME_LEASE_LOST"
+              : "SPEC_ANALYSIS_FAILED",
       details: {},
       failureClass: deadline
         ? "TIMEOUT"
-        : provider
-          ? "PROVIDER"
-          : staleLease
-            ? "RUNTIME_LOST"
-            : "TOOL_EXECUTION",
+        : invalidToolSchema
+          ? "TOOL_EXECUTION"
+          : provider
+            ? "PROVIDER"
+            : staleLease
+              ? "RUNTIME_LOST"
+              : "TOOL_EXECUTION",
       message,
       phase: "spec_analysis",
     },
-    executionDisposition: provider
-      ? "PROVIDER_ERROR"
-      : staleLease
-        ? "RUNTIME_LOST"
-        : "AGENT_ERROR",
-    kind: deadline ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
+    executionDisposition: invalidToolSchema
+      ? "AGENT_ERROR"
+      : provider
+        ? "PROVIDER_ERROR"
+        : staleLease
+          ? "RUNTIME_LOST"
+          : "AGENT_ERROR",
+    kind: deadline || invalidToolSchema ? "FATAL_FAILURE" : "RETRYABLE_FAILURE",
     summary: `第 ${task.snapshot.attemptNumber} 次 Spec 分析未生成有效 Spec。`,
   });
 }

@@ -138,6 +138,119 @@ async function executeCalls(
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it.each(["COMPACT", "CHECK_REFERENCES"] as const)(
+    "rejects scope expansion before freezing requirements and retains change provenance (%s)",
+    async (specFormat) => {
+      const file = {
+        ...requiredPrSources[2]!,
+        excerpt: "退款完成后显示退款成功；列表支持分页。",
+      };
+      const executeSpecTool = vi.fn().mockResolvedValue({
+        result: requiredPrResult,
+        sourceRefs: [source, ...requiredPrSources.slice(0, 2), file],
+      });
+      const requirement = {
+        description: "退款完成后显示结果",
+        sourceRef: file.externalId,
+        quote: "退款完成后显示退款成功",
+        changeBasis: {
+          sourceRef: source.externalId,
+          quote: source.excerpt,
+          reason:
+            "本次新增退款能力，需要核对完成后的业务结果，代码用于明确页面预期。",
+        },
+      };
+      const check = {
+        requirementId: "requirement-1",
+        description: "退款完成后显示退款成功",
+        observationTargets: [{ label: "退款结果", expectedText: "退款成功" }],
+      };
+      const { outcome, create } = await executeCalls(
+        [
+          call(
+            "linear_get_issue",
+            { analysisSummary: "读取需求和代码" },
+            "read",
+          ),
+          call(
+            "define_requirements",
+            {
+              analysisSummary: "按页面文档生成回归",
+              requirements: [
+                {
+                  description: "列表支持分页",
+                  sourceRef: file.externalId,
+                  quote: "列表支持分页",
+                },
+              ],
+            },
+            "expanded",
+          ),
+          call(
+            "define_requirements",
+            {
+              analysisSummary: "保留本次必要行为",
+              requirements: [requirement],
+            },
+            "focused",
+          ),
+          ...(specFormat === "CHECK_REFERENCES"
+            ? [
+                call(
+                  "define_checks",
+                  {
+                    analysisSummary: "定义业务结果检查",
+                    expectedRevision: 0,
+                    checks: [check],
+                  },
+                  "checks",
+                ),
+              ]
+            : []),
+          call(
+            "finish_spec",
+            {
+              analysisSummary: "提交本次必要验证",
+              spec: {
+                summary: "验证退款结果",
+                outOfScope: ["分页没有本次变更依据，不追加通用回归。"],
+                cases: [
+                  {
+                    name: "退款结果",
+                    steps: ["申请退款并确认结果。"],
+                    ...(specFormat === "CHECK_REFERENCES"
+                      ? { checkIds: ["check-1"] }
+                      : { criteria: [check] }),
+                  },
+                ],
+              },
+            },
+            "finish",
+          ),
+        ],
+        executeSpecTool,
+        { ...task, snapshot: { ...task.snapshot, specFormat } },
+      );
+      expect(outcome.kind).toBe("SPEC_GENERATED");
+      if (outcome.kind !== "SPEC_GENERATED") return;
+      expect(outcome.spec.scopePolicy).toBe("CHANGE_FOCUSED");
+      expect(outcome.spec.requirements).toEqual([
+        { ...requirement, id: "requirement-1" },
+      ]);
+      expect(outcome.spec.scope.outOfScope).toEqual([
+        "分页没有本次变更依据，不追加通用回归。",
+      ]);
+      expect(outcome.spec.cases).toHaveLength(1);
+      expect(outcome.spec.cases[0]!.criteria).toHaveLength(1);
+      expect(outcome.sourceRefs.map((s) => s.externalId)).toEqual(
+        expect.arrayContaining([file.externalId, source.externalId]),
+      );
+      expect(JSON.stringify(create.mock.calls.at(-1)![0].messages)).toContain(
+        "缺少 changeBasis",
+      );
+    },
+  );
+
   it("registers checks once, repairs only the unsupported item and expands ID-only cases", async () => {
     const issue = {
       ...source,
@@ -669,6 +782,24 @@ describe("SpecAnalysisExecutor", () => {
         };
       });
     const args = { analysisSummary: "核对来源。", pullRequestUrl: url };
+    const scopedSpec = (ref: string, quote: string) => {
+      const spec = refundSpec(ref, quote);
+      spec.requirements = [
+        {
+          id: "requirement-1",
+          description: "核对退款行为",
+          sourceRef: ref,
+          quote,
+          changeBasis: {
+            sourceRef: source.externalId,
+            quote: source.excerpt,
+            reason: "本次退款需求涉及变更后的退款操作，需要核对其结果。",
+          },
+        },
+      ];
+      spec.cases[0]!.criteria[0]!.requirementId = "requirement-1";
+      return spec;
+    };
     const { outcome, appendSpecEvent } = await executeCalls(
       [
         call("linear_get_issue", args, "issue"),
@@ -679,7 +810,7 @@ describe("SpecAnalysisExecutor", () => {
           "finish_spec",
           {
             analysisSummary: "提交规格。",
-            spec: refundSpec(fileA.externalId, fileB.excerpt),
+            spec: scopedSpec(fileA.externalId, fileB.excerpt),
           },
           "wrong-quote",
         ),
@@ -687,7 +818,7 @@ describe("SpecAnalysisExecutor", () => {
           "finish_spec",
           {
             analysisSummary: "修正引用。",
-            spec: refundSpec(fileB.externalId, fileB.excerpt),
+            spec: scopedSpec(fileB.externalId, fileB.excerpt),
           },
           "correct-quote",
         ),
@@ -755,6 +886,32 @@ describe("SpecAnalysisExecutor", () => {
       "具备访问权限，进入后只读核查类型与参照界面。",
     ];
     expect(validateFinalSpec(input)).toBeNull();
+  });
+
+  it("does not repeat a rejected schema or poison provider health for later Spec tasks", async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("400 Invalid schema for function 'finish_spec'"),
+      );
+    const appendSpecEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const executor = new SpecAnalysisExecutor(
+      () => ({ complete: create }),
+      { appendSpecEvent } as never,
+      10,
+    );
+    for (let run = 0; run < 2; run++) {
+      await expect(
+        executor.execute(task, lease, new AbortController().signal),
+      ).rejects.toThrow("Invalid schema");
+    }
+    expect(create).toHaveBeenCalledTimes(2);
+    const failures = appendSpecEvent.mock.calls.filter(
+      (call) => call[1] === "agent.model.failed",
+    );
+    expect(
+      failures.every((call) => call[2].inputPreview.candidateHealth === null),
+    ).toBe(true);
   });
 
   it("correlates each fallback call independently, even when candidates share a model name", async () => {

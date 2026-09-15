@@ -9,7 +9,9 @@ import {
   specPullRequestCoverage,
   specRequirementCoverageError,
   specCapabilityError,
+  specNecessityError,
   SPEC_EXECUTION_SCOPE_GUIDANCE,
+  SPEC_NECESSITY_GUIDANCE,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskLease,
   type RuntimeSpecSourceRef,
@@ -17,6 +19,7 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 import { ModelHealth } from "./model-health.js";
+import { isInvalidModelToolSchema } from "./model-tool-schema.js";
 import { hasExternalCaseDependency } from "./spec-case-dependency.js";
 import {
   compactSpecSchema,
@@ -107,7 +110,7 @@ export class SpecAnalysisExecutor {
           {
             issueRef: task.snapshot.issueRef,
             objective:
-              "分析 Issue、关联 Pull Request、代码变更和相关知识，并生成一份完整、可执行的中文测试规格。",
+              "分析 Issue、关联 PR 和代码，生成优先覆盖本次必要业务结果的中文测试规格；保留明确要求，避免扩展为整页回归。",
             targetUrl: task.snapshot.targetUrl ?? null,
           },
           null,
@@ -153,6 +156,8 @@ export class SpecAnalysisExecutor {
         let selectedModelCallId: string | undefined;
         let selectedModelAttempt = 1;
         let lastError: unknown;
+        let lastSchemaError: unknown;
+        const schemaRejectedCandidates = new Set<(typeof candidates)[number]>();
 
         for (const {
           candidate,
@@ -160,6 +165,7 @@ export class SpecAnalysisExecutor {
           maxModelAttempts,
         } of this.modelHealth.attempts(candidates)) {
           signal.throwIfAborted();
+          if (schemaRejectedCandidates.has(candidate)) continue;
           const modelStartedAt = Date.now();
           const modelCallId = randomUUID();
           await this.appendTrace(lease, signal, {
@@ -204,7 +210,14 @@ export class SpecAnalysisExecutor {
           } catch (error) {
             signal.throwIfAborted();
             lastError = error;
-            const candidateHealth = this.modelHealth.failure(candidate, error);
+            const schemaRejected = isInvalidModelToolSchema(error);
+            if (schemaRejected) {
+              schemaRejectedCandidates.add(candidate);
+              lastSchemaError = error;
+            }
+            const candidateHealth = schemaRejected
+              ? null
+              : this.modelHealth.failure(candidate, error);
             await this.appendTrace(lease, signal, {
               kind: "agent.model.failed",
               payload: {
@@ -230,7 +243,7 @@ export class SpecAnalysisExecutor {
 
         if (!response) {
           throw new Error(
-            `All configured model providers failed: ${traceError(lastError ?? "Configured candidates are temporarily unavailable after previous provider failures.")}`,
+            `All configured model providers failed: ${traceError(lastSchemaError ?? lastError ?? "Configured candidates are temporarily unavailable after previous provider failures.")}`,
           );
         }
         await this.appendTrace(lease, signal, {
@@ -348,6 +361,7 @@ export class SpecAnalysisExecutor {
               requirements = defineSpecRequirements(
                 parsedArguments,
                 sourceContents,
+                sources,
                 issueTexts,
               );
               history.push(toolOutput(call, { accepted: true, requirements }));
@@ -510,6 +524,7 @@ export class SpecAnalysisExecutor {
               );
               continue;
             }
+            parsed.data.spec.scopePolicy = "CHANGE_FOCUSED";
             const validationError = validateFinalSpec({
               issueTexts,
               calledTools,
@@ -1005,7 +1020,7 @@ function toolDefinitions(
             type: "function",
             name: "define_requirements",
             description:
-              "逐条确定本次需求的可验证产品要求，包含所有业务类型、行为和样式参照。每项提供来源原文。系统分配编号并固定清单，后续 Case 必须覆盖或明确说明未覆盖原因。",
+              "先筛选本次必要的业务结果，再固定需求清单。保留 Issue 明确要求；次级来源推导的行为必须提供 changeBasis 引用 Issue 或实际 diff 并解释变更关联。等价类型可共用需求，操作和取证不单列需求。系统分配编号，后续必须覆盖或说明未覆盖原因。",
             parameters: constrainSourceRefs(
               stripFormats(
                 z.toJSONSchema(
@@ -1026,7 +1041,7 @@ function toolDefinitions(
             type: "function",
             name: "define_checks",
             description:
-              "分批定义并校验验收标准。系统保存有效项并返回 checkId；失败仅重提交该项。修改已保存标准时提供 checkId 和该项完整内容，其余标准保留。supportingSourceRefs 仅填写支持界面文案或实现行为的额外已读来源，原需求依据由系统保留。",
+              "按业务结果分批定义验收，不按点击或字段拆点；同一结果可包含多个必须观察的对象。系统保存有效项并返回 checkId；失败仅重提交该项。修改时提供 checkId 和完整内容。supportingSourceRefs 补充界面/实现依据，不扩大需求范围。",
             parameters: constrainSourceRefs(
               stripFormats(
                 z.toJSONSchema(
@@ -1172,7 +1187,8 @@ function stripFormats(value: unknown): unknown {
 function systemPrompt(compact = false, checkReferences = false) {
   return `你是 DevProof 的 Spec 分析 Agent。
 ${SPEC_EXECUTION_SCOPE_GUIDANCE}
-请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成一份完整、可执行的验证 Spec。
+${SPEC_NECESSITY_GUIDANCE}
+请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成覆盖必要业务结果的可执行验证 Spec。
 必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
 GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pullRequestUrls，不能使用 Issue URL 或猜测链接。Issue 内容、关联 PR 内容和明确的测试环境地址都是生成 Spec 的必要条件。linear_get_issue 会同时检查这些信息，缺失时由系统统一请求人工补充；不得生成仅基于 Issue 的规格。该工具也会返回已读取的 PR 元数据与确定的 targetUrl，继续读取各 PR 的 diff 和必要实现文件。
 若变更包含 specs/routes 下的 Route Spec，必须用 github_read_file 读取它，并结合相关实现及界面文案核对。若 Issue、Route Spec 和实现存在名称或行为冲突，应在 risks 中注明来源与差异，把未确定部分作为待确认事项，不能擅自把其中一种说法设为硬性失败条件。
@@ -1184,14 +1200,14 @@ ${compact ? "每条需求引用实际返回的 analysis-source 和原文，由�
 每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字或接口值（expectedText）。涉及多个类型时，分别列出每个类型的显示名或接口值，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。${compact ? "每条标准必须引用 define_requirements 返回的 requirementId，来源原文必须直接支持断言。" : "每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。"}来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 ${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定位元素、探索路径和选择工具，不预先编造选择器。前置条件、测试数据和清理步骤按需填写。" : "生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。"}
-内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。多个业务类型分别生成可独立判定的验收标准，不能观察一个类型后就判定所有类型通过。
-每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。把所需的类型可选性、参照界面、权限和数据检查写成本 Case 的具体只读步骤；不能把假设当作已经观察的事实。
+内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。等价业务类型可以共用一条验收，但必须分别观察所有 observationTargets；业务条件或预期不同才拆分，不能观察一个类型后判定所有类型通过。
+每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。必要的权限、数据和控件定位检查放在本 Case 的步骤；仅在对应业务结果属于本次范围时才设为验收标准。不能把假设当作已经观察的事实。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，各写入 Case 使用独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，存在则请求新账号，不删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
 只有完成所有可用来源的调查后才能调用 finish_spec；Issue 或 PR 内容不可用时不得提交规格；代码来源不可用时应报告明确的数据源错误，不能以部分规格跳过必需来源。绝不能泄露凭据。
 ${
   compact
-    ? `当前使用精简 Spec 协议。先读取所有可用来源，再调用 define_requirements 独立列出完整需求清单；不同业务对象及样式参照要求均需保留。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。
+    ? `当前使用精简 Spec 协议。先读取必要来源并完成范围筛选，再调用 define_requirements 固定本次必要需求；保留所有明确要求的业务对象与样式参照，不按操作、字段和等价类型机械拆分。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。outOfScope 只记录不属于本次要求或改动影响的内容及排除原因。
 ${checkReferences ? `先调用 define_checks 分批定义验收标准，每项填写 requirementId、description、observationTargets 和必要的 requiredEvidenceKinds；界面文案来自其他已读来源时显式填写 supportingSourceRefs，原需求 basis 保持不变。工具会保存有效项并返回 checkId、revision 和逐字段 issues；只重提交失败项，修改已保存项时携带 checkId 及该项完整内容，并使用工具给出的 expectedRevision。不要为已保存的相同标准重复生成内容。最终 Case 只填写 name、steps（有序操作字符串数组）和 checkIds，不填写 criteria。checkIds 必须来自 define_checks 成功保存的编号，系统展开完整标准和来源。同一个 check 只在对象、状态和预期完全一致时复用，每个 Case 独立观察和取证。` : `Case 只需填写 name、steps（有序操作字符串数组）、criteria。每条 criterion 填写 requirementId、description、observationTargets；必要时用 supportingSourceRefs 引用额外已读的界面证据。`}仅确有需要时填写 preconditions、testData、cleanup；系统自动生成编号、默认优先级、步骤序号及来源 basis。
 同一个业务对象的同义显示方式才写在该 target 的 alternatives 中；启用/禁用、成功/失败属于不同状态，不能互为 alternatives。不同业务对象分别列 target，使用各对象实际可见的类型或区域名称作为 expectedText 锚点，所有对象都必须验证；不要让两个样式参照对象都只写“启用状态”。描述中的“或”必须体现在同一 target 的 alternatives 中，不能拆成两个必须出现的对象。UI 未承诺展示内部枚举时，优先使用业务中文名称。
 criteria.description 描述产品应满足的条件，不把“截图、记录差异、观察页面”等测试动作当作通过条件。样式比较须写明被比较的目标、参照对象和要比较的结构/交互，requiredEvidenceKinds 包含 SCREENSHOT；来源没有明确比较范围时，在 uncoveredRequirements 中说明待确认内容，不擅自把像素、颜色或字段当作硬性要求。`
@@ -1235,6 +1251,8 @@ export function validateFinalSpec(input: {
       "请只从 allowedSourceRefs 中逐字复制来源引用。",
     ].join("\n");
   }
+  const necessityError = specNecessityError(input.spec, input);
+  if (necessityError) return necessityError;
   for (const testCase of input.spec.cases) {
     if (testCase.preconditions.some(hasExternalCaseDependency))
       return `用例「${testCase.name}」依赖其他 Case 或未交付的操作知识。每例独立并发执行，请将必要检查和参照观察展开为本 Case 的步骤，不得假定其他用例已完成。`;
@@ -1421,10 +1439,20 @@ function specSourceRefEntries(
   spec: z.infer<typeof runtimeGeneratedSpecSchema>,
 ) {
   return [
-    ...(spec.requirements ?? []).map((item, index) => ({
-      path: `spec.requirements[${index}].sourceRef`,
-      sourceRef: item.sourceRef,
-    })),
+    ...(spec.requirements ?? []).flatMap((item, index) => [
+      {
+        path: `spec.requirements[${index}].sourceRef`,
+        sourceRef: item.sourceRef,
+      },
+      ...(item.changeBasis
+        ? [
+            {
+              path: `spec.requirements[${index}].changeBasis.sourceRef`,
+              sourceRef: item.changeBasis.sourceRef,
+            },
+          ]
+        : []),
+    ]),
     ...spec.cases.flatMap((testCase, caseIndex) => [
       ...testCase.sourceRefs.map((sourceRef, sourceIndex) => ({
         path: `spec.cases[${caseIndex}].sourceRefs[${sourceIndex}]`,

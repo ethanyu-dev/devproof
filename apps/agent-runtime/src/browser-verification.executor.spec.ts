@@ -815,6 +815,65 @@ describe("context delivery and slow models", () => {
     expect(create.mock.calls[0]![1].timeoutMs).toBe(450_000);
   });
 
+  it("tries each schema-rejecting provider once without cooling down subsequent runs", async () => {
+    const error = new Error(
+      "400 Invalid schema for function 'record_progress': pattern is not a 'regex'.",
+    );
+    const create = vi.fn().mockRejectedValue(error);
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    for (let run = 0; run < 2; run++) {
+      await expect(
+        executor.execute(runTask, lease, new AbortController().signal),
+      ).rejects.toThrow("Invalid schema");
+    }
+    expect(create.mock.calls.map(([request]) => request.model)).toEqual([
+      "gpt-test",
+      "fallback",
+      "gpt-test",
+      "fallback",
+    ]);
+    const failures = controlPlane.appendEvent.mock.calls.filter(
+      (call) => call[1] === "agent.model.failed",
+    );
+    expect(
+      failures.every((call) => call[2].inputPreview.candidateHealth === null),
+    ).toBe(true);
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back after a schema rejection and preserves the schema cause if all candidates fail", async () => {
+    const schemaError = new Error(
+      "400 Invalid schema for function 'record_progress'",
+    );
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(schemaError)
+      .mockResolvedValue(reply("finish_verification", finish, 1));
+    const { executor, runTask } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(create).toHaveBeenCalledTimes(2);
+    create
+      .mockReset()
+      .mockRejectedValueOnce(schemaError)
+      .mockRejectedValue(
+        Object.assign(new Error("model not found"), { status: 404 }),
+      );
+    await expect(
+      executor.execute(runTask, lease, new AbortController().signal),
+    ).rejects.toThrow("Invalid schema for function 'record_progress'");
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it("exhausts five attempts per available model before stopping, with separate trace IDs", async () => {
     const create = vi.fn().mockRejectedValue(new Error("provider unavailable"));
     const { executor, controlPlane, runTask } = convergenceHarness(create);

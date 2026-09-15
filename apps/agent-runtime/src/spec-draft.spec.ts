@@ -21,6 +21,7 @@ const plan = {
 const requirements = defineSpecRequirements(
   plan,
   new Map([[sourceRef, sourceText]]),
+  new Map([[sourceRef, { kind: "LINEAR_ISSUE" }]]),
 );
 const draft = {
   summary: "验证白名单配置",
@@ -112,6 +113,7 @@ describe("compact Spec", () => {
           [sourceRef, "其他内容"],
           ["another-file", sourceText],
         ]),
+        new Map([[sourceRef, { kind: "LINEAR_ISSUE" }]]),
       ),
     ).toThrow("实际读取来源");
   });
@@ -119,5 +121,36 @@ describe("compact Spec", () => {
     const spec = normalizeCompactSpec(draft, requirements.slice(0, 1));
     delete spec.requirements;
     expect(specRequirementCoverageError(spec)).toContain("需求清单");
+  });
+  it("preserves exclusions and all objects of a grouped business check without adding checks", () => {
+    const spec = normalizeCompactSpec(
+      {
+        ...draft,
+        outOfScope: ["权限与分页未涉及本次改动，不追加通用回归。"],
+        cases: [
+          {
+            ...draft.cases[0],
+            criteria: [
+              {
+                ...draft.cases[0]!.criteria[0],
+                observationTargets: [
+                  { label: "类型甲", expectedText: "甲" },
+                  { label: "类型乙", expectedText: "乙" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      requirements.slice(0, 1),
+    );
+    expect(spec.scopePolicy).toBe("CHANGE_FOCUSED");
+    expect(spec.scope.outOfScope).toEqual([
+      "权限与分页未涉及本次改动，不追加通用回归。",
+    ]);
+    expect(spec.cases).toHaveLength(1);
+    expect(spec.cases[0]!.criteria).toHaveLength(1);
+    expect(spec.cases[0]!.criteria[0]!.observationTargets).toHaveLength(2);
+    expect(specRequirementCoverageError(spec)).toBeNull();
   });
 });

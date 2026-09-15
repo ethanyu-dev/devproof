@@ -8,7 +8,8 @@ The persisted Spec and browser execution still receive the complete criteria.
 ## Workflow
 
 1. Read the Issue, linked PR metadata, diffs and required implementation/Route Spec files.
-2. Call `define_requirements` to establish the fixed requirement list and verbatim source basis.
+2. Filter for explicit Issue requirements and directly affected behavior, then call
+   `define_requirements` to establish the fixed requirement list and verbatim source basis.
 3. Call `define_checks` in batches. Each check specifies `requirementId`, `description`,
    `observationTargets`, and optional `requiredEvidenceKinds` / `supportingSourceRefs`.
    The tool saves valid entries and returns their `checkId` and the new catalog revision.
@@ -39,6 +40,38 @@ Example final model input after `check-1` and `check-2` have been saved:
 ```
 
 ## Grounding and correction
+
+New generation uses `scopePolicy: CHANGE_FOCUSED`, set by the runtime for both
+compact formats and full-output generation. The default is necessary business
+outcomes for this change, not a whole-page regression suite. Navigation, login,
+test-data acquisition, evidence collection and cleanup remain execution work;
+they do not each become a product acceptance check. Explicit permission,
+negative, boundary, visual-comparison or API-contract requirements are retained.
+There is no fixed quota of Cases or checks.
+
+A requirement citing the Issue needs no extra justification. A requirement based
+on a Route Spec, implementation file or other secondary source must include
+`changeBasis: { sourceRef, quote, reason }`: an actual Issue or diff citation and
+a Chinese explanation of how the current change makes this behavior necessary.
+Diff citations must include changed lines, retaining their `+`/`-` markers;
+unchanged context and file headers do not qualify. Both the generation tools
+and API persistence validate the source and quote. This is a provenance gate;
+it does not prove semantic relevance from text alone. Generation instructions
+require that assessment and disallow treating “documented on this page” as a reason.
+
+Group related observations of one business outcome, such as saving and confirming
+the persisted result. Equivalent types may share a requirement/check only when
+their conditions and expected behavior match, with a separate target and real
+evidence for every type. Opposite states still need separate judgments. Do not
+duplicate a lifecycle Case with a separate read-only Case merely to repeat its
+acceptance checks. Case independence does not require converting setup into checks.
+
+Optional `outOfScope` notes in compact input persist as `scope.outOfScope`, with
+reasons for excluding unrelated regression work. Unverified real requirements
+still belong in `uncoveredRequirements`; omission is never a passing result.
+The browser agent is instructed to complete the declared business path and
+cleanup without adding unrelated regression branches. Historical Specs remain
+readable and rerunnable; regenerate a Spec to apply the new scope policy.
 
 Requirement evidence and UI evidence can come from different files. An Issue may
 say “样式参考 ZDR” while the displayed text “零数据留存 (ZDR)” exists only in an i18n
