@@ -1,3 +1,5 @@
+import { testAccountRequirementsSchema } from "./test-accounts.js";
+export * from "./test-accounts.js";
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 import { z } from "zod";
 export {
@@ -220,6 +222,7 @@ export const runtimeSpecCriterionSchema = z.object({
 });
 
 export const runtimeGeneratedSpecCaseSchema = z.object({
+  accountRequirements: testAccountRequirementsSchema.optional(),
   authRole: z.string().trim().min(1).max(120).default("default"),
   cleanup: z.array(z.string().trim().min(1).max(5_000)).max(50).default([]),
   criteria: z.array(runtimeSpecCriterionSchema).min(1).max(100),

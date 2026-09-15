@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { BadRequestException } from "@nestjs/common";
 import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
 const id = "285146a8-5230-4b02-832a-5eef19e8dc8a";
 const snapshot = {
@@ -122,6 +123,54 @@ describe("durable execution checkpoints", () => {
       }),
     );
   });
+  it("persists account aliases while ignoring historical conflicts and reservations", async () => {
+    const tx = transaction();
+    const accounts = [
+      {
+        slotId: "subject:1",
+        account: "shared",
+        aliases: ["shared-uuid"],
+        usage: "CREATE_OR_MODIFY",
+      },
+    ];
+    const records = [
+      {
+        id: "124",
+        account: "shared",
+        ownership: "CREATED_THIS_RUN",
+        evidenceRefs: ["artifact://proof"],
+        cleanup: { instruction: "删除本次记录", status: "PENDING" },
+      },
+    ];
+    const result = await saveExecutionCheckpoint(
+      tx as never,
+      {
+        id,
+        runId: id,
+        snapshot: {
+          ...snapshot,
+          executionPolicy: {
+            ...snapshot.executionPolicy,
+            testAccounts: accounts,
+          },
+        },
+      },
+      {
+        executionState: {
+          accounts,
+          records,
+          accountConflict: "TEST_ACCOUNT_CONFLICT",
+        },
+      },
+    );
+    expect(result).toEqual({ accountConflict: null });
+    const policy =
+      tx.executionRun.update.mock.calls[0]![0].data.executionPolicy;
+    expect(policy.executionState.accounts[0]).toMatchObject(accounts[0]!);
+    expect(policy.executionState.records[0]).toMatchObject(records[0]!);
+    expect(policy.executionState).not.toHaveProperty("accountConflict");
+    expect(policy).not.toHaveProperty("testAccountClaim");
+  });
   it("rejects evidence from a different run before mutating either snapshot", async () => {
     const tx = transaction();
     await expect(
@@ -140,4 +189,40 @@ describe("durable execution checkpoints", () => {
     expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
     expect(tx.executionRun.update).not.toHaveBeenCalled();
   });
+});
+
+describe("execution checkpoint validation", () => {
+  it.each([
+    {
+      executionState: {
+        accounts: [
+          {
+            slotId: "target:1",
+            account: "subject",
+            label: "账号",
+            usage: "CREATE_OR_MODIFY",
+            aliases: [""],
+          },
+        ],
+      },
+    },
+  ])(
+    "returns a structured 400 before touching stored progress",
+    async (payload) => {
+      const update = vi.fn();
+      const tx = { executionRun: { update }, agentRuntimeTask: { update } };
+      const error = await saveExecutionCheckpoint(
+        tx as never,
+        { id: "task", runId: "run", snapshot: {} },
+        payload,
+      ).catch((e) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getStatus()).toBe(400);
+      expect(error.getResponse()).toMatchObject({
+        code: "INVALID_EXECUTION_CHECKPOINT",
+        issues: expect.any(Array),
+      });
+      expect(update).not.toHaveBeenCalled();
+    },
+  );
 });

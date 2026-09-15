@@ -1,4 +1,17 @@
 import {
+  testAccountBindingsSchema,
+  businessTestAccountSchema,
+} from "@devproof/agent-runtime-protocol";
+export {
+  testAccountPlanSchema,
+  testAccountSlots,
+} from "@devproof/agent-runtime-protocol";
+export type {
+  TestAccountPlan,
+  TestAccountBinding,
+  TestAccountRequirement,
+} from "@devproof/agent-runtime-protocol";
+import {
   agentProviderSchema as executionAgentProviderSchema,
   runtimeBusinessReferenceSchema,
   runtimeCriterionSchema,
@@ -585,6 +598,7 @@ export const DEFAULT_EXECUTION_BUDGET_SECONDS = 1_800;
 
 export const executionRunCreateInputSchema = z
   .object({
+    testAccounts: testAccountBindingsSchema.optional(),
     concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
     businessReferences: z
       .array(runtimeBusinessReferenceSchema)
@@ -1816,3 +1830,19 @@ export type VerificationExecutionAcquireInput = z.infer<
 >;
 
 export * from "./runtime-recovery.js";
+
+export const taskTestAccountsInputSchema = z.object({
+  submissionId: z.string().uuid(),
+  expectedRevision: z.string().min(1).max(100),
+  assignments: z
+    .array(
+      z.object({
+        caseExecutionId: z.string().uuid(),
+        slotId: z.string().min(1).max(100),
+        account: businessTestAccountSchema,
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+export type TaskTestAccountsInput = z.infer<typeof taskTestAccountsInputSchema>;

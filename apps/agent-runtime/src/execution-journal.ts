@@ -1,5 +1,7 @@
 import {
   executionStateSchema,
+  businessTestAccountSchema,
+  testAccountBindingsSchema,
   readExecutionState,
   type ExecutionState,
   type RuntimeEvidenceRef,
@@ -22,6 +24,7 @@ const resource = (url: string) => {
     return (
       u.origin +
       u.pathname
+        .replace(/\/list\/?$/, "")
         .replace(/\/[^/]+$/, (match) => (/^\/\d+$/.test(match) ? "" : match))
         .replace(/\/$/, "")
     );
@@ -58,11 +61,24 @@ function records(value: unknown, depth = 0): Record<string, unknown>[] {
 function emptyList(value: unknown): boolean {
   if (Array.isArray(value)) return value.length === 0;
   const v = object(value);
-  return [v.data, v.list, v.items, v.records].some((child) =>
+  return [v.data, v.list, v.items, v.records, v.whitelists].some((child) =>
     Array.isArray(child)
       ? child.length === 0
       : child && typeof child === "object" && emptyList(child),
   );
+}
+
+// Business responses may contain empty or malformed optional identity fields.
+// They must never become shared aliases linking otherwise unrelated users.
+function accountAliases(values: unknown[]) {
+  return [
+    ...new Set(
+      values.flatMap((value) => {
+        const parsed = businessTestAccountSchema.safeParse(value);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
+  ];
 }
 
 /** Durable facts are distinct from product verdicts and permission to delete.
@@ -73,6 +89,24 @@ export class ExecutionJournal {
   state: ExecutionState;
   constructor(policy: Record<string, unknown>) {
     this.state = readExecutionState(policy);
+    const bindings = testAccountBindingsSchema.safeParse(policy.testAccounts);
+    if (bindings.success && bindings.data.length) {
+      this.state.accounts = bindings.data.map((binding) => ({
+        ...binding,
+        aliases: [
+          ...new Set([
+            ...binding.aliases,
+            ...(this.state.accounts?.find(
+              (old) =>
+                old.slotId === binding.slotId &&
+                old.account === binding.account,
+            )?.aliases ?? []),
+          ]),
+        ],
+      }));
+      delete this.state.account;
+      this.state.accountAliases = [];
+    }
   }
   observe(output: unknown, evidence: Map<string, RuntimeEvidenceRef>) {
     const before = JSON.stringify(this.state),
@@ -126,7 +160,19 @@ export class ExecutionJournal {
         body = parse(q.responseSummary);
       if (!url) continue;
       const found = records(body);
-      if (method === "GET" && successful(q.status, body) && emptyList(body)) {
+      const completeBody =
+        q.bodyPending !== true &&
+        q.pending !== true &&
+        q.responseTruncated !== true &&
+        q.responseBodyTruncated !== true &&
+        q.responseBodyOmitted === undefined &&
+        typeof q.responseSummary === "string";
+      if (
+        method === "GET" &&
+        completeBody &&
+        successful(q.status, body) &&
+        emptyList(body)
+      ) {
         try {
           const params = new URL(url).searchParams,
             account = params.get("account"),
@@ -160,11 +206,7 @@ export class ExecutionJournal {
           method: method as "POST" | "PUT" | "PATCH" | "DELETE",
           url,
           status: typeof q.status === "number" ? q.status : null,
-          confirmed:
-            q.bodyPending !== true &&
-            q.pending !== true &&
-            q.responseBodyOmitted === undefined &&
-            typeof q.responseSummary === "string",
+          confirmed: completeBody,
           request: q.requestSummary.slice(0, 4000),
           ...(typeof q.responseSummary === "string"
             ? { response: q.responseSummary.slice(0, 4000) }
@@ -185,21 +227,30 @@ export class ExecutionJournal {
             "核对已提交的业务结果并记录验收，不重新进行创建前的冲突检查。";
         }
       }
-      if (!successful(q.status, body)) continue;
+      if (!completeBody || !successful(q.status, body)) continue;
       for (const candidate of found) {
         const id = String(candidate.id),
           type = String(candidate.type),
           key = recordKey(id, type, url);
-        const aliases = [
+        const aliases = accountAliases([
           candidate.account,
           object(candidate.user).uuid,
           object(candidate.user).phone,
           object(candidate.user).email,
-        ].filter((v): v is string => typeof v === "string");
+        ]);
         if (this.state.account && aliases.includes(this.state.account))
           this.state.accountAliases = [
             ...new Set([...this.state.accountAliases, ...aliases]),
           ].slice(0, 20);
+        for (const binding of this.state.accounts ?? []) {
+          if (
+            aliases.includes(binding.account) ||
+            binding.aliases.some((alias) => aliases.includes(alias))
+          )
+            binding.aliases = [
+              ...new Set([...binding.aliases, ...aliases]),
+            ].slice(0, 20);
+        }
         const existing = this.state.records.find(
           (r) => recordKey(r.id, r.type, r.resourceUrl) === key,
         );
@@ -339,10 +390,8 @@ export class ExecutionJournal {
     this.state = {
       ...parsed,
       ...(this.state.account ? { account: this.state.account } : {}),
+      accounts: this.state.accounts,
       accountAliases: this.state.accountAliases,
-      ...(this.state.accountConflict
-        ? { accountConflict: this.state.accountConflict }
-        : {}),
       pendingRecords: this.state.pendingRecords,
       writes: this.state.writes,
       preflightAbsences: this.state.preflightAbsences,

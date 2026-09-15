@@ -50,4 +50,26 @@ describe("case execution goal", () => {
     expect(goal).toContain("查看页面");
     expect(goal).not.toMatch(/undefined|测试数据|清理/u);
   });
+  it("delivers structured account constraints to the executor even without prose test data", () => {
+    const goal = caseExecutionGoal({
+      name: "创建白名单",
+      preconditions: [],
+      steps: [],
+      accountRequirements: [
+        {
+          role: "subject",
+          label: "无白名单记录的账号",
+          count: 1,
+          usage: "CREATE_OR_MODIFY",
+          requiredTypes: ["MODEL_NAME_MAPPING_WHITELIST"],
+          constraints: ["账号已存在，且该类型记录不存在"],
+          rationale: "同一账号验证两次状态切换",
+        },
+      ],
+    });
+    expect(goal).toContain("subject:1");
+    expect(goal).toContain("MODEL_NAME_MAPPING_WHITELIST");
+    expect(goal).toContain("账号已存在，且该类型记录不存在");
+    expect(goal).toContain("先只读核对全部角色");
+  });
 });

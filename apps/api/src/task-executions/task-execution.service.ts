@@ -1,3 +1,12 @@
+import {
+  expireTestAccountPlans,
+  accountsReady,
+  prepareTestAccountPlans,
+  provideTaskTestAccounts,
+  readAccountPlan,
+  taskAccountPreparation,
+} from "./task-test-accounts.js";
+import type { TaskTestAccountsInput } from "@devproof/contracts";
 import { ContextSourceError } from "../specifications/context-source.error.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -1581,7 +1590,11 @@ export class TaskExecutionService {
     const waitingForHuman =
       analysis.status === "WAITING_INPUT" ||
       [...issueCases, ...directCases].some(
-        (item) => item.run?.lifecycle === "WAITING_HUMAN",
+        (item) =>
+          item.run?.lifecycle === "WAITING_HUMAN" ||
+          ("scheduling" in item &&
+            readCaseScheduling(item.scheduling)?.reason ===
+              "TEST_ACCOUNTS_REQUIRED"),
       );
     const direct = task.kind === "DIRECT_RUN" || task.kind === "LEGACY_RUN";
     const matrix = taskDeploymentMatrix(
@@ -2731,7 +2744,20 @@ export class TaskExecutionService {
     });
   }
 
+  async provideTestAccounts(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskTestAccountsInput,
+  ) {
+    await provideTaskTestAccounts(this.prisma, current.team.id, id, input);
+    await this.dispatchPendingForTask(id);
+    await this.projectTask(id);
+    return this.detail(current, id);
+  }
+
   private async dispatchPending(limit: number, taskExecutionId?: string) {
+    await prepareTestAccountPlans(this.prisma, taskExecutionId);
+    await expireTestAccountPlans(this.prisma, taskExecutionId);
     const dispatchDeadline = new Date(Date.now() + MINIMUM_CHILD_RUN_WINDOW_MS);
     const where: Prisma.TaskCaseExecutionWhereInput = {
       dispatchAttempts: { lt: CASE_DISPATCH_MAX_ATTEMPTS },
@@ -2740,7 +2766,7 @@ export class TaskExecutionService {
       taskExecution: {
         cancelRequestedAt: null,
         deadlineAt: { gt: dispatchDeadline },
-        lifecycle: { in: ["RUNNING", "QUEUED"] },
+        lifecycle: { in: ["RUNNING", "QUEUED", "WAITING_HUMAN"] },
       },
       OR: [
         { dispatchStatus: "PENDING" },
@@ -2862,6 +2888,17 @@ export class TaskExecutionService {
           });
           continue;
         }
+      }
+      if (
+        !accountsReady(candidate.testAccountPlan, candidate.testCase.definition)
+      ) {
+        await this.recordScheduling(
+          candidate,
+          "WAITING",
+          "TEST_ACCOUNTS_REQUIRED",
+          { resourceType: "TEST_ACCOUNT" },
+        );
+        continue;
       }
       const reservation = await this.reservations.acquire(
         candidate.taskExecutionId,
@@ -3256,6 +3293,7 @@ function taskCaseRunRequest(
     }),
   );
   return {
+    testAccounts: readAccountPlan(item.testAccountPlan)?.bindings,
     concurrencyPolicy: executionConcurrencyPolicySchema.safeParse(
       item.executionPolicy,
     ).success
@@ -3692,6 +3730,10 @@ function toTaskDetail(row: TaskDetailRow) {
     updatedAt: row.updatedAt.toISOString(),
     verdict: row.verdict,
     waitingReason: row.waitingReason,
+    testAccountPreparation: taskAccountPreparation(
+      row.caseExecutions,
+      latestSnapshot?.id,
+    ),
     analysisInputRequest:
       row.waitingReason === "ANALYSIS_INPUT_REQUIRED"
         ? (record(row.environmentSnapshot).analysisInputRequest ?? null)

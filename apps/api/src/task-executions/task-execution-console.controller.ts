@@ -17,6 +17,7 @@ import {
   taskStageRetryInputSchema,
   taskCaseRerunInputSchema,
   taskAnalysisInputSchema,
+  taskTestAccountsInputSchema,
   executionConcurrencyPolicySchema,
 } from "@devproof/contracts";
 
@@ -155,6 +156,19 @@ export class TaskExecutionConsoleController {
       current.user.id,
       id,
       parseBody(taskProfileSelectionInputSchema, body),
+    );
+  }
+
+  @Post(":id/test-accounts")
+  provideTestAccounts(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.provideTestAccounts(
+      taskToolContext(current),
+      id,
+      parseBody(taskTestAccountsInputSchema, body),
     );
   }
 

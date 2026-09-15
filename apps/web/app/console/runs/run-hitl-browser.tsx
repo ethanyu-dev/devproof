@@ -67,6 +67,13 @@ interface RunBrowserHitlProps {
     expiresAt: string;
     id: string;
     kind?: string;
+    context?: {
+      accountSlots?: Array<{
+        slotId: string;
+        label: string;
+        requiredTypes: string[];
+      }>;
+    };
     prompt: string;
     notificationError?: string;
   };
@@ -120,6 +127,8 @@ function TestAccountInput({
   const [open, setOpen] = useState(true);
   const [account, setAccount] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [accounts, setAccounts] = useState<Record<string, string>>({});
+  const slots = intervention.context?.accountSlots ?? [];
   const [mode, setMode] = useState<"account" | "instructions">("account");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,10 +150,23 @@ function TestAccountInput({
     if (busy) return;
     if (
       mode === "account" &&
+      slots.length === 0 &&
       (!/^[\p{L}\p{N}][\p{L}\p{N}._@+:-]*$/u.test(account.trim()) ||
         /删除|重新创建|允许你|先把|再创建|帮我|重试/u.test(account))
     ) {
       setError("请填写账号标识；删除或重建说明请切换到处置意见。");
+      return;
+    }
+    if (
+      mode === "account" &&
+      slots.some(
+        (slot) =>
+          !/^[\p{L}\p{N}][\p{L}\p{N}._@+:-]*$/u.test(
+            accounts[slot.slotId]?.trim() ?? "",
+          ),
+      )
+    ) {
+      setError("请填写每个请求角色的有效账号。");
       return;
     }
     if (mode === "instructions" && instructions.trim().length < 5) {
@@ -161,7 +183,16 @@ function TestAccountInput({
           body: JSON.stringify({
             response:
               mode === "account"
-                ? { account: account.trim() }
+                ? slots.length
+                  ? {
+                      accounts: Object.fromEntries(
+                        slots.map((slot) => [
+                          slot.slotId,
+                          accounts[slot.slotId]!.trim(),
+                        ]),
+                      ),
+                    }
+                  : { account: account.trim() }
                 : { instructions: instructions.trim() },
           }),
         },
@@ -253,17 +284,43 @@ function TestAccountInput({
             等待截止：{new Date(intervention.expiresAt).toLocaleString("zh-CN")}
           </p>
           {mode === "account" ? (
-            <Field label="测试账号">
-              <Input
-                ref={accountInput}
-                autoComplete="off"
-                disabled={busy}
-                maxLength={200}
-                onChange={(event) => setAccount(event.target.value)}
-                required
-                value={account}
-              />
-            </Field>
+            slots.length ? (
+              <div className="grid gap-3">
+                {slots.map((slot) => (
+                  <Field
+                    key={slot.slotId}
+                    label={slot.label}
+                    description={slot.requiredTypes.join("、")}
+                  >
+                    <Input
+                      aria-label={slot.label}
+                      disabled={busy}
+                      maxLength={200}
+                      required
+                      value={accounts[slot.slotId] ?? ""}
+                      onChange={(event) =>
+                        setAccounts({
+                          ...accounts,
+                          [slot.slotId]: event.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                ))}
+              </div>
+            ) : (
+              <Field label="测试账号">
+                <Input
+                  ref={accountInput}
+                  autoComplete="off"
+                  disabled={busy}
+                  maxLength={200}
+                  onChange={(event) => setAccount(event.target.value)}
+                  required
+                  value={account}
+                />
+              </Field>
+            )
           ) : (
             <Field label="处置意见">
               <textarea

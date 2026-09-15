@@ -1,3 +1,4 @@
+import type { TaskAccountPreparation } from "./task-test-accounts";
 import type {
   ExecutionConcurrencyPolicy,
   TaskCaseRerunSource,
@@ -108,6 +109,7 @@ export interface TaskStage {
 }
 
 export interface TaskDetail {
+  testAccountPreparation?: TaskAccountPreparation;
   analysisInputRequest?:
     (SpecAnalysisInputRequest & { attemptId: string }) | null;
   caseRerunSource?: TaskCaseRerunSource | null;

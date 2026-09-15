@@ -1,3 +1,7 @@
+import {
+  accountInputSlots,
+  accountInputResponseSchema,
+} from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -26,7 +30,7 @@ import {
   isInvalidModelToolSchema,
   openAiFunctionSchema,
 } from "./model-tool-schema.js";
-import { taskTestAccount } from "./test-account.js";
+import { hasProvidedTestAccount, taskTestAccount } from "./test-account.js";
 import { ExecutionJournal } from "./execution-journal.js";
 import { ModelHealth } from "./model-health.js";
 
@@ -366,49 +370,11 @@ export class BrowserVerificationExecutor {
         task.snapshot.goal,
         task.snapshot.executionPolicy,
       );
-      if (account) {
-        try {
-          if (journal.state.account !== account) {
-            journal.state.accountAliases = [];
-            delete journal.state.accountConflict;
-          }
-          await this.controlPlane.appendEvent(
-            lease,
-            "execution.account.claim",
-            { account, aliases: journal.state.accountAliases },
-          );
-          journal.state.account = account;
-          await checkpoint();
-        } catch (error) {
-          if (!String(error).includes("TEST_ACCOUNT_CONFLICT")) throw error;
-          if (!hitlPolicy.enabled) throw error;
-          preserveBrowserForHuman = true;
-          segmentStatus = "WAITING_HUMAN";
-          return runtimeOutcomeSchema.parse({
-            kind: "WAITING_HUMAN",
-            executionDisposition: "BLOCKED",
-            summary: "测试账号已被同环境其他用例占用，等待独立账号。",
-            intervention: {
-              kind: "TEST_ACCOUNT",
-              prompt:
-                "当前测试账号已由其他用例使用，尚未完成清理。请提供可用于本用例的独立测试账号（手机号或 UUID）。",
-              context: {
-                usage: "CREATE_OR_MODIFY",
-                account,
-                reason: "TEST_ACCOUNT_CONFLICT",
-              },
-              responseSchema: {
-                type: "object",
-                properties: { account: { type: "string" } },
-                required: ["account"],
-              },
-              expiresAt: new Date(
-                Date.now() + hitlPolicy.timeoutSeconds * 1000,
-              ).toISOString(),
-            },
-          });
-        }
+      if (account && journal.state.account !== account) {
+        journal.state.account = account;
+        journal.state.accountAliases = [];
       }
+      if (account || journal.state.accounts?.length) await checkpoint();
       for (let callCount = 0; callCount < this.toolLimit;) {
         signal.throwIfAborted();
         if (finalizationDue(task, deadlinePolicy)) {
@@ -1025,19 +991,10 @@ export class BrowserVerificationExecutor {
     journal: ExecutionJournal,
     verificationCheckpoint?: Record<string, unknown>,
   ) {
-    const result = (await this.controlPlane.appendEvent(
-      lease,
-      "execution.checkpoint",
-      {
-        executionState: journal.state,
-        ...(verificationCheckpoint ? { verificationCheckpoint } : {}),
-      },
-    )) as { accountConflict?: string | null } | undefined;
-    if (result?.accountConflict)
-      journal.state.accountConflict = result.accountConflict;
-    else if (result?.accountConflict === null)
-      delete journal.state.accountConflict;
-    return result;
+    return this.controlPlane.appendEvent(lease, "execution.checkpoint", {
+      executionState: journal.state,
+      ...(verificationCheckpoint ? { verificationCheckpoint } : {}),
+    });
   }
 
   private async browserCommand(
@@ -1224,16 +1181,6 @@ export class BrowserVerificationExecutor {
     }
 
     if (input.call.function.name === "browser_command") {
-      if (
-        input.journal?.state.accountConflict &&
-        ![...READ_COMMANDS, "page.navigate", "tab.switch"].includes(
-          String((raw as Record<string, unknown>).commandType),
-        )
-      )
-        return correction(
-          input.browserCommandCount,
-          input.journal.state.accountConflict,
-        );
       const catalogCorrection = input.catalog.correctionFor(
         (raw as Record<string, unknown>).commandType,
         input.advertisedGroups,
@@ -1590,11 +1537,38 @@ export class BrowserVerificationExecutor {
           : null;
       if (ownershipError)
         return correction(input.browserCommandCount, ownershipError);
+      if (
+        parsed.data.kind === "TEST_ACCOUNT" &&
+        hasProvidedTestAccount(input.task.snapshot.executionPolicy)
+      )
+        return correction(
+          input.browserCommandCount,
+          toolCorrection(
+            "用户已提供测试账号。账号不存在、不可用或不满足业务前置条件时，将受影响的验收标准记录为 INCONCLUSIVE，引用实际错误并说明原因；完成可独立验证的部分及本次数据清理后结束，不再请求替换账号。若这是本次已创建的记录，应继续验证与清理；无效账号负向测试仍按产品预期正常判定。",
+            {
+              code: "COMMAND_NOT_ALLOWED",
+              nextAction:
+                "使用 record_criterion 记录受影响项为 INCONCLUSIVE，再通过 finish_verification 完成收尾。",
+            },
+          ),
+        );
       const chineseError =
         requireChineseText(parsed.data.prompt, "request_human_input.prompt") ??
         requireChineseText(parsed.data.summary, "request_human_input.summary");
       if (chineseError) {
         return correction(input.browserCommandCount, chineseError);
+      }
+      let accountSlots: ReturnType<typeof accountInputSlots> = [];
+      if (parsed.data.kind === "TEST_ACCOUNT") {
+        try {
+          accountSlots = accountInputSlots(
+            input.task.snapshot.executionPolicy,
+            parsed.data.responseSchema,
+            parsed.data.context,
+          );
+        } catch (error) {
+          return correction(input.browserCommandCount, String(error));
+        }
       }
       return {
         browserCommandCount: input.browserCommandCount,
@@ -1605,6 +1579,7 @@ export class BrowserVerificationExecutor {
               parsed.data.kind === "TEST_ACCOUNT"
                 ? {
                     ...parsed.data.context,
+                    accountSlots,
                     purpose: "BUSINESS_TEST_SUBJECT",
                     usage:
                       parsed.data.context.usage === "READ_EXISTING"
@@ -1628,14 +1603,7 @@ export class BrowserVerificationExecutor {
             prompt: parsed.data.prompt,
             responseSchema:
               parsed.data.kind === "TEST_ACCOUNT"
-                ? {
-                    type: "object",
-                    properties: {
-                      account: { type: "string", minLength: 1, maxLength: 200 },
-                    },
-                    required: ["account"],
-                    additionalProperties: false,
-                  }
+                ? accountInputResponseSchema(accountSlots)
                 : parsed.data.responseSchema,
           },
           kind: "WAITING_HUMAN",
@@ -2413,7 +2381,7 @@ function toolDefinitions(
             type: "function",
             name: "record_progress",
             description:
-              "保存跨轮执行进度：当前阶段、已读观察的准确原文和下一步计划。executionState 可持久保存业务对象、初始状态与清理结果，必须引用实际证据。不能分配或更换测试账号，缺少或更换账号请使用 TEST_ACCOUNT 人工输入。仅在阶段转换或需要保留关键观察时使用，不要每次阅读都调用。不能替代 record_criterion，不能让旧 ref 重新有效。",
+              "保存跨轮执行进度：当前阶段、已读观察的准确原文和下一步计划。executionState 可持久保存业务对象、初始状态与清理结果，必须引用实际证据。不能分配或更换测试账号，尚未提供账号时使用 TEST_ACCOUNT 人工输入；已提供但不可用时记录受影响项为 INCONCLUSIVE。仅在阶段转换或需要保留关键观察时使用，不要每次阅读都调用。不能替代 record_criterion，不能让旧 ref 重新有效。",
             parameters: openAiFunctionSchema(recordProgressInputSchema),
             strict: false,
           },
@@ -2538,10 +2506,11 @@ STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或 SCROLL_TARGET_NOT_SCROLLABLE 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
 验收证据必须对应标准里的具体页面区域、控件和业务对象。记录 PASSED 时，优先使用 citations: [{target: observationTargets 中的 label, ref: 当前快照已交付的完整 ref}]。执行器会提取该节点的连续原文并绑定同次观察的 DOM 与截图，无需手抄 observationId、cursor、quote 或 artifact UUID。节点必须属于标准要求的实际区域和状态，匹配文字本身不代表验收通过。旧接口也可使用 observations，但必须逐个覆盖 observationTargets：在 observations 中提供对应 target（label）、observationId、cursor 和逐字 quote，quote 必须包含该对象的 expectedText 或 alternatives 中任一等价文本，且来自已交付观察。同一对象的文本是任选其一，不同 target 则必须全部覆盖。仅看见下拉候选列表不证明选择后表单已经切换，必须引用实际选中状态及对应表单；多个对象不能只验证其中一个。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
-TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。写入前只读核对环境、账号和所需类型的唯一键是否已有记录；已存在则请求独立账号，禁止删除既有记录来满足新建前置条件。默认并发执行，不假设其他 Case 的数据归属。缺账号继续使用 TEST_ACCOUNT，请在 context 中说明 usage="CREATE_OR_MODIFY"、requiredTypes 和 uniquenessConstraint；仅查看已有记录的筛选 Case 优先复用已有数据，必要时以 usage="READ_EXISTING" 请求账号，并保持只读。获得的账号只属于本 Case 的所声明用途，READ_EXISTING 答复不授权写入。记录实际创建的 ID、类型和证据，不能假设备注字段存在。
-正向业务验证需要已有测试账号时，只使用任务或 humanResume.response.account 明确提供的账号；不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。缺少账号，或提交后明确观察到该账号不存在/不可用时，调用现有 request_human_input，kind="TEST_ACCOUNT"，用简体中文请求一个当前环境可用于本次测试的账号（页面支持手机号或 UUID 时说明即可），context 中保留字段、原始错误与证据引用。用户只需提供账号，不需要接管浏览器。humanResume.response.instructions 是用户的处置意见，不是账号；保留已分配账号，结合本次对象归属与证据决定能否处置，不得将说明填入账号字段。恢复后先重新观察保留的页面，用 humanResume.response.account 填写并核对结果；不要因为任务正文中的旧示例而覆盖用户答复。HITL 禁用时将缺数据的标准记为 INCONCLUSIVE，不盲目试号。若验收目标就是无效账号应被拒绝，则保留负向测试输入，按实际错误验证，不索取有效账号。
+executionState.accounts 提供用户填写并按角色分配的账号，slotId 对应 Spec 中的账号角色（role:序号）。平台不锁定账号，不因同账号在其他 Case 或历史 Run 中使用过而拦截。按 usage、requiredTypes 和业务约束使用，禁止把账号 A/B、角色名称当作真实账号。开始时先只读核对各角色的账号存在性和业务前置条件；用户已提供账号但账号不存在、不可用或前置记录冲突时，将受影响的验收标准记录为 INCONCLUSIVE（无法判定），引用实际页面或网络错误，说明账号角色、具体原因和未验证范围，不重复请求替换账号。可独立验证的标准继续正常判定。本次已创建的记录应继续验证及清理，不能当作创建前的数据冲突。
+TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。它只用于用户尚未提供测试账号的情况，说明环境、用途、数量、requiredTypes 和前置约束。获得账号后按用户分配使用；READ_EXISTING 答复不授权写入。平台允许账号复用不等于业务前置条件已满足，也不授权删除既有记录来满足新建前置条件。记录实际创建的 ID、类型和证据，仅清理本次有明确归属和授权的数据。
+正向业务验证优先使用 executionState.accounts 对应角色的账号；旧执行兼容 humanResume.response.account。不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。用户尚未提供账号时可调用 request_human_input，kind="TEST_ACCOUNT"；用户已提供但不可用时不再发起账号 HITL，按证据记录 INCONCLUSIVE，并以 finish_verification 正常结束，而不是记录产品 FAILED 或抛出执行异常。旧 Spec 中“冲突后换账号/再次 HITL”的指示也按此规则执行。humanResume.response.instructions 是处置意见，不是账号，不能填入账号字段。人工恢复后重新观察页面并使用用户最新提供的账号。若验收目标就是无效账号应被拒绝，则保留负向输入，按真实响应和产品预期正常判定 PASSED/FAILED，不索取有效账号，也不能仅因账号无效而判 INCONCLUSIVE。
 result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。
-保存后出现错误、弹窗不关闭或结果未更新时，先启用 diagnostics，读取 page.network（精确 urlIncludes、includeResponseBodies=true）及 page.console/page.errors。旧 Runtime 缺少 actionFeedback 时也必须走这条只读诊断路径；重复点击同一保存不能代替诊断。already exists 等唯一性拒绝意味着需要核查已有记录或换账号；前置数据冲突不应直接判产品失败。
+保存后出现错误、弹窗不关闭或结果未更新时，先启用 diagnostics，读取 page.network（精确 urlIncludes、includeResponseBodies=true）及 page.console/page.errors。旧 Runtime 缺少 actionFeedback 时也必须走这条只读诊断路径；重复点击同一保存不能代替诊断。already exists 等唯一性拒绝要结合创建前检查、本次写入回执和记录归属核对；若是用户提供账号的前置数据问题，记录 INCONCLUSIVE 并说明原因，不循环换号或直接判产品失败。
 remainingToolCalls 不足 3 次时进入收尾，不发起新的提交；优先核对最近操作并提交已完成标准，剩余标准记录 INCONCLUSIVE。范围标签 fN 不是元素 ref，不要将它当作 frame.snapshot 的引用；恢复过的无效方法不要重复尝试。
 timeBudget.remainingExecutionSeconds 是扣除收尾预留后的剩余秒数，与 remainingToolCalls 独立；工具次数多不代表时间充足。剩余执行时间不足 60 秒时优先只读确认已有操作并提交部分结论，不再启动新的业务写入。每次模型失败后的 fallback 可能收到刷新的页面，仍需使用本次输入中的 ref。
 只有无法自主继续时才能调用 request_human_input。至少执行一次浏览器操作并提供所有必需验收标准后，才能完成验证。

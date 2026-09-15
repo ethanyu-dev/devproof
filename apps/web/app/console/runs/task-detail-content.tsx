@@ -1,4 +1,5 @@
 "use client";
+import { TaskTestAccountsCard } from "./task-test-accounts";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -263,6 +264,15 @@ export function TaskDetailContent({
           />
         ))}
 
+        {detail.testAccountPreparation &&
+          detail.testAccountPreparation.totalCount > 0 && (
+            <TaskTestAccountsCard
+              key={detail.testAccountPreparation.revision}
+              preparation={detail.testAccountPreparation}
+              busy={busy || terminalLifecycles.has(detail.lifecycle)}
+              onSubmit={(input) => onMutate("/test-accounts", input)}
+            />
+          )}
         {detail.waitingReason === "ANALYSIS_INPUT_REQUIRED" &&
           detail.analysisInputRequest && (
             <TaskAnalysisInputCard

@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ExecutionRunService,
   projectRunTrajectory,
-  reserveCaseTestAccount,
 } from "./execution-run.service.js";
 
 const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
@@ -114,6 +113,85 @@ describe("ExecutionRunService events", () => {
 });
 
 describe("ExecutionRunService HITL resume", () => {
+  it("replaces one requested role and retains other accounts, writes and cleanup evidence", async () => {
+    const tx = transactionClient();
+    const bindings = ["first", "second"].map((role) => ({
+      slotId: `${role}:1`,
+      label: role,
+      account: role,
+      aliases: [],
+      usage: "CREATE_OR_MODIFY",
+      requiredTypes: [],
+    }));
+    const writes = [
+      {
+        key: "write",
+        method: "POST",
+        url: "https://example.com/items",
+        status: 200,
+        confirmed: true,
+        request: "{}",
+        evidenceRefs: ["proof"],
+      },
+    ];
+    const evidence = [{ externalId: "proof", kind: "NETWORK", metadata: {} }];
+    const policy = {
+      ...snapshot.executionPolicy,
+      testAccounts: bindings,
+      executionState: { accounts: bindings, writes },
+      verificationCheckpoint: { criteria: [], evidence },
+    };
+    const original = intervention({ kind: "TEST_ACCOUNT" });
+    tx.humanIntervention.findFirst.mockResolvedValue({
+      ...original,
+      context: {
+        accountSlots: [
+          {
+            slotId: "second:1",
+            label: "第二个用途",
+            usage: "CREATE_OR_MODIFY",
+            requiredTypes: [],
+          },
+        ],
+      },
+      run: { ...original.run, executionPolicy: policy },
+      task: { snapshot: { ...snapshot, executionPolicy: policy } },
+    });
+    const service = new ExecutionRunService(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      } as never,
+      {} as never,
+    );
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { accounts: { "second:1": "replacement" } },
+    });
+    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          snapshot: expect.objectContaining({
+            executionPolicy: expect.objectContaining({
+              testAccounts: [
+                bindings[0],
+                expect.objectContaining({
+                  slotId: "second:1",
+                  account: "replacement",
+                }),
+              ],
+              executionState: expect.objectContaining({ writes }),
+              verificationCheckpoint: {
+                criteria: [],
+                observations: [],
+                evidence,
+              },
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("rejects prose in the account field but preserves the account when instructions are submitted separately", async () => {
     const tx = transactionClient();
     tx.humanIntervention.findFirst.mockResolvedValue(
@@ -164,133 +242,44 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
-  it("keeps a conflicting business account reply pending and preserves default scheduling", async () => {
+  it("accepts a supplied account without consulting other cases or historical cleanup", async () => {
     const tx = transactionClient();
     const original = intervention({
       kind: "TEST_ACCOUNT",
-      context: {
-        usage: "CREATE_OR_MODIFY",
-        requiredTypes: ["LEGACY_CORPORATE"],
-      },
+      context: { usage: "CREATE_OR_MODIFY" },
     });
-    tx.humanIntervention.findFirst.mockResolvedValue({
-      ...original,
-      run: {
-        ...original.run,
-        taskExecutionId: "parent-task",
-        environmentSnapshot: { targetUrl: "https://test.example.com/list" },
-      },
-    });
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "test-user" },
-        context: {},
-        run: {
-          environmentSnapshot: { targetUrl: "https://test.example.com/form" },
-        },
-      },
-    ]);
+    tx.humanIntervention.findFirst.mockResolvedValue(original);
+    tx.humanIntervention.findMany.mockRejectedValue(
+      new Error("historical account scan must not run"),
+    );
+    tx.executionRun.findMany.mockRejectedValue(
+      new Error("account reservation scan must not run"),
+    );
     const service = new ExecutionRunService(
       {
         $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
       } as never,
       {} as never,
     );
-    await expect(
-      service.resolveIntervention(current, runId, interventionId, {
-        response: { account: "test-user" },
-      }),
-    ).rejects.toThrow("已分配");
-    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
-    expect(tx.executionRun.updateMany).not.toHaveBeenCalled();
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
-      tx.humanIntervention.findMany.mock.invocationCallOrder[0]!,
-    );
-    expect(tx.humanIntervention.findMany).toHaveBeenCalledWith(
+    vi.spyOn(service, "detail").mockResolvedValue({} as never);
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { account: "shared-user" },
+    });
+    expect(tx.humanIntervention.findMany).not.toHaveBeenCalled();
+    expect(tx.executionRun.findMany).not.toHaveBeenCalled();
+    expect(tx.humanIntervention.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
+        data: expect.objectContaining({
+          response: { account: "shared-user" },
           status: "RESOLVED",
-          runId: { not: runId },
-          run: { taskExecutionId: "parent-task" },
         }),
       }),
     );
-  });
-
-  it("releases historical HITL allocations after the previous case is cleaned", async () => {
-    const tx = transactionClient();
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "reusable" },
-        context: {},
-        run: {
-          id: "old-run",
-          lifecycle: "COMPLETED",
-          environmentSnapshot: { targetUrl: "https://test.example.com" },
-          executionPolicy: {
-            executionState: {
-              records: [
-                {
-                  id: "123",
-                  ownership: "CREATED_THIS_RUN",
-                  evidenceRefs: ["proof"],
-                  cleanup: { instruction: "delete", status: "COMPLETED" },
-                },
-              ],
-            },
-          },
-        },
-      },
-    ]);
-    await reserveCaseTestAccount(tx as never, {
-      account: "reusable",
-      context: {},
-      environment: { targetUrl: "https://test.example.com" },
-      runId,
-      taskExecutionId: "parent",
-      teamId: snapshot.teamId,
-    });
-    expect(tx.executionRun.update).toHaveBeenCalledWith(
+    expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: {
-          executionPolicy: expect.objectContaining({
-            testAccountClaim: { account: "reusable", aliases: [] },
-          }),
-        },
+        data: expect.objectContaining({ lifecycle: "QUEUED" }),
       }),
     );
-  });
-
-  it("allows independent accounts, environments and explicit read-only reuse", async () => {
-    const tx = transactionClient();
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "allocated-user" },
-        context: {},
-        run: {
-          environmentSnapshot: { targetUrl: "https://test.example.com/list" },
-        },
-      },
-    ]);
-    const input = {
-      account: "independent-user",
-      context: {},
-      environment: { targetUrl: "https://test.example.com" },
-      runId,
-      taskExecutionId: "parent",
-      teamId: snapshot.teamId,
-    };
-    await reserveCaseTestAccount(tx as never, input);
-    await reserveCaseTestAccount(tx as never, {
-      ...input,
-      account: "allocated-user",
-      environment: { targetUrl: "https://other.example.com" },
-    });
-    await reserveCaseTestAccount(tx as never, {
-      ...input,
-      account: "allocated-user",
-      context: { usage: "READ_EXISTING" },
-    });
   });
 
   it("keeps HITL and browser checks in the Runtime snapshot while storing provenance only on the Run", async () => {

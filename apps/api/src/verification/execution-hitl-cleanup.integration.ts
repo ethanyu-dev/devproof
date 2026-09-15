@@ -19,10 +19,7 @@ import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
 import { AgentRuntimeTaskService } from "../agent-runtime/agent-runtime-task.service.js";
 import { SessionClosureService } from "../runtime/session-closure.service.js";
 import { SessionRecoveryWorker } from "../runtime/session-recovery.worker.js";
-import {
-  ExecutionRunService,
-  reserveCaseTestAccount,
-} from "../execution-runs/execution-run.service.js";
+import { ExecutionRunService } from "../execution-runs/execution-run.service.js";
 import { UnifiedRunCleanupWorker } from "../execution-runs/unified-run-cleanup.worker.js";
 import { RuntimeSessionsService } from "../runtime/runtime-sessions.service.js";
 import { releaseVerifiedSessionResources } from "../runtime/session-resource-cleanup.js";
@@ -576,103 +573,44 @@ describe("PostgreSQL human resume after browser loss", () => {
 });
 
 describe("PostgreSQL uncertain writes after human intervention", () => {
-  it("atomically assigns a business account to one parallel Case and permits an independent account", async () => {
-    const { current } = await waitingHumanFixture("accounts");
-    const deadlineAt = new Date(Date.now() + 600_000);
-    const parent = await db.taskExecution.create({
+  it("accepts a business account while retaining an unresolved write journal", async () => {
+    const { current, run, intervention } = await resumableFixture(false, true);
+    const original = await db.executionRun.findUniqueOrThrow({
+      where: { id: run.id },
+    });
+    await db.humanIntervention.update({
+      where: { id: intervention.id },
       data: {
-        teamId: current.team.id,
-        kind: "ISSUE_SPEC",
-        sourceKind: "TEST",
-        idempotencyKey: randomUUID(),
-        title: "Concurrent data fixture",
-        inputSnapshot: {},
-        traceId: randomUUID().replaceAll("-", ""),
-        deadlineAt,
+        kind: "TEST_ACCOUNT",
+        prompt: "请提供测试账号",
+        context: { usage: "CREATE_OR_MODIFY" },
       },
     });
-    const environment = { targetUrl: "https://test.example.com/list" };
-    const replies: Array<{
-      id: string;
-      runId: string;
-      context: Prisma.JsonValue;
-    }> = [];
-    for (let index = 0; index < 2; index++) {
-      const run = await db.executionRun.create({
-        data: {
-          teamId: current.team.id,
-          taskExecutionId: parent.id,
-          idempotencyKey: randomUUID(),
-          goal: "Data fixture",
-          criteriaSnapshot: [],
-          environmentSnapshot: environment,
-          traceId: randomUUID().replaceAll("-", ""),
-          deadlineAt,
-          initialDeadlineAt: deadlineAt,
-          hardDeadlineAt: deadlineAt,
-          attempts: { create: { number: 1, inputSnapshot: {} } },
+    const service = new ExecutionRunService(db as never, {} as never);
+    await service.resolveIntervention(
+      {
+        ...current,
+        credential: {
+          id: current.user.id,
+          name: "Console user",
+          scopes: ["run:write"],
         },
-        include: { attempts: true },
-      });
-      const task = await db.agentRuntimeTask.create({
-        data: {
-          runId: run.id,
-          attemptId: run.attempts[0]!.id,
-          capability: "browser.verify",
-          status: "WAITING_HUMAN",
-          snapshot: {},
-          deadlineAt,
-        },
-      });
-      replies.push(
-        await db.humanIntervention.create({
-          data: {
-            teamId: current.team.id,
-            runId: run.id,
-            taskId: task.id,
-            attemptId: task.attemptId,
-            kind: "TEST_ACCOUNT",
-            prompt: "Provide an independent business account.",
-            context: { usage: "CREATE_OR_MODIFY" },
-          },
-        }),
-      );
-    }
-    const resolve = (reply: (typeof replies)[number], account: string) =>
-      db.$transaction(async (tx) => {
-        await reserveCaseTestAccount(tx, {
-          account,
-          context: reply.context,
-          environment,
-          runId: reply.runId,
-          taskExecutionId: parent.id,
-          teamId: current.team.id,
-        });
-        // Force overlap between the contenders; removing the advisory lock admits both.
-        await tx.$queryRaw`SELECT 1 FROM pg_sleep(0.05)`;
-        await tx.humanIntervention.update({
-          where: { id: reply.id },
-          data: { response: { account }, status: "RESOLVED" },
-        });
-      });
-    const results = await Promise.allSettled(
-      replies.map((reply) => resolve(reply, "fixture-business-user")),
+      },
+      run.id,
+      intervention.id,
+      {
+        response: { account: "shared-subject" },
+      },
     );
-    expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(
-      1,
-    );
-    const pending = await db.humanIntervention.findFirstOrThrow({
-      where: { id: { in: replies.map((item) => item.id) }, status: "PENDING" },
+    const resumed = await db.executionRun.findUniqueOrThrow({
+      where: { id: run.id },
     });
-    await resolve(pending, "independent-business-user");
-    expect(
-      await db.humanIntervention.count({
-        where: {
-          id: { in: replies.map((item) => item.id) },
-          status: "RESOLVED",
-        },
-      }),
-    ).toBe(2);
+    expect(resumed.lifecycle).toBe("QUEUED");
+    expect(resumed.executionPolicy).toEqual(original.executionPolicy);
+    const reply = await db.humanIntervention.findUniqueOrThrow({
+      where: { id: intervention.id },
+    });
+    expect(reply.response).toEqual({ account: "shared-subject" });
   });
 
   it.each(["FINALIZATION_RESERVE_REACHED", "TOOL_LIMIT_REACHED"] as const)(

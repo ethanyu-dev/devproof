@@ -1403,6 +1403,7 @@ model TaskGeneratedTestCase {
 }
 
 model TaskCaseExecution {
+  testAccountPlan     Json?                  @map("test_account_plan")
   id                  String                 @id @default(uuid()) @db.Uuid
   taskExecutionId     String                 @map("task_execution_id") @db.Uuid
   caseId              String                 @map("case_id") @db.Uuid

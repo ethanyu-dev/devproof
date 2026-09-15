@@ -535,7 +535,11 @@ describe("TaskExecutionService dispatch fairness", () => {
     };
     const prisma = {
       taskCaseExecution: {
-        findMany: vi.fn().mockResolvedValue([{ taskExecutionId: "task-1" }]),
+        findMany: vi
+          .fn()
+          .mockImplementation((args) =>
+            args.include?.testCase ? [] : [{ taskExecutionId: "task-1" }],
+          ),
         findFirst: vi
           .fn()
           .mockResolvedValueOnce(candidate)
@@ -601,24 +605,26 @@ describe("TaskExecutionService dispatch fairness", () => {
     const prisma = {
       taskCaseExecution: {
         findMany: vi.fn(async (input) =>
-          input.distinct
-            ? [{ taskExecutionId: "task-1" }]
-            : [
-                {
-                  id: "dependency",
-                  taskExecutionId: "task-1",
-                  caseId: dependencyId,
-                  deploymentId: "deployment-1",
-                  executionOrdinal: 1,
-                  runId: "dependency-run",
-                  dispatchStatus: "LINKED",
-                  run: {
-                    lifecycle: "RUNNING",
-                    verdict: null,
-                    executionDisposition: null,
+          input.include?.testCase
+            ? []
+            : input.distinct
+              ? [{ taskExecutionId: "task-1" }]
+              : [
+                  {
+                    id: "dependency",
+                    taskExecutionId: "task-1",
+                    caseId: dependencyId,
+                    deploymentId: "deployment-1",
+                    executionOrdinal: 1,
+                    runId: "dependency-run",
+                    dispatchStatus: "LINKED",
+                    run: {
+                      lifecycle: "RUNNING",
+                      verdict: null,
+                      executionDisposition: null,
+                    },
                   },
-                },
-              ],
+                ],
         ),
         findFirst: vi
           .fn()

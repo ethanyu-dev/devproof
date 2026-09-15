@@ -94,6 +94,8 @@ export function caseExecutionPhase(
     )
   )
     return "recovering";
+  if (!item.run && scheduling?.reason === "TEST_ACCOUNTS_REQUIRED")
+    return "waitingHuman";
   if (scheduling?.state === "RECOVERING") return "recovering";
   if (item.run) {
     if (scheduling?.state === "ADMITTED") return "queued";

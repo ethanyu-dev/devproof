@@ -11,6 +11,8 @@ import { Prisma } from "@prisma/client";
 import {
   browserExecutionSnapshot,
   businessTestAccountSchema,
+  testAccountBindingsSchema,
+  testAccountInputSlotsSchema,
   readExecutionState,
   runtimeTaskSnapshotSchema,
 } from "@devproof/agent-runtime-protocol";
@@ -25,14 +27,9 @@ import {
   runHitlPolicySchema,
 } from "@devproof/contracts";
 
-import {
-  canReleaseTestAccount,
-  claimTestAccount,
-} from "./test-account-reservation.js";
 import { initializeExecutionBudget } from "./execution-budget.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
-import { businessEnvironmentKey } from "../verification/execution-concurrency.js";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
 import { summarizeValue } from "../observability/observability.service.js";
 import { refreshedTaskDeadline } from "../task-executions/task-deadline.js";
@@ -218,6 +215,7 @@ export class ExecutionRunService {
         hardDeadlineAt: hardDeadlineAt.toISOString(),
         environment: input.environment,
         executionPolicy: {
+          testAccounts: input.testAccounts,
           browser: input.browserPolicy,
           concurrency: input.concurrencyPolicy,
           deadline: deadlinePolicy,
@@ -253,6 +251,8 @@ export class ExecutionRunService {
             deadlineExtendedMs: 0,
             environmentSnapshot: json(input.environment),
             executionPolicy: json({
+              initialTestAccounts: input.testAccounts ?? [],
+              testAccounts: input.testAccounts,
               browser: input.browserPolicy,
               concurrency: input.concurrencyPolicy,
               businessReferences: input.businessReferences,
@@ -742,51 +742,109 @@ export class ExecutionRunService {
         );
       }
       let response = input.response;
+      let resumedAccounts:
+        ReturnType<typeof testAccountBindingsSchema.parse> | undefined;
       if (intervention.kind === "TEST_ACCOUNT") {
-        const account = businessTestAccountSchema.safeParse(
-          input.response.account,
+        const slots = testAccountInputSlotsSchema.parse(
+          isRecord(intervention.context)
+            ? (intervention.context.accountSlots ?? [])
+            : [],
         );
-        const instructions =
-          typeof input.response.instructions === "string"
-            ? input.response.instructions.trim()
-            : "";
-        if (instructions) {
+        const originalPolicy = isRecord(intervention.run.executionPolicy)
+          ? intervention.run.executionPolicy
+          : {};
+        if (slots.length) {
+          const previous = testAccountBindingsSchema.parse(
+            originalPolicy.testAccounts ?? [],
+          );
           if (
-            instructions.length < 5 ||
-            instructions.length > 2000 ||
-            input.response.account !== undefined
-          )
-            throw new BadRequestException(
-              "处置意见需为 5–2000 个字符，请与提供新账号分开提交。",
-            );
-          const policy =
-            isRecord(intervention.task.snapshot) &&
-            isRecord(intervention.task.snapshot.executionPolicy)
-              ? intervention.task.snapshot.executionPolicy
+            typeof input.response.instructions === "string" &&
+            input.response.instructions.trim().length >= 5 &&
+            input.response.instructions.trim().length <= 2000 &&
+            input.response.accounts === undefined &&
+            input.response.account === undefined
+          ) {
+            response = {
+              instructions: input.response.instructions.trim(),
+              accounts: Object.fromEntries(
+                previous.map((b) => [b.slotId, b.account]),
+              ),
+            };
+          } else {
+            const provided = isRecord(input.response.accounts)
+              ? input.response.accounts
               : {};
-          const previous =
-            readExecutionState(policy).account ??
-            (isRecord(policy.resume) && isRecord(policy.resume.response)
-              ? policy.resume.response.account
-              : undefined);
-          response = {
-            instructions,
-            ...(typeof previous === "string" ? { account: previous } : {}),
-          };
+            if (
+              input.response.account !== undefined ||
+              input.response.instructions !== undefined ||
+              Object.keys(provided).some(
+                (id) => !slots.some((slot) => slot.slotId === id),
+              )
+            )
+              throw new BadRequestException(
+                "请按请求的账号角色填写，处置意见需单独提交。",
+              );
+            const replacements = slots.map((slot) => {
+              const parsed = businessTestAccountSchema.safeParse(
+                provided[slot.slotId],
+              );
+              if (!parsed.success)
+                throw new BadRequestException(
+                  `请填写「${slot.label}」的有效账号标识。`,
+                );
+              return { ...slot, account: parsed.data, aliases: [] };
+            });
+            resumedAccounts = [
+              ...previous.filter(
+                (binding) =>
+                  !slots.some((slot) => slot.slotId === binding.slotId),
+              ),
+              ...replacements,
+            ];
+            response = {
+              accounts: Object.fromEntries(
+                replacements.map((b) => [b.slotId, b.account]),
+              ),
+            };
+          }
         } else {
-          if (!account.success)
-            throw new BadRequestException(
-              "请填写手机号、UUID、邮箱或用户 ID；删除或重建说明请通过“处置意见”提交。",
-            );
-          response = { account: account.data };
-          await reserveCaseTestAccount(tx, {
-            account: account.data,
-            context: intervention.context,
-            environment: intervention.run.environmentSnapshot,
-            runId,
-            taskExecutionId: intervention.run.taskExecutionId ?? runId,
-            teamId: current.team.id,
-          });
+          const account = businessTestAccountSchema.safeParse(
+            input.response.account,
+          );
+          const instructions =
+            typeof input.response.instructions === "string"
+              ? input.response.instructions.trim()
+              : "";
+          if (instructions) {
+            if (
+              instructions.length < 5 ||
+              instructions.length > 2000 ||
+              input.response.account !== undefined
+            )
+              throw new BadRequestException(
+                "处置意见需为 5–2000 个字符，请与提供新账号分开提交。",
+              );
+            const policy =
+              isRecord(intervention.task.snapshot) &&
+              isRecord(intervention.task.snapshot.executionPolicy)
+                ? intervention.task.snapshot.executionPolicy
+                : {};
+            const previous =
+              readExecutionState(policy).account ??
+              (isRecord(policy.resume) && isRecord(policy.resume.response)
+                ? policy.resume.response.account
+                : undefined);
+            response = {
+              instructions,
+              ...(typeof previous === "string" ? { account: previous } : {}),
+            };
+          } else {
+            if (!account.success)
+              throw new BadRequestException(
+                "请填写手机号、UUID、邮箱或用户 ID；删除或重建说明请通过“处置意见”提交。",
+              );
+            response = { account: account.data };
+          }
         }
       }
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
@@ -857,6 +915,22 @@ export class ExecutionRunService {
         hardDeadlineAt: resumedHardDeadlineAt.toISOString(),
         executionPolicy: {
           ...snapshot.executionPolicy,
+          ...(resumedAccounts
+            ? {
+                testAccounts: resumedAccounts,
+                executionState: {
+                  ...readExecutionState(snapshot.executionPolicy),
+                  accounts: resumedAccounts,
+                },
+                verificationCheckpoint: {
+                  ...(isRecord(snapshot.executionPolicy.verificationCheckpoint)
+                    ? snapshot.executionPolicy.verificationCheckpoint
+                    : {}),
+                  criteria: [],
+                  observations: [],
+                },
+              }
+            : {}),
           resume: {
             interventionId,
             kind: intervention.kind,
@@ -884,6 +958,14 @@ export class ExecutionRunService {
       }
       const runClaim = await tx.executionRun.updateMany({
         data: {
+          ...(resumedAccounts
+            ? {
+                executionPolicy: json({
+                  ...policyValue,
+                  ...resumedSnapshot.executionPolicy,
+                }),
+              }
+            : {}),
           executionDisposition: null,
           deadlineAt: resumedDeadlineAt,
           initialDeadlineAt: resumedDeadlineAt,
@@ -1085,83 +1167,6 @@ export class ExecutionRunService {
     if (!run) throw new NotFoundException("Run not found.");
     return run;
   }
-}
-
-/** Resolved HITL replies are durable task-scoped allocations, including finished
- * Cases whose records may still exist. The caller commits the reply under this lock. */
-export async function reserveCaseTestAccount(
-  tx: Prisma.TransactionClient,
-  input: {
-    account: string;
-    context: unknown;
-    environment: unknown;
-    runId: string;
-    taskExecutionId: string;
-    teamId: string;
-  },
-) {
-  // Read-only reuse never grants permission to mutate that account's records.
-  if (isRecord(input.context) && input.context.usage === "READ_EXISTING")
-    return;
-  await acquireAdvisoryTransactionLock(
-    tx,
-    `test-account:${input.teamId}:${input.taskExecutionId}`,
-  );
-  const allocated = await tx.humanIntervention.findMany({
-    where: {
-      kind: "TEST_ACCOUNT",
-      status: "RESOLVED",
-      teamId: input.teamId,
-      runId: { not: input.runId },
-      run: { taskExecutionId: input.taskExecutionId },
-    },
-    select: {
-      response: true,
-      context: true,
-      run: {
-        select: {
-          id: true,
-          lifecycle: true,
-          executionPolicy: true,
-          environmentSnapshot: true,
-        },
-      },
-    },
-  });
-  const conflicts = allocated.filter(
-    (item) =>
-      !(isRecord(item.context) && item.context.usage === "READ_EXISTING") &&
-      isRecord(item.response) &&
-      typeof item.response.account === "string" &&
-      item.response.account.trim().toLowerCase() ===
-        input.account.trim().toLowerCase() &&
-      sameTestEnvironment(item.run.environmentSnapshot, input.environment),
-  );
-  for (const conflict of conflicts)
-    if (!(await canReleaseTestAccount(tx, conflict.run)))
-      throw new ConflictException(
-        "该业务测试账号已分配给本任务同环境的其他 Case，可能已有相同类型的记录。请提供独立账号；不要删除已有业务记录。",
-      );
-  await claimTestAccount(tx, {
-    teamId: input.teamId,
-    runId: input.runId,
-    environment: input.environment,
-    account: input.account,
-  });
-}
-
-function testEnvironmentKey(value: unknown) {
-  if (!isRecord(value)) return businessEnvironmentKey();
-  const target = value.targetUrl ?? value.baseUrl;
-  return businessEnvironmentKey(
-    typeof target === "string" ? target : undefined,
-  );
-}
-
-function sameTestEnvironment(left: unknown, right: unknown) {
-  const a = testEnvironmentKey(left);
-  const b = testEnvironmentKey(right);
-  return a === "*" || b === "*" || a === b;
 }
 
 function browserAdmissionInput(input: ExecutionRunCreateInput) {

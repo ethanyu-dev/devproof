@@ -1,5 +1,6 @@
 import {
   runtimeGeneratedSpecSchema,
+  testAccountRequirementsSchema,
   runtimeObservationTargetSchema,
   runtimeSpecCriterionSchema,
   runtimeSpecRequirementSchema,
@@ -56,6 +57,7 @@ export const compactSpecSchema = z.object({
       z.object({
         name: runtimeGeneratedSpecSchema.shape.cases.element.shape.name,
         steps: z.array(text).min(1).max(100),
+        accountRequirements: testAccountRequirementsSchema.optional(),
         preconditions: notes,
         testData: notes,
         cleanup: runtimeGeneratedSpecSchema.shape.cases.element.shape.cleanup,

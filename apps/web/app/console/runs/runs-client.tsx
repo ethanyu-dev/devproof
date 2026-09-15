@@ -144,6 +144,7 @@ interface RunDetail extends RunSummary {
     } | null;
   }>;
   interventions: Array<{
+    context?: unknown;
     attemptId: string;
     expiresAt: string | null;
     id: string;
@@ -612,6 +613,13 @@ function RunDetailClient({ id }: { id: string }) {
               <RunHitlBrowser
                 key={`${id}:${pendingIntervention.id}`}
                 intervention={{
+                  context: pendingIntervention.context as {
+                    accountSlots?: Array<{
+                      slotId: string;
+                      label: string;
+                      requiredTypes: string[];
+                    }>;
+                  },
                   expiresAt: pendingIntervention.expiresAt!,
                   id: pendingIntervention.id,
                   kind: pendingIntervention.kind,

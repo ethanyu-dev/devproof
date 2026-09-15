@@ -11,7 +11,6 @@ import {
 import { Prisma } from "@prisma/client";
 import {
   browserExecutionCriterion,
-  businessTestAccountSchema,
   browserExecutionSnapshot,
   missingRequiredEvidenceKinds,
   runtimeEvidenceKindSchema,
@@ -50,7 +49,6 @@ import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
 import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
 
 import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
-import { claimTestAccount } from "../execution-runs/test-account-reservation.js";
 import { initializeExecutionBudget } from "../execution-runs/execution-budget.js";
 
 export { initializeExecutionBudget } from "../execution-runs/execution-budget.js";
@@ -1217,20 +1215,7 @@ export class AgentRuntimeTaskService {
             teamId,
           },
         });
-        if (input.event.kind === "execution.account.claim") {
-          await claimTestAccount(tx, {
-            teamId,
-            runId: task.runId,
-            environment: task.run.environmentSnapshot,
-            account: businessTestAccountSchema.parse(
-              input.event.payload.account,
-            ),
-            aliases: businessTestAccountSchema
-              .array()
-              .max(20)
-              .parse(input.event.payload.aliases ?? []),
-          });
-        }
+        // Legacy execution.account.claim events remain audit-only.
         if (input.event.kind === "agent.model.failed") {
           const payload = input.event.payload;
           const preview =

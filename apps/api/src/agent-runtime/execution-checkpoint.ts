@@ -1,8 +1,8 @@
-import { claimTestAccount } from "../execution-runs/test-account-reservation.js";
 import { BadRequestException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import {
   executionStateSchema,
+  testAccountBindingsSchema,
   runtimeCriterionResultSchema,
   runtimeEvidenceRefSchema,
   runtimeTaskSnapshotSchema,
@@ -21,12 +21,33 @@ export async function saveExecutionCheckpoint(
   task: { id: string; runId: string; snapshot: unknown },
   payload: Record<string, unknown>,
 ) {
-  const state = executionStateSchema.parse(payload.executionState);
+  const parsedState = executionStateSchema.safeParse(payload.executionState);
+  const parsedProgress = progressSchema
+    .optional()
+    .safeParse(payload.verificationCheckpoint);
+  if (!parsedState.success || !parsedProgress.success) {
+    throw new BadRequestException({
+      code: "INVALID_EXECUTION_CHECKPOINT",
+      message: "执行进度格式不合法，请修正字段后重新保存。",
+      issues: [
+        ...(!parsedState.success
+          ? parsedState.error.issues.map((issue) => ({
+              path: ["executionState", ...issue.path].join("."),
+              code: issue.code,
+            }))
+          : []),
+        ...(!parsedProgress.success
+          ? parsedProgress.error.issues.map((issue) => ({
+              path: ["verificationCheckpoint", ...issue.path].join("."),
+              code: issue.code,
+            }))
+          : []),
+      ],
+    });
+  }
+  const state = parsedState.data;
   const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
-  const progress =
-    payload.verificationCheckpoint === undefined
-      ? undefined
-      : progressSchema.parse(payload.verificationCheckpoint);
+  const progress = parsedProgress.data;
   const stateRefs = [
     ...state.records.flatMap((r) => r.evidenceRefs),
     ...state.pendingRecords.flatMap((r) => r.evidenceRefs),
@@ -55,26 +76,22 @@ export async function saveExecutionCheckpoint(
         "Checkpoint must reference this execution's saved evidence and criteria.",
       );
   }
-  const owner = await tx.executionRun.findUniqueOrThrow({
-    where: { id: task.runId },
-    select: { teamId: true, environmentSnapshot: true },
-  });
-  if (state.account && state.accountAliases.length) {
-    try {
-      await claimTestAccount(tx, {
-        teamId: owner.teamId,
-        runId: task.runId,
-        environment: owner.environmentSnapshot,
-        account: state.account,
-        aliases: state.accountAliases,
-      });
-      delete state.accountConflict;
-    } catch (error) {
-      if (!String(error).includes("TEST_ACCOUNT_CONFLICT")) throw error;
-      state.accountConflict =
-        "测试账号的手机号或 UUID 与其他用例占用的账号一致；停止写入并请求独立账号。";
-    }
-  }
+  const assigned = testAccountBindingsSchema.parse(
+    snapshot.executionPolicy.testAccounts ?? [],
+  );
+  if (
+    assigned.length !== (state.accounts ?? []).length ||
+    (state.accounts ?? []).some(
+      (binding) =>
+        !assigned.some(
+          (expected) =>
+            expected.slotId === binding.slotId &&
+            expected.account === binding.account &&
+            expected.usage === binding.usage,
+        ),
+    )
+  )
+    throw new BadRequestException("执行进度不能分配或更换测试账号。");
   const checkpoint = {
     executionState: state,
     ...(progress
@@ -109,5 +126,6 @@ export async function saveExecutionCheckpoint(
       } as Prisma.InputJsonValue,
     },
   });
-  return { accountConflict: state.accountConflict ?? null };
+  // Clear the retired conflict flag for older Runtime clients as well.
+  return { accountConflict: null };
 }
