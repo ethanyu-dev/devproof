@@ -1,0 +1,229 @@
+.body {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.overview,
+.environment,
+.actions p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.case {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.caseHeading,
+.assignment {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.caseHeading h3 {
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.caseHeading > span {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.environment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.environment > span {
+  min-width: 0;
+}
+
+.slot {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.assignment > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  min-width: 0;
+}
+
+.label {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.account {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.assigned {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--success);
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.details {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.details > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.details > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.details > summary:hover {
+  color: var(--foreground);
+}
+
+.details > summary svg {
+  flex-shrink: 0;
+}
+
+.details[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.details > summary > span {
+  margin-left: 4px;
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
+.requirements {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 0;
+  border-radius: 4px;
+  padding: 12px;
+  background: var(--muted);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.requirements > div {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.requirements dt {
+  font-weight: 500;
+}
+
+.requirements dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--foreground);
+}
+
+.types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.types code {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 6px;
+  background: var(--card);
+  font-size: 11px;
+}
+
+.requirements ul,
+.accountFree ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.accountFree ul {
+  margin: 6px 0 0 20px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.accountFree li > span {
+  margin-left: 8px;
+}
+
+.actions {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+
+@media (max-width: 640px) {
+  .body {
+    padding: 12px;
+  }
+
+  .case {
+    padding: 12px;
+  }
+
+  .assignment {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .requirements > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}

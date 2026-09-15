@@ -149,6 +149,39 @@ export function testAccountSlots(
   );
 }
 
+/** Login identities come from the browser profile, never the TEST_ACCOUNT form.
+ * Keep business subjects used in authentication/permission tests: a role name
+ * such as admin alone is not evidence that this is the executor's identity.
+ */
+export function isLoginOnlyAccountRequirement(
+  requirement: TestAccountRequirement,
+) {
+  return (
+    /登录用|后台登录(?:账号|身份)|浏览器(?:登录)?身份|执行(?:者|用)(?:的)?登录|login\s+(?:identity|account)|authentication\s+identity/iu.test(
+      requirement.label,
+    ) ||
+    /仅(?:用于|用作|作为).{0,12}(?:后台)?登录|不是业务测试对象|不作为.{0,8}业务(?:测试)?对象/iu.test(
+      requirement.rationale,
+    )
+  );
+}
+
+export function businessAccountRequirementsError(
+  cases: readonly {
+    name: string;
+    accountRequirements?: readonly TestAccountRequirement[] | undefined;
+  }[],
+) {
+  for (const testCase of cases) {
+    const login = testCase.accountRequirements?.find(
+      isLoginOnlyAccountRequirement,
+    );
+    if (login)
+      return `用例「${testCase.name}」的 ${login.role} 是执行登录身份。请放入 authRole 并从 accountRequirements 移除；该数组只声明被测业务对象，纯界面只读用例填 []。`;
+  }
+  return null;
+}
+
 /** Old Specs remain executable; names such as 账号A describe roles, never values. */
 export function caseAccountRequirements(
   definition: unknown,
@@ -158,7 +191,9 @@ export function caseAccountRequirements(
       ? (definition as Record<string, unknown>)
       : {};
   if (d.accountRequirements !== undefined)
-    return testAccountRequirementsSchema.parse(d.accountRequirements);
+    return testAccountRequirementsSchema
+      .parse(d.accountRequirements)
+      .filter((item) => !isLoginOnlyAccountRequirement(item));
   const text = JSON.stringify([d.name, d.preconditions, d.testData, d.steps]);
   if (
     /不需要业务测试账号|无需业务测试账号|本用例不写入数据|本用例未产生写入/u.test(

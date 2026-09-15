@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   accountInputResponseSchema,
+  businessAccountRequirementsError,
   accountInputSlots,
   caseAccountRequirements,
   testAccountRequirementsSchema,
@@ -88,4 +89,49 @@ describe("test account requirements", () => {
       ),
     ).toThrow();
   });
+});
+
+it("rejects executor login roles at generation and excludes them when replaying historical specs", () => {
+  const requirements = testAccountRequirementsSchema.parse([
+    {
+      role: "ops_admin",
+      label: "白名单配置后台管理员账号（登录用）",
+      usage: "READ_EXISTING",
+      rationale: "登录后台",
+    },
+    {
+      role: "subject",
+      label: "被配置白名单的业务账号",
+      usage: "CREATE_OR_MODIFY",
+      rationale: "验证新增和编辑",
+    },
+  ]);
+  expect(
+    businessAccountRequirementsError([
+      { name: "只读页面", accountRequirements: requirements },
+    ]),
+  ).toContain("authRole");
+  expect(
+    caseAccountRequirements({ accountRequirements: requirements }).map(
+      (x) => x.role,
+    ),
+  ).toEqual(["subject"]);
+});
+it("preserves actual business subjects used to verify login permissions", () => {
+  const requirements = testAccountRequirementsSchema.parse([
+    {
+      role: "admin",
+      label: "管理员权限测试对象",
+      usage: "READ_EXISTING",
+      rationale: "核对该业务账号能否登录被测产品",
+    },
+  ]);
+  expect(
+    businessAccountRequirementsError([
+      { name: "账号权限", accountRequirements: requirements },
+    ]),
+  ).toBeNull();
+  expect(
+    caseAccountRequirements({ accountRequirements: requirements }),
+  ).toEqual(requirements);
 });

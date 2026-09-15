@@ -73,3 +73,28 @@ describe("case execution goal", () => {
     expect(goal).toContain("先只读核对全部角色");
   });
 });
+
+it("writes shared account rules once and excludes login identities and repeated rationale", () => {
+  const role = {
+    role: "subject",
+    label: "业务对象",
+    count: 2,
+    usage: "CREATE_OR_MODIFY" as const,
+    requiredTypes: ["MODEL"],
+    constraints: ["该类型记录不存在", "该类型记录不存在"],
+    rationale: "两个独立对象用于对照",
+  };
+  const goal = caseExecutionGoal({
+    name: "生命周期",
+    preconditions: [],
+    steps: [{ order: 1, action: "新增并编辑" }],
+    accountRequirements: [
+      role,
+      { ...role, role: "admin", label: "后台账号（登录用）" },
+    ],
+  });
+  expect(goal.match(/先只读核对全部角色/g)).toHaveLength(1);
+  expect(goal).toContain("subject:2");
+  expect(goal).not.toContain("admin:1");
+  expect(goal).not.toContain(role.rationale);
+});
