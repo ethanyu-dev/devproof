@@ -214,6 +214,11 @@ export class DomObservations {
                   if (value)
                     attributes.push(`${name}=${JSON.stringify(value)}`);
                 }
+                if (
+                  control &&
+                  (style.opacity === "0" || style.pointerEvents === "none")
+                )
+                  attributes.push(`pointerHint="use visible control wrapper"`);
                 if (control) {
                   const label = text(
                     Array.from(control.labels ?? [])
