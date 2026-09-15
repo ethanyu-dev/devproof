@@ -542,6 +542,72 @@ describe("administrator actions", () => {
 });
 
 describe("shared closure retry budget", () => {
+  it("allows a current member to request recovery for a session in their team", async () => {
+    const { tx, session, recovery } = setup();
+    tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+    const findFirst = vi.fn().mockResolvedValue(session);
+    Object.assign(tx.browserRuntimeSession, { findFirst });
+    const service = new SessionRecoveryService(tx as never);
+    const request = vi
+      .spyOn(service, "request")
+      .mockResolvedValue(recovery as never);
+
+    await service.requestForUser(current, session.id);
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: session.id, teamId: "team-1" },
+    });
+    expect(request).toHaveBeenCalledWith(session.id, "OPERATOR_REQUEST");
+  });
+
+  it.each(["request", "retry"] as const)(
+    "rejects a %s after team membership is removed",
+    async (action) => {
+      const { tx } = setup();
+      tx.teamMembership.findUnique.mockResolvedValue(null as never);
+      const service = new SessionRecoveryService(tx as never);
+
+      await expect(
+        action === "request"
+          ? service.requestForUser(current, "session-1")
+          : service.retry(current, "recovery-1", 1),
+      ).rejects.toThrow("current team membership");
+
+      expect(tx.runtimeSessionRecovery.updateMany).not.toHaveBeenCalled();
+      expect(tx.auditEvent.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects member retries for a recovery outside the current team", async () => {
+    const { tx } = setup();
+    tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+    tx.runtimeSessionRecovery.findFirst.mockResolvedValue(null as never);
+
+    await expect(
+      new SessionRecoveryService(tx as never).retry(
+        current,
+        "other-team-recovery",
+        1,
+      ),
+    ).rejects.toThrow("Runtime recovery was not found");
+
+    expect(tx.runtimeSessionRecovery.findFirst).toHaveBeenCalledWith({
+      where: { id: "other-team-recovery", teamId: "team-1" },
+    });
+    expect(tx.runtimeSessionRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not let a member interrupt a healthy execution through recovery", async () => {
+    const { tx, recovery } = setup();
+    tx.teamMembership.findUnique.mockResolvedValue({ role: "MEMBER" });
+    recovery.closureState = "OBSERVED";
+
+    await expect(
+      new SessionRecoveryService(tx as never).retry(current, recovery.id, 1),
+    ).rejects.toThrow("still owns a valid lease");
+    expect(tx.runtimeSessionRecovery.updateMany).not.toHaveBeenCalled();
+  });
+
   it.each(["NEEDS_OPERATOR", "exhausted", "backoff"])(
     "does not dispatch another close for %s",
     async (condition) => {
@@ -569,23 +635,27 @@ describe("shared closure retry budget", () => {
     });
     expect(tx.runtimeSessionRecovery.update).not.toHaveBeenCalled();
   });
-  it("resets exhausted attempts only on an audited operator retry", async () => {
-    const { tx, recovery } = setup();
-    recovery.closureState = "NEEDS_OPERATOR";
-    recovery.attempts = 6;
-    await new SessionRecoveryService(tx as never).retry(
-      current,
-      recovery.id,
-      1,
-    );
-    expect(tx.runtimeSessionRecovery.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          attempts: 0,
-          closureState: "REQUESTED",
+  it.each(["MEMBER", "ADMIN"])(
+    "resets exhausted attempts on an audited %s retry",
+    async (role) => {
+      const { tx, recovery } = setup();
+      tx.teamMembership.findUnique.mockResolvedValue({ role });
+      recovery.closureState = "NEEDS_OPERATOR";
+      recovery.attempts = 6;
+      await new SessionRecoveryService(tx as never).retry(
+        current,
+        recovery.id,
+        1,
+      );
+      expect(tx.runtimeSessionRecovery.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            attempts: 0,
+            closureState: "REQUESTED",
+          }),
         }),
-      }),
-    );
-    expect(tx.auditEvent.create).toHaveBeenCalled();
-  });
+      );
+      expect(tx.auditEvent.create).toHaveBeenCalled();
+    },
+  );
 });

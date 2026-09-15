@@ -8,7 +8,7 @@ export function recoveryClosureLabel(state: string) {
         VERIFIED: "浏览器关闭已确认",
         RETRY_WAIT: "等待重试关闭",
         WAITING_RUNTIME: "等待节点连接",
-        NEEDS_OPERATOR: "需要管理员核验",
+        NEEDS_OPERATOR: "需要人工核验",
       } as Record<string, string>
     )[state] ?? "关闭状态待确认"
   );
@@ -50,7 +50,7 @@ export function recoveryGuidance(state: string, errorCode: string | null) {
       return "无法确认旧会话的浏览器和网络进程已完全终止，自动重试已暂停。请核验原宿主；条件变化后可重试。缺少可核验的历史身份时，进入节点排空流程处理。";
     if (errorCode === "UNSUPPORTED_CLOSURE_EVIDENCE")
       return "节点尚不具备所需的关闭证明能力。请检查 Runtime 版本和宿主身份，升级并连接后重新检查；历史会话仍可能需要排空核验。";
-    return "自动关闭需要管理员处理。请检查节点和诊断信息，条件变化后重试，或查看节点排空范围。";
+    return "自动关闭已暂停。请检查节点和诊断信息，团队成员可在条件变化后重试关闭；如需节点排空，请联系管理员。";
   }
   return "系统正在处理会话关闭。此页面自动更新状态，请等待关闭结果；重新检查不会降低关闭证明要求。";
 }
