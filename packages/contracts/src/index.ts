@@ -1648,7 +1648,7 @@ const userBrowserProfileVerificationUrlSchema = z
 
 export const userBrowserProfileCreateInputSchema = z.object({
   executionMode: userBrowserProfileExecutionModeSchema.optional(),
-  executionConcurrency: z.number().int().min(1).max(4).optional(),
+  executionConcurrency: z.number().int().min(1).max(32).optional(),
   authRole: z.string().trim().min(1).max(100).default("default"),
   displayName: z.string().trim().min(1).max(160),
   environmentKey: z.string().trim().min(1).max(160).default("default"),
@@ -1666,7 +1666,7 @@ export const userBrowserProfileCreateInputSchema = z.object({
 export const userBrowserProfileUpdateInputSchema = z
   .object({
     executionMode: userBrowserProfileExecutionModeSchema.optional(),
-    executionConcurrency: z.number().int().min(1).max(4).optional(),
+    executionConcurrency: z.number().int().min(1).max(32).optional(),
     displayName: z.string().trim().min(1).max(160).optional(),
     grants: z
       .array(browserProfileTriggerSourceSchema)

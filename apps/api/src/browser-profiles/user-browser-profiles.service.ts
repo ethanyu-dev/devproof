@@ -106,9 +106,9 @@ export class UserBrowserProfilesService {
       throw new ConflictException(
         "Isolated authenticated execution is not enabled on this deployment.",
       );
-    if ((input.executionConcurrency ?? 1) > 4)
+    if ((input.executionConcurrency ?? 1) > 32)
       throw new ConflictException(
-        "This release validates at most four concurrent authenticated sessions.",
+        "A login identity supports at most 32 concurrent authenticated sessions.",
       );
     const verificationHostname = normalizedHostname(input.verificationUrl);
     if (input.runtimeId) {
@@ -409,9 +409,9 @@ export class UserBrowserProfilesService {
     input: UserBrowserProfileUpdateInput,
   ) {
     const profile = await this.owned(current, id);
-    if ((input.executionConcurrency ?? 1) > 4)
+    if ((input.executionConcurrency ?? 1) > 32)
       throw new ConflictException(
-        "This release validates at most four concurrent authenticated sessions.",
+        "A login identity supports at most 32 concurrent authenticated sessions.",
       );
     const changesExecutionConfiguration =
       input.verificationUrl !== undefined ||
@@ -459,7 +459,21 @@ export class UserBrowserProfilesService {
               "The browser profile changed concurrently. Reload it before changing its configuration.",
             );
           }
-          if (input.executionMode === "ISOLATED_AUTH") {
+          // Raising the limit only adds permits. Existing sessions retain their
+          // permits and closure requirements, including quarantined sessions.
+          const increasesIsolatedConcurrency =
+            lockedProfile.executionMode === "ISOLATED_AUTH" &&
+            (input.executionMode === undefined ||
+              input.executionMode === "ISOLATED_AUTH") &&
+            input.executionConcurrency !== undefined &&
+            input.executionConcurrency >= lockedProfile.executionConcurrency &&
+            input.verificationUrl === undefined &&
+            input.verificationRules === undefined &&
+            input.grants === undefined;
+          if (
+            input.executionMode === "ISOLATED_AUTH" ||
+            increasesIsolatedConcurrency
+          ) {
             if (
               process.env.BROWSER_ISOLATED_AUTH_ENABLED !== "true" ||
               lockedProfile.status !== "READY" ||
@@ -489,7 +503,7 @@ export class UserBrowserProfilesService {
                 "The verified authentication snapshot requires its assigned Browser Runtime with protocol v1.13 or newer.",
               );
           }
-          if (changesExecutionConfiguration) {
+          if (changesExecutionConfiguration && !increasesIsolatedConcurrency) {
             const nonTerminal = {
               notIn: ["COMPLETED", "CANCELLED", "TIMED_OUT"],
             } as const;

@@ -493,11 +493,11 @@ export function ProfilesClient() {
                         </Select>
                       </Field>
                       {executionMode === "ISOLATED_AUTH" ? (
-                        <Field label="此登录身份的并发上限">
+                        <Field label="此登录身份的并发上限（1–32）">
                           <Input
                             type="number"
                             min={1}
-                            max={4}
+                            max={32}
                             value={executionConcurrency}
                             onChange={(event) =>
                               setExecutionConcurrency(
@@ -517,7 +517,7 @@ export function ProfilesClient() {
                       {!selected.isolatedExecutionAvailable
                         ? "当前部署尚未启用并发登录功能，仅支持串行复用此身份。"
                         : selected.authSnapshotGeneration
-                          ? "已通过 4 个独立会话的登录验证。存在读写冲突的任务仍会排队执行。"
+                          ? "已通过 4 个独立会话的登录验证。实际并发受执行节点容量限制，存在读写冲突的任务仍会排队执行。"
                           : "如需并发执行，请先重新登录，在登录窗口勾选“验证并发登录”并保存。"}
                     </p>
                   </form>
