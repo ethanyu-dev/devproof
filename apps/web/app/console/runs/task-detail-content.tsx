@@ -887,7 +887,7 @@ function SchedulingExplanation({
   const waitText = schedulingWaitText(scheduling);
   if (!scheduling || !waitText) return null;
   return (
-    <small className="dp-spec-dispatch-error">
+    <small className="dp-spec-scheduling-notice">
       {waitText}
       {scheduling.queue?.position
         ? ` · 当前队列第 ${scheduling.queue.position} 位`

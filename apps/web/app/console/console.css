@@ -1745,11 +1745,11 @@
   padding: 12px 16px;
 }
 
-.dp-spec-dispatch-error {
+.dp-spec-scheduling-notice {
   border-radius: var(--radius-sm);
-  background: var(--ek-danger-soft);
+  background: var(--muted);
   padding: 6px 8px;
-  color: var(--ek-danger) !important;
+  color: var(--muted-foreground);
 }
 
 .dp-specification-case-body p,
