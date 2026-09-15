@@ -106,7 +106,14 @@ export function TaskAnalysisInputCard({
         {missing.has("DEPLOYMENT_TARGET") && (
           <Field
             label="测试环境地址（每行一个）"
-            description="填写本次需要实际验证的环境，可指定多个。"
+            description={[
+              "填写本次需要实际验证的环境，可指定多个。",
+              request.deploymentCandidates.length > 0
+                ? `发现的候选地址：${request.deploymentCandidates.join("、")}。请确认后填写。`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" ")}
           >
             <Textarea
               aria-label="测试环境地址"
@@ -115,12 +122,6 @@ export function TaskAnalysisInputCard({
               placeholder="https://preview.example.com"
               disabled={busy}
             />
-            {request.deploymentCandidates.length > 0 && (
-              <p className="text-sm text-muted-foreground">
-                发现的候选地址：{request.deploymentCandidates.join("、")}
-                。请确认后填写。
-              </p>
-            )}
           </Field>
         )}
         {error && (
