@@ -423,6 +423,30 @@ export class SpecAnalysisRuntimeService {
       } catch {
         // A corrected Issue reference or restored access can resume this task.
       }
+      if (linear) {
+        const issue = linear.issue;
+        await this.prisma.$transaction(async (tx) => {
+          if (
+            !(await this.lockActiveTask(
+              tx,
+              attempt.stage.taskExecutionId,
+              teamId,
+            ))
+          )
+            throw new ConflictException("The task is no longer active.");
+          const locked = await this.findAttempt(tx, teamId, attempt.id);
+          const now = await databaseNow(tx);
+          this.requireLease(locked, input, now);
+          requireActiveTask(locked.stage.taskExecution, now);
+          await tx.taskExecution.update({
+            data: {
+              sourceRef: issue.identifier,
+              title: `${issue.identifier} · ${issue.title}`,
+            },
+            where: { id: locked.stage.taskExecutionId },
+          });
+        });
+      }
       const directUrls = [
         ...new Set(
           [

@@ -95,7 +95,53 @@ function recoveryHarness(attempt = analysisAttempt()) {
     {} as never,
     {} as never,
   );
-  return { service, tx };
+  return { service, tx, prisma };
+}
+
+function issueToolHarness(attempt = analysisAttempt()) {
+  const { tx, prisma } = recoveryHarness(attempt);
+  const taskAnalysisSource = {
+    aggregate: vi.fn().mockResolvedValue({
+      _count: { _all: 0 },
+      _sum: { byteSize: null },
+    }),
+    create: vi.fn().mockResolvedValue({ id: "source-1" }),
+    findFirst: vi.fn().mockResolvedValue(null),
+  };
+  Object.assign(tx, { taskAnalysisSource });
+  Object.assign(prisma, { taskAnalysisSource });
+  const linear = {
+    getIssue: vi.fn().mockResolvedValue({
+      issue: {
+        id: "linear-issue-1",
+        identifier: "ENG-123",
+        title: "Refund flow",
+        description: "Users must be able to request a refund.",
+        url: "https://linear.app/acme/issue/ENG-123/refund-flow",
+      },
+      pullRequestUrls: [],
+    }),
+  };
+  const github = {
+    discoverIssuePullRequests: vi.fn().mockResolvedValue({
+      pullRequestUrls: [],
+      diagnostics: [],
+    }),
+  };
+  const service = new SpecAnalysisRuntimeService(
+    prisma as never,
+    {} as never,
+    linear as never,
+    github as never,
+  );
+  const readIssue = () =>
+    service.executeTool(teamId, attemptId, {
+      ...identity,
+      arguments: { analysisSummary: "Read the authoritative Issue." },
+      callId: "call-1",
+      name: "linear_get_issue",
+    });
+  return { tx, taskAnalysisSource, linear, github, readIssue };
 }
 
 function issueTaskInput() {
@@ -792,51 +838,81 @@ describe("SpecAnalysisRuntimeService", () => {
     expect(result.sourceRefs).toHaveLength(1);
   });
 
+  it("updates the Issue title before PR discovery even when analysis needs more input", async () => {
+    const { tx, github, readIssue } = issueToolHarness();
+    github.discoverIssuePullRequests.mockImplementation(async () => {
+      expect(tx.taskExecution.update).toHaveBeenCalledWith({
+        data: { sourceRef: "ENG-123", title: "ENG-123 · Refund flow" },
+        where: { id: taskExecutionId },
+      });
+      return { pullRequestUrls: [], diagnostics: [] };
+    });
+
+    const output = await readIssue();
+
+    expect(github.discoverIssuePullRequests).toHaveBeenCalledOnce();
+    expect(output.inputRequest?.missing).toEqual([
+      "PULL_REQUEST",
+      "DEPLOYMENT_TARGET",
+    ]);
+    expect(tx.taskExecutionStage.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the existing task title when the Issue cannot be read", async () => {
+    const { tx, linear, readIssue } = issueToolHarness();
+    linear.getIssue.mockRejectedValue(new Error("Issue unavailable"));
+
+    const output = await readIssue();
+
+    expect(output.inputRequest?.missing).toContain("ISSUE");
+    expect(tx.taskExecution.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancelled", "stale lease", "deadline elapsed"])(
+    "does not update the title if the task becomes %s during the Issue read",
+    async (condition) => {
+      const { tx, linear, github, readIssue } = issueToolHarness();
+      linear.getIssue.mockImplementation(async () => {
+        if (condition === "cancelled") {
+          tx.taskExecution.updateMany.mockResolvedValue({ count: 0 });
+        } else {
+          tx.taskStageAttempt.findUniqueOrThrow.mockResolvedValue({
+            ...analysisAttempt({
+              ...(condition === "deadline elapsed"
+                ? { deadlineAt: now }
+                : { leaseExpiresAt: now }),
+            }),
+          });
+        }
+        return {
+          issue: {
+            identifier: "ENG-123",
+            title: "Refund flow",
+          },
+          pullRequestUrls: [],
+        };
+      });
+
+      await expect(readIssue()).rejects.toThrow(
+        condition === "cancelled" ? "no longer active" : "lease",
+      );
+
+      expect(tx.taskExecution.update).not.toHaveBeenCalled();
+      expect(github.discoverIssuePullRequests).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["LINKED", "EXPLICIT", "DISCOVERED"])(
     "persists resolved PR links in the immutable Issue source (%s)",
     async (mode) => {
-      const sourceCreate = vi.fn().mockResolvedValue({ id: "source-1" });
-      const prisma = {
-        taskAnalysisSource: {
-          aggregate: vi.fn().mockResolvedValue({
-            _count: { _all: 0 },
-            _sum: { byteSize: null },
-          }),
-          create: sourceCreate,
-          findFirst: vi.fn().mockResolvedValue(null),
-        },
-        taskStageAttempt: {
-          findUnique: vi.fn().mockResolvedValue({
-            fencingToken: 4n,
-            id: attemptId,
-            leaseExpiresAt: new Date(Date.now() + 60_000),
-            leaseOwner: "worker-1",
-            leaseToken,
-            stage: {
-              taskExecution: {
-                id: taskExecutionId,
-                inputSnapshot: {
-                  ...issueTaskInput(),
-                  ...(mode === "EXPLICIT"
-                    ? {
-                        pullRequestUrls: [
-                          "https://github.com/acme/web/pull/42/",
-                        ],
-                      }
-                    : {}),
-                },
-                teamId,
-              },
-            },
-            status: "RUNNING",
-          }),
-        },
-      };
-      Object.assign(prisma, {
-        $queryRaw: vi.fn().mockResolvedValue([]),
-        $transaction: async (operation: (tx: unknown) => unknown) =>
-          operation(prisma),
-      });
+      const attempt = analysisAttempt();
+      if (mode === "EXPLICIT") {
+        Object.assign(attempt.stage.taskExecution.inputSnapshot, {
+          pullRequestUrls: ["https://github.com/acme/web/pull/42/"],
+        });
+      }
+      const { taskAnalysisSource, linear, github, readIssue } =
+        issueToolHarness(attempt);
       const linearResult = {
         issue: {
           assignee: null,
@@ -852,32 +928,19 @@ describe("SpecAnalysisRuntimeService", () => {
         pullRequestUrls:
           mode === "LINKED" ? ["https://github.com/acme/web/pull/42"] : [],
       };
-      const discoverIssuePullRequests = vi.fn().mockResolvedValue({
+      linear.getIssue.mockResolvedValue(linearResult);
+      github.discoverIssuePullRequests.mockResolvedValue({
         pullRequestUrls: ["https://github.com/acme/web/pull/42"],
         diagnostics: [],
       });
-      const service = new SpecAnalysisRuntimeService(
-        prisma as never,
-        {} as never,
-        { getIssue: vi.fn().mockResolvedValue(linearResult) } as never,
-        { discoverIssuePullRequests } as never,
-      );
-
-      const output = await service.executeTool(teamId, attemptId, {
-        arguments: { analysisSummary: "Read the authoritative Issue." },
-        callId: "call-1",
-        fencingToken: "4",
-        leaseToken,
-        name: "linear_get_issue",
-        workerId: "worker-1",
-      });
+      const output = await readIssue();
 
       expect(output.sourceRefs).toHaveLength(1);
       expect(output.sourceRefs[0]).toMatchObject({
         kind: "LINEAR_ISSUE",
         label: "ENG-123 · Refund flow",
       });
-      expect(sourceCreate).toHaveBeenCalledWith({
+      expect(taskAnalysisSource.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           content: {
             ...linearResult,
@@ -892,11 +955,11 @@ describe("SpecAnalysisRuntimeService", () => {
         }),
       });
       if (mode === "DISCOVERED")
-        expect(discoverIssuePullRequests).toHaveBeenCalledWith(
+        expect(github.discoverIssuePullRequests).toHaveBeenCalledWith(
           teamId,
           linearResult.issue.url,
         );
-      else expect(discoverIssuePullRequests).not.toHaveBeenCalled();
+      else expect(github.discoverIssuePullRequests).not.toHaveBeenCalled();
     },
   );
 });
