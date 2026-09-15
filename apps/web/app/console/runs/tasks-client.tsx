@@ -28,6 +28,7 @@ import {
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
 import { TaskDeleteButton } from "./task-delete-button";
+import { TaskCreateButton } from "./task-create-button";
 import { taskOutcomeDisplay } from "./task-outcome";
 import { terminalLifecycles, tone } from "./task-display";
 import {
@@ -147,14 +148,19 @@ export function TasksClient() {
     <div className="dp-task-list-page">
       <PageHeader
         actions={
-          <Button
-            onClick={() => void load()}
-            disabled={loadingList}
-            variant="secondary"
-          >
-            <RefreshCw />
-            刷新
-          </Button>
+          <>
+            <Button
+              onClick={() => void load()}
+              disabled={loadingList}
+              variant="secondary"
+            >
+              <RefreshCw />
+              刷新
+            </Button>
+            <TaskCreateButton
+              onCreated={(id) => router.push(taskDetailHref(id, returnTo))}
+            />
+          </>
         }
         description="查看执行进展；测试报告汇总需求覆盖、验收结论和证据。"
         title="任务执行"
