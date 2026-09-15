@@ -322,7 +322,10 @@ function TestAccountInput({
               </Field>
             )
           ) : (
-            <Field label="处置意见">
+            <Field
+              label="处置意见"
+              description="保留原账号。Agent 将结合记录归属和实际状态判断能否执行你的处置意见。"
+            >
               <textarea
                 className="min-h-24 w-full rounded-md border p-3 text-sm"
                 value={instructions}
@@ -331,10 +334,6 @@ function TestAccountInput({
                 disabled={busy}
                 required
               />
-              <p className="text-xs text-muted-foreground">
-                保留原账号。Agent
-                将结合记录归属和实际状态判断能否执行你的处置意见。
-              </p>
             </Field>
           )}
           {error ? (
