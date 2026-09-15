@@ -303,12 +303,27 @@ export class SessionRecoveryService {
       );
   }
 
+  private async requireTeamMember(
+    current: AuthContext,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    const membership = await tx.teamMembership.findUnique({
+      where: {
+        teamId_userId: { teamId: current.team.id, userId: current.user.id },
+      },
+    });
+    if (!membership)
+      throw new ForbiddenException(
+        "A current team membership is required to recover a browser session.",
+      );
+  }
+
   async requestForUser(
     current: AuthContext,
     sessionId: string,
     reason = "OPERATOR_REQUEST",
   ) {
-    await this.requireAdmin(current);
+    await this.requireTeamMember(current);
     const session = await this.prisma.browserRuntimeSession.findFirst({
       where: { id: sessionId, teamId: current.team.id },
     });
@@ -425,7 +440,7 @@ export class SessionRecoveryService {
   async retry(current: AuthContext, id: string, expectedVersion: number) {
     requireRecoveryEnabled();
     return this.prisma.$transaction(async (tx) => {
-      await this.requireAdmin(current, tx);
+      await this.requireTeamMember(current, tx);
       const row = await this.owned(current, id, tx);
       if (row.closureState === "VERIFIED") return recoveryDto(row);
       if (row.closureState === "OBSERVED")
@@ -637,7 +652,7 @@ export class SessionRecoveryService {
         );
       if (
         owner &&
-        ["PENDING", "CLOSING", "RETRY_SCHEDULED"].includes(
+        ["PENDING", "CLOSING", "HITL_CLOSING", "RETRY_SCHEDULED"].includes(
           owner.recoveryStatus ?? "",
         )
       )

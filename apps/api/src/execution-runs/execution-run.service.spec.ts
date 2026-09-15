@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ExecutionRunService,
   projectRunTrajectory,
-  reserveCaseTestAccount,
 } from "./execution-run.service.js";
 
 const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a";
@@ -114,6 +113,85 @@ describe("ExecutionRunService events", () => {
 });
 
 describe("ExecutionRunService HITL resume", () => {
+  it("replaces one requested role and retains other accounts, writes and cleanup evidence", async () => {
+    const tx = transactionClient();
+    const bindings = ["first", "second"].map((role) => ({
+      slotId: `${role}:1`,
+      label: role,
+      account: role,
+      aliases: [],
+      usage: "CREATE_OR_MODIFY",
+      requiredTypes: [],
+    }));
+    const writes = [
+      {
+        key: "write",
+        method: "POST",
+        url: "https://example.com/items",
+        status: 200,
+        confirmed: true,
+        request: "{}",
+        evidenceRefs: ["proof"],
+      },
+    ];
+    const evidence = [{ externalId: "proof", kind: "NETWORK", metadata: {} }];
+    const policy = {
+      ...snapshot.executionPolicy,
+      testAccounts: bindings,
+      executionState: { accounts: bindings, writes },
+      verificationCheckpoint: { criteria: [], evidence },
+    };
+    const original = intervention({ kind: "TEST_ACCOUNT" });
+    tx.humanIntervention.findFirst.mockResolvedValue({
+      ...original,
+      context: {
+        accountSlots: [
+          {
+            slotId: "second:1",
+            label: "第二个用途",
+            usage: "CREATE_OR_MODIFY",
+            requiredTypes: [],
+          },
+        ],
+      },
+      run: { ...original.run, executionPolicy: policy },
+      task: { snapshot: { ...snapshot, executionPolicy: policy } },
+    });
+    const service = new ExecutionRunService(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      } as never,
+      {} as never,
+    );
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { accounts: { "second:1": "replacement" } },
+    });
+    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          snapshot: expect.objectContaining({
+            executionPolicy: expect.objectContaining({
+              testAccounts: [
+                bindings[0],
+                expect.objectContaining({
+                  slotId: "second:1",
+                  account: "replacement",
+                }),
+              ],
+              executionState: expect.objectContaining({ writes }),
+              verificationCheckpoint: {
+                criteria: [],
+                observations: [],
+                evidence,
+              },
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("rejects prose in the account field but preserves the account when instructions are submitted separately", async () => {
     const tx = transactionClient();
     tx.humanIntervention.findFirst.mockResolvedValue(
@@ -164,133 +242,44 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
-  it("keeps a conflicting business account reply pending and preserves default scheduling", async () => {
+  it("accepts a supplied account without consulting other cases or historical cleanup", async () => {
     const tx = transactionClient();
     const original = intervention({
       kind: "TEST_ACCOUNT",
-      context: {
-        usage: "CREATE_OR_MODIFY",
-        requiredTypes: ["LEGACY_CORPORATE"],
-      },
+      context: { usage: "CREATE_OR_MODIFY" },
     });
-    tx.humanIntervention.findFirst.mockResolvedValue({
-      ...original,
-      run: {
-        ...original.run,
-        taskExecutionId: "parent-task",
-        environmentSnapshot: { targetUrl: "https://test.example.com/list" },
-      },
-    });
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "test-user" },
-        context: {},
-        run: {
-          environmentSnapshot: { targetUrl: "https://test.example.com/form" },
-        },
-      },
-    ]);
+    tx.humanIntervention.findFirst.mockResolvedValue(original);
+    tx.humanIntervention.findMany.mockRejectedValue(
+      new Error("historical account scan must not run"),
+    );
+    tx.executionRun.findMany.mockRejectedValue(
+      new Error("account reservation scan must not run"),
+    );
     const service = new ExecutionRunService(
       {
         $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
       } as never,
       {} as never,
     );
-    await expect(
-      service.resolveIntervention(current, runId, interventionId, {
-        response: { account: "test-user" },
-      }),
-    ).rejects.toThrow("已分配");
-    expect(tx.humanIntervention.updateMany).not.toHaveBeenCalled();
-    expect(tx.executionRun.updateMany).not.toHaveBeenCalled();
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
-      tx.humanIntervention.findMany.mock.invocationCallOrder[0]!,
-    );
-    expect(tx.humanIntervention.findMany).toHaveBeenCalledWith(
+    vi.spyOn(service, "detail").mockResolvedValue({} as never);
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { account: "shared-user" },
+    });
+    expect(tx.humanIntervention.findMany).not.toHaveBeenCalled();
+    expect(tx.executionRun.findMany).not.toHaveBeenCalled();
+    expect(tx.humanIntervention.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
+        data: expect.objectContaining({
+          response: { account: "shared-user" },
           status: "RESOLVED",
-          runId: { not: runId },
-          run: { taskExecutionId: "parent-task" },
         }),
       }),
     );
-  });
-
-  it("releases historical HITL allocations after the previous case is cleaned", async () => {
-    const tx = transactionClient();
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "reusable" },
-        context: {},
-        run: {
-          id: "old-run",
-          lifecycle: "COMPLETED",
-          environmentSnapshot: { targetUrl: "https://test.example.com" },
-          executionPolicy: {
-            executionState: {
-              records: [
-                {
-                  id: "123",
-                  ownership: "CREATED_THIS_RUN",
-                  evidenceRefs: ["proof"],
-                  cleanup: { instruction: "delete", status: "COMPLETED" },
-                },
-              ],
-            },
-          },
-        },
-      },
-    ]);
-    await reserveCaseTestAccount(tx as never, {
-      account: "reusable",
-      context: {},
-      environment: { targetUrl: "https://test.example.com" },
-      runId,
-      taskExecutionId: "parent",
-      teamId: snapshot.teamId,
-    });
-    expect(tx.executionRun.update).toHaveBeenCalledWith(
+    expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: {
-          executionPolicy: expect.objectContaining({
-            testAccountClaim: { account: "reusable", aliases: [] },
-          }),
-        },
+        data: expect.objectContaining({ lifecycle: "QUEUED" }),
       }),
     );
-  });
-
-  it("allows independent accounts, environments and explicit read-only reuse", async () => {
-    const tx = transactionClient();
-    tx.humanIntervention.findMany.mockResolvedValue([
-      {
-        response: { account: "allocated-user" },
-        context: {},
-        run: {
-          environmentSnapshot: { targetUrl: "https://test.example.com/list" },
-        },
-      },
-    ]);
-    const input = {
-      account: "independent-user",
-      context: {},
-      environment: { targetUrl: "https://test.example.com" },
-      runId,
-      taskExecutionId: "parent",
-      teamId: snapshot.teamId,
-    };
-    await reserveCaseTestAccount(tx as never, input);
-    await reserveCaseTestAccount(tx as never, {
-      ...input,
-      account: "allocated-user",
-      environment: { targetUrl: "https://other.example.com" },
-    });
-    await reserveCaseTestAccount(tx as never, {
-      ...input,
-      account: "allocated-user",
-      context: { usage: "READ_EXISTING" },
-    });
   });
 
   it("keeps HITL and browser checks in the Runtime snapshot while storing provenance only on the Run", async () => {
@@ -586,7 +575,7 @@ describe("ExecutionRunService HITL resume", () => {
     });
   });
 
-  it("refunds paused execution time without crossing the hard deadline", async () => {
+  it("restarts the configured execution budget instead of only refunding remaining time", async () => {
     const tx = transactionClient();
     const beforeResolve = Date.now();
     const hardDeadlineAt = new Date(beforeResolve + 120_000);
@@ -594,6 +583,7 @@ describe("ExecutionRunService HITL resume", () => {
       intervention({
         pausedExecutionRemainingMs: 45_000,
         run: {
+          executionBudgetSeconds: 600,
           deadlineAt: new Date(beforeResolve + 90_000),
           executionPolicy: {
             ...snapshot.executionPolicy,
@@ -625,11 +615,18 @@ describe("ExecutionRunService HITL resume", () => {
     const resumedDeadlineAt = tx.executionRun.updateMany.mock.calls[0]?.[0].data
       .deadlineAt as Date;
     expect(resumedDeadlineAt.getTime()).toBeGreaterThanOrEqual(
-      beforeResolve + 45_000,
+      beforeResolve + 600_000,
     );
     expect(resumedDeadlineAt.getTime()).toBeLessThanOrEqual(
-      hardDeadlineAt.getTime(),
+      Date.now() + 600_000,
     );
+    expect(tx.executionRun.updateMany.mock.calls[0]?.[0].data).toMatchObject({
+      initialDeadlineAt: resumedDeadlineAt,
+      executionBudgetSeconds: 600,
+      deadlineExtensionCount: 0,
+      deadlineExtendedMs: 0,
+      hardDeadlineAt: new Date(resumedDeadlineAt.getTime() + 900_000),
+    });
     expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ deadlineAt: resumedDeadlineAt }),
@@ -637,7 +634,7 @@ describe("ExecutionRunService HITL resume", () => {
     );
   });
 
-  it("refreshes the parent task window and excludes human wait from the Run hard deadline", async () => {
+  it("refreshes both the parent window and the full generated-case budget after HITL", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-08-28T02:00:00.000Z");
     vi.setSystemTime(now);
@@ -651,6 +648,8 @@ describe("ExecutionRunService HITL resume", () => {
           pausedExecutionRemainingMs: 45_000,
           requestedAt,
           run: {
+            sourceKind: "TASK_CASE",
+            executionBudgetSeconds: 900,
             deadlineAt: new Date(now.getTime() + 60 * 60_000),
             executionPolicy: {
               ...snapshot.executionPolicy,
@@ -691,10 +690,9 @@ describe("ExecutionRunService HITL resume", () => {
       expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            deadlineAt: new Date(now.getTime() + 45_000),
-            hardDeadlineAt: new Date(
-              originalHardDeadlineAt.getTime() + 10 * 60_000,
-            ),
+            deadlineAt: new Date(now.getTime() + 30 * 60_000),
+            hardDeadlineAt: new Date(now.getTime() + 45 * 60_000),
+            executionBudgetSeconds: 1800,
           }),
         }),
       );
@@ -714,7 +712,7 @@ describe("ExecutionRunService HITL resume", () => {
     }
   });
 
-  it("restores the full remaining window for a fixed Run after HITL", async () => {
+  it("refreshes the entire configured fixed budget after each distinct intervention", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-08-28T02:00:00.000Z");
     vi.setSystemTime(now);
@@ -727,6 +725,7 @@ describe("ExecutionRunService HITL resume", () => {
           pausedExecutionRemainingMs: 60_000,
           requestedAt,
           run: {
+            executionBudgetSeconds: 600,
             deadlineAt: new Date(now.getTime() + 30 * 60_000),
             executionPolicy: {
               ...snapshot.executionPolicy,
@@ -751,15 +750,152 @@ describe("ExecutionRunService HITL resume", () => {
       expect(tx.executionRun.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            deadlineAt: new Date(now.getTime() + 60_000),
-            hardDeadlineAt: new Date(now.getTime() + 60_000),
+            deadlineAt: new Date(now.getTime() + 600_000),
+            hardDeadlineAt: new Date(now.getTime() + 600_000),
             lifecycle: "QUEUED",
           }),
         }),
       );
+      vi.setSystemTime(new Date(now.getTime() + 5 * 60_000));
+      const previous = await tx.humanIntervention.findFirst();
+      tx.humanIntervention.findFirst.mockResolvedValue({
+        ...previous,
+        id: "second-intervention",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await service.resolveIntervention(current, runId, "second-intervention", {
+        response: { approved: true },
+      });
+      expect(tx.executionRun.updateMany.mock.calls[1]?.[0].data).toMatchObject({
+        deadlineAt: new Date(now.getTime() + 15 * 60_000),
+        hardDeadlineAt: new Date(now.getTime() + 15 * 60_000),
+      });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("caps a refreshed budget at the refreshed parent deadline even when refundHumanWait was disabled", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-09-15T02:00:00.000Z");
+    vi.setSystemTime(now);
+    try {
+      const tx = transactionClient();
+      const base = intervention({});
+      tx.humanIntervention.findFirst.mockResolvedValue({
+        ...base,
+        run: {
+          ...base.run,
+          executionBudgetSeconds: 1800,
+          executionPolicy: {
+            ...snapshot.executionPolicy,
+            deadline: { mode: "ADAPTIVE", refundHumanWait: false },
+          },
+          taskExecution: {
+            id: "parent",
+            lifecycle: "WAITING_HUMAN",
+            inputSnapshot: {
+              idempotencyKey: "short-parent-budget",
+              kind: "ISSUE_SPEC",
+              issueRef: "ENG-1",
+              deadlineSeconds: 120,
+            },
+          },
+        },
+      });
+      const service = new ExecutionRunService(
+        {
+          $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+          executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+        } as never,
+        {} as never,
+      );
+      await service.resolveIntervention(current, runId, interventionId, {
+        response: {},
+      });
+      expect(tx.executionRun.updateMany.mock.calls[0]?.[0].data).toMatchObject({
+        deadlineAt: new Date(now.getTime() + 120_000),
+        hardDeadlineAt: new Date(now.getTime() + 120_000),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([true, false])(
+    "handles preserved-session renewal (usable=%s)",
+    async (usable) => {
+      const tx = transactionClient();
+      tx.humanIntervention.findFirst.mockResolvedValue(
+        intervention({
+          task: { snapshot, fencingToken: 7n },
+        }),
+      );
+      tx.browserExecution.findUnique.mockResolvedValue({
+        runtimeSessionId: "old-session",
+      } as never);
+      tx.browserRuntimeSession.updateMany.mockResolvedValue({
+        count: usable ? 1 : 0,
+      });
+      const service = new ExecutionRunService(
+        {
+          $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+          executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+        } as never,
+        {} as never,
+      );
+      await service.resolveIntervention(current, runId, interventionId, {
+        response: { approved: true },
+      });
+      expect(tx.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: "ACTIVE",
+            ownerTaskId: taskId,
+            ownerFencingToken: 7n,
+            quarantinedAt: null,
+            closureVerifiedAt: null,
+            closedAt: null,
+            leaseExpiresAt: { gt: expect.any(Date) },
+          }),
+        }),
+      );
+      expect(tx.browserRuntimeSlot.updateMany).toHaveBeenCalledTimes(
+        usable ? 1 : 0,
+      );
+      expect(tx.browserRuntimeProfileLease.updateMany).toHaveBeenCalledTimes(
+        usable ? 1 : 0,
+      );
+      expect(tx.taskCaseExecution.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            scheduling: expect.objectContaining({
+              state: usable ? "READY" : "RECOVERING",
+              reason: usable ? null : "LEASE_RECOVERY",
+            }),
+          },
+        }),
+      );
+    },
+  );
+
+  it("does not refresh the budget twice for a duplicate human response", async () => {
+    const tx = transactionClient();
+    tx.humanIntervention.findFirst.mockResolvedValue(
+      intervention({ status: "RESOLVED" }),
+    );
+    const service = new ExecutionRunService(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      } as never,
+      {} as never,
+    );
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: {},
+    });
+    expect(tx.executionRun.updateMany).not.toHaveBeenCalled();
+    expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
   });
 
   it("does not requeue a Run that was cancelled after it was read", async () => {
@@ -877,7 +1013,9 @@ function transactionClient() {
       findMany: vi.fn().mockResolvedValue([]),
     },
     browserRuntimeProfileLease: { updateMany: vi.fn() },
-    browserRuntimeSession: { updateMany: vi.fn() },
+    browserRuntimeSession: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     browserRuntimeSlot: { updateMany: vi.fn() },
     executionRun: {
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -893,6 +1031,10 @@ function transactionClient() {
     notificationOutbox: { create: vi.fn() },
     runAttempt: { update: vi.fn() },
     runEvent: { create: vi.fn() },
+    taskCaseExecution: {
+      findMany: vi.fn().mockResolvedValue([]),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     taskExecution: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
   };
 }

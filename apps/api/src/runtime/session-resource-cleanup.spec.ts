@@ -212,3 +212,100 @@ describe("verified browser resource release", () => {
     expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
   });
 });
+
+function completedFixture(completed: boolean) {
+  const session = {
+    id: "session",
+    status: "CLOSED",
+    closureVerifiedAt: new Date(),
+    closureEvidenceId: "evidence",
+    fencingToken: 3n,
+    leaseToken: "lease",
+    ownerTaskId: "task",
+    ownerFencingToken: 5n,
+    purpose: "EXECUTION",
+    protocolMinor: 14,
+  };
+  const recovery = {
+    id: "recovery",
+    version: 1,
+    closureState: "VERIFIED",
+    closureEvidenceId: "evidence",
+    closureVerifiedAt: new Date(),
+    writeOutcomeState: "UNKNOWN",
+  };
+  const owner = {
+    id: "task",
+    fencingToken: 5n,
+    completionId: completed ? "accepted" : null,
+    status: completed ? "SUCCEEDED" : "FAILED",
+    recoveryStatus: null,
+    result: completed
+      ? { kind: "VERIFICATION_COMPLETED", verdict: "INCONCLUSIVE" }
+      : null,
+  };
+  const tx = {
+    browserRuntimeSession: {
+      findUnique: vi.fn().mockResolvedValue(session),
+      updateMany: vi.fn(),
+    },
+    sessionClosureEvidence: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "evidence",
+        recoveryId: "recovery",
+        sessionId: "session",
+        sessionFence: 3n,
+        leaseDigest: leaseDigest(session.leaseToken),
+      }),
+    },
+    runtimeSessionRecovery: {
+      findUnique: vi.fn().mockResolvedValue(recovery),
+      updateMany: vi.fn(),
+    },
+    agentRuntimeTask: {
+      findUnique: vi.fn().mockResolvedValue(owner),
+      updateMany: vi.fn(),
+    },
+    browserRuntimeSlot: { deleteMany: vi.fn() },
+    browserRuntimeProfileLease: { deleteMany: vi.fn() },
+    browserHumanControlLease: { deleteMany: vi.fn() },
+    executionResourceLease: {
+      deleteMany: vi.fn(),
+      updateMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(1),
+    },
+  };
+  return { tx, recovery };
+}
+
+describe("completed outcome and session audit", () => {
+  it("releases the browser but retains unknown-write guards without classifying an accepted verdict as recovery failure", async () => {
+    const { tx, recovery } = completedFixture(true);
+    expect(await releaseVerifiedSessionResources(tx as never, "session")).toBe(
+      true,
+    );
+    expect(tx.browserRuntimeSlot.deleteMany).toHaveBeenCalled();
+    expect(tx.executionResourceLease.updateMany).toHaveBeenCalledWith({
+      where: { sessionId: "session", mode: "WRITE" },
+      data: { quarantined: true },
+    });
+    expect(tx.executionResourceLease.deleteMany).toHaveBeenCalledWith({
+      where: { sessionId: "session", mode: "READ", origin: "NORMAL" },
+    });
+    expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+    expect(recovery.writeOutcomeState).toBe("UNKNOWN");
+    expect(tx.runtimeSessionRecovery.updateMany).not.toHaveBeenCalled();
+  });
+  it("still marks an interrupted task as requiring write review", async () => {
+    const { tx } = completedFixture(false);
+    await releaseVerifiedSessionResources(tx as never, "session");
+    expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+          recoveryNextAttemptAt: null,
+        },
+      }),
+    );
+  });
+});

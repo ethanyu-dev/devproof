@@ -410,7 +410,12 @@ describe("SpecAnalysisExecutor", () => {
     ).toContain(ui.externalId);
     const caseInput = definitionAt(5, "finish_spec").parameters.properties.spec
       .properties.cases.items;
-    expect(caseInput.required).toEqual(["name", "steps", "checkIds"]);
+    expect(caseInput.required).toEqual([
+      "name",
+      "steps",
+      "checkIds",
+      "accountRequirements",
+    ]);
     expect(caseInput.properties.criteria).toBeUndefined();
     expect(caseInput.properties.checkIds.items.enum).toEqual([
       "check-1",
@@ -561,7 +566,12 @@ describe("SpecAnalysisExecutor", () => {
     );
     const caseInput =
       finishTool.function.parameters.properties.spec.properties.cases.items;
-    expect(caseInput.required).toEqual(["name", "steps", "criteria"]);
+    expect(caseInput.required).toEqual([
+      "name",
+      "steps",
+      "criteria",
+      "accountRequirements",
+    ]);
     expect(caseInput.properties.criteria.items.required).toEqual([
       "requirementId",
       "description",

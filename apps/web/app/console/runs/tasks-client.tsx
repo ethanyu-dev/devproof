@@ -27,6 +27,7 @@ import {
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
+import { TaskDeleteButton } from "./task-delete-button";
 import { taskOutcomeDisplay } from "./task-outcome";
 import { terminalLifecycles, tone } from "./task-display";
 import {
@@ -136,6 +137,11 @@ export function TasksClient() {
     router.push(taskDetailHref(task.id, returnTo));
   }
 
+  function afterDelete() {
+    if (result?.items.length === 1 && page > 1) navigate(page - 1);
+    else void load();
+  }
+
   const rows = result?.items ?? null;
   return (
     <div className="dp-task-list-page">
@@ -150,7 +156,7 @@ export function TasksClient() {
             刷新
           </Button>
         }
-        description="查看任务状态与执行进度，进入详情查看 Spec、执行记录和日志。"
+        description="查看执行进展；测试报告汇总需求覆盖、验收结论和证据。"
         title="任务执行"
       />
       {loadError && result ? (
@@ -188,9 +194,12 @@ export function TasksClient() {
             <option value="ALL">全部状态</option>
             <option value="ACTIVE">进行中</option>
             <option value="WAITING_HUMAN">等待人工操作</option>
-            <option value="PASSED">验证通过</option>
-            <option value="VERIFICATION_FAILED">验证未通过</option>
-            <option value="EXECUTION_FAILED">任务执行失败</option>
+            <option value="PASSED">验收项通过</option>
+            <option value="VERIFICATION_FAILED">发现产品问题</option>
+            <option value="INCONCLUSIVE">无法判定</option>
+            <option value="BLOCKED">执行受阻</option>
+            <option value="NOT_RUN">尚未执行</option>
+            <option value="EXECUTION_FAILED">执行异常或受阻（全部）</option>
             <option value="COMPLETED">已完成</option>
             <option value="CANCELLED">已取消</option>
             <option value="TIMED_OUT">已超时</option>
@@ -278,13 +287,14 @@ export function TasksClient() {
             <div aria-hidden="true" className="dp-task-grid-head">
               <span>任务</span>
               <span>状态</span>
-              <span>进度</span>
+              <span>执行进度 / 报告</span>
               <span>创建时间</span>
               <span className="dp-task-actions-heading">操作</span>
             </div>
             {rows.map((task) => (
               <TaskRow
                 key={task.id}
+                onDeleted={afterDelete}
                 onRerun={focusRerun}
                 onSummary={updateSummary}
                 href={taskDetailHref(task.id, returnTo)}
@@ -350,11 +360,13 @@ function taskListQuery(page: number, filters: TaskFilters) {
 
 function TaskRow({
   href,
+  onDeleted,
   onRerun,
   onSummary,
   task,
 }: {
   href: string;
+  onDeleted: () => void;
   onRerun: (task: TaskDetail) => void;
   onSummary: (task: TaskDetail) => void;
   task: TaskSummary;
@@ -372,6 +384,7 @@ function TaskRow({
     displayed.counts.passed +
       displayed.counts.failed +
       displayed.counts.inconclusive;
+  const acceptanceScore = active ? null : displayed.acceptanceScore;
   const createdAt = new Date(displayed.createdAt);
   return (
     <article className="dp-task-row">
@@ -396,6 +409,20 @@ function TaskRow({
           </Badge>
         </div>
         <div className="dp-task-progress-cell">
+          {acceptanceScore?.score != null && (
+            <div
+              className="dp-task-score"
+              title={`验收评分：${acceptanceScore.score}/100。${acceptanceScore.reason}`}
+            >
+              <span>
+                <b>{acceptanceScore.score}</b>
+                <small> / 100</small>
+              </span>
+              <span className="dp-task-score-coverage">
+                {acceptanceScore.passed}/{acceptanceScore.total} 项通过
+              </span>
+            </div>
+          )}
           <span className="dp-task-progress-count">
             <b>
               {displayed.counts.total > 0
@@ -404,18 +431,26 @@ function TaskRow({
             </b>
             {displayed.counts.total > 0 && <span>已结束</span>}
           </span>
-          {displayed.counts.total > 0 && (
-            <>
-              <progress
-                aria-label={`${displayed.title}：已结束 ${terminalCount} / ${displayed.counts.total}`}
-                max={displayed.counts.total}
-                value={terminalCount}
-              />
-              <small>
-                执行 {displayed.counts.running} · 等待{" "}
-                {displayed.counts.waiting}
-              </small>
-            </>
+          {active && displayed.counts.total > 0 && (
+            <progress
+              aria-label={`${displayed.title}：已结束 ${terminalCount} / ${displayed.counts.total}`}
+              max={displayed.counts.total}
+              value={terminalCount}
+            />
+          )}
+          {active ? (
+            <small className="dp-task-progress-note">
+              {displayed.lifecycle === "WAITING_HUMAN"
+                ? "等待人工处理"
+                : "执行结束后生成完整报告"}
+            </small>
+          ) : (
+            <Link
+              className="dp-task-report-link"
+              href={`${href}${href.includes("?") ? "&" : "?"}view=report`}
+            >
+              查看验收报告 <ArrowRight aria-hidden="true" />
+            </Link>
           )}
         </div>
         <time
@@ -465,7 +500,15 @@ function TaskRow({
             >
               <XCircle />
             </Button>
-          ) : null}
+          ) : (
+            <TaskDeleteButton
+              id={task.id}
+              title={task.title}
+              onDeleted={onDeleted}
+              disabled={busy}
+              iconOnly
+            />
+          )}
           <Button
             asChild
             className="col-start-3"

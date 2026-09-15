@@ -1,5 +1,7 @@
 import {
   runtimeGeneratedSpecSchema,
+  businessAccountRequirementsError,
+  testAccountRequirementsSchema,
   runtimeObservationTargetSchema,
   runtimeSpecCriterionSchema,
   runtimeSpecRequirementSchema,
@@ -9,8 +11,13 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 
-const text = z.string().trim().min(1).max(5_000);
-const notes = z.array(text).max(100).default([]);
+const conciseText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(300)
+  .describe("一句话描述，最多 300 字；不重复其他字段的内容。");
+const notes = z.array(conciseText).max(100).default([]);
 
 export const requirementPlanSchema = z.object({
   requirements: z
@@ -29,7 +36,9 @@ export type SpecRequirement = z.infer<typeof runtimeSpecRequirementSchema>;
 
 export const specCheckSchema = z.object({
   requirementId: z.string().trim().min(1).max(100),
-  description: text,
+  description: conciseText.describe(
+    "一句可判定的业务结果；字段值和枚举放 observationTargets，不复述步骤。",
+  ),
   observationTargets: z.array(runtimeObservationTargetSchema).min(1).max(20),
   supportingSourceRefs: z
     .array(z.string().trim().min(1).max(500))
@@ -41,7 +50,7 @@ export const specCheckSchema = z.object({
 
 /** Model-facing input; repeated audit fields are filled by the runtime. */
 export const compactSpecSchema = z.object({
-  summary: text,
+  summary: conciseText,
   assumptions: notes,
   risks: notes,
   outOfScope: notes.describe(
@@ -54,11 +63,22 @@ export const compactSpecSchema = z.object({
   cases: z
     .array(
       z.object({
-        name: runtimeGeneratedSpecSchema.shape.cases.element.shape.name,
-        steps: z.array(text).min(1).max(100),
+        name: z.string().trim().min(1).max(100),
+        authRole: runtimeGeneratedSpecSchema.shape.cases.element.shape.authRole,
+        steps: z.array(conciseText).min(1).max(100),
+        accountRequirements: z
+          .array(
+            testAccountRequirementsSchema.element.extend({
+              label: z.string().trim().min(1).max(80),
+              rationale: z.string().trim().min(1).max(160),
+              constraints: z.array(conciseText).max(20).default([]),
+            }),
+          )
+          .max(20)
+          .optional(),
         preconditions: notes,
         testData: notes,
-        cleanup: runtimeGeneratedSpecSchema.shape.cases.element.shape.cleanup,
+        cleanup: notes,
         criteria: z.array(specCheckSchema).min(1).max(100),
       }),
     )
@@ -107,6 +127,8 @@ export function normalizeCompactSpec(
   requirements: readonly SpecRequirement[],
 ) {
   const draft = compactSpecSchema.parse(raw);
+  const accountError = businessAccountRequirementsError(draft.cases);
+  if (accountError) throw new Error(accountError);
   const byId = new Map(requirements.map((item) => [item.id, item]));
   return runtimeGeneratedSpecSchema.parse({
     ...draft,

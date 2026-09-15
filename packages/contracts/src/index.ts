@@ -1,4 +1,17 @@
 import {
+  testAccountBindingsSchema,
+  businessTestAccountSchema,
+} from "@devproof/agent-runtime-protocol";
+export {
+  testAccountPlanSchema,
+  testAccountSlots,
+} from "@devproof/agent-runtime-protocol";
+export type {
+  TestAccountPlan,
+  TestAccountBinding,
+  TestAccountRequirement,
+} from "@devproof/agent-runtime-protocol";
+import {
   agentProviderSchema as executionAgentProviderSchema,
   runtimeBusinessReferenceSchema,
   runtimeCriterionSchema,
@@ -581,8 +594,11 @@ export const runDeadlinePolicySchema = z.discriminatedUnion("mode", [
   }),
 ]);
 
+export const DEFAULT_EXECUTION_BUDGET_SECONDS = 1_800;
+
 export const executionRunCreateInputSchema = z
   .object({
+    testAccounts: testAccountBindingsSchema.optional(),
     concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
     businessReferences: z
       .array(runtimeBusinessReferenceSchema)
@@ -619,7 +635,12 @@ export const executionRunCreateInputSchema = z
         requiredCapabilities: ["browser"],
       }),
     criteria: z.array(runtimeCriterionSchema).min(1).max(100),
-    deadlineSeconds: z.number().int().min(30).max(86_400).default(900),
+    deadlineSeconds: z
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .default(DEFAULT_EXECUTION_BUDGET_SECONDS),
     deadlinePolicy: runDeadlinePolicySchema.default({ mode: "FIXED" }),
     environment: z.record(z.string(), z.unknown()).default({}),
     goal: z.string().trim().min(1).max(20_000),
@@ -1648,7 +1669,7 @@ const userBrowserProfileVerificationUrlSchema = z
 
 export const userBrowserProfileCreateInputSchema = z.object({
   executionMode: userBrowserProfileExecutionModeSchema.optional(),
-  executionConcurrency: z.number().int().min(1).max(4).optional(),
+  executionConcurrency: z.number().int().min(1).max(32).optional(),
   authRole: z.string().trim().min(1).max(100).default("default"),
   displayName: z.string().trim().min(1).max(160),
   environmentKey: z.string().trim().min(1).max(160).default("default"),
@@ -1666,7 +1687,7 @@ export const userBrowserProfileCreateInputSchema = z.object({
 export const userBrowserProfileUpdateInputSchema = z
   .object({
     executionMode: userBrowserProfileExecutionModeSchema.optional(),
-    executionConcurrency: z.number().int().min(1).max(4).optional(),
+    executionConcurrency: z.number().int().min(1).max(32).optional(),
     displayName: z.string().trim().min(1).max(160).optional(),
     grants: z
       .array(browserProfileTriggerSourceSchema)
@@ -1809,3 +1830,22 @@ export type VerificationExecutionAcquireInput = z.infer<
 >;
 
 export * from "./runtime-recovery.js";
+
+export const taskTestAccountsInputSchema = z.object({
+  submissionId: z.string().uuid(),
+  expectedRevision: z.string().min(1).max(100),
+  assignments: z
+    .array(
+      z.object({
+        caseExecutionId: z.string().uuid(),
+        slotId: z.string().min(1).max(100),
+        account: businessTestAccountSchema,
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+export type TaskTestAccountsInput = z.infer<typeof taskTestAccountsInputSchema>;
+export type * from "./task-acceptance-report.js";
+
+export * from "./acceptance-assessment.js";

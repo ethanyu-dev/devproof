@@ -1,3 +1,5 @@
+import { AcceptanceReviewRuntimeController } from "./agent-runtime/acceptance-review-runtime.controller.js";
+import { TaskAcceptanceReviewService } from "./task-executions/task-acceptance-review.service.js";
 import { Module } from "@nestjs/common";
 import { APP_INTERCEPTOR } from "@nestjs/core";
 import { RuntimeDrainService } from "./runtime/runtime-drain.service.js";
@@ -99,6 +101,7 @@ import { VerificationService } from "./verification/verification.service.js";
     AgentRuntimeControlController,
     AgentRuntimeTaskController,
     SpecAnalysisRuntimeController,
+    AcceptanceReviewRuntimeController,
     AuthController,
     UserBrowserProfilesController,
     ConsoleController,
@@ -127,6 +130,7 @@ import { VerificationService } from "./verification/verification.service.js";
     AgentModelConfigurationService,
     AgentRuntimeTaskService,
     SpecAnalysisRuntimeService,
+    TaskAcceptanceReviewService,
     UnifiedBrowserExecutionService,
     AuditService,
     AuthGuard,

@@ -1,3 +1,6 @@
+export * from "./criterion-observation.js";
+import { testAccountRequirementsSchema } from "./test-accounts.js";
+export * from "./test-accounts.js";
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 import { z } from "zod";
 export {
@@ -220,6 +223,7 @@ export const runtimeSpecCriterionSchema = z.object({
 });
 
 export const runtimeGeneratedSpecCaseSchema = z.object({
+  accountRequirements: testAccountRequirementsSchema.optional(),
   authRole: z.string().trim().min(1).max(120).default("default"),
   cleanup: z.array(z.string().trim().min(1).max(5_000)).max(50).default([]),
   criteria: z.array(runtimeSpecCriterionSchema).min(1).max(100),
@@ -932,3 +936,5 @@ export type RuntimeTaskOutcomeInput = z.infer<
 >;
 export { specPullRequestCoverage } from "./spec-source-coverage.js";
 export { specRequirementCoverageError } from "./spec-requirement-coverage.js";
+
+export * from "./acceptance-review.js";

@@ -194,32 +194,133 @@ describe("UserBrowserProfilesService configuration concurrency", () => {
     },
   );
 
-  it("enables isolation with a verified snapshot using a version-checked write", async () => {
+  it.each([4, 32])(
+    "enables isolation at concurrency %s with a verified snapshot using a version-checked write",
+    async (executionConcurrency) => {
+      vi.stubEnv("BROWSER_ISOLATED_AUTH_ENABLED", "true");
+      const { service, tx, prisma, audit } = fixture();
+      await service.update(current as never, "profile-1", {
+        executionMode: "ISOLATED_AUTH",
+        executionConcurrency,
+      });
+      expect(tx.userBrowserProfile.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            id: "profile-1",
+            ownerUserId: "user-1",
+            teamId: "team-1",
+            version: 7,
+          },
+          data: expect.objectContaining({
+            executionMode: "ISOLATED_AUTH",
+            executionConcurrency,
+            version: { increment: 1 },
+          }),
+        }),
+      );
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: "Serializable",
+      });
+      expect(audit.record).toHaveBeenCalled();
+    },
+  );
+
+  it("rejects Profile concurrency above 32 before writing the configuration", async () => {
+    const { service, prisma, tx } = fixture();
+    await expect(
+      service.update(current as never, "profile-1", {
+        executionConcurrency: 33,
+      }),
+    ).rejects.toThrow("at most 32 concurrent authenticated sessions");
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.userBrowserProfile.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each<UserBrowserProfileUpdateInput>([
+    { executionMode: "ISOLATED_AUTH", executionConcurrency: 32 },
+    { executionConcurrency: 32 },
+    { executionMode: "ISOLATED_AUTH", executionConcurrency: 4 },
+  ])(
+    "allows increasing or resaving isolated concurrency while in use: %o",
+    async (input) => {
+      vi.stubEnv("BROWSER_ISOLATED_AUTH_ENABLED", "true");
+      const { service, tx, audit } = fixture({
+        executionMode: "ISOLATED_AUTH",
+        executionConcurrency: 4,
+      });
+      tx.executionRun.count.mockResolvedValue(1);
+      tx.browserRuntimeSession.count.mockResolvedValue(1);
+      tx.taskProfileBinding.count.mockResolvedValue(1);
+      tx.taskDeploymentProfileBinding.count.mockResolvedValue(1);
+
+      await service.update(current as never, "profile-1", input);
+
+      expect(tx.userBrowserProfile.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: "profile-1", version: 7 }),
+          data: expect.objectContaining({
+            executionConcurrency: input.executionConcurrency,
+            version: { increment: 1 },
+          }),
+        }),
+      );
+      expect(
+        tx.userBrowserProfile.updateMany.mock.calls[0]![0].data,
+      ).not.toHaveProperty("authSnapshotGeneration");
+      expect(tx.browserProfileGrant.updateMany).not.toHaveBeenCalled();
+      expect(audit.record).toHaveBeenCalled();
+    },
+  );
+
+  it.each<UserBrowserProfileUpdateInput>([
+    { executionMode: "ISOLATED_AUTH", executionConcurrency: 2 },
+    { executionConcurrency: 2 },
+    { executionMode: "SERIAL_PERSISTENT", executionConcurrency: 32 },
+    { grants: ["FEISHU"], executionConcurrency: 32 },
+    {
+      verificationUrl: "https://other.example.com/settings",
+      executionConcurrency: 32,
+    },
+    {
+      verificationRules: {
+        authenticatedSelector: "#account",
+        loginUrlPatterns: [],
+        successUrlPatterns: [],
+      },
+      executionConcurrency: 32,
+    },
+  ])(
+    "still requires confirmed closure for an incompatible configuration change: %o",
+    async (input) => {
+      vi.stubEnv("BROWSER_ISOLATED_AUTH_ENABLED", "true");
+      const { service, tx } = fixture({
+        executionMode: "ISOLATED_AUTH",
+        executionConcurrency: 4,
+      });
+      tx.browserRuntimeSession.count.mockResolvedValue(1);
+
+      await expect(
+        service.update(current as never, "profile-1", input),
+      ).rejects.toThrow("confirmed closed");
+
+      expect(tx.userBrowserProfile.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires a valid snapshot when increasing concurrency without specifying the mode", async () => {
     vi.stubEnv("BROWSER_ISOLATED_AUTH_ENABLED", "true");
-    const { service, tx, prisma, audit } = fixture();
-    await service.update(current as never, "profile-1", {
+    const { service, tx } = fixture({
       executionMode: "ISOLATED_AUTH",
       executionConcurrency: 4,
+      authSnapshotGeneration: null,
     });
-    expect(tx.userBrowserProfile.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          id: "profile-1",
-          ownerUserId: "user-1",
-          teamId: "team-1",
-          version: 7,
-        },
-        data: expect.objectContaining({
-          executionMode: "ISOLATED_AUTH",
-          executionConcurrency: 4,
-          version: { increment: 1 },
-        }),
+
+    await expect(
+      service.update(current as never, "profile-1", {
+        executionConcurrency: 32,
       }),
-    );
-    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
-      isolationLevel: "Serializable",
-    });
-    expect(audit.record).toHaveBeenCalled();
+    ).rejects.toThrow("Verify a compatible authentication snapshot");
+    expect(tx.userBrowserProfile.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not overwrite grants if a lifecycle transition wins the final version check", async () => {

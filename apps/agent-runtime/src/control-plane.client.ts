@@ -1,3 +1,7 @@
+import {
+  acceptanceReviewClaimOutputSchema,
+  type AcceptanceReviewResult,
+} from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -69,6 +73,44 @@ export class ControlPlaneClient {
     return task
       ? withConservativeLeaseDuration(task, performance.now() - started)
       : null;
+  }
+
+  async claimAcceptanceReview(workerId: string, signal?: AbortSignal) {
+    try {
+      const response = await this.request(
+        "/internal/v2/runtime/acceptance-reviews/claim",
+        {
+          body: { workerId },
+          ...(signal ? { signal } : {}),
+        },
+      );
+      return acceptanceReviewClaimOutputSchema.parse(response).task;
+    } catch (error) {
+      // Rolling deployments may run an older API without this optional endpoint.
+      if (error instanceof ControlPlaneError && error.status === 404)
+        return null;
+      throw error;
+    }
+  }
+
+  submitAcceptanceReview(
+    id: string,
+    input: {
+      workerId: string;
+      leaseToken: string;
+      result?: AcceptanceReviewResult;
+      model?: string;
+      error?: string;
+    },
+    signal?: AbortSignal,
+  ) {
+    return this.request(
+      `/internal/v2/runtime/acceptance-reviews/${id}/outcome`,
+      {
+        body: input,
+        ...(signal ? { signal } : {}),
+      },
+    );
   }
 
   async heartbeat(lease: ActiveLease, signal?: AbortSignal) {

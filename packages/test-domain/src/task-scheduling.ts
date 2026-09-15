@@ -87,12 +87,15 @@ export function caseExecutionPhase(
   if (item.run?.lifecycle === "WAITING_HUMAN") return "waitingHuman";
   const scheduling = readCaseScheduling(item.scheduling);
   if (
-    item.run?.tasks?.some(
-      (task) =>
-        task.recoveryStatus === "PENDING" || task.recoveryStatus === "CLOSING",
+    item.run?.tasks?.some((task) =>
+      ["PENDING", "CLOSING", "HITL_CLOSING"].includes(
+        task.recoveryStatus ?? "",
+      ),
     )
   )
     return "recovering";
+  if (!item.run && scheduling?.reason === "TEST_ACCOUNTS_REQUIRED")
+    return "waitingHuman";
   if (scheduling?.state === "RECOVERING") return "recovering";
   if (item.run) {
     if (scheduling?.state === "ADMITTED") return "queued";

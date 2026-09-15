@@ -1,4 +1,6 @@
+import type { TaskAccountPreparation } from "./task-test-accounts";
 import type {
+  AcceptanceAssessment,
   ExecutionConcurrencyPolicy,
   TaskCaseRerunSource,
   SpecAnalysisInputRequest,
@@ -108,6 +110,8 @@ export interface TaskStage {
 }
 
 export interface TaskDetail {
+  acceptanceScore?: Omit<AcceptanceAssessment, "findings"> | null;
+  testAccountPreparation?: TaskAccountPreparation;
   analysisInputRequest?:
     (SpecAnalysisInputRequest & { attemptId: string }) | null;
   caseRerunSource?: TaskCaseRerunSource | null;
@@ -201,6 +205,7 @@ export interface TaskDetail {
 
 export type TaskSummary = Pick<
   TaskDetail,
+  | "acceptanceScore"
   | "counts"
   | "createdAt"
   | "currentStage"

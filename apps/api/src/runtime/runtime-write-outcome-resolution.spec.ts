@@ -345,7 +345,7 @@ describe("manual reconciliation through durable session recovery", () => {
       expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
     },
   );
-  it.each(["PENDING", "CLOSING", "RETRY_SCHEDULED"])(
+  it.each(["PENDING", "CLOSING", "HITL_CLOSING", "RETRY_SCHEDULED"])(
     "does not race an active Agent recovery %s",
     async (state) => {
       const { service, owner, tx } = fixture();

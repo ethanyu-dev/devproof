@@ -8,6 +8,7 @@ import {
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 import type { BrowserObservations } from "./browser-observation.js";
+import { networkRequestMatches } from "./network-criterion.js";
 import {
   schemaCorrection,
   toolCorrection,
@@ -16,6 +17,20 @@ import {
 
 // Keep short, segment-local node references out of the durable result protocol.
 export const criterionSubmissionSchema = runtimeCriterionResultSchema.extend({
+  networkCitations: z
+    .array(
+      z
+        .object({
+          target: z.string().trim().min(1).max(500),
+          observationId: z.string().uuid(),
+          cursor: z.number().int().nonnegative().default(0),
+          requestIndex: z.number().int().nonnegative(),
+        })
+        .strict(),
+    )
+    .max(20)
+    .optional(),
+  savedObservationIds: z.array(z.string().uuid()).max(20).optional(),
   citations: z
     .array(
       z
@@ -43,7 +58,37 @@ export function resolveCriterionEvidence(
     expected: string;
   }[] = [];
   const quotes = [...(submitted.observations ?? [])];
+  const networkQuotes = new Set<string>();
   const refs = new Set(submitted.evidenceRefs);
+  for (const [index, citation] of (
+    submitted.networkCitations ?? []
+  ).entries()) {
+    const resolved = observations?.networkCitation(
+      citation.observationId,
+      citation.cursor,
+      citation.requestIndex,
+    );
+    if (!resolved) {
+      issues.push({
+        code: "CITATION_NOT_AVAILABLE",
+        path: `networkCitations.${index}`,
+        expected:
+          "引用 page.network 已读取的完整请求（requestIndex 从 0 开始）；缺失、截断或未读取的请求不能作为证据。",
+      });
+      continue;
+    }
+    const { evidenceRefs, ...quote } = resolved;
+    quotes.push({ target: citation.target, ...quote });
+    networkQuotes.add(
+      JSON.stringify([
+        citation.target,
+        quote.observationId,
+        quote.cursor,
+        quote.quote,
+      ]),
+    );
+    evidenceRefs.forEach((ref) => refs.add(ref));
+  }
   for (const [index, citation] of (submitted.citations ?? []).entries()) {
     const resolved = observations?.citation(citation.ref);
     if (!resolved) {
@@ -58,6 +103,24 @@ export function resolveCriterionEvidence(
     const { evidenceRefs, ...quote } = resolved;
     quotes.push({ target: citation.target, ...quote });
     evidenceRefs.forEach((ref) => refs.add(ref));
+  }
+  for (const id of submitted.savedObservationIds ?? []) {
+    const fact = observations?.savedCitation(id, criterion.id);
+    if (!fact) {
+      issues.push({
+        code: "CITATION_NOT_AVAILABLE",
+        path: "savedObservationIds",
+        expected: "仅引用该验收标准已保存的观察编号。",
+      });
+      continue;
+    }
+    quotes.push({
+      target: fact.target,
+      observationId: fact.observationId,
+      cursor: fact.cursor,
+      quote: fact.quote,
+    });
+    fact.evidenceRefs.forEach((ref) => refs.add(ref));
   }
   const parsed = runtimeCriterionResultSchema.safeParse({
     ...submitted,
@@ -110,7 +173,17 @@ export function resolveCriterionEvidence(
             (item) =>
               item.target === target.label &&
               [target.expectedText, ...(target.alternatives ?? [])].some(
-                (text) => observedValueMatches(item.quote, text),
+                (text) =>
+                  networkQuotes.has(
+                    JSON.stringify([
+                      item.target,
+                      item.observationId,
+                      item.cursor,
+                      item.quote,
+                    ]),
+                  )
+                    ? networkRequestMatches(item.quote, target.label, text)
+                    : observedValueMatches(item.quote, text),
               ) &&
               observations?.hasDeliveredQuote(
                 item.observationId,
@@ -122,7 +195,7 @@ export function resolveCriterionEvidence(
           issues.push({
             code: "QUOTE_NOT_EXACT",
             path: "observations",
-            expected: `通过结论缺少已观察原文覆盖：${target.label}。选择包含「${target.expectedText}」且属于验收区域的节点，通过 citations 提交；手填 quote 必须是连续原文，不能拼接或改写。`,
+            expected: `通过结论缺少已观察原文覆盖：${target.label}。需要确认「${target.expectedText}」。页面节点使用 citations；请求字段使用 page.network 的 networkCitations。手填 quote 必须是连续原文，不能拼接或改写。`,
           });
       }
     }
@@ -148,7 +221,7 @@ export function resolveCriterionEvidence(
           expected: `${code}: ${expected}`,
         })),
         nextAction:
-          "优先使用 citations: [{target: 验收对象 label, ref: 当前快照的完整 ref}]；执行器会填入原文、观察编号及同次采集的证据。核对所有缺失项后再提交；无法确认则记录 INCONCLUSIVE。",
+          "页面使用 citations: [{target, ref}]；网络使用 networkCitations: [{target, observationId, cursor, requestIndex}]，引用 page.network 已读取的请求（序号从 0 开始）。执行器会绑定真实原文及证据。核对所有缺失项后再提交；无法确认则记录 INCONCLUSIVE。",
       }),
     };
   return { result };

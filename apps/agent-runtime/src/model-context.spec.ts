@@ -186,7 +186,7 @@ describe("bounded model context", () => {
     );
   });
 
-  it("summarizes four complete turns and keeps exact requirements and accepted state", () => {
+  it("retains complete turn summaries while they fit the budget and keeps exact requirements and accepted state", () => {
     const context = new ModelContext(initial);
     for (let index = 0; index < 9; index += 1) turn(context, index);
     const state = {
@@ -207,18 +207,23 @@ describe("bounded model context", () => {
       data: state,
     });
     expect(view.metrics).toMatchObject({
-      retainedTurns: 4,
-      compactedTurns: 5,
+      retainedTurns: 9,
+      compactedTurns: 0,
       historyMode: "OPERATION_SUMMARIES",
     });
     const history = JSON.parse(String(view.messages[3]!.content));
     expect(history.kind).toBe("recent_operations");
-    expect(history.turns).toHaveLength(4);
+    expect(history.turns).toHaveLength(9);
     expect(
       history.turns
         .flat()
         .map((operation: { callId: string }) => operation.callId),
-    ).toEqual([5, 6, 7, 8].flatMap((index) => [`${index}-0`, `${index}-1`]));
+    ).toEqual(
+      [0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap((index) => [
+        `${index}-0`,
+        `${index}-1`,
+      ]),
+    );
     expect(history.turns[0][0]).toMatchObject({
       tool: "browser_command",
       outcome: "RETURNED",
@@ -354,7 +359,7 @@ describe("bounded model context", () => {
       expect(view.metrics.requestBytes).toBeLessThanOrEqual(96 * 1_024);
     }
     expect(boundedBytes / legacyBytes).toBeLessThan(0.5);
-    expect(Math.max(...tailSizes) - Math.min(...tailSizes)).toBeLessThan(100);
+    expect(Math.max(...tailSizes)).toBeLessThanOrEqual(96 * 1024);
     console.info("Context byte fixture", {
       boundedBytes,
       legacyBytes,

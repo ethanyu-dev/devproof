@@ -79,6 +79,25 @@ describe("execution phase counts", () => {
     });
   });
 
+  it("counts an in-flight human resume as recovery before its scheduling projection catches up", () => {
+    expect(
+      countCaseExecutions(
+        [
+          {
+            dispatchStatus: "LINKED",
+            run: {
+              lifecycle: "QUEUED",
+              executionDisposition: null,
+              verdict: null,
+              tasks: [{ recoveryStatus: "HITL_CLOSING" }],
+            },
+          },
+        ],
+        1,
+      ),
+    ).toMatchObject({ recovering: 1, queued: 0, running: 0, terminal: 0 });
+  });
+
   it("covers unmaterialized deployment rows and old cancelled parent rows", () => {
     const rows = [{ dispatchStatus: "PENDING", run: null }];
     expect(countCaseExecutions(rows, 4)).toMatchObject({ queued: 4, total: 4 });

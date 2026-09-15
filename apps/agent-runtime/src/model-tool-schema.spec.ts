@@ -44,7 +44,7 @@ describe("model tool schema compatibility", () => {
     expect(z.toJSONSchema(businessTestAccountSchema)).toHaveProperty("pattern");
   });
 
-  it("keeps portable constraints and object union branches", () => {
+  it("projects object unions without root combinators and preserves local validation", () => {
     const schema = openAiFunctionSchema(
       z.union([
         z.object({ id: z.string().regex(/^[A-Z][0-9]+$/) }).strict(),
@@ -57,11 +57,46 @@ describe("model tool schema compatibility", () => {
       ]),
     ) as ToolSchema;
     expect(schema.type).toBe("object");
-    expect(schema.anyOf).toHaveLength(2);
-    expect(schema.anyOf![0]?.properties!.id!.pattern).toBe("^[A-Z][0-9]+$");
-    expect(schema.anyOf![1]?.properties!.tags!.items).not.toHaveProperty(
-      "pattern",
-    );
-    expect(schema.anyOf![1]?.properties!.url).not.toHaveProperty("format");
+    expect(schema).not.toHaveProperty("anyOf");
+    expect(schema.required).toEqual([]);
+    expect(schema.properties!.id!.pattern).toBe("^[A-Z][0-9]+$");
+    expect(schema.properties!.tags!.items).not.toHaveProperty("pattern");
+    expect(schema.properties!.url).not.toHaveProperty("format");
   });
+});
+
+it("rejects scalar function parameters before sending a request", () => {
+  expect(() => openAiFunctionSchema(z.string())).toThrow("object");
+  expect(() =>
+    openAiFunctionSchema(z.union([z.string(), z.object({})])),
+  ).toThrow("objects");
+});
+it("retains required intersection and optional defaults while canonical parsing rejects mismatched payloads", () => {
+  const canonical = z.union([
+    z.object({
+      commandType: z.literal("navigate"),
+      payload: z.object({ url: z.url() }),
+      timeout: z.number().default(30),
+    }),
+    z.object({
+      commandType: z.literal("click"),
+      payload: z.object({ ref: z.string() }),
+      timeout: z.number().default(30),
+    }),
+  ]);
+  const schema = openAiFunctionSchema(canonical) as ToolSchema;
+  expect(schema.required).toEqual(["commandType", "payload", "timeout"]);
+  expect(schema.properties!.commandType).toMatchObject({
+    type: "string",
+    enum: ["navigate", "click"],
+  });
+  expect(
+    canonical.safeParse({
+      commandType: "click",
+      payload: { url: "https://example.com" },
+    }).success,
+  ).toBe(false);
+  expect(
+    canonical.parse({ commandType: "click", payload: { ref: "e1" } }).timeout,
+  ).toBe(30);
 });

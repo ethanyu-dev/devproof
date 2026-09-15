@@ -154,3 +154,59 @@ describe("compact Spec", () => {
     expect(specRequirementCoverageError(spec)).toBeNull();
   });
 });
+
+it("rejects login roles instead of producing a needless account HITL", () => {
+  expect(() =>
+    normalizeCompactSpec(
+      {
+        ...draft,
+        cases: [
+          {
+            ...draft.cases[0],
+            accountRequirements: [
+              {
+                role: "admin",
+                label: "后台管理员账号（登录用）",
+                usage: "READ_EXISTING",
+                rationale: "登录后台",
+              },
+            ],
+          },
+        ],
+      },
+      requirements,
+    ),
+  ).toThrow("authRole");
+  const result = normalizeCompactSpec(
+    {
+      ...draft,
+      cases: [
+        {
+          ...draft.cases[0],
+          authRole: "白名单管理员",
+          accountRequirements: [],
+        },
+      ],
+    },
+    requirements,
+  );
+  expect(result.cases[0]).toMatchObject({
+    authRole: "白名单管理员",
+    accountRequirements: [],
+  });
+});
+it("asks for concise generation without truncating saved evidence or removing necessary steps", () => {
+  expect(
+    compactSpecSchema.safeParse({ ...draft, summary: "冗长".repeat(151) })
+      .success,
+  ).toBe(false);
+  const steps = Array.from({ length: 11 }, (_, i) => `必要业务操作 ${i + 1}`);
+  const result = normalizeCompactSpec(
+    { ...draft, cases: [{ ...draft.cases[0], steps }] },
+    requirements,
+  );
+  expect(result.cases[0]!.steps.map((step) => step.action)).toEqual(steps);
+  expect(result.cases[0]!.criteria[0]!.basis!.quote).toBe(
+    plan.requirements[0]!.quote,
+  );
+});

@@ -2,6 +2,8 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
+  ParseUUIDPipe,
   Get,
   HttpCode,
   Param,
@@ -17,6 +19,7 @@ import {
   taskStageRetryInputSchema,
   taskCaseRerunInputSchema,
   taskAnalysisInputSchema,
+  taskTestAccountsInputSchema,
   executionConcurrencyPolicySchema,
 } from "@devproof/contracts";
 
@@ -68,6 +71,9 @@ export class TaskExecutionConsoleController {
         "FAILED",
         "VERIFICATION_FAILED",
         "EXECUTION_FAILED",
+        "INCONCLUSIVE",
+        "BLOCKED",
+        "NOT_RUN",
         "COMPLETED",
         "CANCELLED",
         "TIMED_OUT",
@@ -92,9 +98,26 @@ export class TaskExecutionConsoleController {
     return this.tasks.detail(taskToolContext(current), id);
   }
 
+  @Delete(":id")
+  @HttpCode(204)
+  delete(
+    @CurrentAuth() current: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.tasks.delete(taskToolContext(current), id);
+  }
+
   @Get(":id/events")
   events(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.tasks.events(taskToolContext(current), id);
+  }
+
+  @Get(":id/acceptance-report")
+  acceptanceReport(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+  ) {
+    return this.tasks.acceptanceReport(taskToolContext(current), id);
   }
 
   @Post(":id/cases/:caseExecutionId/policy")
@@ -155,6 +178,19 @@ export class TaskExecutionConsoleController {
       current.user.id,
       id,
       parseBody(taskProfileSelectionInputSchema, body),
+    );
+  }
+
+  @Post(":id/test-accounts")
+  provideTestAccounts(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.provideTestAccounts(
+      taskToolContext(current),
+      id,
+      parseBody(taskTestAccountsInputSchema, body),
     );
   }
 

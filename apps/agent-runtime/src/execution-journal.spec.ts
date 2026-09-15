@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ExecutionJournal } from "./execution-journal.js";
 import { taskTestAccount } from "./test-account.js";
+import { executionStateSchema } from "@devproof/agent-runtime-protocol";
 const evidence = new Map([
   [
     "network-1",
@@ -47,6 +48,126 @@ const listing = {
   responseSummary: JSON.stringify({ data: [record] }),
 };
 describe("execution business journal", () => {
+  it.each([false, true])(
+    "ignores blank and invalid response identities without joining unrelated users (multi=%s)",
+    (multi) => {
+      const j = new ExecutionJournal(
+        multi
+          ? {
+              testAccounts: [
+                {
+                  slotId: "target:1",
+                  account: "subject-phone",
+                  label: "测试账号",
+                  usage: "CREATE_OR_MODIFY",
+                  aliases: [],
+                  requiredTypes: ["MAPPING"],
+                },
+              ],
+            }
+          : { executionState: { account: "subject-phone" } },
+      );
+      j.observe(
+        output([
+          {
+            ...listing,
+            responseSummary: JSON.stringify({
+              whitelists: [
+                {
+                  ...record,
+                  account: "subject-uuid",
+                  user: {
+                    uuid: "subject-uuid",
+                    phone: " subject-phone ",
+                    email: "",
+                  },
+                },
+                {
+                  ...record,
+                  id: 456,
+                  account: "other-uuid",
+                  user: { uuid: "other-uuid", phone: "other-phone", email: "" },
+                },
+                {
+                  ...record,
+                  account: "subject-uuid",
+                  user: { phone: null, email: "  " },
+                },
+                {
+                  ...record,
+                  account: "subject-uuid",
+                  user: { phone: "执行删除", email: "x".repeat(201) },
+                },
+              ],
+            }),
+          },
+        ]),
+        evidence,
+      );
+      const aliases = multi
+        ? j.state.accounts![0]!.aliases
+        : j.state.accountAliases;
+      expect(aliases).toEqual(["subject-uuid", "subject-phone"]);
+      expect(executionStateSchema.safeParse(j.state).success).toBe(true);
+      const restored = new ExecutionJournal({ executionState: j.state });
+      expect(restored.state).toEqual(j.state);
+    },
+  );
+  it("recognizes a filtered whitelists/list absence and records the subsequent creation for cleanup", () => {
+    const j = new ExecutionJournal({});
+    const listUrl = `${url}/list`;
+    j.observe(
+      output([
+        {
+          ...preflight,
+          url: `${listUrl}?account=13962083614&type=MAPPING`,
+          responseSummary: '{"whitelists":[],"total":"0"}',
+        },
+      ]),
+      evidence,
+    );
+    j.observe(
+      output([
+        create,
+        {
+          ...listing,
+          url: listUrl,
+          responseSummary: JSON.stringify({
+            whitelists: [{ ...record, user: { ...record.user, email: "" } }],
+            total: "1",
+          }),
+        },
+      ]),
+      evidence,
+    );
+    expect(j.state.records).toEqual([
+      expect.objectContaining({
+        id: "123",
+        resourceUrl: url,
+        ownership: "CREATED_THIS_RUN",
+        accountAliases: ["user-uuid", "13962083614"],
+        cleanup: expect.objectContaining({ status: "PENDING" }),
+      }),
+    ]);
+    expect(executionStateSchema.safeParse(j.state).success).toBe(true);
+  });
+  it("does not infer absence or ownership from truncated, late, or unrelated list responses", () => {
+    for (const change of [
+      { responseTruncated: true },
+      { url: `https://other.test/list?account=13962083614&type=MAPPING` },
+      { url: `${url}/another/list?account=13962083614&type=MAPPING` },
+    ]) {
+      const j = new ExecutionJournal({});
+      j.observe(
+        output([{ ...preflight, ...change }, create, listing]),
+        evidence,
+      );
+      expect(j.state.records).toEqual([]);
+    }
+    const late = new ExecutionJournal({});
+    late.observe(output([create, preflight, listing]), evidence);
+    expect(late.state.records).toEqual([]);
+  });
   it("reconciles a list seen before the POST body, even after resuming without another list read", () => {
     const j = new ExecutionJournal({});
     j.observe(
@@ -180,16 +301,12 @@ describe("execution business journal", () => {
       "TEST_ACCOUNT",
     );
     expect(j.state).toEqual(before);
-    const {
-      account: _account,
-      accountConflict: _conflict,
-      ...progress
-    } = j.state;
+    const { account: _account, ...progress } = j.state;
+    expect(j.state).not.toHaveProperty("accountConflict");
     j.update({ ...progress, step: "继续核对" });
     expect(j.state).toMatchObject({
       account: "original",
       accountAliases: ["uuid-original"],
-      accountConflict: "conflict",
     });
     const unallocated = new ExecutionJournal({});
     expect(() =>
@@ -313,19 +430,16 @@ describe("execution business journal", () => {
     });
     expect(j.pendingCleanup()[0]?.cleanup?.note).toContain("123");
   });
-  it("extracts labelled static accounts while preferring the human reply", () => {
+  it("uses assigned accounts and human replies, never prose placeholders", () => {
+    expect(taskTestAccount("新增记录 账号A 与账号B", {})).toBeUndefined();
     expect(
-      taskTestAccount(
-        "新增记录 账号：12345678-abcd-1234-abcd-123456789012",
-        {},
-      ),
-    ).toBe("12345678-abcd-1234-abcd-123456789012");
-    expect(taskTestAccount("编辑记录 测试账号：qa@example.com", {})).toBe(
-      "qa@example.com",
-    );
-    expect(taskTestAccount("新增白名单\n目标用户账号：18868106973", {})).toBe(
-      "18868106973",
-    );
+      taskTestAccount("编辑记录 测试账号：qa@example.com", {}),
+    ).toBeUndefined();
+    expect(
+      taskTestAccount("新增记录", {
+        executionState: { account: "assigned-user" },
+      }),
+    ).toBe("assigned-user");
     expect(
       taskTestAccount("新增白名单\n账号 18868106973", {
         resume: { response: { account: "13962083614" } },

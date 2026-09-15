@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { summarizeCaseScheduling } from "./task-scheduling.js";
+import {
+  summarizeCaseScheduling,
+  readCaseScheduling,
+} from "./task-scheduling.js";
 export * from "./task-scheduling.js";
 
 import type {
@@ -259,6 +262,25 @@ export function projectTaskExecution(
       null,
     );
   }
+  if (
+    caseExecutions.some(
+      (item) =>
+        readCaseScheduling(item.scheduling)?.reason ===
+        "TEST_ACCOUNTS_REQUIRED",
+    ) &&
+    !runs.some((run) => !TERMINAL_RUN_LIFECYCLES.has(run.lifecycle))
+  ) {
+    return {
+      ...taskProjection(
+        "SPEC_EXECUTION",
+        "WAITING_HUMAN",
+        "RUNNING",
+        null,
+        null,
+      ),
+      waitingReason: "TEST_ACCOUNTS_REQUIRED",
+    };
+  }
   const dispatchActive = caseExecutions.some(
     (item) =>
       ["PENDING", "DISPATCHING"].includes(item.dispatchStatus) ||
@@ -289,7 +311,7 @@ export function projectTaskExecution(
       "COMPLETED",
       "FAILED",
       runs.length ? "BLOCKED" : "NOT_RUN",
-      null,
+      runs.some((run) => run.verdict === "FAILED") ? "FAILED" : null,
     );
   }
 

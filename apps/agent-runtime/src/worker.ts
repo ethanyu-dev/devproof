@@ -1,3 +1,4 @@
+import type { AcceptanceReviewLease } from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 
@@ -190,6 +191,14 @@ export class AgentRuntimeWorker {
             );
             continue;
           }
+          const review = await this.controlPlane.claimAcceptanceReview(
+            workerId,
+            signal,
+          );
+          if (review) {
+            await this.executeAcceptanceReview(review, workerId);
+            continue;
+          }
         } else if (pool === "browser") {
           const task = await this.controlPlane.claim(workerId, signal);
           if (task) {
@@ -210,6 +219,55 @@ export class AgentRuntimeWorker {
           workerId,
         });
         await delay(this.config.DEVPROOF_AGENT_POLL_INTERVAL_MS, signal);
+      }
+    }
+  }
+
+  private async executeAcceptanceReview(
+    task: AcceptanceReviewLease,
+    workerId: string,
+  ) {
+    const timeout = AbortSignal.timeout(
+      Math.max(1, Date.parse(task.deadlineAt) - Date.now() - 30_000),
+    );
+    const signal = AbortSignal.any([
+      timeout,
+      this.executionShutdown.signal,
+      this.drainDeadline.signal,
+    ]);
+    const identity = { workerId, leaseToken: task.leaseToken };
+    let output;
+    try {
+      const { executeAcceptanceReview } =
+        await import("./acceptance-review.executor.js");
+      output = {
+        ...identity,
+        ...(await executeAcceptanceReview(task, this.modelClient, signal)),
+      };
+    } catch {
+      output = {
+        ...identity,
+        error: "AI 评述未完成，证据评分和验收结果已保留。",
+      };
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.controlPlane.submitAcceptanceReview(
+          task.id,
+          output,
+          this.drainDeadline.signal,
+        );
+        log("runtime.acceptance_review.completed", {
+          reviewId: task.id,
+          succeeded: "result" in output,
+        });
+        return;
+      } catch (error) {
+        if (
+          attempt ||
+          (error instanceof ControlPlaneError && error.status < 500)
+        )
+          throw error;
       }
     }
   }

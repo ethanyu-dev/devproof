@@ -845,6 +845,37 @@ describe("context delivery and slow models", () => {
     expect(controlPlane.releaseBrowser).toHaveBeenCalledTimes(2);
   });
 
+  it("does not return to a schema-rejected model after the fallback later fails", async () => {
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("Invalid schema for function 'browser_command'"),
+      )
+      .mockResolvedValueOnce(
+        reply(
+          "browser_command",
+          { commandType: "page.get_title", payload: {} },
+          1,
+        ),
+      )
+      .mockRejectedValue(
+        Object.assign(new Error("model not found"), { status: 404 }),
+      );
+    const { executor, runTask } = convergenceHarness(create);
+    runTask.snapshot.modelCandidates!.push({
+      ...runTask.snapshot.modelCandidates![0]!,
+      modelId: "fallback",
+    });
+    await expect(
+      executor.execute(runTask, lease, new AbortController().signal),
+    ).rejects.toThrow("Invalid schema");
+    expect(create.mock.calls.map(([request]) => request.model)).toEqual([
+      "gpt-test",
+      "fallback",
+      "fallback",
+    ]);
+  });
+
   it("falls back after a schema rejection and preserves the schema cause if all candidates fail", async () => {
     const schemaError = new Error(
       "400 Invalid schema for function 'record_progress'",
@@ -932,7 +963,7 @@ describe("context delivery and slow models", () => {
     ).toHaveLength(1);
   });
 
-  it("gives every timeout retry a fresh 300-second budget", async () => {
+  it("limits consecutive timeouts to two fresh 300-second attempts", async () => {
     vi.useFakeTimers();
     const create = vi.fn(() => new Promise(() => {}));
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -942,14 +973,14 @@ describe("context delivery and slow models", () => {
     const execution = expect(
       executor.execute(runTask, lease, new AbortController().signal),
     ).rejects.toThrow("模型响应超过 300 秒");
-    await vi.advanceTimersByTimeAsync(1_500_001);
+    await vi.advanceTimersByTimeAsync(600_001);
     await execution;
-    expect(create).toHaveBeenCalledTimes(5);
+    expect(create).toHaveBeenCalledTimes(2);
     expect(
       controlPlane.appendEvent.mock.calls
         .filter((call) => call[1] === "agent.model.failed")
         .map((call) => call[2].durationMs),
-    ).toEqual([300_000, 300_000, 300_000, 300_000, 300_000]);
+    ).toEqual([300_000, 300_000]);
   });
 
   it("does not retry model requests after cancellation", async () => {
@@ -966,16 +997,14 @@ describe("context delivery and slow models", () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
-  it.each([null, undefined])(
-    "honors an explicit conflict release but not an omitted reply (%s)",
+  it.each([null, undefined, "TEST_ACCOUNT_CONFLICT"])(
+    "ignores retired account locks in both historical state and checkpoint replies (%s)",
     async (accountConflict) => {
       let step = 0;
       const create = vi.fn(async (request: Request) => {
         const state = contextData(request, "browser_working_state").data
           .executionState;
-        expect(state.accountConflict).toBe(
-          accountConflict === null ? undefined : "TEST_ACCOUNT_CONFLICT",
-        );
+        expect(state.accountConflict).toBeUndefined();
         return ++step === 1
           ? reply(
               "browser_command",
@@ -1002,7 +1031,7 @@ describe("context delivery and slow models", () => {
         controlPlane.browserCommand.mock.calls.filter(
           (call) => call[1].commandType === "page.click",
         ),
-      ).toHaveLength(accountConflict === null ? 1 : 0);
+      ).toHaveLength(1);
     },
   );
 
@@ -1029,7 +1058,179 @@ describe("context delivery and slow models", () => {
     );
   });
 
-  it("rejects record_progress account changes before reserving a different account", async () => {
+  it("uses supplied accounts without issuing reservation events", async () => {
+    const create = vi.fn(async (request: Request) => {
+      expect(
+        contextData(
+          request,
+          "browser_working_state",
+        ).data.executionState.accounts.map(
+          (b: { account: string }) => b.account,
+        ),
+      ).toEqual(["shared", "shared"]);
+      return reply("finish_verification", finish, 1);
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    runTask.snapshot.executionPolicy.testAccounts = ["first", "second"].map(
+      (role) => ({
+        slotId: `${role}:1`,
+        account: "shared",
+        usage: "CREATE_OR_MODIFY",
+        aliases: [],
+      }),
+    );
+    controlPlane.appendEvent.mockImplementation(async (_lease, kind) => {
+      if (kind === "execution.account.claim")
+        throw new Error("reservation must not run");
+      return undefined;
+    });
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({ kind: "VERIFICATION_COMPLETED" });
+    expect(create).toHaveBeenCalledOnce();
+    expect(
+      controlPlane.appendEvent.mock.calls.some(
+        (call) => call[1] === "execution.account.claim",
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["assigned", "legacy", "read-only"])(
+    "finishes an unusable %s account as inconclusive without another HITL",
+    async (source) => {
+      const evidenceRef = "artifact://11111111-1111-4111-8111-111111111111";
+      let step = 0;
+      const create = vi.fn(async () =>
+        ++step === 1
+          ? reply(
+              "request_human_input",
+              {
+                kind: "TEST_ACCOUNT",
+                prompt: "该账号不存在，请换账号。",
+                summary: "用户提供账号不存在。",
+                context: { observedError: "USER_NOT_FOUND" },
+              },
+              step,
+            )
+          : reply(
+              "finish_verification",
+              {
+                verdict: "INCONCLUSIVE",
+                summary: "用户提供账号不存在，无法验证新增白名单。",
+                criteria: [
+                  {
+                    criterionId: "page-visible",
+                    status: "INCONCLUSIVE",
+                    summary: "账号不存在，新增前置条件不满足。",
+                    evidenceRefs: [evidenceRef],
+                  },
+                ],
+              },
+              step,
+            ),
+      );
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      if (source === "assigned")
+        runTask.snapshot.executionPolicy.testAccounts = [
+          {
+            slotId: "subject:1",
+            account: "supplied",
+            usage: "CREATE_OR_MODIFY",
+            aliases: [],
+          },
+        ];
+      else
+        runTask.snapshot.executionPolicy.resume = {
+          kind: "TEST_ACCOUNT",
+          context: {
+            usage:
+              source === "read-only" ? "READ_EXISTING" : "CREATE_OR_MODIFY",
+          },
+          response: { account: "supplied" },
+        };
+      controlPlane.browserCommand.mockResolvedValue({
+        status: "SUCCEEDED",
+        result: {
+          content: "账号不存在 USER_NOT_FOUND",
+          artifacts: [{ id: evidenceRef.slice(11), kind: "DOM" }],
+        },
+      });
+      const outcome = await executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      expect(outcome).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+        executionDisposition: "EXECUTED",
+        verdict: "INCONCLUSIVE",
+        criteria: [{ status: "INCONCLUSIVE", evidenceRefs: [evidenceRef] }],
+      });
+      const request = controlPlane.appendEvent.mock.calls.find(
+        (call) =>
+          call[1] === "agent.tool.completed" &&
+          call[2].name === "request_human_input",
+      );
+      expect(JSON.stringify(request?.[2])).toContain("不再请求替换账号");
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["PASSED", "FAILED"])(
+    "keeps intentional invalid-account tests eligible for %s",
+    async (verdict) => {
+      const evidenceRef = "artifact://11111111-1111-4111-8111-111111111111";
+      const create = vi.fn(async () =>
+        reply(
+          "finish_verification",
+          {
+            verdict,
+            summary: "已核对无效账号的预期拒绝行为。",
+            criteria: [
+              {
+                criterionId: "page-visible",
+                status: verdict,
+                summary:
+                  verdict === "PASSED"
+                    ? "无效账号按预期被拒绝。"
+                    : "无效账号错误地被接受。",
+                evidenceRefs: [evidenceRef],
+              },
+            ],
+          },
+          1,
+        ),
+      );
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      runTask.snapshot.goal = "验证无效账号应被拒绝";
+      runTask.snapshot.executionPolicy.testAccounts = [
+        {
+          slotId: "invalid:1",
+          account: "invalid-account",
+          usage: "CREATE_OR_MODIFY",
+          aliases: [],
+        },
+      ];
+      controlPlane.browserCommand.mockResolvedValue({
+        status: "SUCCEEDED",
+        result: {
+          content:
+            verdict === "PASSED" ? "USER_NOT_FOUND 账号不存在" : "保存成功",
+          artifacts: [{ id: evidenceRef.slice(11), kind: "DOM" }],
+        },
+      });
+      expect(
+        await executor.execute(runTask, lease, new AbortController().signal),
+      ).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+        executionDisposition: "EXECUTED",
+        verdict,
+      });
+    },
+  );
+
+  it("rejects model-invented account changes without reserving accounts", async () => {
     let step = 0;
     const create = vi.fn(async (request: Request) => {
       const page = contextData(request, "current_browser_page").data.snapshot;
@@ -1068,7 +1269,7 @@ describe("context delivery and slow models", () => {
     const claims = controlPlane.appendEvent.mock.calls.filter(
       (call) => call[1] === "execution.account.claim",
     );
-    expect(claims.map((call) => call[2].account)).toEqual(["original"]);
+    expect(claims).toEqual([]);
     expect(
       controlPlane.appendEvent.mock.calls.find(
         (call) =>
@@ -1115,7 +1316,7 @@ describe("context delivery and slow models", () => {
         contextData(request, "recent_operations")
           .turns.flat()
           .some((op: { tool: string }) => op.tool === "record_progress"),
-      ).toBe(false);
+      ).toBe(true);
       return reply("finish_verification", finish, step);
     });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -2080,7 +2281,7 @@ describe("browser verification bounded context", () => {
     const metrics = controlPlane.appendEvent.mock.calls
       .filter((call) => call[1] === "agent.model.started")
       .map((call) => call[2].inputPreview.context);
-    expect(metrics.at(-1).compactedTurns).toBeGreaterThan(0);
+    expect(metrics.at(-1).retainedTurns).toBeGreaterThan(4);
   });
 
   it("blocks a ref outside the returned page, allows it after local paging, and invalidates it after mutation", async () => {

@@ -23,6 +23,7 @@ import {
   testRunArtifactLinkInputSchema,
   toolCredentialCreateInputSchema,
   userBrowserProfileCreateInputSchema,
+  userBrowserProfileUpdateInputSchema,
   verificationCheckpointCreateInputSchema,
   verificationCheckpointResolveInputSchema,
   verificationEventAppendInputSchema,
@@ -107,6 +108,7 @@ describe("DevProof contracts", () => {
       goal: "Verify the page.",
       idempotencyKey: "run-v2-hitl-default",
     });
+    expect(run.deadlineSeconds).toBe(1800);
     expect(run.hitlPolicy).toMatchObject({
       enabled: true,
       onTimeout: "INCONCLUSIVE",
@@ -649,6 +651,32 @@ describe("DevProof contracts", () => {
       }).success,
     ).toBe(false);
   });
+
+  it.each([
+    [1, true],
+    [4, true],
+    [32, true],
+    [0, false],
+    [33, false],
+    [1.5, false],
+  ])(
+    "validates Profile concurrency %s on creation and update (accepted: %s)",
+    (executionConcurrency, accepted) => {
+      expect(
+        userBrowserProfileCreateInputSchema.safeParse({
+          displayName: "Concurrent staging account",
+          executionMode: "ISOLATED_AUTH",
+          executionConcurrency,
+          verificationUrl: "https://app.example.com/account",
+          verificationRules: { authenticatedSelector: "[data-user-menu]" },
+        }).success,
+      ).toBe(accepted);
+      expect(
+        userBrowserProfileUpdateInputSchema.safeParse({ executionConcurrency })
+          .success,
+      ).toBe(accepted);
+    },
+  );
 
   it("validates verification results and HITL checkpoints", () => {
     expect(

@@ -9,6 +9,9 @@ export interface TaskFilters {
     | "PASSED"
     | "VERIFICATION_FAILED"
     | "EXECUTION_FAILED"
+    | "INCONCLUSIVE"
+    | "BLOCKED"
+    | "NOT_RUN"
     | "COMPLETED"
     | "CANCELLED"
     | "TIMED_OUT";
@@ -42,6 +45,9 @@ export function readTaskListState(params: Pick<URLSearchParams, "get">) {
         "PASSED",
         "VERIFICATION_FAILED",
         "EXECUTION_FAILED",
+        "INCONCLUSIVE",
+        "BLOCKED",
+        "NOT_RUN",
         "COMPLETED",
         "CANCELLED",
         "TIMED_OUT",

@@ -64,7 +64,7 @@ export function RuntimeRecoveryDetailView({
     <div className="grid min-w-0 gap-4 text-xs">
       <PageHeader
         title="恢复详情"
-        description="分别查看关闭证明、业务结果与实际保护范围。未知结果不表示已发生写入；恢复操作需要当前团队管理员权限。"
+        description="分别查看关闭证明、业务结果与实际保护范围。团队成员可重试关闭；业务结果核实与节点排空需要管理员权限。"
         actions={
           <>
             <Button asChild variant="secondary">

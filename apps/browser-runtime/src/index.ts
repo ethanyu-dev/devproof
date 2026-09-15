@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { comboboxClickTarget } from "./combobox-click.js";
 import { DomObservations } from "./dom-observation.js";
 import { stepVideoPlan } from "./step-video-plan.js";
 import { observedRequestBody } from "./network-request.js";
@@ -2125,8 +2126,9 @@ export class BrowserSessionManager {
             parsed.payload.target,
             timeout,
           );
-          interaction = await actionTarget(locator).catch(() => undefined);
-          await locator.click({ timeout });
+          const clickTarget = await comboboxClickTarget(locator);
+          interaction = await actionTarget(clickTarget).catch(() => undefined);
+          await clickTarget.click({ timeout });
         } else {
           if (command.ownerTaskId || parsed.payload.visualObservationId)
             await this.visualObservations.assertPoint(

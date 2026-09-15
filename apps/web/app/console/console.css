@@ -1354,7 +1354,7 @@
 .dp-task-grid-head,
 .dp-task-row-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 148px 128px 104px 104px;
+  grid-template-columns: minmax(220px, 1fr) 128px 172px 104px 104px;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
@@ -1458,6 +1458,48 @@
 
 .dp-task-progress-cell progress::-moz-progress-bar {
   background: var(--primary);
+}
+
+.dp-task-progress-count {
+  white-space: nowrap;
+  flex-wrap: nowrap;
+}
+.dp-task-score {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dp-task-score b {
+  color: var(--foreground);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.dp-task-score small,
+.dp-task-score-coverage {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.dp-task-report-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--primary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.dp-task-report-link:hover {
+  text-decoration: underline;
+}
+.dp-task-report-link svg {
+  width: 13px;
+  height: 13px;
+}
+.dp-task-progress-note {
+  text-wrap: pretty;
 }
 
 .dp-task-row-controls {
@@ -1745,11 +1787,11 @@
   padding: 12px 16px;
 }
 
-.dp-spec-dispatch-error {
+.dp-spec-scheduling-notice {
   border-radius: var(--radius-sm);
-  background: var(--ek-danger-soft);
+  background: var(--muted);
   padding: 6px 8px;
-  color: var(--ek-danger) !important;
+  color: var(--muted-foreground);
 }
 
 .dp-specification-case-body p,
@@ -5517,6 +5559,58 @@
   padding: 8px 16px 16px;
   font-size: 13px;
   line-height: 1.7;
+}
+
+.dp-run-goal-details {
+  min-width: 0;
+  margin: 0 16px 16px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.dp-run-goal-details > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dp-run-goal-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dp-run-goal-details > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.dp-run-goal-details > summary:hover {
+  color: var(--foreground);
+}
+
+.dp-run-goal-details > summary svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.dp-run-goal-details[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.dp-run-goal-description {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted);
+  color: var(--ek-fg-2);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .dp-run-key-section-head {

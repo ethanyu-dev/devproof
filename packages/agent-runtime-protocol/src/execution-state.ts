@@ -1,19 +1,9 @@
+import { businessTestAccountSchema } from "./business-test-account.js";
+import { testAccountBindingsSchema } from "./test-accounts.js";
+export { businessTestAccountSchema } from "./business-test-account.js";
 import { z } from "zod";
 
 const text = z.string().trim().min(1).max(500);
-export const businessTestAccountSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .regex(
-    /^[\p{L}\p{N}][\p{L}\p{N}._@+:-]*$/u,
-    "请填写账号标识；操作说明请使用处置意见，不要填入账号。",
-  )
-  .refine(
-    (value) => !/(?:删除|重新创建|允许你|先把|再创建|帮我|重试)/u.test(value),
-    "请填写手机号、UUID、邮箱或用户 ID，不要填写操作说明。",
-  );
 
 export const executionRecordSchema = z.object({
   id: text,
@@ -35,6 +25,7 @@ export const executionRecordSchema = z.object({
 });
 
 export const executionStateSchema = z.object({
+  accounts: testAccountBindingsSchema.optional(),
   version: z.literal(1).default(1),
   phase: z
     .enum(["PREFLIGHT", "EXECUTING", "VERIFYING", "CLEANUP"])
@@ -43,7 +34,6 @@ export const executionStateSchema = z.object({
   account: businessTestAccountSchema.optional(),
   preflightAbsences: z.array(z.string().max(3000)).max(100).default([]),
   existingRecordKeys: z.array(z.string().max(3000)).max(200).default([]),
-  accountConflict: z.string().max(1000).optional(),
   accountAliases: z.array(businessTestAccountSchema).max(20).default([]),
   records: z.array(executionRecordSchema).max(50).default([]),
   // Observed after a matching POST, awaiting its complete business receipt.

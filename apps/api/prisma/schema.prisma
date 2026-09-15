@@ -1239,6 +1239,7 @@ model TaskExecution {
   browserProfileUsages      BrowserProfileUsage[]
   inboundIntegrationEvents  InboundIntegrationEvent[]
   notifications             NotificationOutbox[]
+  acceptanceReviews         TaskAcceptanceReview[]
 
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
@@ -1403,6 +1404,7 @@ model TaskGeneratedTestCase {
 }
 
 model TaskCaseExecution {
+  testAccountPlan     Json?                  @map("test_account_plan")
   id                  String                 @id @default(uuid()) @db.Uuid
   taskExecutionId     String                 @map("task_execution_id") @db.Uuid
   caseId              String                 @map("case_id") @db.Uuid
@@ -2291,4 +2293,25 @@ model RuntimeDrainAttestation {
   @@unique([runtimeId, drainGeneration])
   @@index([teamId, state, createdAt])
   @@map("runtime_drain_attestations")
+}
+
+/// Cached AI explanation for an immutable report revision; source results stay unchanged.
+model TaskAcceptanceReview {
+  id              String        @id @default(uuid()) @db.Uuid
+  taskExecutionId String        @map("task_execution_id") @db.Uuid
+  revision        String
+  status          String        @default("QUEUED")
+  attempts        Int           @default(0)
+  leaseOwner      String?       @map("lease_owner")
+  leaseToken      String?       @map("lease_token") @db.Uuid
+  leaseExpiresAt  DateTime?     @map("lease_expires_at") @db.Timestamptz
+  result          Json?
+  model           String?
+  error           String?
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+  taskExecution   TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  @@unique([taskExecutionId, revision])
+  @@index([status, createdAt])
+  @@map("task_acceptance_reviews")
 }
