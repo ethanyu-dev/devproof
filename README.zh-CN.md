@@ -205,7 +205,9 @@ MCP 地址为 `http://localhost:4433/mcp`，使用同一 Bearer Token。Agent Ru
 
 MCP 只提供统一 Task 控制面：`get_integration_status`、`create_task`、`get_task`、`list_tasks`、`set_task_deployment_target`、`retry_task_stage` 和 `cancel_task`。需要下钻 Case Runtime 时再使用 `get_run`、`resolve_run_intervention` 和 `read_run_evidence`。旧 Spec、Verification、Browser command、Profile 清理及 `create_run` 兼容工具均不再发布；调用方不获取 Browser Session，也不调用 command/complete/release 等低层生命周期工具。只读发现资源为 `devproof://task-tools`。
 
-通过 HTTP 或 MCP 创建任务，在 Console 查看执行详情。Issue 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
+在 Console → 任务执行中点击“创建任务”，填写 Linear Issue 链接或编号、GitHub PR 链接（选填，每行一个，最多 25 个）和执行测试环境地址（每行一个，最多 20 个）。至少填写一个 HTTP 或 HTTPS 测试环境；PR 留空时自动查找关联 PR。创建成功后进入任务详情；在当前页面内重试失败请求会复用同一请求标识，避免重复创建。
+
+也可通过 HTTP 或 MCP 创建任务，在 Console 查看执行详情。Issue 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
 
 当 Agent 在仍然存活的 Browser Session 上请求 HITL 时，“任务执行”详情会显示 Browser Human Handoff：人工接管 Agent 的原页面完成登录、验证码或 MFA，释放控制后将结构化响应写回同一个 Runtime Task，再由新的 fencing lease 恢复执行。实时 JPEG 和鼠标/键盘输入只走受租约保护的瞬时通道，不写入 Prompt、Trace、数据库或对象存储。完整 Browser 数据面、SSRF 与故障注入能力要求 Browser Runtime protocol v1.2；控制面物理清理要求 v1.6；增强证据采集要求 v1.7；用户 Profile 30 天自动清理与生命周期回报要求 v1.8；逐步截图和操作视频要求 v1.10；结构化定位恢复诊断要求 v1.11；带确认、有限且脱敏的视频收尾诊断要求 v1.12。升级代码后需重新构建并重启 Runtime。
 
