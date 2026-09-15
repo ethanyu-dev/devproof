@@ -1285,7 +1285,7 @@ describe("context delivery and slow models", () => {
         contextData(request, "recent_operations")
           .turns.flat()
           .some((op: { tool: string }) => op.tool === "record_progress"),
-      ).toBe(false);
+      ).toBe(true);
       return reply("finish_verification", finish, step);
     });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -2250,7 +2250,7 @@ describe("browser verification bounded context", () => {
     const metrics = controlPlane.appendEvent.mock.calls
       .filter((call) => call[1] === "agent.model.started")
       .map((call) => call[2].inputPreview.context);
-    expect(metrics.at(-1).compactedTurns).toBeGreaterThan(0);
+    expect(metrics.at(-1).retainedTurns).toBeGreaterThan(4);
   });
 
   it("blocks a ref outside the returned page, allows it after local paging, and invalidates it after mutation", async () => {

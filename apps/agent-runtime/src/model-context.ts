@@ -64,7 +64,7 @@ export class ModelContext {
       const summary = summarizeTurn(message, results);
       this.memory.record(summary);
       this.summaries.push(summary);
-      while (this.summaries.length > 4) {
+      while (this.summaries.length > 32) {
         this.summaries.shift();
         this.compactedTurns += 1;
       }
@@ -81,6 +81,7 @@ export class ModelContext {
     currentPage?: Page,
     fallbackPage?: Page,
   ) {
+    let workingState = state as Record<string, unknown>;
     let selectedPage = currentPage;
     const messages = (): ModelMessage[] => [
       ...this.initial,
@@ -91,7 +92,7 @@ export class ModelContext {
               content: JSON.stringify({
                 kind: "browser_working_state",
                 data: {
-                  ...(state as Record<string, unknown>),
+                  ...workingState,
                   executionMemory: this.memory.state(),
                 },
               }),
@@ -132,11 +133,33 @@ export class ModelContext {
       view = messages();
       bytes = jsonBytes({ ...baseRequest, messages: view });
     }
+    // Saved observations remain durable outside the prompt. Trim only their
+    // presentation when necessary; requirements, account bindings and writes stay pinned.
+    const saved = workingState.savedCriterionObservations as
+      { observations?: unknown[]; omitted?: number } | undefined;
+    if (this.bounded && bytes > this.maxBytes && saved?.observations?.length) {
+      const visible = [...saved.observations];
+      let omitted = saved.omitted ?? 0;
+      while (bytes > this.maxBytes && visible.length) {
+        visible.pop();
+        omitted++;
+        workingState = {
+          ...workingState,
+          savedCriterionObservations: {
+            ...saved,
+            observations: visible,
+            omitted,
+          },
+        };
+        view = messages();
+        bytes = jsonBytes({ ...baseRequest, messages: view });
+      }
+    }
     const components = {
       initial: jsonBytes(this.initial),
       tools: jsonBytes(baseRequest.tools ?? []),
       state: jsonBytes({
-        ...(state as Record<string, unknown>),
+        ...workingState,
         executionMemory: this.memory.state(),
       }),
       operations: jsonBytes(

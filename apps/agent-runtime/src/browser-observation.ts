@@ -1,3 +1,8 @@
+import {
+  observedValueMatches,
+  savedCriterionObservationSchema,
+  type SavedCriterionObservation,
+} from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 import {
   visualObservationSchema,
@@ -32,6 +37,7 @@ interface Observation {
   readProgressInheritedFrom?: string;
   completeSnapshotRead?: boolean;
   evidenceRefs: string[];
+  networkEvidenceRefs: string[];
 }
 
 export const READ_COMMANDS = new Set([
@@ -72,6 +78,128 @@ export const readObservationInputSchema = z
 
 /** Segment-local observations. Cached page reads never touch the browser. */
 export class BrowserObservations {
+  private readonly criterionFacts = new Map<
+    string,
+    SavedCriterionObservation
+  >();
+  restoreCriterionFacts(values: unknown[]) {
+    for (const value of values) {
+      const parsed = savedCriterionObservationSchema.safeParse(value);
+      if (parsed.success && this.criterionFacts.size < 200)
+        this.criterionFacts.set(parsed.data.id, parsed.data);
+    }
+  }
+  retainedCriterionFacts() {
+    return [...this.criterionFacts.values()];
+  }
+  criterionFactView(unresolvedIds: string[], maxBytes = 12 * 1024) {
+    const selected: SavedCriterionObservation[] = [];
+    for (const fact of this.criterionFacts.values()) {
+      if (
+        unresolvedIds.includes(fact.criterionId) &&
+        jsonBytes([...selected, fact]) <= maxBytes
+      )
+        selected.push(fact);
+    }
+    return {
+      observations: selected,
+      omitted: this.criterionFacts.size - selected.length,
+      guidance:
+        "已保存的历史观察，不代表验收通过，也不能用于操作旧 ref。核对区域和状态后，用 savedObservationIds 引用已足够的观察，避免重新操作已验证的对象。",
+    };
+  }
+  savedCitation(id: string, criterionId: string) {
+    const fact = this.criterionFacts.get(id);
+    return fact?.criterionId === criterionId ? fact : undefined;
+  }
+  rememberCriterionFacts(
+    criteria: readonly {
+      id: string;
+      observationTargets?:
+        | readonly {
+            label: string;
+            expectedText: string;
+            alternatives?: string[] | undefined;
+          }[]
+        | undefined;
+    }[],
+  ) {
+    const entry = this.entries.get(this.currentSnapshot ?? "");
+    if (!entry?.content || this.pageDirty || !entry.evidenceRefs.length)
+      return false;
+    let changed = false;
+    const lines = entry.content.split("\n");
+    const normalize = (value: string) =>
+      value.replace(/\[ref=[^\]]+\]|\[box=[^\]]+\]/gu, "").trim();
+    for (const criterion of criteria)
+      for (const target of criterion.observationTargets ?? []) {
+        const matches = lines
+          .map((line, index) => ({ quote: line.trim(), index }))
+          .filter(
+            ({ quote }) =>
+              quote.length <= 1000 &&
+              /\[ref=/.test(quote) &&
+              [target.expectedText, ...(target.alternatives ?? [])].some(
+                (text) => observedValueMatches(quote, text),
+              ),
+          )
+          .sort((a, b) => a.quote.length - b.quote.length)
+          .slice(0, 2);
+        for (const { quote, index } of matches) {
+          const cursor = [...entry.readPages.keys()].find((cursor) =>
+            this.hasDeliveredQuote(entry.id, cursor, quote),
+          );
+          if (cursor === undefined) continue;
+          const contextQuotes = lines
+            .slice(Math.max(0, index - 2), index + 7)
+            .map((line) => line.trim())
+            .filter(
+              (line) =>
+                line.length <= 1000 &&
+                line !== quote &&
+                this.hasDeliveredQuote(entry.id, cursor, line),
+            )
+            .slice(0, 8);
+          const key = JSON.stringify([
+            entry.url,
+            normalize(quote),
+            contextQuotes.map(normalize),
+          ]);
+          const previous = [...this.criterionFacts.values()].filter(
+            (f) => f.criterionId === criterion.id && f.target === target.label,
+          );
+          if (
+            previous.some(
+              (f) =>
+                JSON.stringify([
+                  f.url,
+                  normalize(f.quote),
+                  f.contextQuotes.map(normalize),
+                ]) === key,
+            )
+          )
+            continue;
+          // Preserve first observations (including initial state) and a few later variants.
+          if (previous.length >= 4) this.criterionFacts.delete(previous[1]!.id);
+          if (this.criterionFacts.size >= 200) continue;
+          const fact: SavedCriterionObservation = {
+            id: randomUUID(),
+            criterionId: criterion.id,
+            target: target.label,
+            observationId: entry.id,
+            cursor,
+            quote,
+            contextQuotes,
+            evidenceRefs: entry.evidenceRefs.slice(0, 20),
+            ...(entry.url ? { url: entry.url } : {}),
+          };
+          this.criterionFacts.set(fact.id, fact);
+          changed = true;
+        }
+      }
+    return changed;
+  }
+
   private readonly entries = new Map<string, Observation>();
   private readonly capturedResults = new WeakMap<object, Observation>();
   private currentSnapshot: string | null = null;
@@ -415,6 +543,14 @@ export class BrowserObservations {
         ? [`artifact://${item.id}`]
         : [];
     });
+    entry.networkEvidenceRefs = (
+      Array.isArray(response.artifacts) ? response.artifacts : []
+    ).flatMap((artifact) => {
+      const item = record(artifact);
+      return typeof item.id === "string" && item.kind === "NETWORK"
+        ? [`artifact://${item.id}`]
+        : [];
+    });
     if (snapshot && typeof result.content === "string") {
       if (response.status === "SUCCEEDED" || response.ok === true) {
         this.currentSnapshot = entry.id;
@@ -484,11 +620,28 @@ export class BrowserObservations {
 
   read(id: string, cursor: number = 0): Record<string, unknown> {
     const entry = this.entries.get(id);
-    if (!entry || entry.content === undefined)
+    if (!entry || entry.content === undefined) {
+      const facts = [...this.criterionFacts.values()].filter(
+        (f) => f.observationId === id,
+      );
+      if (facts.length && cursor === 0)
+        return {
+          observationId: id,
+          cursor: 0,
+          refState: "HISTORICAL",
+          source: "SAVED_CRITERION_FACTS",
+          savedObservations: facts,
+          content: [
+            ...new Set(facts.flatMap((f) => [f.quote, ...f.contextQuotes])),
+          ].join("\n"),
+          nextCursor: null,
+          notice: "历史原文仅供判定，不是完整页面，也不会恢复可操作 ref。",
+        };
       return {
         accepted: false,
         error: "观察内容已过期或不属于当前执行段；请重新采集所需页面范围。",
       };
+    }
     if (!entry.cursors.has(cursor))
       return {
         accepted: false,
@@ -502,6 +655,15 @@ export class BrowserObservations {
   /** Checkpoints may quote delivered observations, never invented page facts. */
   hasDeliveredQuote(id: string, cursor: number, quote: string) {
     const entry = this.entries.get(id);
+    if (
+      [...this.criterionFacts.values()].some(
+        (f) =>
+          f.observationId === id &&
+          f.cursor === cursor &&
+          (f.quote === quote || f.contextQuotes.includes(quote)),
+      )
+    )
+      return true;
     return Boolean(
       quote.trim() &&
       entry?.content !== undefined &&
@@ -511,6 +673,47 @@ export class BrowserObservations {
         : String(this.page(entry, cursor, false).content)
       ).includes(quote),
     );
+  }
+
+  /** Select one complete, delivered network request, preserving its URL/method
+   * and artifact. A DOM string that happens to look like JSON is not a request.
+   */
+  networkCitation(id: string, cursor: number, requestIndex: number) {
+    const entry = this.entries.get(id);
+    if (
+      !entry?.content ||
+      entry.commandType !== "page.network" ||
+      entry.captureTruncated ||
+      entry.sourceTruncated ||
+      !entry.networkEvidenceRefs.length
+    )
+      return;
+    try {
+      const requests: unknown = JSON.parse(entry.content);
+      if (!Array.isArray(requests)) return;
+      const request = record(requests[requestIndex]);
+      if (
+        typeof request.url !== "string" ||
+        typeof request.method !== "string" ||
+        request.bodyPending === true ||
+        request.requestBodyTruncated === true ||
+        request.requestBodyOmitted !== undefined ||
+        request.responseBodyTruncated === true ||
+        request.responseBodyOmitted !== undefined
+      )
+        return;
+      const quote = JSON.stringify(request);
+      if (quote.length > 4000 || !this.hasDeliveredQuote(id, cursor, quote))
+        return;
+      return {
+        observationId: id,
+        cursor,
+        quote,
+        evidenceRefs: [...entry.networkEvidenceRefs],
+      };
+    } catch {
+      return;
+    }
   }
 
   /** Resolve only a delivered node in the current, unchanged observation.
@@ -551,15 +754,13 @@ export class BrowserObservations {
         source.result && typeof source.result === "object"
           ? this.capturedResults.get(source.result)
           : undefined;
-      if (
-        entry?.id === this.currentSnapshot &&
-        typeof record(source.result).content === "string"
-      ) {
+      if (entry && typeof record(source.result).content === "string") {
         this.deliverPage(this.completePage(entry));
-        for (const match of String(record(source.result).content).matchAll(
-          /\[ref=((?:f\d+)?e\d+)\]/gu,
-        ))
-          this.exposedRefs.add(match[1]!);
+        if (entry.id === this.currentSnapshot)
+          for (const match of String(record(source.result).content).matchAll(
+            /\[ref=((?:f\d+)?e\d+)\]/gu,
+          ))
+            this.exposedRefs.add(match[1]!);
       }
       const { dataBase64: _bytes, ...metadata } = record(
         source.visualObservation,
@@ -806,6 +1007,7 @@ export class BrowserObservations {
       cursors: new Set([0]),
       readPages: new Map(),
       evidenceRefs: [],
+      networkEvidenceRefs: [],
     };
     this.entries.set(entry.id, entry);
     this.bytes += entry.bytes;

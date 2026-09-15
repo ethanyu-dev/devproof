@@ -1,3 +1,4 @@
+export * from "./criterion-observation.js";
 import { testAccountRequirementsSchema } from "./test-accounts.js";
 export * from "./test-accounts.js";
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";

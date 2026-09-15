@@ -2,6 +2,7 @@ import { BadRequestException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import {
   executionStateSchema,
+  savedCriterionObservationSchema,
   testAccountBindingsSchema,
   runtimeCriterionResultSchema,
   runtimeEvidenceRefSchema,
@@ -9,6 +10,7 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 const progressSchema = z.object({
+  observations: z.array(savedCriterionObservationSchema).max(200).optional(),
   criteria: z.array(runtimeCriterionResultSchema).max(100),
   evidence: z.array(runtimeEvidenceRefSchema).max(2000),
 });
@@ -57,6 +59,7 @@ export async function saveExecutionCheckpoint(
     const refs = [
       ...stateRefs,
       ...(progress?.evidence.map((e) => e.externalId) ?? []),
+      ...(progress?.observations?.flatMap((o) => o.evidenceRefs) ?? []),
     ];
     const stored = await tx.runEvidence.findMany({
       where: { runId: task.runId, externalId: { in: refs } },
@@ -65,6 +68,14 @@ export async function saveExecutionCheckpoint(
     const known = new Map(stored.map((e) => [e.externalId, e.kind]));
     if (
       stateRefs.some((id) => !known.has(id)) ||
+      progress?.observations?.some(
+        (o) =>
+          !snapshot.criteria.some(
+            (c) =>
+              c.id === o.criterionId &&
+              c.observationTargets?.some((t) => t.label === o.target),
+          ) || o.evidenceRefs.some((ref) => !known.has(ref)),
+      ) ||
       progress?.evidence.some((e) => known.get(e.externalId) !== e.kind) ||
       progress?.criteria.some(
         (c) =>

@@ -206,6 +206,14 @@ describe("execution checkpoint validation", () => {
         ],
       },
     },
+    {
+      executionState: {},
+      verificationCheckpoint: {
+        criteria: [],
+        evidence: [],
+        observations: [{}],
+      },
+    },
   ])(
     "returns a structured 400 before touching stored progress",
     async (payload) => {
