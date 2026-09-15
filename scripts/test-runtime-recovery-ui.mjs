@@ -350,7 +350,7 @@ try {
   await page.clock.runFor(15_100);
   await page.getByText(/恢复状态已变化，草稿已保留/).waitFor();
   const submit = page.getByRole("button", {
-    name: "保存核实结果并释放相关数据保护",
+    name: "保存核实结果",
     exact: true,
   });
   assert.ok(await submit.isDisabled());

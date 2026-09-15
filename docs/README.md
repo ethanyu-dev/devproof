@@ -10,6 +10,7 @@ English is the canonical language for project documentation.
 - [Bounded browser working context](agent-context-budget-design.md): observation paging, complete-turn compaction, request budgets, and rollback
 - [Discoverable browser tool modules](agent-tool-surface-design.md): core commands, optional groups, canonical schemas, and independent rollback
 - [Browser Runtime protocol](runtime-protocol.md): compatibility rules and capability milestones
+- [Runtime machine observability](runtime-machine-observability.md): pairing, host resources, live slot pools, and concurrency tuning
 - [User Browser Profiles](user-browser-profiles.md): identity, authorization, retention, and privacy
 - [Runtime concurrency and recovery proposal](runtime-concurrency-recovery-design.md): isolated authenticated sessions, bounded lease recovery, and explainable scheduling
 - [Test data model](test-data-model.md): immutable definitions, snapshots, traces, and artifacts

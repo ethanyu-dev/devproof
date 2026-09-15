@@ -36,6 +36,7 @@ see its [changelog](../packages/agent-runtime-protocol/README.md).
 | v1.13    | Local authenticated snapshots, isolated contexts, owner-bound execution permits, and verified closure |
 | v1.16    | DOM observations and screenshot-bound visual interaction (`dom-vision-v1`)                            |
 | v1.17    | Measured container scroll feedback and focused observations (`scroll-feedback-v1`)                    |
+| v1.18    | Optional host CPU / memory telemetry on existing heartbeats                                           |
 
 The source of truth for the currently implemented version is `RUNTIME_PROTOCOL` in [`packages/runtime-protocol/src/index.ts`](../packages/runtime-protocol/src/index.ts).
 

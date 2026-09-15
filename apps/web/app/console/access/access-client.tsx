@@ -45,6 +45,8 @@ import {
 import { consoleApi } from "@/lib/api";
 import { displayLabel } from "@/lib/display-text";
 import type { RuntimeRecoveryCounts } from "@devproof/contracts";
+import type { RuntimeTelemetrySnapshot } from "@devproof/runtime-protocol";
+import { RuntimeObservability } from "./runtime-observability";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -66,6 +68,7 @@ type Scope =
   | "run:cancel";
 
 interface BrowserRuntime {
+  telemetry?: RuntimeTelemetrySnapshot | null;
   drainState: string;
   capabilities: string[];
   deviceInfo: string;
@@ -332,6 +335,11 @@ export function AccessClient() {
   );
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [observationError, setObservationError] = useState<string | null>(null);
+  const [observationTime, setObservationTime] = useState(() => Date.now());
+  const [lastObservationAt, setLastObservationAt] = useState<number | null>(
+    null,
+  );
   const [pendingItem, setPendingItem] = useState<string | null>(null);
   const pairingRef = useRef<HTMLDivElement>(null);
   const issuedRef = useRef<HTMLDivElement>(null);
@@ -381,6 +389,8 @@ export function AccessClient() {
       ]);
       setRuntimes(runtimeRows);
       setBrowserPool(browserPoolCapacity);
+      setLastObservationAt(Date.now());
+      setObservationError(null);
       setSettings(currentSettings);
       setRoutingRules(routeRows);
       setCredentials(credentialRows);
@@ -411,6 +421,52 @@ export function AccessClient() {
     void load().catch(() => undefined);
   }, [load]);
 
+  // Poll only the two observability resources; do not reload credentials or
+  // configuration forms on every tick. Keep one polling request in flight.
+  useEffect(() => {
+    if (activeSection !== "browser") return;
+    let stopped = false;
+    let inFlight = false;
+    const controller = new AbortController();
+    const refresh = async () => {
+      if (document.visibilityState === "hidden") return;
+      setObservationTime(Date.now());
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const [rows, pool] = await Promise.allSettled([
+          consoleApi<BrowserRuntime[]>("/browser-runtimes", {
+            signal: controller.signal,
+          }),
+          consoleApi<BrowserPoolCapacity>("/browser-pool-capacity", {
+            signal: controller.signal,
+          }),
+        ]);
+        if (stopped) return;
+        if (rows.status === "rejected") throw rows.reason;
+        if (pool.status === "rejected") throw pool.reason;
+        setRuntimes(rows.value);
+        setBrowserPool(pool.value);
+        setObservationError(null);
+        setObservationTime(Date.now());
+        setLastObservationAt(Date.now());
+      } catch (error) {
+        if (!stopped) setObservationError((error as Error).message);
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 5_000);
+    const visible = () => void refresh();
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      stopped = true;
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [activeSection]);
+
   useEffect(() => {
     if (!pairing) return;
     pairingRef.current?.focus({ preventScroll: true });
@@ -423,11 +479,13 @@ export function AccessClient() {
     issuedRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [issued]);
 
+  const selectedRuntime = runtimes?.find((row) => row.id === policyRuntimeId);
+  const selectedConcurrency = selectedRuntime?.maxConcurrency ?? 1;
+  const selectedAllowlist = selectedRuntime?.networkAllowlist.join("\n") ?? "";
   useEffect(() => {
-    const runtime = runtimes?.find((row) => row.id === policyRuntimeId);
-    setRuntimeMaxConcurrency(String(runtime?.maxConcurrency ?? 1));
-    setNetworkAllowlistText(runtime?.networkAllowlist.join("\n") ?? "");
-  }, [policyRuntimeId, runtimes]);
+    setRuntimeMaxConcurrency(String(selectedConcurrency));
+    setNetworkAllowlistText(selectedAllowlist);
+  }, [policyRuntimeId, selectedConcurrency, selectedAllowlist]);
 
   function networkAllowlistEntries(value: string) {
     return [
@@ -1123,6 +1181,87 @@ export function AccessClient() {
               ) : null}
 
               <div className="dp-runtime-layout">
+                <div className="dp-runtime-primary">
+                  <Card className="dp-runtime-section">
+                    <div className="dp-section-head">
+                      <span>
+                        <ServerCog />
+                        <b>团队执行策略</b>
+                      </span>
+                    </div>
+                    <div className="dp-section-body dp-form">
+                      <div className={styles.policyControls}>
+                        <div className="dp-form-grid">
+                          <Toggle
+                            checked={settings.hitlEnabled}
+                            label="允许验证过程中人工接管"
+                            onChange={(hitlEnabled) =>
+                              setSettings({ ...settings, hitlEnabled })
+                            }
+                          />
+                        </div>
+                        <div className="dp-config-actions">
+                          <Button
+                            disabled={savingRuntime}
+                            onClick={saveRuntime}
+                          >
+                            <Save />
+                            {savingRuntime ? "保存中…" : "保存策略"}
+                          </Button>
+                        </div>
+                      </div>
+                      {browserPool ? (
+                        <div className="dp-browser-pool-summary">
+                          <span>
+                            <b>{browserPool.configuredCapacity}</b>
+                            <small>配置总容量</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.schedulableCapacity}</b>
+                            <small>在线可调度</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.occupiedCapacity}</b>
+                            <small>占用中</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.availableCapacity}</b>
+                            <small>当前空闲</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.runtimeWaiting ?? "—"}</b>
+                            <small>槽位等待</small>
+                          </span>
+                          <span>
+                            <b>{browserPool.flexibleRuntimeWaiting ?? "—"}</b>
+                            <small>其中未指定节点</small>
+                          </span>
+                          <span
+                            title={Object.entries(
+                              browserPool.upstreamWaitingByReason ?? {},
+                            )
+                              .map(
+                                ([reason, count]) =>
+                                  `${displayLabel(reason)} ${count}`,
+                              )
+                              .join(" · ")}
+                          >
+                            <b>{browserPool.upstreamWaiting ?? "—"}</b>
+                            <small>上游等待（身份、数据或依赖）</small>
+                          </span>
+                          {Object.entries(
+                            browserPool.upstreamWaitingByReason ?? {},
+                          ).map(([reason, count]) => (
+                            <span key={reason}>
+                              <b>{count}</b>
+                              <small>{displayLabel(reason)}</small>
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </Card>
+                </div>
                 <section className="dp-runtime-aside">
                   <Card className="dp-runtime-section">
                     <div className="dp-section-head">
@@ -1148,6 +1287,17 @@ export function AccessClient() {
                           {pendingItem === "pairing" ? "生成中…" : "注册"}
                         </Button>
                       </span>
+                    </div>
+                    <div
+                      className="px-3 pt-3 text-xs text-muted-foreground"
+                      role="status"
+                    >
+                      {observationError
+                        ? `自动刷新失败，以下为上次成功快照：${observationError}`
+                        : "每 5 秒自动刷新 · 资源随心跳每 15 秒上报"}
+                      {lastObservationAt
+                        ? ` · 最近刷新 ${new Date(lastObservationAt).toLocaleTimeString("zh-CN")}`
+                        : ""}
                     </div>
                     <AccessCollection
                       label="浏览器执行节点列表"
@@ -1196,18 +1346,13 @@ export function AccessClient() {
                                   </dd>
                                 </div>
                               </dl>
-                              {capacity ? (
-                                <div className={styles.capacity}>
-                                  <span>占用 {capacity.occupied}</span>
-                                  <span>空闲 {capacity.available}</span>
-                                  <span>
-                                    等待{" "}
-                                    {capacity.runtimeWaiting ??
-                                      capacity.waiting}
-                                  </span>
-                                  <span>隔离 {capacity.quarantined ?? 0}</span>
-                                </div>
-                              ) : null}
+                              <RuntimeObservability
+                                status={runtime.status}
+                                protocolMinor={runtime.protocolMinor}
+                                telemetry={runtime.telemetry}
+                                capacity={capacity}
+                                now={observationTime}
+                              />
                               <div className={styles.itemActions}>
                                 <Button
                                   aria-label={`配置 ${runtime.name}`}
@@ -1268,83 +1413,6 @@ export function AccessClient() {
                     </AccessCollection>
                   </Card>
                 </section>
-                <div className="dp-runtime-primary">
-                  <Card className="dp-runtime-section">
-                    <div className="dp-section-head">
-                      <span>
-                        <ServerCog />
-                        <b>团队执行策略</b>
-                      </span>
-                    </div>
-                    <div className="dp-section-body dp-form">
-                      <div className={styles.policyControls}>
-                        <div className="dp-form-grid">
-                          <Toggle
-                            checked={settings.hitlEnabled}
-                            label="允许验证过程中人工接管"
-                            onChange={(hitlEnabled) =>
-                              setSettings({ ...settings, hitlEnabled })
-                            }
-                          />
-                        </div>
-                        <div className="dp-config-actions">
-                          <Button
-                            disabled={savingRuntime}
-                            onClick={saveRuntime}
-                          >
-                            <Save />
-                            {savingRuntime ? "保存中…" : "保存策略"}
-                          </Button>
-                        </div>
-                      </div>
-                      {browserPool ? (
-                        <div className="dp-browser-pool-summary">
-                          <span>
-                            <b>{browserPool.configuredCapacity}</b>
-                            <small>配置总容量</small>
-                          </span>
-                          <span>
-                            <b>{browserPool.schedulableCapacity}</b>
-                            <small>在线可调度</small>
-                          </span>
-                          <span>
-                            <b>{browserPool.occupiedCapacity}</b>
-                            <small>占用中</small>
-                          </span>
-                          <span>
-                            <b>{browserPool.availableCapacity}</b>
-                            <small>当前空闲</small>
-                          </span>
-                          <span>
-                            <b>{browserPool.runtimeWaiting ?? "—"}</b>
-                            <small>槽位等待</small>
-                          </span>
-                          <span
-                            title={Object.entries(
-                              browserPool.upstreamWaitingByReason ?? {},
-                            )
-                              .map(
-                                ([reason, count]) =>
-                                  `${displayLabel(reason)} ${count}`,
-                              )
-                              .join(" · ")}
-                          >
-                            <b>{browserPool.upstreamWaiting ?? "—"}</b>
-                            <small>上游等待（身份、数据或依赖）</small>
-                          </span>
-                          {Object.entries(
-                            browserPool.upstreamWaitingByReason ?? {},
-                          ).map(([reason, count]) => (
-                            <span key={reason}>
-                              <b>{count}</b>
-                              <small>{displayLabel(reason)}</small>
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  </Card>
-                </div>
               </div>
 
               <Card className="dp-runtime-section dp-network-policy-card">
@@ -1380,7 +1448,10 @@ export function AccessClient() {
                           ))}
                       </Select>
                     </Field>
-                    <Field label="并发容量（1–32）">
+                    <Field
+                      label="并发容量（1–32）"
+                      description="32 是配置上限。请用代表性任务逐步调整，并观察 CPU、内存与排队变化。"
+                    >
                       <Input
                         max={32}
                         min={1}

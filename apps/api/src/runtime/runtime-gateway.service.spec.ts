@@ -97,6 +97,7 @@ function fixture() {
     heartbeat: ReturnType<typeof runtimeClientMessageSchema.parse>,
   ) => Promise<void>;
   return {
+    redis,
     handleHeartbeat,
     handleHello,
     hub,
@@ -280,6 +281,56 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
 });
 
 describe("RuntimeGatewayService capacity ownership", () => {
+  it("accepts telemetry only from a current, negotiated connection", async () => {
+    const f = fixture();
+    const metrics = {
+      sampledAt: new Date().toISOString(),
+      sampleIntervalMs: 15000,
+      scope: "HOST",
+      cpu: { logicalCores: 4, usagePercent: 25 },
+      memory: {
+        totalBytes: 1000,
+        usedBytes: 300,
+        availableBytes: 700,
+        usagePercent: 30,
+        availableSource: "MEM_AVAILABLE",
+      },
+      process: { rssBytes: 100, uptimeSeconds: 60 },
+    };
+    const heartbeat = runtimeClientMessageSchema.parse({
+      activeSessions: [],
+      maxConcurrency: 4,
+      sentAt: metrics.sampledAt,
+      type: "runtime.heartbeat",
+      machineMetrics: metrics,
+    });
+    await f.handleHeartbeat.call(
+      f.service,
+      f.socket,
+      { ...context, negotiatedMinor: 18 },
+      heartbeat,
+    );
+    expect(f.redis.markRuntimeOnline).toHaveBeenLastCalledWith(
+      context.runtimeId,
+      context.connectionGeneration,
+      metrics,
+    );
+    await f.handleHeartbeat.call(f.service, f.socket, context, heartbeat);
+    expect(f.redis.markRuntimeOnline).toHaveBeenLastCalledWith(
+      context.runtimeId,
+      context.connectionGeneration,
+      undefined,
+    );
+    f.redis.markRuntimeOnline.mockClear();
+    f.prisma.browserRuntime.updateMany.mockResolvedValue({ count: 0 });
+    await f.handleHeartbeat.call(
+      f.service,
+      f.socket,
+      { ...context, negotiatedMinor: 18 },
+      heartbeat,
+    );
+    expect(f.redis.markRuntimeOnline).not.toHaveBeenCalled();
+  });
   it("does not overwrite the console capacity from Runtime heartbeats", async () => {
     const { handleHeartbeat, prisma, service, socket } = fixture();
     const heartbeat = runtimeClientMessageSchema.parse({

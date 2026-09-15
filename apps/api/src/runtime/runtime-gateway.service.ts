@@ -11,6 +11,7 @@ import {
   RUNTIME_MAX_FRAME_BYTES,
   RUNTIME_PREAUTH_TIMEOUT_MS,
   RUNTIME_PROTOCOL,
+  RUNTIME_TELEMETRY_MINOR,
   RUNTIME_HEARTBEAT_INTERVAL_MS,
   runtimeClientMessageSchema,
   type ReconcileAction,
@@ -890,7 +891,13 @@ export class RuntimeGatewayService {
       },
     });
     if (updated.count !== 1) return;
-    await this.redis.markRuntimeOnline(runtimeId, context.connectionGeneration);
+    await this.redis.markRuntimeOnline(
+      runtimeId,
+      context.connectionGeneration,
+      context.negotiatedMinor >= RUNTIME_TELEMETRY_MINOR
+        ? heartbeat.machineMetrics
+        : undefined,
+    );
     socket.send(
       JSON.stringify({
         closeSessions,

@@ -50,13 +50,18 @@ export class BrowserRuntimeService {
 
   async list(current: AuthContext) {
     const rows = await this.prisma.browserRuntime.findMany({
-      orderBy: { updatedAt: "desc" },
+      // Heartbeats update updatedAt; registration order keeps live cards stable.
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
       where: { teamId: current.team.id },
     });
     return Promise.all(
       rows.map(async (row) => ({
         ...row,
         connectionGeneration: row.connectionGeneration.toString(),
+        telemetry:
+          row.enabled && !row.revokedAt
+            ? await this.redis.runtimeTelemetry(row.id)
+            : null,
         status:
           row.status === "REVOKED"
             ? "REVOKED"

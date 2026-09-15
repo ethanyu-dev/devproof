@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RedisService } from "./redis.service.js";
+import { type RuntimeMachineMetrics } from "@devproof/runtime-protocol";
 import { resetEnvForTests } from "../config/env.js";
 
 let oldGateway: RedisService;
@@ -48,6 +49,48 @@ afterAll(async () => {
 });
 
 describe("Runtime presence Lua against disposable real Redis", () => {
+  it("shares current telemetry across replicas and fences old heartbeats, reconnects and disconnects", async () => {
+    const runtime = randomUUID();
+    const metrics: RuntimeMachineMetrics = {
+      sampledAt: new Date().toISOString(),
+      sampleIntervalMs: 15000,
+      scope: "HOST",
+      cpu: { logicalCores: 4, usagePercent: 25 },
+      memory: {
+        totalBytes: 1000,
+        usedBytes: 300,
+        availableBytes: 700,
+        usagePercent: 30,
+        availableSource: "MEM_AVAILABLE",
+      },
+      process: { rssBytes: 100, uptimeSeconds: 60 },
+    };
+    const key = `devproof:runtime:telemetry:${runtime}`;
+    const generation = 9_007_199_254_740_993_123n;
+    await newGateway.markRuntimeOnline(runtime, generation, metrics);
+    expect((await oldGateway.runtimeTelemetry(runtime))?.metrics).toEqual(
+      metrics,
+    );
+    expect(await inspector.pttl(key)).toBeGreaterThan(40000);
+    expect(await inspector.pttl(key)).toBeLessThanOrEqual(45000);
+    await oldGateway.markRuntimeOnline(runtime, generation - 1n, {
+      ...metrics,
+      cpu: { logicalCores: 4, usagePercent: 99 },
+    });
+    await oldGateway.removeRuntimePresence(runtime, generation - 1n);
+    expect(
+      (await oldGateway.runtimeTelemetry(runtime))?.metrics.cpu.usagePercent,
+    ).toBe(25);
+    await newGateway.markRuntimeOnline(runtime, generation + 1n);
+    expect(await newGateway.runtimeTelemetry(runtime)).toBeNull();
+    await newGateway.markRuntimeOnline(runtime, generation + 1n, metrics);
+    await newGateway.removeRuntimePresence(runtime, generation + 1n);
+    expect(await oldGateway.runtimeTelemetry(runtime)).toBeNull();
+    await newGateway.markRuntimeOnline(runtime, generation + 2n, metrics);
+    await inspector.pexpire(key, 0);
+    expect(await oldGateway.runtimeTelemetry(runtime)).toBeNull();
+    expect(await newGateway.isRuntimeOnline(runtime)).toBe(true);
+  });
   it("runs without a TCP listener or any persistence", async () => {
     expect(await inspector.config("GET", "port")).toEqual(["port", "0"]);
     expect(await inspector.config("GET", "save")).toEqual(["save", ""]);
