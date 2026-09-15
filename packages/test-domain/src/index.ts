@@ -311,7 +311,7 @@ export function projectTaskExecution(
       "COMPLETED",
       "FAILED",
       runs.length ? "BLOCKED" : "NOT_RUN",
-      null,
+      runs.some((run) => run.verdict === "FAILED") ? "FAILED" : null,
     );
   }
 

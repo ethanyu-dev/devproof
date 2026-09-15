@@ -936,3 +936,5 @@ export type RuntimeTaskOutcomeInput = z.infer<
 >;
 export { specPullRequestCoverage } from "./spec-source-coverage.js";
 export { specRequirementCoverageError } from "./spec-requirement-coverage.js";
+
+export * from "./acceptance-review.js";

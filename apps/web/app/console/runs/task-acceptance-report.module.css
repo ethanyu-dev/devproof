@@ -1,0 +1,320 @@
+.report {
+  display: grid;
+  gap: 16px;
+}
+.hero,
+.section {
+  padding: 24px;
+  gap: 0;
+}
+.heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.heading h2 {
+  font-size: 24px;
+  font-weight: 650;
+  margin: 8px 0;
+}
+.eyebrow,
+.meta,
+.actions,
+.evidence {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.eyebrow,
+.meta,
+.caption {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.hero > p {
+  margin: 12px 0;
+  line-height: 1.7;
+}
+.meta {
+  margin-top: 16px;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.metrics > div {
+  padding: 16px;
+  display: grid;
+  gap: 6px;
+}
+.metrics > div + div {
+  border-left: 1px solid var(--border);
+}
+.metrics strong {
+  font-size: 24px;
+  font-weight: 600;
+}
+.metrics span {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+.tableScroll {
+  overflow-x: auto;
+}
+.tableScroll table {
+  width: 100%;
+  min-width: 660px;
+  table-layout: fixed;
+  text-align: left;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.tableScroll th,
+.tableScroll td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.tableScroll th {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.issues {
+  display: grid;
+  gap: 14px;
+  padding: 0;
+  list-style: none;
+}
+.issues li {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+}
+.issues small {
+  color: var(--muted-foreground);
+}
+.case {
+  border-top: 1px solid var(--border);
+}
+.case summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 16px 0;
+  font-size: 14px;
+}
+.case summary:focus-visible {
+  outline: 2px solid var(--ring);
+}
+.case summary > span:first-child {
+  flex: 1;
+}
+.caseBody {
+  padding-bottom: 16px;
+}
+.criterion {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.criterion > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.criterion p {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+.evidence {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.report a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (max-width: 640px) {
+  .hero,
+  .section {
+    padding: 16px;
+  }
+  .metrics > div {
+    padding: 12px;
+  }
+  .actions {
+    width: 100%;
+  }
+}
+
+.tableScroll th:first-child {
+  width: 55%;
+}
+.tableScroll th:nth-child(2) {
+  width: 13%;
+}
+.tableScroll th:nth-child(3) {
+  width: 12%;
+}
+.tableScroll th:nth-child(4) {
+  width: 20%;
+}
+
+.assessment {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 28px;
+  margin: 24px 0 12px;
+}
+.score {
+  display: grid;
+  gap: 4px;
+  border-right: 1px solid var(--border);
+}
+.score > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.score > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.score strong {
+  font-size: 52px;
+  line-height: 1.2;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.score div span {
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.recommendation p {
+  margin: 12px 0;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.recommendation small,
+.aiReview small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.scoreBar {
+  display: flex;
+  height: 8px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--muted);
+}
+.scoreBar .passed {
+  background: var(--success);
+}
+.scoreBar .failed {
+  background: var(--destructive);
+}
+.scoringRules {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.8;
+}
+.scoringRules summary,
+.diagnostics summary {
+  cursor: pointer;
+}
+.scoringRules summary:focus-visible,
+.diagnostics summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.aiReview {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 6px;
+  background: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.aiReview p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.findings {
+  display: grid;
+  gap: 16px;
+}
+.finding {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 0;
+}
+.findingHeading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+}
+.finding dl {
+  display: grid;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  margin: 16px 0;
+}
+.finding dl > div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 12px;
+}
+.finding dt {
+  color: var(--muted-foreground);
+}
+.finding dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.diagnostics summary {
+  font-size: 14px;
+  font-weight: 600;
+}
+@media (max-width: 640px) {
+  .assessment {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .score {
+    border-right: 0;
+  }
+  .finding dl > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

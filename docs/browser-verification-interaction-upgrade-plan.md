@@ -21,16 +21,16 @@
 
 ## 2. 当前基础与真实缺口
 
-| 当前已有 | 本次补充 |
-| --- | --- |
-| DOM 标签、label、value、options、部分 ARIA 属性、Shadow DOM 和 iframe 观察 | 原生控件约束、焦点及区域关系、结构化节点输出 |
-| 当前快照、分页、本地读取、引用有效性检查 | 聚焦摘要、具有明确基线的变化摘要 |
-| 动作后截图，BOUNDED 模式在页面变脏后自动 snapshot | 在一次 Runtime 命令内复用观察与图片，避免重复采集 |
-| `action-feedback-v1` 的关联请求、响应摘要 | 实际控件状态、输入比较、明确的观察后置条件 |
-| 同轮多个工具调用的执行循环 | Runtime 内有界表单序列及每个子步骤的结果 |
-| 两次定位恢复、进度检测、验收证据校验 | 对新结果、局部失败和新命令的完整接入 |
-| 当前工作区中的历史观察记忆 | 将新观察接入同一记忆和引用体系 |
-| 本地真实模型比较工具及五类 fixture | 分阶段对照组、交互边界案例、分阶段计时 |
+| 当前已有                                                                   | 本次补充                                          |
+| -------------------------------------------------------------------------- | ------------------------------------------------- |
+| DOM 标签、label、value、options、部分 ARIA 属性、Shadow DOM 和 iframe 观察 | 原生控件约束、焦点及区域关系、结构化节点输出      |
+| 当前快照、分页、本地读取、引用有效性检查                                   | 聚焦摘要、具有明确基线的变化摘要                  |
+| 动作后截图，BOUNDED 模式在页面变脏后自动 snapshot                          | 在一次 Runtime 命令内复用观察与图片，避免重复采集 |
+| `action-feedback-v1` 的关联请求、响应摘要                                  | 实际控件状态、输入比较、明确的观察后置条件        |
+| 同轮多个工具调用的执行循环                                                 | Runtime 内有界表单序列及每个子步骤的结果          |
+| 两次定位恢复、进度检测、验收证据校验                                       | 对新结果、局部失败和新命令的完整接入              |
+| 当前工作区中的历史观察记忆                                                 | 将新观察接入同一记忆和引用体系                    |
+| 本地真实模型比较工具及五类 fixture                                         | 分阶段对照组、交互边界案例、分阶段计时            |
 
 几个直接影响设计的代码事实：
 
@@ -87,11 +87,11 @@ Runtime 负责读出确定的页面事实。Agent 负责将事实与 Spec 对照
 
 三个状态分别建模：
 
-| 维度 | 状态 | 含义 |
-| --- | --- | --- |
-| 动作执行 | `COMPLETED / NOT_STARTED / UNKNOWN` | 已完成动作、确认未启动、不能确认是否产生效果 |
-| 输入比较 | `MATCHED / DIFFERENT / UNKNOWN / NOT_APPLICABLE` | 当前值与请求输入的比较；不是验收结论 |
-| 显式后置条件 | `MET / NOT_MET / UNKNOWN / NOT_REQUESTED` | 指定条件在观察范围和时间窗口内是否满足 |
+| 维度         | 状态                                             | 含义                                         |
+| ------------ | ------------------------------------------------ | -------------------------------------------- |
+| 动作执行     | `COMPLETED / NOT_STARTED / UNKNOWN`              | 已完成动作、确认未启动、不能确认是否产生效果 |
+| 输入比较     | `MATCHED / DIFFERENT / UNKNOWN / NOT_APPLICABLE` | 当前值与请求输入的比较；不是验收结论         |
+| 显式后置条件 | `MET / NOT_MET / UNKNOWN / NOT_REQUESTED`        | 指定条件在观察范围和时间窗口内是否满足       |
 
 保留命令原有成功/失败和错误字段。Playwright 调用返回后的值不一致放在 `inputComparison` 中；观察失败也不把已完成的动作改写成“未执行”。对输入超时、连接中断等不能排除副作用的情况使用 `UNKNOWN`。
 
@@ -126,9 +126,7 @@ Runtime 负责读出确定的页面事实。Agent 负责将事实与 Spec 对照
     "text": "32",
     "after": {
       "observe": "TARGET_REGION",
-      "expect": [
-        { "kind": "TARGET_VALUE_EQUALS", "value": "32" }
-      ],
+      "expect": [{ "kind": "TARGET_VALUE_EQUALS", "value": "32" }],
       "timeoutMs": 1500
     }
   }
@@ -261,17 +259,17 @@ Playwright 已提供动作前的可操作性检查，断言机制也采用有界
 
 ### 8.3 故障决策表
 
-| 观察到的情况 | 处理 |
-| --- | --- |
-| 请求填 32，实际值为 0 | 记录 DIFFERENT，查看控件约束和事件行为；不自动再填 |
+| 观察到的情况                                | 处理                                               |
+| ------------------------------------------- | -------------------------------------------------- |
+| 请求填 32，实际值为 0                       | 记录 DIFFERENT，查看控件约束和事件行为；不自动再填 |
 | 实际值为 32，但 max=4 且 rangeOverflow=true | 返回原生校验事实；由 Spec 判断这是预期拦截还是缺陷 |
-| 保存后出现权限错误 | 返回新错误文本和观察证据，停止重复保存 |
-| 保存动作超时，页面已显示成功 | 先核实结果，避免重复写入 |
-| 实际动作完成但截图失败 | 保留动作结果，视觉状态置为不可用 |
-| ref 过期/目标被替换 | 刷新当前观察，进入既有有限定位恢复 |
-| 页面持续有轮询请求 | 按具体可观察条件结束等待 |
-| 序列前三步完成，第四步失效 | 保存前三步结果，停止后续，返回部分完成 |
-| 用户接管或 permit 过期 | 不再启动动作，保留已有证据，进入现有暂停/释放流程 |
+| 保存后出现权限错误                          | 返回新错误文本和观察证据，停止重复保存             |
+| 保存动作超时，页面已显示成功                | 先核实结果，避免重复写入                           |
+| 实际动作完成但截图失败                      | 保留动作结果，视觉状态置为不可用                   |
+| ref 过期/目标被替换                         | 刷新当前观察，进入既有有限定位恢复                 |
+| 页面持续有轮询请求                          | 按具体可观察条件结束等待                           |
+| 序列前三步完成，第四步失效                  | 保存前三步结果，停止后续，返回部分完成             |
+| 用户接管或 permit 过期                      | 不再启动动作，保留已有证据，进入现有暂停/释放流程  |
 
 ## 9. API、协议与发布兼容
 
@@ -321,14 +319,14 @@ Playwright 已提供动作前的可操作性检查，断言机制也采用有界
 
 ### 11.1 补齐指标
 
-| 类别 | 指标 |
-| --- | --- |
+| 类别   | 指标                                                                             |
+| ------ | -------------------------------------------------------------------------------- |
 | 正确性 | criterion 正确率、错误通过数、错误失败数、INCONCLUSIVE、重复业务写入、证据完整性 |
-| 模型 | 调用次数、输入/输出/cached tokens、模型与 HTTP 尝试耗时 |
-| 浏览器 | 命令数、底层动作数、自动观察数、条件读取数、定位恢复数、序列停止位置 |
-| 采集 | DOM 字节数、模型实际呈现字节数、截图次数/字节数、证据上传及图像加载耗时 |
-| 延迟 | 调度等待、命令往返、动作执行、条件等待、DOM、截图、持久化、总耗时的 p50/p95 |
-| 状态 | 值不一致、UNKNOWN、无页面变化动作、delta 回退率、缺少所需内容后的补读次数 |
+| 模型   | 调用次数、输入/输出/cached tokens、模型与 HTTP 尝试耗时                          |
+| 浏览器 | 命令数、底层动作数、自动观察数、条件读取数、定位恢复数、序列停止位置             |
+| 采集   | DOM 字节数、模型实际呈现字节数、截图次数/字节数、证据上传及图像加载耗时          |
+| 延迟   | 调度等待、命令往返、动作执行、条件等待、DOM、截图、持久化、总耗时的 p50/p95      |
+| 状态   | 值不一致、UNKNOWN、无页面变化动作、delta 回退率、缺少所需内容后的补读次数        |
 
 各阶段使用同一 commandId/stepId 关联；明确父子计时，避免将含等待的 RPC 总时间与内部截图时间重复相加。缺失数据记为 null，不能记为零。
 
@@ -336,13 +334,13 @@ Playwright 已提供动作前的可操作性检查，断言机制也采用有界
 
 复用现有比较脚本，保留 A/B/C 的原含义。将当前 `BOUNDED + GROUPED` 的 C 作为此次基线，增加独立的 feature 配置：
 
-| 新对照配置 | 开启内容 |
-| --- | --- |
-| F0 | 固定当前基线 |
-| F1 | F0 + 实际动作结果 |
-| F2 | F1 + 合并观察 |
-| F3 | F2 + 聚焦/增量呈现（分别记录开关） |
-| F4 | F3 + 表单序列 |
+| 新对照配置 | 开启内容                           |
+| ---------- | ---------------------------------- |
+| F0         | 固定当前基线                       |
+| F1         | F0 + 实际动作结果                  |
+| F2         | F1 + 合并观察                      |
+| F3         | F2 + 聚焦/增量呈现（分别记录开关） |
+| F4         | F3 + 表单序列                      |
 
 同模型、同版本/配置、同 deadline、同动作预算、独立测试数据及会话，轮换组别顺序。先使用少量代表用例做 3 次烟测，再对完整案例每组重复 5 次；方差较大时扩展到现有脚本支持的 10 次，并说明统计不确定性。
 
@@ -372,15 +370,15 @@ Runtime 用真实 Chromium 测 DOM、输入和事件；Agent 测结果消费、�
 
 ## 12. 实施拆分
 
-| PR | 交付 | 依赖 | 完成标准 |
-| --- | --- | --- | --- |
-| 0 | 固定基线、分阶段计时、补输入边界和重复保存 fixture | 当前并行改动基线确定 | 现状可复现，可比较 |
-| 1 | `actionOutcome`、控件约束、Agent 消费、控制台结果 | PR 0 | 正确返回实际值、UNKNOWN 和负向校验事实 |
-| 2 | `after`、有界条件观察、同命令采集复用、证据及能力协商 | PR 1 | 少一次重复采集，完整证据，旧节点可用 |
-| 3a | 结构化快照、聚焦视图、覆盖和分页 | PR 2 | 模型看到当前关键区域，仍可读取省略内容 |
-| 3b | 节点身份、delta 基线及回退 | PR 3a | 新引用正确，节点替换/导航/截断均有正确回退 |
-| 4 | `page.fill_fields`、逐步结果、取消及潜在写审计 | PR 2；默认启用依赖 PR 3 验证 | 中断不继续、不重放，预算按底层动作计 |
-| 5 | 真实模型对照、混合版本测试、灰度和运维说明 | 对应特性完成 | 正确性门槛通过，逐项收益可解释 |
+| PR  | 交付                                                  | 依赖                         | 完成标准                                   |
+| --- | ----------------------------------------------------- | ---------------------------- | ------------------------------------------ |
+| 0   | 固定基线、分阶段计时、补输入边界和重复保存 fixture    | 当前并行改动基线确定         | 现状可复现，可比较                         |
+| 1   | `actionOutcome`、控件约束、Agent 消费、控制台结果     | PR 0                         | 正确返回实际值、UNKNOWN 和负向校验事实     |
+| 2   | `after`、有界条件观察、同命令采集复用、证据及能力协商 | PR 1                         | 少一次重复采集，完整证据，旧节点可用       |
+| 3a  | 结构化快照、聚焦视图、覆盖和分页                      | PR 2                         | 模型看到当前关键区域，仍可读取省略内容     |
+| 3b  | 节点身份、delta 基线及回退                            | PR 3a                        | 新引用正确，节点替换/导航/截断均有正确回退 |
+| 4   | `page.fill_fields`、逐步结果、取消及潜在写审计        | PR 2；默认启用依赖 PR 3 验证 | 中断不继续、不重放，预算按底层动作计       |
+| 5   | 真实模型对照、混合版本测试、灰度和运维说明            | 对应特性完成                 | 正确性门槛通过，逐项收益可解释             |
 
 建议首批交付 PR 0–2，得到可用的“动作 + 实际结果 + 当前观察”闭环；随后根据实测决定聚焦、delta 和序列的开启节奏。所有阶段可以分别交付和回退。
 
@@ -388,25 +386,25 @@ Runtime 用真实 Chromium 测 DOM、输入和事件；Agent 测结果消费、�
 
 仓库根目录：`/Users/mac/Desktop/ethankit-workspace/devProof`。以下是已核对的现有文件；新增模块名称为建议。
 
-| 现有位置 | 改造职责 |
-| --- | --- |
-| [Runtime 协议](/Users/mac/Desktop/ethankit-workspace/devProof/packages/runtime-protocol/src/index.ts) | 新结果 schema、after、序列、能力及版本检查 |
-| [Agent 协议](/Users/mac/Desktop/ethankit-workspace/devProof/packages/agent-runtime-protocol/src/index.ts) | acquire 实际能力、执行配置和必要的观察协议 |
-| [DOM 观察](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/dom-observation.ts) | 控件约束、结构化节点、身份与覆盖 |
-| [动作反馈](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/action-feedback.ts) | 保留网络关联语义，关联逐步请求窗口 |
-| [Runtime 执行](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/index.ts) | 合并采集、取消传递、错误部分结果；建议拆出 action-outcome、post-action-observation、form-sequence 模块 |
-| [API 命令分发](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/runtime-command-dispatcher.service.ts) | 能力准入、部分结果及制品持久化、计时 |
-| [Runtime 网关](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/runtime-gateway.service.ts) | 新能力协商、重连清理过时能力、结果及事件接入 |
-| [Browser 执行调度](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/verification/browser-execution-runner.service.ts) | 执行命令的 payload 能力校验、实际会话能力返回 |
-| [API 执行适配](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/agent-runtime/unified-browser-execution.service.ts) | acquire 能力返回、动作后观察和图片归属校验 |
-| [API 写入审计](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/session-write-audit.ts) | 序列及未知子步骤的潜在写入回归 |
-| [Agent 观察](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-observation.ts) | 新观察入库、有效引用、聚焦和 delta、历史事实 |
-| [Agent 执行器](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-verification.executor.ts) | 自动观察去重、能力选择、序列预算及恢复 |
-| [模型上下文](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/model-context.ts) | 当前事实、视图优先级及序列化预算 |
-| [工具目录](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-tool-catalog.ts) | 新字段和按能力显示的工具组 |
-| [验收证据](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/criterion-evidence.ts) | 新观察引用仍走统一校验 |
-| [比较脚本](/Users/mac/Desktop/ethankit-workspace/devProof/scripts/browser-comparison.mjs) | 特性对照、版本/工作区指纹、重复与失败保留 |
-| [比较指标](/Users/mac/Desktop/ethankit-workspace/devProof/scripts/local-browser/metrics.mjs) | 分阶段统计、动作预算及正确性结果 |
-| [执行详情](/Users/mac/Desktop/ethankit-workspace/devProof/apps/web/app/console/runs/task-detail-content.tsx) | 实际结果和序列部分完成展示 |
+| 现有位置                                                                                                                         | 改造职责                                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [Runtime 协议](/Users/mac/Desktop/ethankit-workspace/devProof/packages/runtime-protocol/src/index.ts)                            | 新结果 schema、after、序列、能力及版本检查                                                             |
+| [Agent 协议](/Users/mac/Desktop/ethankit-workspace/devProof/packages/agent-runtime-protocol/src/index.ts)                        | acquire 实际能力、执行配置和必要的观察协议                                                             |
+| [DOM 观察](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/dom-observation.ts)                           | 控件约束、结构化节点、身份与覆盖                                                                       |
+| [动作反馈](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/action-feedback.ts)                           | 保留网络关联语义，关联逐步请求窗口                                                                     |
+| [Runtime 执行](/Users/mac/Desktop/ethankit-workspace/devProof/apps/browser-runtime/src/index.ts)                                 | 合并采集、取消传递、错误部分结果；建议拆出 action-outcome、post-action-observation、form-sequence 模块 |
+| [API 命令分发](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/runtime-command-dispatcher.service.ts)        | 能力准入、部分结果及制品持久化、计时                                                                   |
+| [Runtime 网关](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/runtime-gateway.service.ts)                   | 新能力协商、重连清理过时能力、结果及事件接入                                                           |
+| [Browser 执行调度](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/verification/browser-execution-runner.service.ts) | 执行命令的 payload 能力校验、实际会话能力返回                                                          |
+| [API 执行适配](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/agent-runtime/unified-browser-execution.service.ts)   | acquire 能力返回、动作后观察和图片归属校验                                                             |
+| [API 写入审计](/Users/mac/Desktop/ethankit-workspace/devProof/apps/api/src/runtime/session-write-audit.ts)                       | 序列及未知子步骤的潜在写入回归                                                                         |
+| [Agent 观察](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-observation.ts)                       | 新观察入库、有效引用、聚焦和 delta、历史事实                                                           |
+| [Agent 执行器](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-verification.executor.ts)           | 自动观察去重、能力选择、序列预算及恢复                                                                 |
+| [模型上下文](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/model-context.ts)                             | 当前事实、视图优先级及序列化预算                                                                       |
+| [工具目录](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/browser-tool-catalog.ts)                        | 新字段和按能力显示的工具组                                                                             |
+| [验收证据](/Users/mac/Desktop/ethankit-workspace/devProof/apps/agent-runtime/src/criterion-evidence.ts)                          | 新观察引用仍走统一校验                                                                                 |
+| [比较脚本](/Users/mac/Desktop/ethankit-workspace/devProof/scripts/browser-comparison.mjs)                                        | 特性对照、版本/工作区指纹、重复与失败保留                                                              |
+| [比较指标](/Users/mac/Desktop/ethankit-workspace/devProof/scripts/local-browser/metrics.mjs)                                     | 分阶段统计、动作预算及正确性结果                                                                       |
+| [执行详情](/Users/mac/Desktop/ethankit-workspace/devProof/apps/web/app/console/runs/task-detail-content.tsx)                     | 实际结果和序列部分完成展示                                                                             |
 
 每个实施 PR 同步更新相关协议文档、DOM/视觉文档、比较说明及版本兼容测试。本文保持为总体方案，实际字段与阶段进度在实现后回填。

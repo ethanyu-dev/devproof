@@ -47,6 +47,8 @@ import {
   recoveryGuidance,
   recoveryWriteLabel,
 } from "../access/runtime-recovery-display";
+import { RunGoal } from "./run-goal";
+import { runRecoveryNotice } from "./run-recovery-notice";
 import { RunTrajectory } from "./run-trajectory";
 import { mergeTrajectoryRecords } from "./run-trajectory-records";
 import { RunScreenshotCarousel } from "./run-screenshot-carousel";
@@ -780,9 +782,25 @@ function RunDetailClient({ id }: { id: string }) {
                     : recovery.sessionId
                       ? undefined
                       : currentFailures[0];
-                  const needsWriteReview = ["UNKNOWN", "UNASSESSED"].includes(
-                    recovery.writeOutcomeState,
-                  );
+                  const notice = runRecoveryNotice(detail, recovery);
+                  const { needsWriteReview } = notice;
+                  if (notice.diagnosticOnly)
+                    return (
+                      <details
+                        key={recovery.id}
+                        className="col-span-full rounded border p-3 text-sm text-muted-foreground"
+                      >
+                        <summary className="cursor-pointer">
+                          执行收尾记录 · 浏览器已关闭，写入审计待核实
+                        </summary>
+                        <p className="my-2">{notice.guidance}</p>
+                        <Link
+                          href={`/console/access/recoveries/${recovery.id}`}
+                        >
+                          查看收尾记录 →
+                        </Link>
+                      </details>
+                    );
                   return (
                     <div
                       className="dp-run-recovery-notice"
@@ -791,11 +809,7 @@ function RunDetailClient({ id }: { id: string }) {
                     >
                       <TriangleAlert aria-hidden="true" />
                       <div>
-                        <b>
-                          {needsWriteReview
-                            ? "上次写入结果未确认"
-                            : "浏览器会话需要恢复处理"}
-                        </b>
+                        <b>{notice.title}</b>
                         {failure && failure.message !== outcome.description && (
                           <p>中断原因：{failure.message}</p>
                         )}
@@ -811,11 +825,7 @@ function RunDetailClient({ id }: { id: string }) {
                             )}
                           </p>
                         )}
-                        {needsWriteReview && (
-                          <p>
-                            已停止自动重试；这不代表产品验证失败。可点击“重试用例”手动确认重试，或在恢复记录中核实业务结果。
-                          </p>
-                        )}
+                        {needsWriteReview && <p>{notice.guidance}</p>}
                         <Link
                           href={`/console/access/recoveries/${recovery.id}`}
                         >
@@ -953,7 +963,7 @@ function RunDetailClient({ id }: { id: string }) {
                 <div className="dp-run-key-info-scroll">
                   <section>
                     <span className="dp-run-key-label">任务目标</span>
-                    <p className="dp-run-goal-copy">{detail.goal}</p>
+                    <RunGoal goal={detail.goal} />
                   </section>
                   <section>
                     <div className="dp-run-key-section-head">

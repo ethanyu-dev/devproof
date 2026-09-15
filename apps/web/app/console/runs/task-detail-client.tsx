@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   ExternalLink,
+  FileCheck2,
   Layers3,
   RefreshCw,
   RotateCcw,
@@ -24,6 +25,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { displayLabel } from "@/lib/display-text";
+import { TaskDeleteButton } from "./task-delete-button";
+import { TaskAcceptanceReportView } from "./task-acceptance-report";
 import { TaskDetailContent } from "./task-detail-content";
 import styles from "./task-detail.module.css";
 import { terminalLifecycles, tone } from "./task-display";
@@ -36,9 +39,15 @@ import { useTaskDetail } from "./use-task-detail";
 export function TaskDetailClient({ id }: { id: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const view = searchParams.get("view") === "logs" ? "logs" : "specs";
+  const requestedView = searchParams.get("view");
   const returnTo = taskReturnHref(searchParams.get("returnTo"));
-  const taskHref = taskDetailHref(id, returnTo);
+  const baseHref = taskDetailHref(id, returnTo);
+  const specParams = new URLSearchParams(baseHref.split("?")[1]);
+  specParams.set("view", "specs");
+  const taskHref = `${baseHref.split("?")[0]}?${specParams}`;
+  const reportParams = new URLSearchParams(baseHref.split("?")[1]);
+  reportParams.set("view", "report");
+  const reportHref = `${baseHref.split("?")[0]}?${reportParams}`;
   const logParams = new URLSearchParams(taskHref.split("?")[1]);
   logParams.set("view", "logs");
   const logsHref = `${taskHref.split("?")[0]}?${logParams}`;
@@ -52,7 +61,7 @@ export function TaskDetailClient({ id }: { id: string }) {
     refresh,
     updateDetail,
     retryEvents,
-  } = useTaskDetail(id, view === "logs");
+  } = useTaskDetail(id, requestedView === "logs");
   const { busy, message, mutate, cancel, rerun, rerunCase } = useTaskActions({
     id,
     onUpdated: updateDetail,
@@ -62,6 +71,13 @@ export function TaskDetailClient({ id }: { id: string }) {
     () => (detail ? projectSpecGenerationTrajectory(detail, events) : []),
     [detail, events],
   );
+  const view =
+    requestedView === "logs"
+      ? "logs"
+      : requestedView === "report" ||
+          (!requestedView && detail && terminalLifecycles.has(detail.lifecycle))
+        ? "report"
+        : "specs";
   const outcome = detail ? taskOutcomeDisplay(detail) : null;
   const active = detail !== null && !terminalLifecycles.has(detail.lifecycle);
 
@@ -72,7 +88,7 @@ export function TaskDetailClient({ id }: { id: string }) {
       </Link>
       <PageHeader
         title={detail?.title ?? "任务详情"}
-        description="查看执行用例与结果，跟进任务进展并排查日志。"
+        description="查看 AI 验收报告、需求覆盖、执行结果与证据。"
         actions={
           <>
             {detail && detail.kind !== "LEGACY_RUN" && (
@@ -93,6 +109,14 @@ export function TaskDetailClient({ id }: { id: string }) {
               >
                 <XCircle /> 取消任务
               </Button>
+            )}
+            {detail && !active && (
+              <TaskDeleteButton
+                id={id}
+                title={detail.title}
+                disabled={busy}
+                onDeleted={() => router.push(returnTo)}
+              />
             )}
             <Button disabled={loading} onClick={refresh} variant="secondary">
               <RefreshCw />
@@ -168,18 +192,12 @@ export function TaskDetailClient({ id }: { id: string }) {
                 </div>
               )}
             </dl>
-            <div className="dp-task-detail-counts" aria-label="任务结果统计">
+            <div className="dp-task-detail-counts" aria-label="任务执行进度">
               <span>
                 执行项 <b>{detail.counts.total}</b>
               </span>
               <span>
-                验证通过 <b>{detail.counts.passed}</b>
-              </span>
-              <span>
-                未通过 <b>{detail.counts.failed}</b>
-              </span>
-              <span>
-                结果不确定 <b>{detail.counts.inconclusive}</b>
+                已结束 <b>{detail.counts.terminal ?? 0}</b>
               </span>
               <span>
                 执行中 <b>{detail.counts.running}</b>
@@ -187,6 +205,21 @@ export function TaskDetailClient({ id }: { id: string }) {
               <span>
                 等待中 <b>{detail.counts.waiting}</b>
               </span>
+              {Boolean(detail.counts.waitingHuman) && (
+                <span>
+                  等待人工 <b>{detail.counts.waitingHuman}</b>
+                </span>
+              )}
+              {Boolean(detail.counts.cancelled) && (
+                <span>
+                  已取消 <b>{detail.counts.cancelled}</b>
+                </span>
+              )}
+              {Boolean(detail.counts.blocked) && (
+                <span>
+                  执行受阻 <b>{detail.counts.blocked}</b>
+                </span>
+              )}
               {Boolean(detail.counts.recovering) && (
                 <span>
                   恢复中 <b>{detail.counts.recovering}</b>
@@ -200,6 +233,14 @@ export function TaskDetailClient({ id }: { id: string }) {
             </div>
           </Card>
           <nav className="dp-task-detail-tabs" aria-label="任务详情视图">
+            <Link
+              href={reportHref}
+              replace
+              scroll={false}
+              aria-current={view === "report" ? "page" : undefined}
+            >
+              <FileCheck2 /> 测试报告
+            </Link>
             <Link
               href={taskHref}
               replace
@@ -223,20 +264,28 @@ export function TaskDetailClient({ id }: { id: string }) {
               <ScrollText /> 任务日志
             </Link>
           </nav>
-          <TaskDetailContent
-            onRerunCase={rerunCase}
-            onCaseRetried={updateDetail}
-            busy={busy}
-            detail={detail}
-            onMutate={mutate}
-            trajectory={trajectory}
-            view={view}
-            events={events}
-            eventsError={eventsError}
-            eventsLoading={eventsLoading}
-            onRetryEvents={retryEvents}
-            taskHref={taskHref}
-          />
+          {view === "report" ? (
+            <TaskAcceptanceReportView
+              key={detail.id}
+              id={detail.id}
+              updatedAt={detail.updatedAt}
+            />
+          ) : (
+            <TaskDetailContent
+              onRerunCase={rerunCase}
+              onCaseRetried={updateDetail}
+              busy={busy}
+              detail={detail}
+              onMutate={mutate}
+              trajectory={trajectory}
+              view={view}
+              events={events}
+              eventsError={eventsError}
+              eventsLoading={eventsLoading}
+              onRetryEvents={retryEvents}
+              taskHref={taskHref}
+            />
+          )}
         </>
       )}
     </div>

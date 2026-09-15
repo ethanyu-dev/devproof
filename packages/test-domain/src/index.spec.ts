@@ -293,6 +293,36 @@ describe("projectTaskExecution", () => {
     });
   });
 
+  it("retains a confirmed product failure even when another case cannot execute", () => {
+    expect(
+      projectTaskExecution({
+        ...base,
+        caseExecutions: [
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "LINKED",
+            run: {
+              executionDisposition: "EXECUTED",
+              lifecycle: "COMPLETED",
+              verdict: "FAILED",
+            },
+          },
+          {
+            dispatchAttempts: 3,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "FAILED",
+            run: null,
+          },
+        ],
+      }),
+    ).toMatchObject({
+      lifecycle: "COMPLETED",
+      executionDisposition: "BLOCKED",
+      verdict: "FAILED",
+    });
+  });
+
   it("projects child HITL without changing a product verdict", () => {
     expect(
       projectTaskExecution({

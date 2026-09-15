@@ -1,3 +1,6 @@
+import { TaskAcceptanceReviewService } from "./task-acceptance-review.service.js";
+import { RetentionWorker } from "../observability/retention-worker.service.js";
+import { deleteTask } from "./task-delete.js";
 import {
   expireTestAccountPlans,
   accountsReady,
@@ -8,6 +11,10 @@ import {
 } from "./task-test-accounts.js";
 import type { TaskTestAccountsInput } from "@devproof/contracts";
 import { ContextSourceError } from "../specifications/context-source.error.js";
+import {
+  acceptanceReportInclude,
+  buildTaskAcceptanceReport,
+} from "./task-acceptance-report.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
@@ -237,6 +244,9 @@ export interface TaskListFilters {
     | "FAILED"
     | "VERIFICATION_FAILED"
     | "EXECUTION_FAILED"
+    | "INCONCLUSIVE"
+    | "BLOCKED"
+    | "NOT_RUN"
     | "COMPLETED"
     | "CANCELLED"
     | "TIMED_OUT";
@@ -251,6 +261,13 @@ function taskStatusWhere(
   }
   if (status === "WAITING_HUMAN") return { lifecycle: "WAITING_HUMAN" };
   if (status === "PASSED") return { verdict: status };
+  if (status === "INCONCLUSIVE") return { verdict: "INCONCLUSIVE" };
+  if (status === "BLOCKED" || status === "NOT_RUN")
+    return {
+      lifecycle: "COMPLETED",
+      executionDisposition: status,
+      verdict: null,
+    };
   if (status === "FAILED" || status === "VERIFICATION_FAILED") {
     return { verdict: "FAILED" };
   }
@@ -288,7 +305,18 @@ export class TaskExecutionService {
     private readonly reservations: ProfileReservationService,
     private readonly githubAccess: GithubAccessService,
     private readonly logBundles?: TaskLogBundleService,
+    private readonly retention?: RetentionWorker,
+    private readonly acceptanceReviews?: TaskAcceptanceReviewService,
   ) {}
+
+  async delete(current: ToolAuthContext, id: string) {
+    const storageKeys = await deleteTask(this.prisma, current.team.id, id);
+    // DB deletion is already committed. Failed file removal remains queued for
+    // the retention worker; never report a failed deletion after losing the row.
+    void this.retention
+      ?.flushObjectDeletions(storageKeys)
+      .catch(() => undefined);
+  }
 
   async create(
     current: ToolAuthContext,
@@ -477,7 +505,7 @@ export class TaskExecutionService {
       take: 100,
       where: { teamId: current.team.id },
     });
-    return rows.map(toTaskSummary);
+    return this.summariesWithAcceptanceScores(current, rows);
   }
 
   async listPage(
@@ -514,12 +542,44 @@ export class TaskExecutionService {
       this.prisma.taskExecution.count({ where }),
     ]);
     return {
-      items: rows.map(toTaskSummary),
+      items: await this.summariesWithAcceptanceScores(current, rows),
       page,
       pageSize,
       total,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
     };
+  }
+
+  private async summariesWithAcceptanceScores(
+    current: ToolAuthContext,
+    rows: Prisma.TaskExecutionGetPayload<{ include: typeof taskListInclude }>[],
+  ) {
+    const completed = rows.filter((row) =>
+      ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(row.lifecycle),
+    );
+    // Reuse the report's evidence validation, current attempt and latest Case
+    // selection. One batch per page; listing never starts an AI review.
+    const reports = completed.length
+      ? await this.prisma.taskExecution.findMany({
+          where: {
+            teamId: current.team.id,
+            id: { in: completed.map((row) => row.id) },
+          },
+          include: acceptanceReportInclude,
+        })
+      : [];
+    const byId = new Map(reports.map((row) => [row.id, row]));
+    return rows.map((row) => {
+      const reportRow = byId.get(row.id);
+      const sameRevision =
+        reportRow?.lifecycle === row.lifecycle &&
+        reportRow.updatedAt.getTime() === row.updatedAt.getTime();
+      const report = sameRevision ? buildTaskAcceptanceReport(reportRow) : null;
+      const acceptanceScore = report?.final
+        ? (({ findings: _findings, ...score }) => score)(report.assessment)
+        : null;
+      return { ...toTaskSummary(row), acceptanceScore };
+    });
   }
 
   async detail(current: ToolAuthContext, id: string) {
@@ -530,6 +590,17 @@ export class TaskExecutionService {
     if (!row)
       throw new NotFoundException(`Task execution ${id} was not found.`);
     return toTaskDetail(row);
+  }
+
+  async acceptanceReport(current: ToolAuthContext, id: string) {
+    const row = await this.prisma.taskExecution.findFirst({
+      where: { id, teamId: current.team.id },
+      include: acceptanceReportInclude,
+    });
+    if (!row)
+      throw new NotFoundException(`Task execution ${id} was not found.`);
+    const report = buildTaskAcceptanceReport(row);
+    return this.acceptanceReviews?.attach(current.team.id, report) ?? report;
   }
 
   async setCaseExecutionPolicy(
@@ -1813,6 +1884,7 @@ export class TaskExecutionService {
     }
     if (projectionApplied && terminal) {
       await this.reservations.releaseTask(task.id);
+      await this.acceptanceReviews?.enqueueForTask(task.teamId, task.id);
     }
     return projection;
   }

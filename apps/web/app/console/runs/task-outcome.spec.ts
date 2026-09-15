@@ -11,6 +11,30 @@ import {
 } from "./task-outcome";
 
 describe("taskOutcomeDisplay", () => {
+  it("shows confirmed product findings alongside a blocked task's remaining uncertainty", () => {
+    expect(
+      taskOutcomeDisplay({
+        lifecycle: "COMPLETED",
+        executionDisposition: "BLOCKED",
+        verdict: null,
+        counts: { failed: 1, inconclusive: 0 },
+      }),
+    ).toMatchObject({ label: "发现产品问题", toneStatus: "FAILED" });
+    expect(
+      taskOutcomeDisplay({
+        lifecycle: "COMPLETED",
+        executionDisposition: "BLOCKED",
+        verdict: null,
+      }),
+    ).toMatchObject({ label: "执行受阻", toneStatus: "INCONCLUSIVE" });
+    expect(
+      taskOutcomeDisplay({
+        lifecycle: "COMPLETED",
+        executionDisposition: "EXECUTED",
+        verdict: "INCONCLUSIVE",
+      }),
+    ).toMatchObject({ label: "无法判定", toneStatus: "INCONCLUSIVE" });
+  });
   it("explains a nonterminal task with no active execution", () => {
     expect(
       taskOutcomeDisplay({
@@ -71,7 +95,7 @@ describe("taskOutcomeDisplay", () => {
         lifecycle: "COMPLETED",
         verdict: "FAILED",
       }),
-    ).toMatchObject({ label: "验证未通过", toneStatus: "FAILED" });
+    ).toMatchObject({ label: "发现产品问题", toneStatus: "FAILED" });
   });
 
   it("identifies an execution failure without presenting it as a verdict", () => {
@@ -83,7 +107,7 @@ describe("taskOutcomeDisplay", () => {
       }),
     ).toEqual({
       description: "未得到验证判定：Agent 异常。",
-      label: "任务执行失败",
+      label: "执行异常（Agent 异常）",
       toneStatus: "AGENT_ERROR",
     });
   });
@@ -101,11 +125,11 @@ describe("taskOutcomeDisplay", () => {
 
 describe("task outcome dimension labels", () => {
   it("uses explicit execution and verification wording", () => {
-    expect(executionDispositionLabel("EXECUTED")).toBe("任务执行成功");
+    expect(executionDispositionLabel("EXECUTED")).toBe("执行已完成");
     expect(executionDispositionLabel("PROVIDER_ERROR")).toBe(
-      "任务执行失败（模型服务异常）",
+      "执行异常（模型服务异常）",
     );
-    expect(verificationVerdictLabel("FAILED")).toBe("验证未通过");
+    expect(verificationVerdictLabel("FAILED")).toBe("发现产品问题");
     expect(verificationVerdictLabel(null)).toBe("尚无验证判定");
   });
 });

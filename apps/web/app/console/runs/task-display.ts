@@ -12,8 +12,6 @@ export function tone(status: string | null): BadgeTone {
     [
       "FAILED",
       "TIMED_OUT",
-      "NOT_RUN",
-      "BLOCKED",
       "AGENT_ERROR",
       "PROVIDER_ERROR",
       "BROWSER_UNAVAILABLE",
@@ -21,7 +19,16 @@ export function tone(status: string | null): BadgeTone {
     ].includes(status ?? "")
   )
     return "danger";
-  if (["PENDING", "WAITING_INPUT", "WAITING_HUMAN"].includes(status ?? ""))
+  if (
+    [
+      "INCONCLUSIVE",
+      "NOT_RUN",
+      "BLOCKED",
+      "PENDING",
+      "WAITING_INPUT",
+      "WAITING_HUMAN",
+    ].includes(status ?? "")
+  )
     return "warning";
   if (["PREPARING", "RUNNING", "DISPATCHING"].includes(status ?? ""))
     return "info";

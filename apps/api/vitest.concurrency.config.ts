@@ -5,6 +5,7 @@ export default defineConfig({
   envDir: false,
   test: {
     include: [
+      "src/task-executions/task-delete.integration.ts",
       "src/task-executions/task-test-accounts.integration.ts",
       "src/edge-cases.integration.ts",
       "src/agent-runtime/spec-lease-recovery.integration.ts",

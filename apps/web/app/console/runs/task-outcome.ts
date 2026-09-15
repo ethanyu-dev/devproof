@@ -10,6 +10,7 @@ interface TaskOutcomeSource {
   executionDisposition: string | null;
   lifecycle: string;
   verdict: string | null;
+  counts?: { failed: number; inconclusive: number };
 }
 
 export interface TaskOutcomeDisplay {
@@ -19,21 +20,34 @@ export interface TaskOutcomeDisplay {
 }
 
 export function verificationVerdictLabel(verdict: string | null) {
-  if (verdict === "PASSED") return "验证通过";
-  if (verdict === "FAILED") return "验证未通过";
-  if (verdict === "INCONCLUSIVE") return "验证结果不确定";
+  if (verdict === "PASSED") return "验收项通过";
+  if (verdict === "FAILED") return "发现产品问题";
+  if (verdict === "INCONCLUSIVE") return "无法判定";
   return "尚无验证判定";
 }
 
 export function executionDispositionLabel(disposition: string | null) {
-  if (disposition === "EXECUTED") return "任务执行成功";
-  if (disposition) return `任务执行失败（${displayLabel(disposition)}）`;
+  if (disposition === "EXECUTED") return "执行已完成";
+  if (disposition === "BLOCKED") return "执行受阻";
+  if (disposition === "NOT_RUN") return "尚未执行";
+  if (disposition) return `执行异常（${displayLabel(disposition)}）`;
   return "尚无执行结果";
 }
 
 export function taskOutcomeDisplay(
   task: TaskOutcomeSource,
 ): TaskOutcomeDisplay {
+  if (
+    ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle) &&
+    (task.verdict === "FAILED" || (task.counts?.failed ?? 0) > 0)
+  ) {
+    return {
+      description:
+        "已有验收证据发现产品问题；未完成或中断的部分在测试报告中单独列出。",
+      label: "发现产品问题",
+      toneStatus: "FAILED",
+    };
+  }
   if (task.lifecycle === "CANCELLED") {
     return {
       description: null,
@@ -85,7 +99,9 @@ export function taskOutcomeDisplay(
       description:
         task.verdict === "FAILED"
           ? "任务已执行完成，但至少一项验收标准未通过。"
-          : null,
+          : task.verdict === "PASSED"
+            ? "已执行的验收项通过；整个需求是否通过 AI 验收请查看测试报告。"
+            : "证据或前置条件不足，请查看测试报告中的具体原因。",
       label: verificationVerdictLabel(task.verdict),
       toneStatus: task.verdict,
     };
@@ -93,8 +109,12 @@ export function taskOutcomeDisplay(
   if (task.executionDisposition && task.executionDisposition !== "EXECUTED") {
     return {
       description: `未得到验证判定：${displayLabel(task.executionDisposition)}。`,
-      label: "任务执行失败",
-      toneStatus: task.executionDisposition,
+      label: executionDispositionLabel(task.executionDisposition),
+      toneStatus:
+        task.executionDisposition === "BLOCKED" ||
+        task.executionDisposition === "NOT_RUN"
+          ? "INCONCLUSIVE"
+          : task.executionDisposition,
     };
   }
   if (task.executionDisposition === "EXECUTED") {

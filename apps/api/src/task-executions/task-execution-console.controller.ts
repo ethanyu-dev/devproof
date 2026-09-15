@@ -2,6 +2,8 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
+  ParseUUIDPipe,
   Get,
   HttpCode,
   Param,
@@ -69,6 +71,9 @@ export class TaskExecutionConsoleController {
         "FAILED",
         "VERIFICATION_FAILED",
         "EXECUTION_FAILED",
+        "INCONCLUSIVE",
+        "BLOCKED",
+        "NOT_RUN",
         "COMPLETED",
         "CANCELLED",
         "TIMED_OUT",
@@ -93,9 +98,26 @@ export class TaskExecutionConsoleController {
     return this.tasks.detail(taskToolContext(current), id);
   }
 
+  @Delete(":id")
+  @HttpCode(204)
+  delete(
+    @CurrentAuth() current: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.tasks.delete(taskToolContext(current), id);
+  }
+
   @Get(":id/events")
   events(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
     return this.tasks.events(taskToolContext(current), id);
+  }
+
+  @Get(":id/acceptance-report")
+  acceptanceReport(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+  ) {
+    return this.tasks.acceptanceReport(taskToolContext(current), id);
   }
 
   @Post(":id/cases/:caseExecutionId/policy")

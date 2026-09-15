@@ -342,11 +342,16 @@ export class RetentionWorker implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async purgeObjectStorageDeletions() {
+  async flushObjectDeletions(storageKeys: string[]) {
+    if (storageKeys.length) await this.purgeObjectStorageDeletions(storageKeys);
+  }
+
+  private async purgeObjectStorageDeletions(storageKeys?: string[]) {
     const tasks = await this.prisma.objectStorageDeletionTask.findMany({
       orderBy: { nextAttemptAt: "asc" },
       take: 100,
       where: {
+        ...(storageKeys ? { storageKey: { in: storageKeys } } : {}),
         nextAttemptAt: { lte: new Date() },
         OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: new Date() } }],
       },

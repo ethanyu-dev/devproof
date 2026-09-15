@@ -581,6 +581,7 @@ describe("deployment drain", () => {
       {
         ...control,
         claimSpec: control.claim,
+        claimAcceptanceReview: vi.fn().mockResolvedValue(null),
         heartbeatSpec: control.heartbeat,
         submitSpecOutcome: control.submitOutcome,
       } as never,
