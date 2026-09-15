@@ -60,6 +60,99 @@ describe("executionCounts", () => {
   });
 });
 
+describe("TaskExecutionService deterministic Issue titles", () => {
+  it("uses the resolved title while waiting for PR and environment input", async () => {
+    const issue = {
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Refund flow",
+      description: "Users must be able to request a refund.",
+      url: "https://linear.app/acme/issue/ENG-123/refund-flow",
+    };
+    const task = {
+      id: "task-1",
+      teamId: "team-1",
+      title: issue.url,
+      sourceRef: issue.url,
+      inputSnapshot: {
+        kind: "ISSUE_SPEC",
+        issueRef: issue.url,
+        idempotencyKey: "issue-title-test",
+      },
+      environmentSnapshot: {},
+      notificationContext: {},
+    };
+    const attempt = {
+      id: "attempt-1",
+      number: 1,
+      stageId: "stage-1",
+      leaseOwner: `task-analysis:${process.pid}`,
+      leaseToken: "lease-1",
+      stage: { taskExecutionId: task.id, taskExecution: task },
+    };
+    const tx = {
+      taskExecution: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn().mockImplementation(async ({ data }) => {
+          Object.assign(task, data);
+          return { ...task };
+        }),
+      },
+      taskStageAttempt: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue(attempt),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      taskExecutionStage: { update: vi.fn().mockResolvedValue({}) },
+      taskExecutionEvent: { create: vi.fn().mockResolvedValue({}) },
+      notificationOutbox: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    const service = new TaskExecutionService(
+      {
+        ...tx,
+        $transaction: async (operation: (client: typeof tx) => unknown) =>
+          operation(tx),
+      } as never,
+      {
+        resolve: vi.fn().mockResolvedValue({
+          context: { issue, pullRequests: [] },
+        }),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await (
+      service as unknown as {
+        executeAnalysis: (id: string, lease: string) => Promise<void>;
+      }
+    ).executeAnalysis(attempt.id, attempt.leaseToken);
+
+    expect(task).toMatchObject({
+      title: "ENG-123 · Refund flow",
+      sourceRef: "ENG-123",
+      lifecycle: "WAITING_INPUT",
+      environmentSnapshot: {
+        analysisInputRequest: {
+          missing: ["PULL_REQUEST", "DEPLOYMENT_TARGET"],
+        },
+      },
+    });
+    expect(tx.notificationOutbox.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            payload: expect.objectContaining({ goal: "ENG-123 · Refund flow" }),
+          }),
+        ],
+      }),
+    );
+  });
+});
+
 describe("TaskExecutionService cancellation", () => {
   it("cancels an Issue task without any analysis storage dependency", async () => {
     const transactionClient = {

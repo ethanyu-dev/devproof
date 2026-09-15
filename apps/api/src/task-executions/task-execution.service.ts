@@ -2465,6 +2465,15 @@ export class TaskExecutionService {
           include: { stage: { include: { taskExecution: true } } },
         });
         requireAnalysisLease(locked, leaseToken);
+        if (context) {
+          locked.stage.taskExecution = await tx.taskExecution.update({
+            data: {
+              sourceRef: context.issue.identifier,
+              title: `${context.issue.identifier} · ${context.issue.title}`,
+            },
+            where: { id: locked.stage.taskExecutionId },
+          });
+        }
         await pauseAnalysisForInput(
           tx,
           locked,
