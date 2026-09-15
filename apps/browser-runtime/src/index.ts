@@ -6,6 +6,7 @@ import { observedRequestBody } from "./network-request.js";
 import { VisualObservations } from "./visual-observation.js";
 import { scrollElement } from "./scroll.js";
 import { captureHighDensityPreview } from "./preview-screenshot.js";
+import { MachineMetricsSampler } from "./machine-metrics.js";
 import {
   ActionFeedbackTracker,
   actionTarget,
@@ -31,6 +32,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   RUNTIME_PROTOCOL,
+  RUNTIME_TELEMETRY_MINOR,
   RUNTIME_MAX_FRAME_BYTES,
   RUNTIME_CAPABILITIES,
   RUNTIME_SESSION_PERMIT_MINOR,
@@ -4545,6 +4547,7 @@ function terminalPreviewError(message: string) {
 }
 
 export class RuntimeClient {
+  private readonly machineMetrics = new MachineMetricsSampler();
   private socket: WebSocket | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private readonly pendingHeartbeats = new Map<string, number>();
@@ -5090,6 +5093,9 @@ export class RuntimeClient {
       );
     this.send({
       heartbeatId,
+      ...(this.negotiatedProtocolMinor >= RUNTIME_TELEMETRY_MINOR
+        ? { machineMetrics: this.machineMetrics.sample() }
+        : {}),
       activeSessions: this.manager.descriptors().map((session) => ({
         fencingToken: session.fencingToken,
         leaseToken: session.leaseToken,

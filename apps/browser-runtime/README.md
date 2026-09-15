@@ -48,6 +48,20 @@ The default state directory is `~/.devproof-browser-runtime`. Supported environm
 
 Pairing creates `runtime.json` with mode `0600`. Do not copy this file or include it in a machine image. Revoke the old credential and pair again when moving an installation.
 
+## Machine observability
+
+With protocol v1.18 negotiated, Runtime samples host CPU and memory on each
+15-second heartbeat. Console refreshes node resources and the server-side slot
+pool every five seconds. CPU is an interval average across all logical cores;
+Linux memory uses `MemAvailable` when readable. Daemon RSS is shown separately
+from host usage, which includes Chromium and other processes. These are host
+measurements, not container cgroup limits. The 1–32 concurrency setting remains a
+configured admission limit, not a measured hardware capacity.
+
+Upgrade and restart the Runtime to enable telemetry; existing pairing is retained.
+See [machine observability](../../docs/runtime-machine-observability.md) for metric
+definitions and capacity tuning.
+
 ## Network security
 
 Chromium traffic, including loopback requests, passes through a local SSRF forward proxy. The proxy resolves and validates DNS before connecting to the same IP, covering navigation, redirects, subresources, and WebSockets while closing the DNS-rebinding window.

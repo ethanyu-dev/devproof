@@ -29,7 +29,10 @@ function fixture(protocolMinor: number | null = 4, online = true) {
     },
   };
   const audit = { record: vi.fn().mockResolvedValue(undefined) };
-  const redis = { isRuntimeOnline: vi.fn().mockResolvedValue(online) };
+  const redis = {
+    isRuntimeOnline: vi.fn().mockResolvedValue(online),
+    runtimeTelemetry: vi.fn().mockResolvedValue(null),
+  };
   const hub = {
     close: vi.fn(),
     send: vi.fn().mockResolvedValue(undefined),
@@ -44,6 +47,23 @@ function fixture(protocolMinor: number | null = 4, online = true) {
 }
 
 describe("BrowserRuntimeService managed configuration", () => {
+  it("reads telemetry only for enabled, authorized team runtimes", async () => {
+    const f = fixture(18);
+    const snapshot = {
+      receivedAt: new Date().toISOString(),
+      metrics: { scope: "HOST" },
+    };
+    f.redis.runtimeTelemetry.mockResolvedValue(snapshot as never);
+    expect((await f.service.list(current))[0]?.telemetry).toEqual(snapshot);
+    expect(f.prisma.browserRuntime.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { teamId: f.runtime.teamId } }),
+    );
+    expect(f.redis.runtimeTelemetry).toHaveBeenCalledWith(f.runtime.id);
+    f.redis.runtimeTelemetry.mockClear();
+    f.runtime.enabled = false;
+    expect((await f.service.list(current))[0]?.telemetry).toBeNull();
+    expect(f.redis.runtimeTelemetry).not.toHaveBeenCalled();
+  });
   it("serializes Runtime generations beyond Number precision in both Console responses", async () => {
     const f = fixture();
     f.runtime.connectionGeneration = 9_007_199_254_740_993_123n;

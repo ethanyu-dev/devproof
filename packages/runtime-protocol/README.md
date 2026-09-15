@@ -1,5 +1,14 @@
 # @devproof/runtime-protocol
 
+Protocol v1.18 adds optional `runtime.heartbeat.machineMetrics`, emitted only
+after negotiating minor 18 or later. It carries a host-wide CPU interval average,
+logical CPU count, total/used/available memory and its availability source, plus
+daemon RSS and uptime. CPU is nullable during sample warmup or counter resets.
+Invalid optional telemetry is discarded without invalidating lease heartbeats.
+The control plane keeps only the current connection's latest sample with a
+45-second TTL; no machine measurements participate in admission decisions.
+See [machine observability](../../docs/runtime-machine-observability.md).
+
 Protocol v1.17 adds the optional `scroll-feedback-v1` capability. With this
 capability negotiated, `page.scroll.result.scrollFeedback` reports `version: 1`,
 `status` (`MOVED`, `AT_BOUNDARY`, `NO_MOVEMENT`, or `UNVERIFIED`), and `settled`.

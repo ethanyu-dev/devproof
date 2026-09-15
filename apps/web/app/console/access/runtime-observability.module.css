@@ -1,0 +1,94 @@
+.panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.heading,
+.metric > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.heading small,
+.heading > span,
+.metric small,
+.note {
+  color: var(--muted-foreground);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.metric {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.metric strong {
+  font-size: 16px;
+}
+
+.track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--muted);
+}
+
+.track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.normal,
+.slots [data-state="占用"] {
+  background: var(--primary);
+}
+.high,
+.slots [data-state="隔离"] {
+  background: var(--destructive);
+}
+
+.slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.slots span {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--muted);
+}
+
+.slots [data-state="离线"] {
+  opacity: 0.35;
+}
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.note,
+.warning {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.warning {
+  color: var(--destructive);
+}

@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { Injectable, Logger } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { Redis } from "ioredis";
+import {
+  RUNTIME_TELEMETRY_STALE_MS,
+  type RuntimeMachineMetrics,
+  type RuntimeTelemetrySnapshot,
+} from "@devproof/runtime-protocol";
 
 import { env } from "../config/env.js";
 
@@ -95,7 +100,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async markRuntimeOnline(runtimeId: string, connectionGeneration: bigint) {
+  async markRuntimeOnline(
+    runtimeId: string,
+    connectionGeneration: bigint,
+    metrics?: RuntimeMachineMetrics,
+  ) {
     // Decimal generations are compared without Lua floating-point truncation.
     await this.publisher.eval(
       `local previous = redis.call('GET', KEYS[1])
@@ -104,13 +113,44 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
          if old and (#old > #ARGV[1] or (#old == #ARGV[1] and old > ARGV[1])) then return 0 end
        end
        redis.call('SET', KEYS[1], ARGV[1] .. ':' .. ARGV[2], 'EX', ARGV[3])
+       if ARGV[4] ~= '' then
+         redis.call('SET', KEYS[2], ARGV[4], 'PX', ARGV[5])
+       else
+         redis.call('DEL', KEYS[2])
+       end
        return 1`,
-      1,
+      2,
       "devproof:runtime:presence:" + runtimeId,
+      "devproof:runtime:telemetry:" + runtimeId,
       connectionGeneration.toString(),
       this.instanceId,
       Math.max(env().RUNTIME_LEASE_SECONDS, 45),
+      metrics
+        ? JSON.stringify({
+            owner: `${connectionGeneration}:${this.instanceId}`,
+            receivedAt: new Date().toISOString(),
+            metrics,
+          })
+        : "",
+      RUNTIME_TELEMETRY_STALE_MS,
     );
+  }
+
+  async runtimeTelemetry(
+    runtimeId: string,
+  ): Promise<RuntimeTelemetrySnapshot | null> {
+    // Read both keys atomically. Reconnect, disconnect and TTL expiry invalidate
+    // telemetry from the previous owner even when API requests hit another replica.
+    const [owner, raw] = await this.publisher.mget(
+      "devproof:runtime:presence:" + runtimeId,
+      "devproof:runtime:telemetry:" + runtimeId,
+    );
+    if (!owner || !raw) return null;
+    const snapshot = JSON.parse(raw) as RuntimeTelemetrySnapshot & {
+      owner: string;
+    };
+    if (snapshot.owner !== owner) return null;
+    return { receivedAt: snapshot.receivedAt, metrics: snapshot.metrics };
   }
 
   async removeRuntimePresence(runtimeId: string, connectionGeneration: bigint) {

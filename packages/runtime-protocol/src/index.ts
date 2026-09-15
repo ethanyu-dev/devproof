@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 17,
+  minor: 18,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
@@ -12,6 +12,8 @@ export const RUNTIME_NO_LAUNCH_CAPABILITY = "no-launch-evidence-v1";
 export const RUNTIME_CLOSURE_EVIDENCE_CAPABILITY = "closure-evidence-v1";
 export const RUNTIME_SCROLL_FEEDBACK_MINOR = 17;
 export const RUNTIME_SCROLL_FEEDBACK_CAPABILITY = "scroll-feedback-v1";
+export const RUNTIME_TELEMETRY_MINOR = 18;
+export const RUNTIME_TELEMETRY_STALE_MS = 45_000;
 export const RUNTIME_CAPABILITIES = [
   "browser",
   "dom-vision-v1",
@@ -267,7 +269,40 @@ export const runtimeHelloSchema = z.object({
   version: z.string().trim().min(1).max(64).optional(),
 });
 
+/** Host-wide measurements, including Chromium and other workloads on the host. */
+export const runtimeMachineMetricsSchema = z.object({
+  sampledAt: z.string().datetime(),
+  sampleIntervalMs: z.number().nonnegative().finite(),
+  scope: z.literal("HOST"),
+  cpu: z.object({
+    logicalCores: z.number().int().positive(),
+    usagePercent: z.number().min(0).max(100).nullable(),
+  }),
+  memory: z
+    .object({
+      totalBytes: z.number().int().positive().safe(),
+      usedBytes: z.number().int().nonnegative().safe(),
+      availableBytes: z.number().int().nonnegative().safe(),
+      usagePercent: z.number().min(0).max(100),
+      availableSource: z.enum(["MEM_AVAILABLE", "OS_FREE"]),
+    })
+    .refine(
+      (value) => value.usedBytes + value.availableBytes === value.totalBytes,
+    ),
+  process: z.object({
+    rssBytes: z.number().int().nonnegative().safe(),
+    uptimeSeconds: z.number().nonnegative().finite(),
+  }),
+});
+export type RuntimeMachineMetrics = z.infer<typeof runtimeMachineMetricsSchema>;
+export interface RuntimeTelemetrySnapshot {
+  receivedAt: string;
+  metrics: RuntimeMachineMetrics;
+}
+
 export const runtimeHeartbeatSchema = z.object({
+  // Bad optional telemetry must never invalidate session lease renewal.
+  machineMetrics: runtimeMachineMetricsSchema.optional().catch(undefined),
   heartbeatId: z.string().uuid().optional(),
   activeSessions: z
     .array(
