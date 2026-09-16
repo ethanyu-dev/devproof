@@ -27,11 +27,13 @@ describe("browser outcome delivery", () => {
       leaseDurationMs: 60_000,
       leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     })),
+    initialOutcome?: unknown,
   ) {
     const appendEvent = vi.fn().mockResolvedValue({ accepted: true });
+    const releaseBrowser = vi.fn().mockResolvedValue({ released: true });
     const worker = new AgentRuntimeWorker(
       { DEVPROOF_AGENT_WORKER_ID: "browser-worker" } as never,
-      { submitOutcome, heartbeat, appendEvent } as never,
+      { submitOutcome, heartbeat, appendEvent, releaseBrowser } as never,
       vi.fn() as never,
     );
     const internal = worker as unknown as {
@@ -43,15 +45,17 @@ describe("browser outcome delivery", () => {
       ): Promise<void>;
     };
     internal.executor = {
-      execute: vi.fn().mockResolvedValue({
-        kind: "VERIFICATION_COMPLETED",
-        termination: { reason: "TOOL_LIMIT_REACHED" },
-        verdict: "INCONCLUSIVE",
-        summary: "调用预算耗尽。",
-        criteria: [],
-        evidence: [],
-        executionDisposition: "EXECUTED",
-      }),
+      execute: vi.fn().mockResolvedValue(
+        initialOutcome ?? {
+          kind: "VERIFICATION_COMPLETED",
+          termination: { reason: "TOOL_LIMIT_REACHED" },
+          verdict: "INCONCLUSIVE",
+          summary: "调用预算耗尽。",
+          criteria: [],
+          evidence: [],
+          executionDisposition: "EXECUTED",
+        },
+      ),
     };
     const running = internal.executeTask(
       {
@@ -63,13 +67,39 @@ describe("browser outcome delivery", () => {
         snapshot: {
           deadlineAt: new Date(Date.now() + 600_000).toISOString(),
           runId: "run",
+          executionPolicy: {},
         },
       } as RuntimeTaskLease,
       new AbortController().signal,
       "browser-worker",
     );
-    return { running, heartbeat, appendEvent };
+    return { running, heartbeat, appendEvent, internal, releaseBrowser };
   }
+
+  it("corrects a rejected account request once under the same lease", async () => {
+    const rejection = new ControlPlaneError(400, {
+      code: "ACCOUNT_REQUEST_INVALID",
+      message: "invalid subject",
+    });
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(rejection)
+      .mockRejectedValueOnce(rejection)
+      .mockResolvedValue({ accepted: true });
+    const state = setup(submit, undefined, { kind: "WAITING_HUMAN" });
+    await state.running;
+    expect(state.internal.executor.execute).toHaveBeenCalledTimes(2);
+    expect(submit).toHaveBeenCalledTimes(3);
+    expect(state.releaseBrowser).toHaveBeenCalledOnce();
+    expect(submit.mock.calls[2]![1]).toMatchObject({
+      kind: "FATAL_FAILURE",
+      error: { code: "ACCOUNT_REQUEST_INVALID" },
+    });
+    expect(
+      state.internal.executor.execute.mock.calls[1]![0].snapshot.executionPolicy
+        .accountRequestCorrection,
+    ).toContain("控制面拒绝");
+  });
 
   it("renews ownership through transient submission failures and uses one completion id", async () => {
     vi.useFakeTimers();

@@ -165,3 +165,18 @@ coverage and source coverage still run on the expanded Spec.
 The check catalog is local to one Spec attempt; it is not a durable checkpoint
 across worker restarts. No database migration or Browser Runtime protocol change
 is required. See [the generation workflow](../../docs/spec-check-references.md).
+
+Protocol v2.20 separates operator identity from business account subjects. New
+Specs require `accountRequirementsVersion: 2`, an explicit requirements array,
+and a `subjectBinding` for each requirement. Bindings reference Case steps,
+source quotations and, for authentication subjects, acceptance criteria. Legacy
+Specs and v1 account plans remain readable; new Spec claims require minor 20.
+
+Browser policy carries effective versioned `accountRequirements`. `TEST_ACCOUNT`
+requests declare existing slot IDs or cite actual observed DOM/network evidence
+for an omitted business subject. Runtime and API both validate before entering
+human wait. `ACCOUNT_REQUEST_INVALID` permits one bounded continuation using the
+same lease and remaining tool budget. Browser workers below minor 20 skip tasks
+carrying this contract. Account plan v2 stores a definition hash and reviewed
+role corrections without rewriting the original Spec; reruns preserve and
+remap those corrections. See the [implementation and recovery runbook](../../docs/test-account-requirement-design.md).

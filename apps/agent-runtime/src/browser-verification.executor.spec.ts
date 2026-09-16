@@ -5180,3 +5180,128 @@ describe("durable progress recovery", () => {
     },
   );
 });
+
+describe("structured account requests", () => {
+  it("corrects an operator account request and allows normal browser login takeover", async () => {
+    let step = 0;
+    const create = vi.fn().mockImplementation(async () => ({
+      id: `account-${step}`,
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            step++ === 0
+              ? {
+                  kind: "TEST_ACCOUNT",
+                  prompt: "请提供后台模型编辑账号。",
+                  summary: "需要编辑权限。",
+                  context: { purpose: "BUSINESS_TEST_SUBJECT" },
+                }
+              : {
+                  kind: "BROWSER_HITL",
+                  prompt: "请在浏览器中完成后台登录。",
+                  summary: "等待登录完成。",
+                },
+            step,
+          ),
+        ],
+      },
+    }));
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.executionPolicy.accountRequirements = {
+      version: 2,
+      requirements: [],
+    };
+    const checkpoint = vi.fn();
+    expect(
+      await executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+        checkpoint,
+      ),
+    ).toMatchObject({
+      kind: "WAITING_HUMAN",
+      intervention: { kind: "BROWSER_HITL" },
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "executor.accounts.request_rejected",
+      { code: "ACCOUNT_REQUEST_INVALID" },
+    );
+    expect(
+      checkpoint.mock.calls[0]![0].accountRequestRemainingToolCalls,
+    ).toBeLessThan(60);
+  });
+  it("allows an omitted business subject only after observing its actual field", async () => {
+    const create = vi
+      .fn()
+      .mockImplementation(
+        async (request: { messages: Array<Record<string, unknown>> }) => {
+          const page = contextData(request, "current_browser_page").data
+            .snapshot;
+          return {
+            id: "discover-account",
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                functionCall(
+                  "request_human_input",
+                  {
+                    kind: "TEST_ACCOUNT",
+                    prompt: "请提供需要核验的用户 ID。",
+                    summary: "页面要求指定业务用户。",
+                    context: {
+                      accountRequest: {
+                        mode: "DISCOVERED",
+                        subjectKind: "BUSINESS_INPUT",
+                        target: "用户 ID",
+                        criterionId: "criterion-1",
+                        usage: "READ_EXISTING",
+                        observation: {
+                          observationId: page.observationId,
+                          cursor: page.cursor,
+                          quote: "请输入用户 ID",
+                          evidenceRefs: ["artifact://business-field"],
+                        },
+                      },
+                    },
+                  },
+                  1,
+                ),
+              ],
+            },
+          };
+        },
+      );
+    const { runTask, controlPlane, executor } = convergenceHarness(create);
+    runTask.snapshot.executionPolicy.accountRequirements = {
+      version: 2,
+      requirements: [],
+    };
+    runTask.snapshot.criteria[0]!.id = "criterion-1";
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: { content: '- input "请输入用户 ID" [ref=e1]' },
+      artifacts: [{ id: "business-field", kind: "DOM" }],
+    } as never);
+    expect(
+      await executor.execute(runTask, lease, new AbortController().signal),
+    ).toMatchObject({
+      kind: "WAITING_HUMAN",
+      intervention: {
+        kind: "TEST_ACCOUNT",
+        context: {
+          purpose: "BUSINESS_TEST_SUBJECT",
+          usage: "READ_EXISTING",
+          accountSlots: [{ slotId: "discovered:1", label: "用户 ID" }],
+        },
+      },
+    });
+    expect(create).toHaveBeenCalledOnce();
+  });
+});

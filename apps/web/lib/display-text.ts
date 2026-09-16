@@ -193,6 +193,7 @@ const displayLabels: Record<string, string> = {
   "task.waiting_input": "任务等待输入",
   "task.input.provided": "任务输入已提供",
   "task.case.run_created": "Case 执行已创建",
+  "task.accounts.requirements_corrected": "业务账号需求已纠正",
   "task.case.rerun_queued": "Spec Runtime 已进入重跑",
   "task.case.dispatch_failed": "Case 派发失败",
   "task.cancel_requested": "任务已请求取消",

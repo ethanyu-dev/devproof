@@ -169,6 +169,27 @@ export class SpecCheckCatalog {
             throw new Error(`用例「${testCase.name}」重复引用 checkId。`);
           return {
             ...testCase,
+            accountRequirements: testCase.accountRequirements?.map(
+              (requirement) => ({
+                ...requirement,
+                ...(requirement.subjectBinding
+                  ? {
+                      subjectBinding: {
+                        ...requirement.subjectBinding,
+                        criterionIds:
+                          requirement.subjectBinding.criterionIds?.map((id) => {
+                            const index = checkIds.indexOf(id);
+                            if (index < 0)
+                              throw new Error(
+                                `账号用途引用的 checkId 不属于当前用例：${id}`,
+                              );
+                            return String(index + 1);
+                          }),
+                      },
+                    }
+                  : {}),
+              }),
+            ),
             criteria: checkIds.map((id) => {
               const check = this.checks.get(id);
               if (!check)
@@ -184,6 +205,17 @@ export class SpecCheckCatalog {
     );
     // Preserve the registry identity in execution diagnostics without sharing mutable objects.
     expanded.cases.forEach((testCase, caseIndex) => {
+      const ids = new Map(
+        testCase.criteria.map((criterion, index) => [
+          criterion.id,
+          `case-${caseIndex + 1}-${spec.cases[caseIndex]!.checkIds[index]}`,
+        ]),
+      );
+      for (const requirement of testCase.accountRequirements ?? []) {
+        if (requirement.subjectBinding?.criterionIds)
+          requirement.subjectBinding.criterionIds =
+            requirement.subjectBinding.criterionIds.map((id) => ids.get(id)!);
+      }
       testCase.criteria.forEach((criterion, index) => {
         criterion.id = `case-${caseIndex + 1}-${spec.cases[caseIndex]!.checkIds[index]}`;
       });

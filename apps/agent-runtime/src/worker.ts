@@ -338,7 +338,14 @@ export class AgentRuntimeWorker {
             },
           );
         }
-        outcome = await this.executor.execute(task, lease, executionSignal);
+        outcome = await this.executor.execute(
+          task,
+          lease,
+          executionSignal,
+          (policy) => {
+            task.snapshot.executionPolicy = policy;
+          },
+        );
       } catch (error) {
         if (
           controller.signal.reason instanceof LeaseLostError ||
@@ -359,7 +366,55 @@ export class AgentRuntimeWorker {
 
       if (controller.signal.reason instanceof LeaseLostError) return;
       try {
-        await this.submitOutcomeReliably(lease, outcome, controller.signal);
+        try {
+          await this.submitOutcomeReliably(lease, outcome, controller.signal);
+        } catch (error) {
+          if (
+            !isAccountRequestRejection(error) ||
+            outcome.kind !== "WAITING_HUMAN" ||
+            !this.executor
+          )
+            throw error;
+          task.snapshot.executionPolicy.accountRequestCorrection =
+            "控制面拒绝了上次业务账号请求。请根据当前页面纠正用途与证据；后台登录使用 BROWSER_HITL，无法验证的业务项记录 INCONCLUSIVE，不重复被拒绝请求。";
+          try {
+            outcome = await this.executor.execute(
+              task,
+              lease,
+              executionSignal,
+              (policy) => {
+                task.snapshot.executionPolicy = policy;
+              },
+            );
+            await this.submitOutcomeReliably(lease, outcome, controller.signal);
+          } catch (correctionError) {
+            if (!isAccountRequestRejection(correctionError))
+              throw correctionError;
+            // Both rejected outcomes preserved the browser for a human wait
+            // that was never accepted. Request closure before ending the lease.
+            await this.controlPlane
+              .releaseBrowser(lease, AbortSignal.timeout(2_000))
+              .catch(() => {
+                log("runtime.browser.release_deferred", {
+                  taskId: task.taskId,
+                });
+              });
+            outcome = runtimeOutcomeSchema.parse({
+              kind: "FATAL_FAILURE",
+              executionDisposition: "AGENT_ERROR",
+              error: {
+                code: "ACCOUNT_REQUEST_INVALID",
+                failureClass: "TOOL_EXECUTION",
+                phase: "verification",
+                message: "业务账号请求在一次纠正后仍未通过用途或证据校验。",
+                details: {},
+              },
+              summary:
+                "账号需求未能通过校验，本次执行结束；没有创建错误的人工账号待办。",
+            });
+            await this.submitOutcomeReliably(lease, outcome, controller.signal);
+          }
+        }
         log("runtime.task.completed", {
           kind: outcome.kind,
           runId: task.snapshot.runId,
@@ -550,6 +605,17 @@ export class AgentRuntimeWorker {
     }
     throw lastError;
   }
+}
+
+export function isAccountRequestRejection(error: unknown) {
+  return (
+    error instanceof ControlPlaneError &&
+    error.status === 400 &&
+    error.body !== null &&
+    typeof error.body === "object" &&
+    "code" in error.body &&
+    error.body.code === "ACCOUNT_REQUEST_INVALID"
+  );
 }
 
 function isLeaseConflict(error: unknown) {

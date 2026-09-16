@@ -9,6 +9,10 @@ import {
 } from "@devproof/contracts";
 import { specificationDefinitionHash } from "@devproof/test-domain";
 import type { TaskRequestActor } from "./task-execution.service.js";
+import {
+  readAccountPlan,
+  resolveCaseExecutionDefinition,
+} from "./case-account-definition.js";
 
 export const caseRerunInclude = {
   analysisSources: true,
@@ -298,13 +302,30 @@ export async function insertCaseRerunTask(
       })),
     });
   await tx.taskCaseExecution.createMany({
-    data: deployments.map((item) => ({
+    data: deployments.map((item, index) => ({
       taskExecutionId: taskId,
       caseId,
       deploymentId: item.id,
       executionOrdinal: 1,
       dispatchOrder: 0,
       executionPolicy: item.executionPolicy ?? Prisma.JsonNull,
+      ...(() => {
+        const previous = executions[index]!;
+        const plan = readAccountPlan(previous.testAccountPlan);
+        if (plan?.version !== 2) return {};
+        resolveCaseExecutionDefinition(originalCase.definition, plan);
+        return {
+          testAccountPlan: json({
+            ...(remapSourceReferences(plan, references) as object),
+            definitionHash: specificationDefinitionHash(definition),
+            revision: randomUUID(),
+            requestedAt: now.toISOString(),
+            expiresAt: new Date(
+              now.getTime() + input.hitlPolicy.timeoutSeconds * 1000,
+            ).toISOString(),
+          }),
+        };
+      })(),
     })),
   });
   await tx.taskProfileBinding.create({

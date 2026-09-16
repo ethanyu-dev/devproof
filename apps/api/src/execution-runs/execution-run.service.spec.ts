@@ -425,6 +425,34 @@ describe("ExecutionRunService HITL resume", () => {
     expect(tx.taskExecution.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: taskId } }),
     );
+    Object.assign(existing.executionPolicy, {
+      accountRequirements: { version: 2, requirements: [] },
+      initialTestAccounts: [],
+      testAccounts: [
+        {
+          slotId: "discovered:1",
+          account: "provided-after-creation",
+          usage: "READ_EXISTING",
+        },
+      ],
+    });
+    await expect(
+      service.createForTask(current, input as never, taskId),
+    ).resolves.toMatchObject({ id: runId });
+    await expect(
+      service.createForTask(
+        current,
+        {
+          ...input,
+          accountRequirements: {
+            version: 2,
+            requirements: [],
+            definitionHash: "a".repeat(64),
+          },
+        } as never,
+        taskId,
+      ),
+    ).rejects.toThrow("different run request");
   });
 
   it("injects the human response and requeues the same task", async () => {

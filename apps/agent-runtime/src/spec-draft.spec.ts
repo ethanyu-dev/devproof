@@ -210,3 +210,40 @@ it("asks for concise generation without truncating saved evidence or removing ne
     plan.requirements[0]!.quote,
   );
 });
+
+it("preserves account provenance and resolves AUTH_SUBJECT criterion ordinals", () => {
+  const accountSource = "analysis-source://attempt/accounts";
+  const spec = normalizeCompactSpec(
+    {
+      ...draft,
+      cases: [
+        {
+          ...draft.cases[0],
+          accountRequirementsVersion: 2,
+          accountRequirements: [
+            {
+              role: "subject",
+              label: "权限验收账号",
+              usage: "READ_EXISTING",
+              rationale: "验证指定账号的权限",
+              subjectBinding: {
+                kind: "AUTH_SUBJECT",
+                target: "指定用户权限",
+                stepOrders: [1],
+                criterionIds: ["1"],
+                basis: { sourceRef: accountSource, quote: "指定用户权限" },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    requirements,
+  );
+  expect(spec.cases[0]!.accountRequirementsVersion).toBe(2);
+  expect(spec.cases[0]!.accountRequirements![0]!.subjectBinding).toMatchObject({
+    criterionIds: [spec.cases[0]!.criteria[0]!.id],
+    basis: { sourceRef: accountSource },
+  });
+  expect(spec.cases[0]!.sourceRefs).toContain(accountSource);
+});

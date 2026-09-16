@@ -1,6 +1,8 @@
 import {
   runtimeGeneratedSpecSchema,
   businessAccountRequirementsError,
+  validateCaseAccountRequirements,
+  accountRequirementIssuesMessage,
   testAccountRequirementsSchema,
   runtimeObservationTargetSchema,
   runtimeSpecCriterionSchema,
@@ -64,6 +66,7 @@ export const compactSpecSchema = z.object({
     .array(
       z.object({
         name: z.string().trim().min(1).max(100),
+        accountRequirementsVersion: z.literal(2).optional(),
         authRole: runtimeGeneratedSpecSchema.shape.cases.element.shape.authRole,
         steps: z.array(conciseText).min(1).max(100),
         accountRequirements: z
@@ -130,7 +133,7 @@ export function normalizeCompactSpec(
   const accountError = businessAccountRequirementsError(draft.cases);
   if (accountError) throw new Error(accountError);
   const byId = new Map(requirements.map((item) => [item.id, item]));
-  return runtimeGeneratedSpecSchema.parse({
+  const spec = runtimeGeneratedSpecSchema.parse({
     ...draft,
     scopePolicy: "CHANGE_FOCUSED",
     requirements,
@@ -153,6 +156,30 @@ export function normalizeCompactSpec(
       });
       return {
         ...testCase,
+        accountRequirements: testCase.accountRequirements?.map(
+          (requirement) => ({
+            ...requirement,
+            ...(requirement.subjectBinding
+              ? {
+                  subjectBinding: {
+                    ...requirement.subjectBinding,
+                    criterionIds: requirement.subjectBinding.criterionIds?.map(
+                      (id) => {
+                        if (
+                          !/^[1-9]\d*$/u.test(id) ||
+                          !criteria[Number(id) - 1]
+                        )
+                          throw new Error(
+                            `账号用途引用的验收序号不存在：${id}`,
+                          );
+                        return criteria[Number(id) - 1]!.id;
+                      },
+                    ),
+                  },
+                }
+              : {}),
+          }),
+        ),
         preconditions: testCase.preconditions.length
           ? testCase.preconditions
           : ["使用任务指定的验证环境和浏览器身份。"],
@@ -166,7 +193,12 @@ export function normalizeCompactSpec(
           .join("\n")
           .slice(0, 5_000),
         sourceRefs: [
-          ...new Set(criteria.flatMap((criterion) => criterion.sourceRefs)),
+          ...new Set([
+            ...criteria.flatMap((criterion) => criterion.sourceRefs),
+            ...(testCase.accountRequirements ?? []).flatMap((r) =>
+              r.subjectBinding ? [r.subjectBinding.basis.sourceRef] : [],
+            ),
+          ]),
         ],
         criteria,
         steps: testCase.steps.map((action, index) => ({
@@ -177,6 +209,11 @@ export function normalizeCompactSpec(
       };
     }),
   });
+  const error = accountRequirementIssuesMessage(
+    validateCaseAccountRequirements(spec.cases),
+  );
+  if (error) throw new Error(error);
+  return spec;
 }
 
 export function defineSpecRequirements(

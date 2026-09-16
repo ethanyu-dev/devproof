@@ -1,4 +1,7 @@
 import "reflect-metadata";
+import { specificationDefinitionHash } from "@devproof/test-domain";
+import { correctAccountRequirements } from "./correct-account-requirements.js";
+import { resolveCaseExecutionDefinition } from "./case-account-definition.js";
 import { randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type Prisma } from "@prisma/client";
@@ -579,3 +582,143 @@ async function historicalUnusedAccount() {
   });
   return { ...f, run, session, intervention };
 }
+
+// The correction is intentionally exercised against real row/advisory locks.
+describe("reviewed account requirement correction", () => {
+  async function correctionFixture() {
+    const f = await fixture();
+    const row = (await f.current()).rows.find(
+      (r) => readAccountPlan(r.testAccountPlan)!.requirements.length,
+    )!;
+    const plan = readAccountPlan(row.testAccountPlan)!;
+    const input = {
+      teamId: f.team.id,
+      taskId: f.task.id,
+      correctionId: randomUUID(),
+      operator: "integration-test",
+      reason: "复核步骤发现账号仅指后台操作身份，实际被测对象为模型记录。",
+      cases: [
+        {
+          caseExecutionId: row.id,
+          definitionHash: specificationDefinitionHash(row.testCase.definition),
+          expectedRevision: plan.revision,
+          removedRoles: ["subject"],
+          effectiveAuthRole: "模型编辑员",
+        },
+      ],
+    };
+    return { ...f, row, input };
+  }
+  it("previews without mutation, applies once, invalidates old forms and preserves the Spec", async () => {
+    const f = await correctionFixture();
+    const stale = await f.submission();
+    expect(
+      await correctAccountRequirements(db as never, f.input),
+    ).toMatchObject({
+      applied: false,
+      changes: [{ after: [], missingCount: 0 }],
+    });
+    expect((await f.current()).preparation.missingCount).toBe(2);
+    expect(
+      await db.taskExecutionEvent.count({
+        where: { kind: "task.accounts.requirements_corrected" },
+      }),
+    ).toBe(0);
+    expect(
+      await correctAccountRequirements(db as never, f.input, true),
+    ).toMatchObject({ applied: true });
+    expect(
+      await correctAccountRequirements(db as never, f.input, true),
+    ).toMatchObject({ applied: true, duplicate: true });
+    const current = await f.current();
+    expect(current.preparation.totalCount).toBe(0);
+    const row = current.rows.find((r) => r.id === f.row.id)!;
+    expect(row.testCase.definition).toEqual(f.row.testCase.definition);
+    expect(accountsReady(row.testAccountPlan, row.testCase.definition)).toBe(
+      true,
+    );
+    expect(
+      resolveCaseExecutionDefinition(
+        row.testCase.definition,
+        row.testAccountPlan,
+      ),
+    ).toMatchObject({ authRole: "模型编辑员", accountRequirements: [] });
+    await expect(
+      provideTaskTestAccounts(db as never, f.team.id, f.task.id, stale),
+    ).rejects.toThrow();
+    await prepareTestAccountPlans(db as never, f.task.id);
+    expect((await f.current()).preparation.totalCount).toBe(0);
+    expect(await db.executionRun.count()).toBe(0);
+    expect(
+      await db.taskExecutionEvent.count({
+        where: { kind: "task.accounts.requirements_corrected" },
+      }),
+    ).toBe(1);
+  });
+  it.each([
+    "hash",
+    "revision",
+    "dispatch",
+    "cancel",
+    "terminated",
+    "allocated",
+  ])("rejects a stale or no-longer-blocked target: %s", async (condition) => {
+    const f = await correctionFixture();
+    if (condition === "hash") f.input.cases[0]!.definitionHash = "f".repeat(64);
+    if (condition === "revision")
+      f.input.cases[0]!.expectedRevision = randomUUID();
+    if (condition === "dispatch")
+      await db.taskCaseExecution.update({
+        where: { id: f.row.id },
+        data: { dispatchRequestedAt: new Date(), dispatchAttempts: 1 },
+      });
+    if (condition === "cancel")
+      await db.taskExecution.update({
+        where: { id: f.task.id },
+        data: { cancelRequestedAt: new Date() },
+      });
+    if (condition === "terminated")
+      await db.taskExecution.update({
+        where: { id: f.task.id },
+        data: { lifecycle: "COMPLETED" },
+      });
+    if (condition === "allocated")
+      await provideTaskTestAccounts(
+        db as never,
+        f.team.id,
+        f.task.id,
+        await f.submission(),
+      );
+    await expect(
+      correctAccountRequirements(db as never, f.input, true),
+    ).rejects.toThrow();
+    expect(
+      await db.taskExecutionEvent.count({
+        where: { kind: "task.accounts.requirements_corrected" },
+      }),
+    ).toBe(0);
+  });
+  it("serializes correction against account allocation so only one revision wins", async () => {
+    const f = await correctionFixture();
+    const submission = await f.submission();
+    const results = await Promise.allSettled([
+      correctAccountRequirements(db as never, f.input, true),
+      provideTaskTestAccounts(db as never, f.team.id, f.task.id, submission),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((await f.current()).preparation.missingCount).toBe(0);
+  });
+  it("keeps simultaneous retries idempotent", async () => {
+    const f = await correctionFixture();
+    const results = await Promise.all([
+      correctAccountRequirements(db as never, f.input, true),
+      correctAccountRequirements(db as never, f.input, true),
+    ]);
+    expect(results.every((r) => r.applied)).toBe(true);
+    expect(
+      await db.taskExecutionEvent.count({
+        where: { kind: "task.accounts.requirements_corrected" },
+      }),
+    ).toBe(1);
+  });
+});

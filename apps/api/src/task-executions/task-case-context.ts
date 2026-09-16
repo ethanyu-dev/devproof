@@ -11,11 +11,15 @@ export function caseExecutionGoal(testCase: {
   testData?: readonly string[];
   steps: ReadonlyArray<{ order: number; action: string }>;
   cleanup?: readonly string[];
+  accountRequirementsVersion?: number | undefined;
   accountRequirements?: readonly TestAccountRequirement[] | undefined;
 }) {
-  const requirements = (testCase.accountRequirements ?? []).filter(
-    (item) => !isLoginOnlyAccountRequirement(item),
-  );
+  const requirements =
+    testCase.accountRequirementsVersion === 2
+      ? (testCase.accountRequirements ?? [])
+      : (testCase.accountRequirements ?? []).filter(
+          (item) => !isLoginOnlyAccountRequirement(item),
+        );
   const section = (label: string, values: readonly string[] = []) =>
     values.length
       ? [`${label}：`, ...[...new Set(values)].map((value) => `- ${value}`)]

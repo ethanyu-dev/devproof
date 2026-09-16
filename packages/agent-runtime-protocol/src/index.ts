@@ -1,6 +1,11 @@
 export * from "./criterion-observation.js";
-import { testAccountRequirementsSchema } from "./test-accounts.js";
+import {
+  testAccountRequirementsSchema,
+  executionAccountRequirementsSchema,
+} from "./test-accounts.js";
 export * from "./test-accounts.js";
+export * from "./account-requirement-validation.js";
+export * from "./account-request.js";
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
 import { z } from "zod";
 export {
@@ -25,7 +30,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 19,
+  minor: 20,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -223,6 +228,7 @@ export const runtimeSpecCriterionSchema = z.object({
 });
 
 export const runtimeGeneratedSpecCaseSchema = z.object({
+  accountRequirementsVersion: z.literal(2).optional(),
   accountRequirements: testAccountRequirementsSchema.optional(),
   authRole: z.string().trim().min(1).max(120).default("default"),
   cleanup: z.array(z.string().trim().min(1).max(5_000)).max(50).default([]),
@@ -413,6 +419,16 @@ export function browserExecutionSnapshot(
   return {
     ...snapshot,
     businessReferences: [],
+    executionPolicy: {
+      ...snapshot.executionPolicy,
+      ...(snapshot.executionPolicy.accountRequirements
+        ? {
+            accountRequirements: executionAccountRequirementsSchema.parse(
+              snapshot.executionPolicy.accountRequirements,
+            ),
+          }
+        : {}),
+    },
     criteria: snapshot.criteria.map(browserExecutionCriterion),
   };
 }

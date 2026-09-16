@@ -83,6 +83,8 @@ function refundSpec(sourceRef = source.externalId, quote = source.excerpt) {
     cases: [
       {
         name: "退款状态",
+        accountRequirementsVersion: 2,
+        accountRequirements: [],
         rationale: "覆盖退款要求。",
         preconditions: ["具有退款权限。"],
         sourceRefs: [sourceRef],
@@ -216,6 +218,8 @@ describe("SpecAnalysisExecutor", () => {
                 outOfScope: ["分页没有本次变更依据，不追加通用回归。"],
                 cases: [
                   {
+                    accountRequirementsVersion: 2,
+                    accountRequirements: [],
                     name: "退款结果",
                     steps: ["申请退款并确认结果。"],
                     ...(specFormat === "CHECK_REFERENCES"
@@ -285,6 +289,8 @@ describe("SpecAnalysisExecutor", () => {
       summary: "验证新增白名单类型",
       cases: [
         {
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
           name: "检查白名单配置",
           steps: ["独立打开旧版对公转账与 ZDR 配置界面并对照。"],
           checkIds: ["check-1", "check-2"],
@@ -415,6 +421,7 @@ describe("SpecAnalysisExecutor", () => {
       "steps",
       "checkIds",
       "accountRequirements",
+      "accountRequirementsVersion",
     ]);
     expect(caseInput.properties.criteria).toBeUndefined();
     expect(caseInput.properties.checkIds.items.enum).toEqual([
@@ -457,6 +464,8 @@ describe("SpecAnalysisExecutor", () => {
       summary: "验证白名单类型",
       cases: [
         {
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
           name: "检查新增白名单类型",
           steps: ["独立打开白名单配置，检查类型选项。"],
           preconditions: ["不依赖其他 Case。"],
@@ -537,6 +546,8 @@ describe("SpecAnalysisExecutor", () => {
         uncoveredRequirements: [{ requirementId: "requirement-2" }],
         cases: [
           {
+            accountRequirementsVersion: 2,
+            accountRequirements: [],
             sourceRefs: [source.externalId],
             priority: "MEDIUM",
             steps: [{ order: 1 }],
@@ -571,6 +582,7 @@ describe("SpecAnalysisExecutor", () => {
       "steps",
       "criteria",
       "accountRequirements",
+      "accountRequirementsVersion",
     ]);
     expect(caseInput.properties.criteria.items.required).toEqual([
       "requirementId",
@@ -853,6 +865,8 @@ describe("SpecAnalysisExecutor", () => {
       scope: { inScope: ["类型可选性"] },
       cases: [
         {
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
           name: "检查类型",
           preconditions: [precondition],
           rationale: "核对真实页面。",
@@ -1024,6 +1038,8 @@ describe("SpecAnalysisExecutor", () => {
       scope: { inScope: ["新建类型"] },
       cases: [
         {
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
           name: "新建类型",
           preconditions: ["已登录后台，业务账号另由 TEST_ACCOUNT 提供。"],
           rationale: "来自需求。",
@@ -1205,6 +1221,8 @@ describe("SpecAnalysisExecutor", () => {
     const spec = {
       cases: [
         {
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
           criteria: [
             {
               description: "订单显示为已退款状态。",
@@ -1503,6 +1521,8 @@ describe("SpecAnalysisExecutor", () => {
       const spec = {
         cases: [
           {
+            accountRequirementsVersion: 2,
+            accountRequirements: [],
             criteria: [
               {
                 description: "订单显示为已退款状态。",

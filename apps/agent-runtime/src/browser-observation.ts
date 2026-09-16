@@ -675,6 +675,20 @@ export class BrowserObservations {
     );
   }
 
+  accountRequestEvidence(id: string, cursor: number, quote: string) {
+    if (!this.hasDeliveredQuote(id, cursor, quote))
+      return new Map<string, { kind: string; content: string }>();
+    const entry = this.entries.get(id);
+    return new Map<string, { kind: string; content: string }>([
+      ...(entry?.evidenceRefs ?? []).map(
+        (ref) => [ref, { kind: "DOM", content: quote }] as const,
+      ),
+      ...(entry?.networkEvidenceRefs ?? []).map(
+        (ref) => [ref, { kind: "NETWORK", content: quote }] as const,
+      ),
+    ]);
+  }
+
   /** Select one complete, delivered network request, preserving its URL/method
    * and artifact. A DOM string that happens to look like JSON is not a request.
    */

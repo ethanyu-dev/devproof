@@ -2,7 +2,18 @@ import { z } from "zod";
 import { businessTestAccountSchema } from "./business-test-account.js";
 
 const notes = z.array(z.string().trim().min(1).max(1000)).max(20).default([]);
+export const accountSubjectBindingSchema = z.object({
+  kind: z.enum(["BUSINESS_INPUT", "BUSINESS_RECORD", "AUTH_SUBJECT"]),
+  target: z.string().trim().min(1).max(300),
+  stepOrders: z.array(z.number().int().positive()).min(1).max(100),
+  criterionIds: z.array(z.string().min(1).max(160)).max(100).optional(),
+  basis: z.object({
+    sourceRef: z.string().min(1).max(500),
+    quote: z.string().trim().min(1).max(2000),
+  }),
+});
 export const testAccountRequirementSchema = z.object({
+  subjectBinding: accountSubjectBindingSchema.optional(),
   role: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/),
   label: z.string().trim().min(1).max(200),
   count: z.number().int().min(1).max(20).default(1),
@@ -11,18 +22,22 @@ export const testAccountRequirementSchema = z.object({
   constraints: notes,
   rationale: z.string().trim().min(1).max(1000),
 });
+function validateRequirementCounts(
+  items: readonly { role: string; count: number }[],
+  ctx: z.RefinementCtx,
+) {
+  if (new Set(items.map((item) => item.role)).size !== items.length)
+    ctx.addIssue({ code: "custom", message: "测试账号角色不能重复。" });
+  if (items.reduce((sum, item) => sum + item.count, 0) > 50)
+    ctx.addIssue({
+      code: "custom",
+      message: "每个 Case 最多分配 50 个测试账号。",
+    });
+}
 export const testAccountRequirementsSchema = z
   .array(testAccountRequirementSchema)
   .max(20)
-  .superRefine((items, ctx) => {
-    if (new Set(items.map((item) => item.role)).size !== items.length)
-      ctx.addIssue({ code: "custom", message: "测试账号角色不能重复。" });
-    if (items.reduce((sum, item) => sum + item.count, 0) > 50)
-      ctx.addIssue({
-        code: "custom",
-        message: "每个 Case 最多分配 50 个测试账号。",
-      });
-  });
+  .superRefine(validateRequirementCounts);
 export const testAccountBindingSchema = z.object({
   slotId: z.string().min(1).max(100),
   label: z.string().max(200).optional(),
@@ -121,7 +136,7 @@ export function accountInputResponseSchema(
         additionalProperties: false,
       };
 }
-export const testAccountPlanSchema = z.object({
+const legacyTestAccountPlanSchema = z.object({
   version: z.literal(1),
   revision: z.string().uuid(),
   requirements: testAccountRequirementsSchema,
@@ -129,14 +144,45 @@ export const testAccountPlanSchema = z.object({
   requestedAt: z.string().datetime(),
   expiresAt: z.string().datetime().optional(),
 });
+export const testAccountPlanSchema = z.discriminatedUnion("version", [
+  legacyTestAccountPlanSchema,
+  legacyTestAccountPlanSchema.extend({
+    version: z.literal(2),
+    definitionHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    effectiveAuthRole: z.string().trim().min(1).max(120),
+    resolution: z.object({
+      kind: z.enum(["DECLARED", "REVIEWED_CORRECTION"]),
+      removedRoles: z.array(z.string().min(1).max(80)).max(20),
+      reason: z.string().trim().min(1).max(1000),
+    }),
+  }),
+]);
+export const executionAccountRequirementsSchema = z.object({
+  version: z.literal(2),
+  requirements: z
+    .array(
+      testAccountRequirementSchema.extend({
+        // Source quotations belong to the persisted Spec, not the browser prompt.
+        subjectBinding: accountSubjectBindingSchema
+          .omit({ basis: true })
+          .optional(),
+      }),
+    )
+    .max(20)
+    .superRefine(validateRequirementCounts),
+  definitionHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional(),
+});
 export type TestAccountRequirement = z.infer<
   typeof testAccountRequirementSchema
 >;
 export type TestAccountBinding = z.infer<typeof testAccountBindingSchema>;
 export type TestAccountPlan = z.infer<typeof testAccountPlanSchema>;
-export function testAccountSlots(
-  requirements: readonly TestAccountRequirement[],
-) {
+export function testAccountSlots<
+  T extends Pick<TestAccountRequirement, "role" | "label" | "count">,
+>(requirements: readonly T[]) {
   return requirements.flatMap((requirement) =>
     Array.from({ length: requirement.count }, (_, index) => ({
       ...requirement,
@@ -156,6 +202,8 @@ export function testAccountSlots(
 export function isLoginOnlyAccountRequirement(
   requirement: TestAccountRequirement,
 ) {
+  // Authentication subjects are intentionally tested identities, not operators.
+  if (requirement.subjectBinding?.kind === "AUTH_SUBJECT") return false;
   return (
     /登录用|后台登录(?:账号|身份)|浏览器(?:登录)?身份|执行(?:者|用)(?:的)?登录|login\s+(?:identity|account)|authentication\s+identity/iu.test(
       requirement.label,
@@ -190,6 +238,8 @@ export function caseAccountRequirements(
     definition && typeof definition === "object"
       ? (definition as Record<string, unknown>)
       : {};
+  if (d.accountRequirementsVersion === 2)
+    return testAccountRequirementsSchema.parse(d.accountRequirements);
   if (d.accountRequirements !== undefined)
     return testAccountRequirementsSchema
       .parse(d.accountRequirements)

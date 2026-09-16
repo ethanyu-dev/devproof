@@ -1,5 +1,6 @@
 import {
   testAccountBindingsSchema,
+  executionAccountRequirementsSchema,
   businessTestAccountSchema,
 } from "@devproof/agent-runtime-protocol";
 export {
@@ -598,6 +599,7 @@ export const DEFAULT_EXECUTION_BUDGET_SECONDS = 1_800;
 
 export const executionRunCreateInputSchema = z
   .object({
+    accountRequirements: executionAccountRequirementsSchema.optional(),
     testAccounts: testAccountBindingsSchema.optional(),
     concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
     businessReferences: z

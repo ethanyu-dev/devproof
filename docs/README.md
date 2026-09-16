@@ -13,6 +13,7 @@ English is the canonical language for project documentation.
 - [Runtime machine observability](runtime-machine-observability.md): pairing, host resources, live slot pools, and concurrency tuning
 - [User Browser Profiles](user-browser-profiles.md): identity, authorization, retention, and privacy
 - [Runtime concurrency and recovery proposal](runtime-concurrency-recovery-design.md): isolated authenticated sessions, bounded lease recovery, and explainable scheduling
+- [Business account requirements](test-account-requirement-design.md): operator identity, validated business subjects, immutable plan correction, and recovery commands
 - [Test data model](test-data-model.md): immutable definitions, snapshots, traces, and artifacts
 - [Versioning](versioning.md): platform, Browser Runtime, and wire-protocol releases
 

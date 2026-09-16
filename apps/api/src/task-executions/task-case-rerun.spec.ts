@@ -1,3 +1,5 @@
+import { specificationDefinitionHash } from "@devproof/test-domain";
+import { resolveCaseExecutionDefinition } from "./case-account-definition.js";
 import { describe, expect, it, vi } from "vitest";
 import { caseRerunBlockReason } from "./task-case-rerun.js";
 import { TaskExecutionService } from "./task-execution.service.js";
@@ -479,4 +481,71 @@ describe("case rerun availability", () => {
       ).toBeNull();
     },
   );
+});
+
+it("copies the corrected plan, remaps account provenance and recalculates its hash", async () => {
+  const { execution, tx, rerun } = fixture();
+  const subject = {
+    role: "subject",
+    label: "指定用户",
+    count: 1,
+    usage: "READ_EXISTING",
+    rationale: "检查指定用户记录",
+    requiredTypes: [],
+    constraints: [],
+    subjectBinding: {
+      kind: "BUSINESS_RECORD",
+      target: "用户 ID",
+      stepOrders: [1],
+      basis: { sourceRef, quote: "指定用户" },
+    },
+  };
+  Object.assign(execution.testCase.definition, {
+    accountRequirements: [
+      {
+        role: "editor",
+        label: "LLM 产品编辑账号",
+        count: 1,
+        usage: "CREATE_OR_MODIFY",
+        rationale: "编辑权限",
+      },
+      subject,
+    ],
+  });
+  Object.assign(execution, {
+    testAccountPlan: {
+      version: 2,
+      revision: "88888888-8888-4888-8888-888888888888",
+      requestedAt: new Date().toISOString(),
+      definitionHash: specificationDefinitionHash(
+        execution.testCase.definition,
+      ),
+      requirements: [subject],
+      bindings: [],
+      effectiveAuthRole: "模型编辑员",
+      resolution: {
+        kind: "REVIEWED_CORRECTION",
+        removedRoles: ["editor"],
+        reason: "操作身份已分离",
+      },
+    },
+  });
+  await rerun();
+  const definition =
+    tx.taskSpecificationSnapshot.create.mock.calls[0]![0].data.cases.create[0]
+      .definition;
+  const plan =
+    tx.taskCaseExecution.createMany.mock.calls[0]![0].data[0].testAccountPlan;
+  const ref =
+    tx.taskAnalysisSource.createMany.mock.calls[0]![0].data[0].externalId;
+  expect(plan).toMatchObject({
+    definitionHash: specificationDefinitionHash(definition),
+    effectiveAuthRole: "模型编辑员",
+    resolution: { removedRoles: ["editor"] },
+    requirements: [{ subjectBinding: { basis: { sourceRef: ref } } }],
+  });
+  expect(plan.revision).not.toBe("88888888-8888-4888-8888-888888888888");
+  expect(
+    resolveCaseExecutionDefinition(definition, plan).accountRequirements,
+  ).toHaveLength(1);
 });
