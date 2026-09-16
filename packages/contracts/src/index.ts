@@ -1680,7 +1680,7 @@ export const userBrowserProfileCreateInputSchema = z.object({
     .default(["CONSOLE"])
     .transform((values) => [...new Set(values)]),
   runtimeId: z.string().uuid().optional(),
-  verificationRules: userBrowserProfileVerificationRulesSchema,
+  verificationRules: userBrowserProfileVerificationRulesSchema.optional(),
   verificationUrl: userBrowserProfileVerificationUrlSchema,
 });
 

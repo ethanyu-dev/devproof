@@ -628,6 +628,17 @@ describe("DevProof contracts", () => {
       grants: ["CONSOLE"],
       verificationUrl: "https://app.example.com/account",
     };
+    expect(userBrowserProfileCreateInputSchema.parse(base)).toMatchObject({
+      authRole: "default",
+      environmentKey: "default",
+      verificationUrl: "https://app.example.com/account",
+    });
+    expect(
+      userBrowserProfileCreateInputSchema.safeParse({
+        ...base,
+        verificationUrl: "https://user:password@app.example.com/account",
+      }).success,
+    ).toBe(false);
     expect(
       userBrowserProfileCreateInputSchema.safeParse({
         ...base,

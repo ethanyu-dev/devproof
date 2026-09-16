@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { userBrowserProfileCreateInputSchema } from "@devproof/contracts";
 
 import { UserBrowserProfilesService } from "./user-browser-profiles.service.js";
 
@@ -20,6 +21,98 @@ function service(
 }
 
 describe("UserBrowserProfilesService", () => {
+  it.each([false, true])(
+    "creates a user-owned identity before any task (custom verification: %s)",
+    async (customVerification) => {
+      let row: Record<string, unknown>;
+      const create = vi.fn().mockImplementation(({ data }) => {
+        row = {
+          ...data,
+          id: "profile-1",
+          status: "UNINITIALIZED",
+          grants: [],
+          runtimeSessions: [],
+        };
+        return row;
+      });
+      const createMany = vi.fn().mockImplementation(({ data }) => {
+        row.grants = data;
+        return { count: data.length };
+      });
+      const tx = {
+        userBrowserProfile: {
+          create,
+          findUniqueOrThrow: vi.fn().mockImplementation(() => row),
+        },
+        browserProfileGrant: { createMany },
+      };
+      const record = vi.fn();
+      const profiles = new UserBrowserProfilesService(
+        { $transaction: vi.fn((callback) => callback(tx)) } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        { record } as never,
+      );
+      const customRules = {
+        authenticatedSelector: "[data-user-menu]",
+        loginUrlPatterns: [],
+        successUrlPatterns: [],
+      };
+      const input = userBrowserProfileCreateInputSchema.parse({
+        displayName: "My account",
+        verificationUrl: "https://app.example.com/account?tab=profile#settings",
+        ...(customVerification ? { verificationRules: customRules } : {}),
+      });
+      const auth = { user: { id: "user-1" }, team: { id: "team-1" } };
+      const result = await profiles.create(auth as never, input);
+
+      expect(create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          ownerUserId: "user-1",
+          teamId: "team-1",
+          authRole: "default",
+          environmentKey: "default",
+          executionMode: "SERIAL_PERSISTENT",
+          verificationRules: customVerification
+            ? customRules
+            : {
+                provisionedBy: "USER_TARGET",
+                requestedTriggerSources: [],
+                loginUrlPatterns: ["*/login*", "*/signin*"],
+                successUrlPatterns: ["https://app.example.com/account*"],
+              },
+        }),
+      });
+      expect(createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            consentedByUserId: "user-1",
+            hostnamePattern: "app.example.com",
+            profileId: "profile-1",
+            teamId: "team-1",
+            triggerSource: "CONSOLE",
+          },
+        ],
+      });
+      expect(result).toMatchObject({
+        configurationSource: "MANUAL",
+        status: "UNINITIALIZED",
+        pendingTriggerSources: [],
+        siteHostname: "app.example.com",
+      });
+      expect(result).not.toHaveProperty("runtimeProfileKey");
+      expect(record).toHaveBeenCalledWith(
+        auth,
+        "browser_profile.created",
+        "user_browser_profile",
+        "profile-1",
+        expect.anything(),
+      );
+    },
+  );
+
   it("requests a high quality login preview for the authenticated control session", async () => {
     const subscribe = vi.fn().mockResolvedValue(vi.fn());
     const profiles = new UserBrowserProfilesService(
@@ -96,72 +189,75 @@ describe("UserBrowserProfilesService", () => {
     );
   });
 
-  it("does not treat a same-origin login redirect as automatic verification", async () => {
-    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
-    const execute = vi
-      .fn()
-      .mockResolvedValueOnce({ status: "SUCCEEDED" })
-      .mockResolvedValueOnce({
-        result: { url: "https://app.example.com/auth" },
-      });
-    const profiles = new UserBrowserProfilesService(
-      { userBrowserProfile: { updateMany } } as never,
-      {} as never,
-      { execute } as never,
-      {} as never,
-      {} as never,
-      {} as never,
-    );
-    vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
-      id: "profile-1",
-      runtimeSessions: [
-        {
-          id: "session-1",
-          purpose: "PROFILE_PREPARATION",
-          status: "ACTIVE",
-        },
-      ],
-      status: "PREPARING",
-      verificationRules: {
-        loginUrlPatterns: ["*/login*", "*/signin*"],
-        provisionedBy: "TASK_TARGET",
-        requestedTriggerSources: ["CONSOLE"],
-        successUrlPatterns: ["https://app.example.com/*"],
-      },
-      verificationUrl: "https://app.example.com/",
-      version: 3,
-    } as never);
-
-    await expect(
-      profiles.verify(
-        {
-          sessionId: "session-cookie",
-          team: { id: "team-1", name: "Team", slug: "team" },
-          user: {
-            avatarUrl: null,
-            email: "user@example.com",
-            id: "user-1",
-            name: "User",
+  it.each(["TASK_TARGET", "USER_TARGET"])(
+    "does not treat a same-origin login redirect as automatic verification for %s",
+    async (provisionedBy) => {
+      const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const execute = vi
+        .fn()
+        .mockResolvedValueOnce({ status: "SUCCEEDED" })
+        .mockResolvedValueOnce({
+          result: { url: "https://app.example.com/auth" },
+        });
+      const profiles = new UserBrowserProfilesService(
+        { userBrowserProfile: { updateMany } } as never,
+        {} as never,
+        { execute } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      vi.spyOn(profiles as never, "owned" as never).mockResolvedValue({
+        id: "profile-1",
+        runtimeSessions: [
+          {
+            id: "session-1",
+            purpose: "PROFILE_PREPARATION",
+            status: "ACTIVE",
           },
+        ],
+        status: "PREPARING",
+        verificationRules: {
+          loginUrlPatterns: ["*/login*", "*/signin*"],
+          provisionedBy,
+          requestedTriggerSources: ["CONSOLE"],
+          successUrlPatterns: ["https://app.example.com/*"],
         },
-        "profile-1",
-      ),
-    ).rejects.toThrow("does not prove authentication");
-    expect(execute).toHaveBeenNthCalledWith(
-      1,
-      expect.anything(),
-      "session-1",
-      expect.objectContaining({ commandType: "page.navigate" }),
-    );
-    expect(updateMany).toHaveBeenNthCalledWith(1, {
-      data: {
-        status: "VERIFYING",
-        verificationError: expect.anything(),
-        version: { increment: 1 },
-      },
-      where: { id: "profile-1", status: "PREPARING", version: 3 },
-    });
-  });
+        verificationUrl: "https://app.example.com/",
+        version: 3,
+      } as never);
+
+      await expect(
+        profiles.verify(
+          {
+            sessionId: "session-cookie",
+            team: { id: "team-1", name: "Team", slug: "team" },
+            user: {
+              avatarUrl: null,
+              email: "user@example.com",
+              id: "user-1",
+              name: "User",
+            },
+          },
+          "profile-1",
+        ),
+      ).rejects.toThrow("does not prove authentication");
+      expect(execute).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        "session-1",
+        expect.objectContaining({ commandType: "page.navigate" }),
+      );
+      expect(updateMany).toHaveBeenNthCalledWith(1, {
+        data: {
+          status: "VERIFYING",
+          verificationError: expect.anything(),
+          version: { increment: 1 },
+        },
+        where: { id: "profile-1", status: "PREPARING", version: 3 },
+      });
+    },
+  );
 
   it("does not mark a Profile ready when Runtime close cannot confirm persistence", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });

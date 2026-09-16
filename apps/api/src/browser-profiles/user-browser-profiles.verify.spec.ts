@@ -73,6 +73,42 @@ beforeEach(() => vi.stubEnv("RUNTIME_SESSION_RECOVERY_ENABLED", "true"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Profile verification opt-in and source authentication", () => {
+  it("refreshes and saves a proactively created login before any task exists", async () => {
+    const { service, sessions, updateMany, prisma } = fixture({
+      verificationRules: {
+        provisionedBy: "USER_TARGET",
+        requestedTriggerSources: [],
+        successUrlPatterns: [`${verificationUrl}*`],
+        loginUrlPatterns: ["*/login*", "*/signin*"],
+      },
+      grants: [
+        { triggerSource: "CONSOLE", hostnamePattern: "app.example.com" },
+      ],
+    });
+
+    await service.verify(current as never, "profile-1");
+
+    expect(
+      sessions.execute.mock.calls.map(([, , command]) => command.commandType),
+    ).toEqual(["page.navigate", "page.get_url"]);
+    expect(sessions.close).toHaveBeenCalledOnce();
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "READY",
+          lastVerifiedAt: expect.any(Date),
+        }),
+      }),
+    );
+    expect(prisma.taskProfileRecoveryEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        profileId: "profile-1",
+        source: "PROFILE_VERIFIED",
+      }),
+    });
+    expect(sessions.publishProfileSnapshot).not.toHaveBeenCalled();
+  });
+
   it.each(["verify", "closePreparation"] as const)(
     "preserves the login session and profile when recovery is paused before %s",
     async (operation) => {

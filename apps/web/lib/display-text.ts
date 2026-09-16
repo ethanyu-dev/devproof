@@ -295,6 +295,14 @@ export function displayLabel(value: string | null | undefined): string {
 }
 
 const messageTranslations: Record<string, string> = {
+  "A browser profile already exists for this environment, role, and hostname scope.":
+    "此网站、环境和角色已有浏览器身份，请查看已有身份。",
+  "No online Browser Runtime can host this user profile.":
+    "当前没有可用的浏览器执行节点。身份已保留，节点上线后可点击“登录网站”重试。",
+  "The browser is still on a login page.":
+    "当前仍在登录页面，请完成登录后再验证并保存。",
+  "The browser URL does not prove authentication.":
+    "尚未进入指定的网站页面，请确认登录已完成，且添加时填写的是登录后访问的地址。",
   "A routing rule already exists for this hostname pattern.":
     "该域名规则已存在。",
   "A tool credential with this name already exists.": "同名工具凭证已存在。",

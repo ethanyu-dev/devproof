@@ -21,6 +21,7 @@ import {
   Maximize2,
   Minimize2,
   Monitor,
+  Plus,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -49,7 +50,8 @@ import {
 } from "@/lib/browser-pointer-controller";
 import { displayLabel } from "@/lib/display-text";
 
-type TriggerSource = "CONSOLE" | "FEISHU" | "ISSUE_ASSIGNEE";
+import type { Profile, TriggerSource } from "./profile-types";
+import { ProfileCreateDialog } from "./profile-create-dialog";
 
 const PROFILE_FRAME_STALE_MS = 6_000;
 const PROFILE_OPERATION_TIMEOUT_MS = 120_000;
@@ -63,41 +65,8 @@ type ProfileOperation =
   | "verify"
   | "settings";
 
-interface Profile {
-  activeSession: {
-    humanControlExpiresAt: string | null;
-    id: string;
-    status: string;
-  } | null;
-  assignedRuntime: {
-    deviceInfo: string;
-    id: string;
-    lastSeenAt: string | null;
-    name: string;
-    status: string;
-  } | null;
-  authRole: string;
-  configurationSource: "MANUAL" | "TASK";
-  createdAt: string;
-  displayName: string;
-  environmentKey: string;
-  executionMode?: "SERIAL_PERSISTENT" | "ISOLATED_AUTH";
-  executionConcurrency?: number;
-  authSnapshotGeneration?: number | null;
-  isolatedExecutionAvailable?: boolean;
-  grants: Array<{ hostnamePattern: string; triggerSource: TriggerSource }>;
-  id: string;
-  inactivityExpiresAt: string | null;
-  lastUsedAt: string | null;
-  lastVerifiedAt: string | null;
-  pendingTriggerSources: TriggerSource[];
-  siteHostname: string | null;
-  status: string;
-  verificationUrl: string | null;
-  verificationError?: { message?: string } | null;
-}
-
 export function ProfilesClient() {
+  const [createOpen, setCreateOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [executionMode, setExecutionMode] = useState("SERIAL_PERSISTENT");
@@ -203,10 +172,11 @@ export function ProfilesClient() {
   }
 
   async function action(
-    name: Exclude<ProfileOperation, "delete">,
+    name: Exclude<ProfileOperation, "delete" | "settings">,
     prepareIsolatedAuth = false,
+    profile = selected,
   ) {
-    if (!selected) return;
+    if (!profile) return;
     if (operation && name !== "close") return;
     if (name === "close") operationAbort.current?.abort();
     const controller = new AbortController();
@@ -216,7 +186,7 @@ export function ProfilesClient() {
     setMessage(null);
     try {
       const result = await consoleApi<Profile>(
-        `/browser-profiles/${selected.id}/${name}`,
+        `/browser-profiles/${profile.id}/${name}`,
         {
           ...(name === "prepare" || name === "reauth"
             ? { body: JSON.stringify({ ttlSeconds: 1800 }) }
@@ -228,7 +198,7 @@ export function ProfilesClient() {
         },
         PROFILE_OPERATION_TIMEOUT_MS,
       );
-      await load(selected.id);
+      await load(profile.id);
       setMessage({
         text:
           name === "verify"
@@ -245,7 +215,7 @@ export function ProfilesClient() {
       });
     } catch (error) {
       if (controller.signal.aborted) return;
-      await load(selected.id).catch(() => undefined);
+      await load(profile.id).catch(() => undefined);
       setMessage({ text: (error as Error).message, tone: "error" });
     } finally {
       if (operationSequence.current === sequence) {
@@ -281,17 +251,27 @@ export function ProfilesClient() {
   return (
     <div className={styles.page}>
       <PageHeader
-        description="管理任务使用的登录身份，在需要时完成登录、MFA 或授权。"
+        description="提前登录常用网站，保存身份供后续任务复用，也可在这里续期登录或授权。"
         title="浏览器身份"
         actions={
-          <Button
-            disabled={busy}
-            onClick={() => void load().catch(() => undefined)}
-            variant="secondary"
-            size="sm"
-          >
-            <RefreshCw /> 刷新
-          </Button>
+          <>
+            <Button
+              disabled={busy}
+              onClick={() => void load().catch(() => undefined)}
+              variant="secondary"
+              size="sm"
+            >
+              <RefreshCw /> 刷新
+            </Button>
+            <Button
+              disabled={busy || profiles === null}
+              onClick={() => setCreateOpen(true)}
+              aria-haspopup="dialog"
+              size="sm"
+            >
+              <Plus /> 添加网站并登录
+            </Button>
+          </>
         }
       />
       {message ? (
@@ -326,6 +306,7 @@ export function ProfilesClient() {
                     className={styles.entry}
                     key={profile.id}
                     onClick={() => select(profile)}
+                    disabled={operation !== null}
                     type="button"
                   >
                     <span className={styles.entryHeading}>
@@ -348,13 +329,13 @@ export function ProfilesClient() {
                 ))}
                 {!profiles.length ? (
                   <p className={styles.emptyCopy}>
-                    暂无浏览器身份。需要登录的任务会按目标站点自动创建。
+                    添加常用网站，提前准备登录身份。
                   </p>
                 ) : null}
               </div>
               {profiles.length > 0 && (
                 <p className={styles.listHint}>
-                  身份由需要登录的任务自动创建。
+                  可主动添加网站，也会展示任务自动创建的身份。
                 </p>
               )}
             </section>
@@ -390,7 +371,7 @@ export function ProfilesClient() {
                       ? "正在打开登录页…"
                       : requiresReauth
                         ? "重新登录"
-                        : "准备登录"}
+                        : "登录网站"}
                   </Button>
                 </header>
                 <dl className={styles.facts}>
@@ -571,14 +552,38 @@ export function ProfilesClient() {
                 <Globe2 />
                 <h2>暂无浏览器身份</h2>
                 <p>
-                  在任务中选择“使用我的浏览器身份”或“Issue
-                  负责人的浏览器身份”，系统会按目标站点自动创建，无需提前配置。
+                  提前登录常用网站并保存，后续任务选择“使用我的浏览器身份”即可复用。
+                  需要登录的任务也会自动创建身份。
                 </p>
+                <Button
+                  disabled={busy}
+                  onClick={() => setCreateOpen(true)}
+                  aria-haspopup="dialog"
+                  size="sm"
+                >
+                  <Plus /> 添加网站并登录
+                </Button>
               </div>
             )}
           </Card>
         </div>
       )}
+      <ProfileCreateDialog
+        open={createOpen}
+        profiles={profiles ?? []}
+        onClose={() => setCreateOpen(false)}
+        onRefresh={() => load()}
+        onSelectExisting={(profile) => {
+          setCreateOpen(false);
+          select(profile);
+        }}
+        onCreated={(profile) => {
+          setProfiles((current) => [profile, ...(current ?? [])]);
+          setSelectedId(profile.id);
+          setCreateOpen(false);
+          void action("prepare", false, profile);
+        }}
+      />
       {selected?.activeSession?.status === "HUMAN_CONTROL" ? (
         <ProfileBrowser
           profile={selected}
