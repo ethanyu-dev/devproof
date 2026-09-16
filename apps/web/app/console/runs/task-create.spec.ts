@@ -12,6 +12,8 @@ const draft: TaskCreateDraft = {
     " https://github.com/acme/web/pull/123 \r\n\nhttps://github.com/acme/api/pull/456\nhttps://github.com/acme/web/pull/123",
   targetUrls:
     " https://staging.example.com \nhttp://preview.example.com:8080/app\nhttps://staging.example.com ",
+  profileStrategy: "REQUESTER",
+  profileId: "",
 };
 
 describe("manual task creation", () => {
@@ -26,6 +28,11 @@ describe("manual task creation", () => {
     expect(taskExecutionCreateInputSchema.safeParse(input).success).toBe(true);
     expect(input).toMatchObject({
       kind: "ISSUE_SPEC",
+      profilePolicy: {
+        strategy: "REQUESTER",
+        onUnavailable: "WAIT_FOR_PROFILE",
+        scope: { authRole: "default", environmentKey: "default" },
+      },
       issueRef: "https://linear.app/acme/issue/ENG-123/test-feature",
       pullRequestUrls: [
         "https://github.com/acme/web/pull/123",
@@ -45,6 +52,49 @@ describe("manual task creation", () => {
       ],
     });
     expect(input.idempotencyKey).not.toBe("console-task-validation");
+  });
+
+  it.each(["REQUESTER", "ISSUE_ASSIGNEE", "EPHEMERAL"] as const)(
+    "submits the selected %s strategy without a stale explicit identity",
+    async (profileStrategy) => {
+      const api = vi.fn().mockResolvedValue({ id: "new-task" });
+      await new TaskCreateRequest(api).submit({
+        ...draft,
+        profileStrategy,
+        profileId: "11111111-1111-4111-8111-111111111111",
+      });
+      const input = JSON.parse(api.mock.calls[0]![1].body);
+      expect(input.profilePolicy).toMatchObject({
+        strategy: profileStrategy,
+        onUnavailable: "WAIT_FOR_PROFILE",
+      });
+      expect(input.profilePolicy).not.toHaveProperty("profileId");
+    },
+  );
+
+  it("submits an explicitly selected browser identity", async () => {
+    const api = vi.fn().mockResolvedValue({ id: "new-task" });
+    const profileId = "11111111-1111-4111-8111-111111111111";
+    await new TaskCreateRequest(api).submit({
+      ...draft,
+      profileStrategy: "EXPLICIT_PROFILE",
+      profileId,
+    });
+    expect(JSON.parse(api.mock.calls[0]![1].body).profilePolicy).toMatchObject({
+      strategy: "EXPLICIT_PROFILE",
+      profileId,
+    });
+  });
+
+  it("requires an identity for explicit selection before creating a task", async () => {
+    const api = vi.fn();
+    await expect(
+      new TaskCreateRequest(api).submit({
+        ...draft,
+        profileStrategy: "EXPLICIT_PROFILE",
+      }),
+    ).rejects.toThrow("请选择有效的浏览器身份");
+    expect(api).not.toHaveBeenCalled();
   });
 
   it("accepts an Issue identifier and leaves PR discovery enabled when no links are supplied", () => {

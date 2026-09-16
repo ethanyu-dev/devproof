@@ -1,9 +1,14 @@
-import { taskExecutionCreateInputSchema } from "@devproof/contracts";
+import {
+  taskExecutionCreateInputSchema,
+  type TaskProfilePolicy,
+} from "@devproof/contracts";
 
 export interface TaskCreateDraft {
   issueRef: string;
   pullRequestUrls: string;
   targetUrls: string;
+  profileStrategy: TaskProfilePolicy["strategy"];
+  profileId: string;
 }
 
 function uniqueLines(value: string) {
@@ -51,6 +56,13 @@ export function taskCreateInput(
     kind: "ISSUE_SPEC",
     issueRef,
     idempotencyKey,
+    profilePolicy: {
+      strategy: draft.profileStrategy,
+      onUnavailable: "WAIT_FOR_PROFILE",
+      ...(draft.profileStrategy === "EXPLICIT_PROFILE"
+        ? { profileId: draft.profileId }
+        : {}),
+    },
     ...(pullRequestUrls.length ? { pullRequestUrls } : {}),
     deployments: targetUrls.map((targetUrl, index) => ({
       key: `deployment-${index + 1}`,
@@ -60,6 +72,9 @@ export function taskCreateInput(
   });
   if (!parsed.success) {
     const field = parsed.error.issues[0]?.path[0];
+    if (field === "profilePolicy") {
+      throw new Error("请选择有效的浏览器身份。");
+    }
     if (field === "pullRequestUrls") {
       throw new Error(
         "请填写有效的 GitHub PR 链接（https://github.com/组织/仓库/pull/编号），每行一个，最多 25 个。",
