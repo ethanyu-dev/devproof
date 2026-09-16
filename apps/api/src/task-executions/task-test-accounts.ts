@@ -7,7 +7,6 @@ import {
 import { Prisma } from "@prisma/client";
 import {
   caseAccountRequirements,
-  testAccountPlanSchema,
   testAccountSlots,
   testAccountBindingsSchema,
   type TestAccountPlan,
@@ -16,22 +15,28 @@ import {
   taskExecutionCreateInputSchema,
   type TaskTestAccountsInput,
 } from "@devproof/contracts";
+import { specificationDefinitionHash } from "@devproof/test-domain";
+import {
+  readAccountPlan,
+  resolveCaseExecutionDefinition,
+} from "./case-account-definition.js";
+export {
+  readAccountPlan,
+  resolveCaseExecutionDefinition,
+} from "./case-account-definition.js";
 import type { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import { refreshedTaskDeadline } from "./task-deadline.js";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"];
-export function readAccountPlan(value: unknown) {
-  const parsed = testAccountPlanSchema.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
 export function missingAccountSlots(plan: TestAccountPlan) {
   return testAccountSlots(plan.requirements).filter(
     (slot) => !plan.bindings.some((binding) => binding.slotId === slot.slotId),
   );
 }
 export function accountsReady(value: unknown, definition: unknown) {
+  resolveCaseExecutionDefinition(definition, value);
   const plan = readAccountPlan(value);
   return plan
     ? missingAccountSlots(plan).length === 0
@@ -69,8 +74,18 @@ export async function prepareTestAccountPlans(
     );
     const hitl =
       policy.kind === "ISSUE_SPEC" ? policy.hitlPolicy : policy.run.hitlPolicy;
-    const plan: TestAccountPlan = {
-      version: 1,
+    let plan: TestAccountPlan = {
+      version: 2,
+      definitionHash: specificationDefinitionHash(row.testCase.definition),
+      effectiveAuthRole: String(
+        (row.testCase.definition as Record<string, unknown>).authRole ??
+          "default",
+      ),
+      resolution: {
+        kind: "DECLARED",
+        removedRoles: [],
+        reason: "按当前用例准备业务测试对象。",
+      },
       revision: randomUUID(),
       requirements,
       bindings: [],
@@ -97,6 +112,17 @@ export async function prepareTestAccountPlans(
         include: { run: true },
       });
       if (previous) {
+        const previousPlan = readAccountPlan(previous.testAccountPlan);
+        if (previousPlan?.version === 2) {
+          resolveCaseExecutionDefinition(row.testCase.definition, previousPlan);
+          plan = {
+            ...previousPlan,
+            revision: plan.revision,
+            requestedAt: plan.requestedAt,
+            expiresAt: plan.expiresAt,
+            bindings: [],
+          };
+        }
         const policy = previous.run?.executionPolicy as
           Record<string, unknown> | undefined;
         const bindings = testAccountBindingsSchema.parse(
@@ -104,9 +130,25 @@ export async function prepareTestAccountPlans(
             readAccountPlan(previous.testAccountPlan)?.bindings ??
             [],
         );
-        for (const slot of testAccountSlots(requirements)) {
+        for (const slot of testAccountSlots(plan.requirements)) {
+          const oldRequirement = previousPlan?.requirements.find(
+            (r) => r.role === slot.role,
+          );
+          const newRequirement = plan.requirements.find(
+            (r) => r.role === slot.role,
+          );
+          if (
+            !oldRequirement ||
+            specificationDefinitionHash(oldRequirement) !==
+              specificationDefinitionHash(newRequirement)
+          )
+            continue;
           const binding = bindings.find(
-            (b) => b.slotId === slot.slotId && b.usage === slot.usage,
+            (b) =>
+              b.slotId === slot.slotId &&
+              b.usage === slot.usage &&
+              specificationDefinitionHash(b.requiredTypes) ===
+                specificationDefinitionHash(slot.requiredTypes),
           );
           if (!binding) continue;
           plan.bindings.push(binding);
@@ -117,6 +159,8 @@ export async function prepareTestAccountPlans(
         where: {
           id: row.id,
           runId: null,
+          dispatchStatus: "PENDING",
+          updatedAt: row.updatedAt,
           testAccountPlan: { equals: Prisma.DbNull },
         },
         data: {
@@ -206,7 +250,7 @@ type AccountRow = {
     targetUrl: string;
     enabled?: boolean;
   };
-  testCase: { name: string; snapshotId: string };
+  testCase: { name: string; snapshotId: string; definition?: unknown };
 };
 export function taskAccountPreparation(
   rows: readonly AccountRow[],
@@ -230,6 +274,8 @@ export function taskAccountPreparation(
   const cases = latest.flatMap((row) => {
     const plan = readAccountPlan(row.testAccountPlan);
     if (!plan) return [];
+    if (row.testCase.definition)
+      resolveCaseExecutionDefinition(row.testCase.definition, plan);
     const runPolicy = row.run?.executionPolicy as
       Record<string, unknown> | undefined;
     const bindings =

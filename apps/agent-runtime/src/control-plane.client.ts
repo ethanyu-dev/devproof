@@ -225,10 +225,14 @@ export class ControlPlaneClient {
     );
   }
 
-  async releaseBrowser(lease: ActiveLease) {
+  async releaseBrowser(lease: ActiveLease, signal?: AbortSignal) {
     return this.request(
       `/internal/v2/runtime/tasks/${lease.taskId}/browser/release`,
-      { body: this.identity(lease), timeoutMs: 65_000 },
+      {
+        body: this.identity(lease),
+        timeoutMs: 65_000,
+        ...(signal ? { signal } : {}),
+      },
     );
   }
 

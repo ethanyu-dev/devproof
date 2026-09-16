@@ -12,7 +12,7 @@ const leaseToken = "70844616-602c-475b-95f6-393015b82ed1";
 const nextAttemptId = "cc61de8d-cf29-4561-b2cd-c67c304668a6";
 const now = new Date("2026-09-04T10:00:00.000Z");
 const identity = { fencingToken: "4", leaseToken, workerId: "worker-1" };
-const claimInput = { protocol: { minor: 18 }, workerId: "worker-2" };
+const claimInput = { protocol: { minor: 20 }, workerId: "worker-2" };
 
 function analysisAttempt(
   options: {
@@ -246,6 +246,8 @@ describe("SpecAnalysisRuntimeService", () => {
             scope: { inScope: ["退款"] },
             cases: [
               {
+                accountRequirementsVersion: 2,
+                accountRequirements: [],
                 name: "退款",
                 rationale: "覆盖需求。",
                 preconditions: ["具有退款权限。"],
@@ -342,6 +344,8 @@ describe("SpecAnalysisRuntimeService", () => {
         ],
         cases: [
           {
+            accountRequirementsVersion: 2,
+            accountRequirements: [],
             name: "退款",
             rationale: "验证退款",
             preconditions: ["具有权限"],
@@ -445,7 +449,7 @@ describe("SpecAnalysisRuntimeService", () => {
     resetEnvForTests();
   });
 
-  it.each([18, 19])(
+  it.each([20, 21])(
     "recovers and negotiates generation format for protocol %s",
     async (minor) => {
       const expired = analysisAttempt({
@@ -963,3 +967,126 @@ describe("SpecAnalysisRuntimeService", () => {
     },
   );
 });
+
+it("refuses pre-contract Spec workers", async () => {
+  const { service } = recoveryHarness(analysisAttempt());
+  await expect(
+    service.claim(teamId, { ...claimInput, protocol: { minor: 19 } }),
+  ).rejects.toThrow("minor 20");
+});
+
+it.each(["missing-version", "operator-role", "forged-source"])(
+  "rejects invalid account requirements at the API boundary: %s",
+  async (mode) => {
+    const sourceRef = `analysis-source://${attemptId}/issue`;
+    const { service, tx } = recoveryHarness({
+      ...analysisAttempt({
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+        deadlineAt: new Date(Date.now() + 600_000),
+      }),
+      analysisSources: [
+        {
+          externalId: sourceRef,
+          kind: "LINEAR_ISSUE",
+          uri: "https://linear.app/acme/issue/ENG-123",
+          content: {
+            issue: { description: "模型下架时间字段" },
+            pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+          },
+        },
+        {
+          externalId: "analysis-source://pr",
+          kind: "GITHUB_PULL_REQUEST",
+          uri: "https://github.com/acme/web/pull/42",
+          content: {
+            pullRequest: {
+              title: "模型字段",
+              headSha: "abc",
+              deploymentUrl: "https://preview.example.com",
+            },
+          },
+        },
+      ],
+    } as never);
+    const create = vi.fn();
+    Object.assign(tx, { taskSpecificationSnapshot: { create } });
+    const spec = runtimeGeneratedSpecSchema.parse({
+      summary: "验证模型下架时间",
+      scope: { inScope: ["模型下架时间"] },
+      cases: [
+        {
+          ...(mode === "missing-version"
+            ? {}
+            : { accountRequirementsVersion: 2 }),
+          name: "模型编辑",
+          rationale: "验证模型字段",
+          preconditions: ["具备模型编辑权限"],
+          sourceRefs: [sourceRef],
+          accountRequirements:
+            mode === "missing-version"
+              ? []
+              : [
+                  {
+                    role: "editor",
+                    label: "LLM 产品新增、编辑与列表查看账号",
+                    usage: "CREATE_OR_MODIFY",
+                    rationale: "编辑模型字段",
+                    ...(mode === "forged-source"
+                      ? {
+                          subjectBinding: {
+                            kind: "BUSINESS_INPUT",
+                            target: "用户 ID",
+                            stepOrders: [1],
+                            basis: {
+                              sourceRef: "analysis-source://foreign",
+                              quote: "需要用户 ID",
+                            },
+                          },
+                        }
+                      : {}),
+                  },
+                ],
+          steps: [
+            {
+              order: 1,
+              action: "编辑模型",
+              expectedObservation: "展示下架时间",
+            },
+          ],
+          criteria: [
+            {
+              id: "time",
+              description: "下架时间展示正确",
+              sourceRefs: [sourceRef],
+              requiredEvidenceKinds: ["DOM"],
+            },
+          ],
+        },
+      ],
+    });
+    await expect(
+      service.submitOutcome(teamId, attemptId, {
+        ...identity,
+        completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
+        outcome: {
+          kind: "SPEC_GENERATED",
+          summary: "验证模型下架时间",
+          sourceRefs: [
+            {
+              externalId: sourceRef,
+              kind: "LINEAR_ISSUE",
+              contentHash: "a".repeat(64),
+              uri: "https://linear.app/acme/issue/ENG-123",
+              label: "模型字段",
+              excerpt: "模型下架时间字段",
+              locator: {},
+              revision: null,
+            },
+          ],
+          spec,
+        },
+      }),
+    ).rejects.toThrow(/账号|subjectBinding|来源/);
+    expect(create).not.toHaveBeenCalled();
+  },
+);

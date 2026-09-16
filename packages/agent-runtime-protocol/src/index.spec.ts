@@ -53,6 +53,26 @@ describe("agent runtime protocol", () => {
       traceId: "1234567890abcdef1234567890abcdef",
       executionPolicy: { resume: { response: { account: "test-account" } } },
     });
+    stored.executionPolicy.accountRequirements = {
+      version: 2,
+      requirements: [
+        {
+          role: "subject",
+          label: "白名单用户",
+          usage: "READ_EXISTING",
+          rationale: "核对业务用户",
+          subjectBinding: {
+            kind: "BUSINESS_INPUT",
+            target: "用户 ID",
+            stepOrders: [1],
+            basis: {
+              sourceRef: "analysis-source://private",
+              quote: "private source code",
+            },
+          },
+        },
+      ],
+    };
     const before = runtimeTaskSnapshotSchema.parse(stored);
     const lease = runtimeTaskLeaseSchema.parse({
       taskId: "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0",
@@ -70,9 +90,23 @@ describe("agent runtime protocol", () => {
       observationTargets: before.criteria[0]!.observationTargets,
       requiredEvidenceKinds: ["DOM", "SCREENSHOT"],
     });
-    expect(lease.snapshot.executionPolicy).toEqual(before.executionPolicy);
+    expect(lease.snapshot.executionPolicy.resume).toEqual(
+      before.executionPolicy.resume,
+    );
+    expect(lease.snapshot.executionPolicy.accountRequirements).toMatchObject({
+      version: 2,
+      requirements: [
+        {
+          subjectBinding: {
+            kind: "BUSINESS_INPUT",
+            target: "用户 ID",
+            stepOrders: [1],
+          },
+        },
+      ],
+    });
     expect(JSON.stringify(lease.snapshot)).not.toMatch(
-      /private source code|analysis rationale|reference:\/\//u,
+      /private source code|analysis rationale|reference:\/\/|analysis-source:\/\//u,
     );
     expect(stored).toEqual(before);
     expect(browserExecutionSnapshot(lease.snapshot)).toEqual(lease.snapshot);

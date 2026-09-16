@@ -1068,6 +1068,7 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
       $queryRaw: vi.fn().mockResolvedValue([{ now: new Date() }]),
       agentRuntimeTask: {
         findFirst: vi.fn().mockResolvedValue({
+          snapshot,
           id: task.id,
           startedAt: null,
         }),
@@ -1510,4 +1511,208 @@ describe("finalization checkpoints", () => {
       ),
     ).toBeNull();
   });
+});
+
+describe("account request API boundary", () => {
+  function boundary(policy: Record<string, unknown>, evidence: unknown[] = []) {
+    const now = new Date();
+    const task = {
+      id: "task-account",
+      attemptId: snapshot.attemptId,
+      runId: snapshot.runId,
+      snapshot: { ...snapshot, executionPolicy: policy },
+      status: "RUNNING",
+      completionId: null,
+      leaseOwner: "worker",
+      leaseToken: "lease",
+      fencingToken: 1n,
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+      attempt: { number: 1 },
+      run: {
+        lifecycle: "RUNNING",
+        cancelRequestedAt: null,
+        executionPolicy: { retryPolicy: { maxAttempts: 1, retryOn: [] } },
+      },
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ now }]),
+      agentRuntimeTask: {
+        findFirst: vi.fn().mockResolvedValue(task),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        update: vi.fn().mockRejectedValue(new Error("reached-state-write")),
+      },
+      runEvidence: { findMany: vi.fn().mockResolvedValue(evidence) },
+    };
+    const service = new AgentRuntimeTaskService(
+      { $transaction: (fn: (tx: unknown) => unknown) => fn(tx) } as never,
+      {} as never,
+    );
+    const submit = (
+      context: Record<string, unknown>,
+      kind = "TEST_ACCOUNT",
+      responseSchema = {},
+    ) =>
+      service.submitOutcome(snapshot.teamId, task.id, {
+        workerId: "worker",
+        leaseToken: "lease",
+        fencingToken: "1",
+        completionId: "completion",
+        completedAt: now.toISOString(),
+        outcome: {
+          kind: "WAITING_HUMAN",
+          executionDisposition: "BLOCKED",
+          summary: "补充业务账号",
+          intervention: {
+            kind,
+            prompt: "请提供被测用户",
+            context,
+            responseSchema,
+            expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+          },
+        },
+      } as never);
+    return { submit, tx };
+  }
+  const policy = { accountRequirements: { version: 2, requirements: [] } };
+  const request = {
+    mode: "DISCOVERED",
+    subjectKind: "BUSINESS_INPUT",
+    target: "用户 ID",
+    criterionId: "expected-1",
+    usage: "READ_EXISTING",
+    requiredTypes: [],
+    observation: {
+      observationId: "02a9dede-21ea-4b58-95db-56fa0f9c8133",
+      cursor: 0,
+      quote: "请输入用户 ID",
+      evidenceRefs: ["artifact://account-field"],
+    },
+  };
+  it.each([
+    {},
+    { purpose: "BUSINESS_TEST_SUBJECT" },
+    { accountRequest: { mode: "DECLARED", slotIds: ["operator:1"] } },
+  ])(
+    "rejects ungrounded requests without creating a wait: %j",
+    async (context) => {
+      const h = boundary(policy);
+      await expect(h.submit(context)).rejects.toMatchObject({
+        response: { code: "ACCOUNT_REQUEST_INVALID" },
+      });
+      expect(h.tx.agentRuntimeTask.update).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    null,
+    { ownerTaskId: "another-task", result: { content: "请输入用户 ID" } },
+    { ownerTaskId: "task-account", result: { content: "登录页" } },
+  ])(
+    "rejects spoofed, foreign or irrelevant browser evidence",
+    async (command) => {
+      const h = boundary(policy, [
+        {
+          externalId: "artifact://account-field",
+          kind: "DOM",
+          runtimeArtifact: { command },
+        },
+      ]);
+      await expect(h.submit({ accountRequest: request })).rejects.toMatchObject(
+        { response: { code: "ACCOUNT_REQUEST_INVALID" } },
+      );
+      expect(h.tx.agentRuntimeTask.update).not.toHaveBeenCalled();
+    },
+  );
+  it("accepts only persisted browser content belonging to this task and derives the form", async () => {
+    const h = boundary(policy, [
+      {
+        externalId: "artifact://account-field",
+        kind: "DOM",
+        runtimeArtifact: {
+          command: {
+            ownerTaskId: "task-account",
+            result: { content: "请输入用户 ID" },
+          },
+        },
+      },
+    ]);
+    await expect(
+      h.submit({ accountRequest: request, usage: "CREATE_OR_MODIFY" }),
+    ).rejects.toThrow("reached-state-write");
+    expect(h.tx.runEvidence.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          attemptId: snapshot.attemptId,
+          runId: snapshot.runId,
+          externalId: { in: ["artifact://account-field"] },
+        },
+      }),
+    );
+    expect(h.tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: expect.objectContaining({
+            intervention: expect.objectContaining({
+              context: expect.objectContaining({
+                usage: "READ_EXISTING",
+                purpose: "BUSINESS_TEST_SUBJECT",
+                accountSlots: [
+                  expect.objectContaining({
+                    slotId: "discovered:1",
+                    usage: "READ_EXISTING",
+                  }),
+                ],
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+  it("does not let other HITL kinds carry an account form", async () => {
+    const h = boundary(policy);
+    await expect(
+      h.submit({}, "BROWSER_HITL", {
+        properties: { account: { type: "string" } },
+      }),
+    ).rejects.toMatchObject({ response: { code: "ACCOUNT_REQUEST_INVALID" } });
+    expect(h.tx.agentRuntimeTask.update).not.toHaveBeenCalled();
+  });
+});
+
+it("does not lease a structured-account task to a pre-v20 browser worker", async () => {
+  const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([{ now: new Date() }]),
+    agentRuntimeTask: {
+      findFirst: vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: "new-contract-task",
+          snapshot: {
+            ...snapshot,
+            executionPolicy: {
+              accountRequirements: { version: 2, requirements: [] },
+            },
+          },
+        })
+        .mockResolvedValue(null),
+      updateMany: vi.fn(),
+    },
+  };
+  const service = new AgentRuntimeTaskService(
+    { $transaction: (fn: (tx: unknown) => unknown) => fn(tx) } as never,
+    {
+      candidatesForPool: vi.fn().mockResolvedValue([{ modelId: "test" }]),
+    } as never,
+  );
+  expect(
+    await service.claim(snapshot.teamId, {
+      protocol: { minor: 19 },
+      workerId: "old-worker",
+      capabilities: ["BROWSER_VERIFICATION"],
+    } as never),
+  ).toEqual({ task: null });
+  expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+  expect(
+    tx.agentRuntimeTask.findFirst.mock.calls[1]![0].where.id.notIn,
+  ).toEqual(["new-contract-task"]);
 });

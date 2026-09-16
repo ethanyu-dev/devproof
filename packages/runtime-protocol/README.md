@@ -99,3 +99,7 @@ can specify `visualObservationId`; Agent-owned clicks require a current image.
 Legacy direct coordinate clients without an Agent owner remain accepted. Route
 new verification work only to the new capability and upgrade both independently
 installed runtimes. See [DOM + visual browser observations](../../docs/dom-visual-browser.md).
+
+The separate Agent protocol v2.20 adds validated business account subjects and
+reviewed account-plan corrections. It does not change the Browser wire protocol
+or require a daemon upgrade; see the [Agent protocol changelog](../agent-runtime-protocol/README.md).

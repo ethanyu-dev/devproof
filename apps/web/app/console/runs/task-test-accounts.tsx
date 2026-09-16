@@ -85,6 +85,7 @@ export function TaskTestAccountsCard({
       setError((e as Error).message);
     }
   }
+  if (!preparation.totalCount) return null;
   return (
     <Card className="dp-task-input-card">
       <div className="dp-section-head">
@@ -168,6 +169,15 @@ export function TaskTestAccountsCard({
                       <dt>账号用途</dt>
                       <dd>{s.rationale}</dd>
                     </div>
+                    {s.subjectBinding && (
+                      <div>
+                        <dt>被测业务对象</dt>
+                        <dd>
+                          {s.subjectBinding.target} · 步骤{" "}
+                          {s.subjectBinding.stepOrders.join("、")}
+                        </dd>
+                      </div>
+                    )}
                     {s.requiredTypes.length > 0 && (
                       <div>
                         <dt>业务类型</dt>

@@ -215,6 +215,10 @@ export class ExecutionRunService {
         hardDeadlineAt: hardDeadlineAt.toISOString(),
         environment: input.environment,
         executionPolicy: {
+          accountRequirements: input.accountRequirements ?? {
+            version: 2,
+            requirements: [],
+          },
           testAccounts: input.testAccounts,
           browser: input.browserPolicy,
           concurrency: input.concurrencyPolicy,
@@ -251,6 +255,10 @@ export class ExecutionRunService {
             deadlineExtendedMs: 0,
             environmentSnapshot: json(input.environment),
             executionPolicy: json({
+              accountRequirements: input.accountRequirements ?? {
+                version: 2,
+                requirements: [],
+              },
               initialTestAccounts: input.testAccounts ?? [],
               testAccounts: input.testAccounts,
               browser: input.browserPolicy,
@@ -1563,6 +1571,12 @@ function assertCompatibleRunRequest(
     );
   }
   const expectedPolicy = {
+    accountRequirements: input.accountRequirements ?? {
+      version: 2,
+      requirements: [],
+    },
+    initialTestAccounts: input.testAccounts ?? [],
+    concurrency: input.concurrencyPolicy,
     browser: input.browserPolicy,
     businessReferences: input.businessReferences,
     deadline: runDeadlinePolicySchema.parse(
@@ -1580,7 +1594,15 @@ function assertCompatibleRunRequest(
     !sameJson(existing.environmentSnapshot, input.environment) ||
     !sameJson(
       {
-        ...storedPolicy,
+        browser: storedPolicy.browser,
+        retryPolicy: storedPolicy.retryPolicy,
+        concurrency: storedPolicy.concurrency,
+        accountRequirements: storedPolicy.accountRequirements ?? {
+          version: 2,
+          requirements: [],
+        },
+        initialTestAccounts:
+          storedPolicy.initialTestAccounts ?? storedPolicy.testAccounts ?? [],
         businessReferences:
           storedPolicy.businessReferences ?? input.businessReferences,
         deadline:

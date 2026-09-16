@@ -1,4 +1,7 @@
-import { businessAccountRequirementsError } from "@devproof/agent-runtime-protocol";
+import {
+  validateCaseAccountRequirements,
+  accountRequirementIssuesMessage,
+} from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -1192,6 +1195,7 @@ function stripFormats(value: unknown): unknown {
       ...new Set([
         ...(Array.isArray(result.required) ? result.required : []),
         "accountRequirements",
+        "accountRequirementsVersion",
       ]),
     ];
   return result;
@@ -1216,6 +1220,8 @@ ${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定
 内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。等价业务类型可以共用一条验收，但必须分别观察所有 observationTargets；业务条件或预期不同才拆分，不能观察一个类型后判定所有类型通过。
 Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；简单场景通常 3–6 个业务步骤，按“新增→筛选→禁用→重新启用→清理”合并连续点击，不逐个描述按钮操作。复杂场景按需要增加步骤，不能为压缩遗漏要求。每个描述或步骤最多 300 字；长接口细节移到 observationTargets 的结构化网络字段。验收标准只写可判定结果，不复述操作步骤；不要在 name、preconditions、testData、steps、criteria 和账号说明中重复同一约束。
 账号字段各司其职：label 只写用途，rationale 一句话解释数量或隔离必要性，constraints 只写此业务对象特有的前置条件。通用登录、禁用随机账号、禁止修改他人记录、账号不可用时无法判定等平台规则由执行器统一提供，不在各 Case 中反复抄写。后台登录身份仅填 authRole，不能放进 accountRequirements；后台权限不能填 requiredTypes（它只表示业务类型）。
+每个 Case 必须填写 accountRequirementsVersion: 2。非空账号需求必须提供 subjectBinding：kind 为 BUSINESS_INPUT（账号填入业务字段）、BUSINESS_RECORD（按指定账号检查业务记录）或 AUTH_SUBJECT（该账号登录/权限本身是验收对象）；target 为实际业务字段或被测账号对象；stepOrders 引用当前步骤；basis 引用已读来源的 sourceRef 和准确 quote，说明业务确实需要这个账号。AUTH_SUBJECT 还必须填 criterionIds，${checkReferences ? "使用当前 Case 的 checkIds" : compact ? "使用当前 Case 验收标准的一基序号字符串，如 1" : "使用当前 Case 的 criterion id"}。真实来源原文必须支持账号用途，不能仅引用存在权限判断的代码。
+创建、编辑、克隆模型或产品配置不等于需要业务账号：模型名称、ID、时间属于普通测试资源，使用 testData 和清理台账。仅需模型编辑权限、列表查看或导出权限的操作账号放 authRole，accountRequirements 为 []。添加用户白名单、指定用户查询、双账号转账需要实际账号；验证账号登录权限时保留 AUTH_SUBJECT，不与执行身份混淆。
 每个 Case 必须填写 accountRequirements 数组：不需要业务测试对象时为 []；需要时填写 role（稳定英文标识）、label（中文用途）、count、usage（CREATE_OR_MODIFY 或 READ_EXISTING）、requiredTypes、constraints、rationale。按独立业务测试对象计算最少账号数，不按验收点或类型累加；同一账号能安全验证多个类型时合并为一个角色并列出类型。只有不同身份/数据隔离确有必要才增加数量，并写明原因。账号 A/B 是角色占位符，禁止当作账号值。平台会在执行前统一收集并按角色分配，不检查账号跨 Case 占用。步骤引用对应角色；用户已提供但不可用时按账号前置问题记录无法判定，不让浏览器 Agent 自行换号或再次 HITL。纯界面只读 Case 不需要账号；无效账号负向输入不索取有效账号。
 每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。必要的权限、数据和控件定位检查放在本 Case 的步骤；仅在对应业务结果属于本次范围时才设为验收标准。不能把假设当作已经观察的事实。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
@@ -1245,7 +1251,12 @@ export function validateFinalSpec(input: {
     input.issueTexts ?? new Map(),
   );
   if (capabilityError) return capabilityError;
-  const accountError = businessAccountRequirementsError(input.spec.cases);
+  const accountError = accountRequirementIssuesMessage(
+    validateCaseAccountRequirements(input.spec.cases, {
+      requireVersion: true,
+      sourceContents: input.sourceContents,
+    }),
+  );
   if (accountError) return accountError;
   const chineseError = validateChineseSpec(input.spec);
   if (chineseError) return chineseError;
@@ -1472,6 +1483,16 @@ function specSourceRefEntries(
         : []),
     ]),
     ...spec.cases.flatMap((testCase, caseIndex) => [
+      ...(testCase.accountRequirements ?? []).flatMap((requirement, index) =>
+        requirement.subjectBinding
+          ? [
+              {
+                path: `spec.cases[${caseIndex}].accountRequirements[${index}].subjectBinding.basis.sourceRef`,
+                sourceRef: requirement.subjectBinding.basis.sourceRef,
+              },
+            ]
+          : [],
+      ),
       ...testCase.sourceRefs.map((sourceRef, sourceIndex) => ({
         path: `spec.cases[${caseIndex}].sourceRefs[${sourceIndex}]`,
         sourceRef,

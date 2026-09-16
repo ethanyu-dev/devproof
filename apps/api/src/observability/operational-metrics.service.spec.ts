@@ -134,3 +134,23 @@ describe("execution scheduling operational metrics", () => {
     }
   });
 });
+
+it("counts historical corrections without identifier labels", async () => {
+  const count = vi.fn().mockResolvedValue(2);
+  const metrics = new MetricsService();
+  const service = new OperationalMetricsService(
+    { taskExecutionEvent: { count } } as never,
+    metrics,
+  );
+  const since = new Date("2026-09-16T00:00:00Z");
+  await service.collectAccountCorrections(since);
+  expect(count).toHaveBeenCalledWith({
+    where: {
+      kind: "task.accounts.requirements_corrected",
+      createdAt: { gte: since },
+    },
+  });
+  expect(metrics.render()).toContain(
+    "devproof_account_requirement_corrections_recent 2",
+  );
+});

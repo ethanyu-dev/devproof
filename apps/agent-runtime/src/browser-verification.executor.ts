@@ -1,6 +1,9 @@
 import {
   accountInputSlots,
   accountInputResponseSchema,
+  businessAccountRequestSchema,
+  resolveBusinessAccountRequest,
+  accountRequestKindError,
 } from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
@@ -142,7 +145,9 @@ export class BrowserVerificationExecutor {
     task: RuntimeTaskLease,
     lease: ActiveLease,
     signal: AbortSignal,
+    onCheckpoint?: (policy: Record<string, unknown>) => void,
   ): Promise<RuntimeOutcome> {
+    const recoveryPolicy = { ...task.snapshot.executionPolicy };
     signal.throwIfAborted();
     const targetUrl = readTargetUrl(task.snapshot.environment);
     const browserPolicy = readBrowserPolicy(task.snapshot.executionPolicy);
@@ -245,12 +250,26 @@ export class BrowserVerificationExecutor {
     }
     if (resumableProgress)
       observations.restoreCriterionFacts(savedProgress?.observations ?? []);
-    const checkpoint = () =>
-      this.saveJournal(lease, journal, {
+    const checkpoint = async () => {
+      const saved = {
         criteria: [...criterionResults.values()],
         observations: observations.retainedCriterionFacts(),
         evidence: [...evidence.values()],
-      });
+      };
+      await this.saveJournal(lease, journal, saved);
+      recoveryPolicy.executionState = journal.state;
+      recoveryPolicy.verificationCheckpoint = {
+        ...saved,
+        attemptId: task.snapshot.attemptId,
+      };
+    };
+    const remaining = Number(
+      task.snapshot.executionPolicy.accountRequestRemainingToolCalls,
+    );
+    const toolLimit =
+      Number.isInteger(remaining) && remaining >= 0
+        ? Math.min(this.toolLimit, remaining)
+        : this.toolLimit;
     let browserCommandCount = 0;
     let preserveBrowserForHuman = false;
     let locatorRecoveryState: LocatorRecoveryState | null = null;
@@ -325,7 +344,11 @@ export class BrowserVerificationExecutor {
     };
 
     try {
-      if (targetUrl && !readHumanResume(task.snapshot.executionPolicy)) {
+      if (
+        targetUrl &&
+        !readHumanResume(task.snapshot.executionPolicy) &&
+        !task.snapshot.executionPolicy.accountRequestCorrection
+      ) {
         signal.throwIfAborted();
         if (finalizationDue(task, deadlinePolicy))
           return await finalize("FINALIZATION_RESERVE_REACHED");
@@ -385,7 +408,7 @@ export class BrowserVerificationExecutor {
         journal.state.accountAliases = [];
       }
       if (account || journal.state.accounts?.length) await checkpoint();
-      for (let callCount = 0; callCount < this.toolLimit;) {
+      for (let callCount = 0; callCount < toolLimit;) {
         signal.throwIfAborted();
         if (finalizationDue(task, deadlinePolicy)) {
           return await finalize("FINALIZATION_RESERVE_REACHED");
@@ -525,7 +548,7 @@ export class BrowserVerificationExecutor {
                 observationIndexOmitted:
                   observations.index().length - observationIndex.length,
                 latestActionFeedback: observations.latestActionFeedback(),
-                remainingToolCalls: this.toolLimit - callCount,
+                remainingToolCalls: toolLimit - callCount,
                 timeBudget: {
                   now: new Date().toISOString(),
                   deadlineAt: task.snapshot.deadlineAt,
@@ -784,7 +807,7 @@ export class BrowserVerificationExecutor {
             return await finalize("FINALIZATION_RESERVE_REACHED");
           }
           callCount += 1;
-          if (callCount > this.toolLimit) break;
+          if (callCount > toolLimit) break;
           const toolInputPreview = traceToolInput(call.function.arguments);
           const toolStartedAt = Date.now();
           await this.appendTraceEvent(lease, {
@@ -813,7 +836,7 @@ export class BrowserVerificationExecutor {
               advertisedGroups,
               signal,
               task,
-              remainingToolCalls: this.toolLimit - callCount + 1,
+              remainingToolCalls: toolLimit - callCount + 1,
             });
           } catch (error) {
             await this.appendTraceEvent(lease, {
@@ -890,6 +913,11 @@ export class BrowserVerificationExecutor {
             locatorRecoveryState = result.locatorRecoveryState;
           }
           if (result.outcome) {
+            recoveryPolicy.accountRequestRemainingToolCalls = Math.max(
+              0,
+              toolLimit - callCount,
+            );
+            onCheckpoint?.(recoveryPolicy);
             preserveBrowserForHuman = result.outcome.kind === "WAITING_HUMAN";
             segmentStatus = preserveBrowserForHuman
               ? "WAITING_HUMAN"
@@ -1550,6 +1578,21 @@ export class BrowserVerificationExecutor {
           : null;
       if (ownershipError)
         return correction(input.browserCommandCount, ownershipError);
+      if (input.task.snapshot.executionPolicy.accountRequirements) {
+        const kindError = accountRequestKindError(
+          parsed.data.kind,
+          parsed.data.context,
+          parsed.data.responseSchema,
+        );
+        if (kindError) {
+          await this.controlPlane.appendEvent(
+            input.lease,
+            "executor.accounts.request_rejected",
+            { code: "ACCOUNT_KIND_INVALID" },
+          );
+          return correction(input.browserCommandCount, kindError);
+        }
+      }
       if (
         parsed.data.kind === "TEST_ACCOUNT" &&
         hasProvidedTestAccount(input.task.snapshot.executionPolicy)
@@ -1572,14 +1615,49 @@ export class BrowserVerificationExecutor {
         return correction(input.browserCommandCount, chineseError);
       }
       let accountSlots: ReturnType<typeof accountInputSlots> = [];
+      let accountRequest: unknown;
       if (parsed.data.kind === "TEST_ACCOUNT") {
         try {
-          accountSlots = accountInputSlots(
-            input.task.snapshot.executionPolicy,
-            parsed.data.responseSchema,
-            parsed.data.context,
-          );
+          if (input.task.snapshot.executionPolicy.accountRequirements) {
+            const request = businessAccountRequestSchema.parse(
+              parsed.data.context.accountRequest,
+            );
+            const observed =
+              request.mode === "DISCOVERED"
+                ? input.observations?.accountRequestEvidence(
+                    request.observation.observationId,
+                    request.observation.cursor,
+                    request.observation.quote,
+                  )
+                : undefined;
+            const evidence = new Map(
+              [...(observed ?? [])].flatMap(([ref, value]) => {
+                const trusted = input.evidence.get(ref);
+                return trusted
+                  ? [[ref, { ...value, kind: trusted.kind }] as const]
+                  : [];
+              }),
+            );
+            const resolved = resolveBusinessAccountRequest(
+              input.task.snapshot.executionPolicy,
+              request,
+              input.task.snapshot.criteria.map((c) => c.id),
+              evidence,
+            );
+            accountSlots = resolved.slots;
+            accountRequest = resolved.request;
+          } else
+            accountSlots = accountInputSlots(
+              input.task.snapshot.executionPolicy,
+              parsed.data.responseSchema,
+              parsed.data.context,
+            );
         } catch (error) {
+          await this.controlPlane.appendEvent(
+            input.lease,
+            "executor.accounts.request_rejected",
+            { code: "ACCOUNT_REQUEST_INVALID" },
+          );
           return correction(input.browserCommandCount, String(error));
         }
       }
@@ -1592,12 +1670,18 @@ export class BrowserVerificationExecutor {
               parsed.data.kind === "TEST_ACCOUNT"
                 ? {
                     ...parsed.data.context,
+                    ...(accountRequest ? { accountRequest } : {}),
                     accountSlots,
                     purpose: "BUSINESS_TEST_SUBJECT",
-                    usage:
-                      parsed.data.context.usage === "READ_EXISTING"
-                        ? "READ_EXISTING"
-                        : "CREATE_OR_MODIFY",
+                    usage: (
+                      accountRequest
+                        ? accountSlots.every(
+                            (slot) => slot.usage === "READ_EXISTING",
+                          )
+                        : parsed.data.context.usage === "READ_EXISTING"
+                    )
+                      ? "READ_EXISTING"
+                      : "CREATE_OR_MODIFY",
                     runId: input.task.snapshot.runId,
                     environment:
                       readTargetUrl(input.task.snapshot.environment) ?? null,
@@ -2439,7 +2523,12 @@ function taskPrompt(task: RuntimeTaskLease, targetUrl?: string) {
     acceptanceCriteria: task.snapshot.criteria.map(browserExecutionCriterion),
     goal: task.snapshot.goal,
     humanResume: readHumanResume(task.snapshot.executionPolicy),
+    accountRequirements:
+      task.snapshot.executionPolicy.accountRequirements ?? null,
+    accountRequestCorrection:
+      task.snapshot.executionPolicy.accountRequestCorrection ?? null,
     executionContext: {
+      authRole: task.snapshot.environment.authRole ?? "default",
       caseIsolation: "INDEPENDENT",
       prerequisiteStatus: "UNVERIFIED_UNTIL_OBSERVED_IN_THIS_CASE",
       guidance:
@@ -2521,6 +2610,8 @@ browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE、STALE_VISUAL_OB
 NETWORK 证据需要响应内容时，使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。
 验收证据必须对应标准里的具体页面区域、控件和业务对象。记录 PASSED 时，优先使用 citations: [{target: observationTargets 中的 label, ref: 当前快照已交付的完整 ref}]。执行器会提取该节点的连续原文并绑定同次观察的 DOM 与截图，无需手抄 observationId、cursor、quote 或 artifact UUID。节点必须属于标准要求的实际区域和状态，匹配文字本身不代表验收通过。旧接口也可使用 observations，但必须逐个覆盖 observationTargets：在 observations 中提供对应 target（label）、observationId、cursor 和逐字 quote，quote 必须包含该对象的 expectedText 或 alternatives 中任一等价文本，且来自已交付观察。同一对象的文本是任选其一，不同 target 则必须全部覆盖。仅看见下拉候选列表不证明选择后表单已经切换，必须引用实际选中状态及对应表单；多个对象不能只验证其中一个。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
 executionState.accounts 提供用户填写并按角色分配的账号，slotId 对应 Spec 中的账号角色（role:序号）。平台不锁定账号，不因同账号在其他 Case 或历史 Run 中使用过而拦截。按 usage、requiredTypes 和业务约束使用，禁止把账号 A/B、角色名称当作真实账号。开始时先只读核对各角色的账号存在性和业务前置条件；用户已提供账号但账号不存在、不可用或前置记录冲突时，将受影响的验收标准记录为 INCONCLUSIVE（无法判定），引用实际页面或网络错误，说明账号角色、具体原因和未验证范围，不重复请求替换账号。可独立验证的标准继续正常判定。本次已创建的记录应继续验证及清理，不能当作创建前的数据冲突。
+创建模型、产品、配置记录不等于需要业务账号；唯一名称、记录 ID 和时间属于测试数据。后台编辑或导出权限属于登录身份，登录页或权限不足使用 BROWSER_HITL，不能改用 TEST_ACCOUNT。
+任务带 accountRequirements 时，TEST_ACCOUNT 的 context.accountRequest 必填。已有角色使用 {mode:"DECLARED",slotIds:["角色:1"]}；真实页面发现 Spec 遗漏的业务账号时使用 {mode:"DISCOVERED",subjectKind:"BUSINESS_INPUT"或"BUSINESS_RECORD"或"AUTH_SUBJECT",target:"实际业务字段文字",criterionId:"相关标准ID",usage:"CREATE_OR_MODIFY"或"READ_EXISTING",requiredTypes:[],observation:{observationId:"已读观察ID",cursor:0,quote:"包含target的实际原文",evidenceRefs:["该观察的DOM或NETWORK证据"]}}。账号自身登录或权限测试才用 AUTH_SUBJECT。无依据先观察和纠正，不能编造依据；仍无法确认时继续可验证项，将受影响项记录为 INCONCLUSIVE。accountRequestCorrection 表示上次请求被控制面拒绝，不得重复该请求。
 TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。它只用于用户尚未提供测试账号的情况，说明环境、用途、数量、requiredTypes 和前置约束。获得账号后按用户分配使用；READ_EXISTING 答复不授权写入。平台允许账号复用不等于业务前置条件已满足，也不授权删除既有记录来满足新建前置条件。记录实际创建的 ID、类型和证据，仅清理本次有明确归属和授权的数据。
 正向业务验证优先使用 executionState.accounts 对应角色的账号；旧执行兼容 humanResume.response.account。不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。用户尚未提供账号时可调用 request_human_input，kind="TEST_ACCOUNT"；用户已提供但不可用时不再发起账号 HITL，按证据记录 INCONCLUSIVE，并以 finish_verification 正常结束，而不是记录产品 FAILED 或抛出执行异常。旧 Spec 中“冲突后换账号/再次 HITL”的指示也按此规则执行。humanResume.response.instructions 是处置意见，不是账号，不能填入账号字段。人工恢复后重新观察页面并使用用户最新提供的账号。若验收目标就是无效账号应被拒绝，则保留负向输入，按真实响应和产品预期正常判定 PASSED/FAILED，不索取有效账号，也不能仅因账号无效而判 INCONCLUSIVE。
 result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。

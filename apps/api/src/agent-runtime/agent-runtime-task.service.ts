@@ -19,6 +19,10 @@ import {
   runtimeTraceEventSchema,
   runtimeTaskSnapshotSchema,
   runtimeVerificationTerminationReasonSchema,
+  businessAccountRequestSchema,
+  resolveBusinessAccountRequest,
+  accountInputResponseSchema,
+  accountRequestKindError,
   type RuntimeEvidenceRef,
   type RuntimeTaskClaimInput,
   type RuntimeTaskOutcomeInput,
@@ -35,6 +39,7 @@ import { z } from "zod";
 
 import { env } from "../config/env.js";
 import { AgentModelConfigurationService } from "../console/agent-model-configuration.service.js";
+import { MetricsService } from "../observability/metrics.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { BrowserExecutionRunner } from "../verification/browser-execution-runner.service.js";
 import { RuntimeCommandDispatcher } from "../runtime/runtime-command-dispatcher.service.js";
@@ -249,6 +254,7 @@ export class AgentRuntimeTaskService {
     @Optional() private readonly browser?: BrowserExecutionRunner,
     @Optional() private readonly commands?: RuntimeCommandDispatcher,
     @Optional() private readonly sessionRecovery?: SessionRecoveryService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
 
   onModuleInit() {
@@ -817,6 +823,14 @@ export class AgentRuntimeTaskService {
               },
             });
             if (!candidate) return null;
+            if (
+              input.protocol.minor < 20 &&
+              runtimeTaskSnapshotSchema.parse(candidate.snapshot)
+                .executionPolicy.accountRequirements
+            ) {
+              skipped.add(candidate.id);
+              return undefined;
+            }
 
             const leaseToken = randomUUID();
             const leaseExpiresAt = leaseExpiry(now);
@@ -1216,6 +1230,12 @@ export class AgentRuntimeTaskService {
           },
         });
         // Legacy execution.account.claim events remain audit-only.
+        if (input.event.kind === "executor.accounts.request_rejected")
+          this.metrics?.increment(
+            "devproof_account_requirement_rejections_total",
+            "Account requirement validation rejections.",
+            { boundary: "executor", code: "ACCOUNT_REQUEST_INVALID" },
+          );
         if (input.event.kind === "agent.model.failed") {
           const payload = input.event.payload;
           const preview =
@@ -1469,6 +1489,104 @@ export class AgentRuntimeTaskService {
           if (validationError) throw new ConflictException(validationError);
         }
 
+        if (
+          outcome.kind === "WAITING_HUMAN" &&
+          runtimeTaskSnapshotSchema.parse(task.snapshot).executionPolicy
+            .accountRequirements
+        ) {
+          const kindError = accountRequestKindError(
+            outcome.intervention.kind,
+            outcome.intervention.context,
+            outcome.intervention.responseSchema,
+          );
+          if (kindError) {
+            this.metrics?.increment(
+              "devproof_account_requirement_rejections_total",
+              "Account requirement validation rejections.",
+              { boundary: "outcome_api", code: "ACCOUNT_KIND_INVALID" },
+            );
+            throw new BadRequestException({
+              code: "ACCOUNT_REQUEST_INVALID",
+              message: kindError,
+            });
+          }
+        }
+        if (
+          outcome.kind === "WAITING_HUMAN" &&
+          outcome.intervention.kind === "TEST_ACCOUNT"
+        ) {
+          const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+          if (snapshot.executionPolicy.accountRequirements) {
+            try {
+              const request = businessAccountRequestSchema.parse(
+                outcome.intervention.context.accountRequest,
+              );
+              const stored =
+                request.mode === "DISCOVERED"
+                  ? await tx.runEvidence.findMany({
+                      where: {
+                        attemptId: task.attemptId,
+                        runId: task.runId,
+                        externalId: { in: request.observation.evidenceRefs },
+                      },
+                      include: {
+                        runtimeArtifact: { include: { command: true } },
+                      },
+                    })
+                  : [];
+              const evidence = new Map(
+                stored.map((item) => [
+                  item.externalId,
+                  {
+                    kind: item.kind,
+                    content:
+                      request.mode === "DISCOVERED" &&
+                      item.runtimeArtifact?.command?.ownerTaskId === task.id &&
+                      containsAccountQuote(
+                        item.runtimeArtifact.command.result,
+                        request.observation.quote,
+                      )
+                        ? request.observation.quote
+                        : "",
+                  },
+                ]),
+              );
+              const resolved = resolveBusinessAccountRequest(
+                snapshot.executionPolicy,
+                request,
+                snapshot.criteria.map((c) => c.id),
+                evidence,
+              );
+              outcome.intervention.context = {
+                ...outcome.intervention.context,
+                accountRequest: resolved.request,
+                accountSlots: resolved.slots,
+                purpose: "BUSINESS_TEST_SUBJECT",
+                usage: resolved.slots.every(
+                  (slot) => slot.usage === "READ_EXISTING",
+                )
+                  ? "READ_EXISTING"
+                  : "CREATE_OR_MODIFY",
+              };
+              outcome.intervention.responseSchema = accountInputResponseSchema(
+                resolved.slots,
+              );
+            } catch (error) {
+              this.metrics?.increment(
+                "devproof_account_requirement_rejections_total",
+                "Account requirement validation rejections.",
+                { boundary: "outcome_api", code: "ACCOUNT_REQUEST_INVALID" },
+              );
+              throw new BadRequestException({
+                code: "ACCOUNT_REQUEST_INVALID",
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : "业务账号用途校验失败。",
+              });
+            }
+          }
+        }
         const policy = retryPolicySchema.parse(task.run.executionPolicy);
         const projection = projectRuntimeOutcome({
           attemptNumber: task.attempt.number,
@@ -2150,4 +2268,21 @@ export function completedOutcomeEvidenceError(
     }
   }
   return null;
+}
+
+/** Verify against the browser command persisted by the control plane, not Agent metadata. */
+function containsAccountQuote(
+  value: unknown,
+  quote: string,
+  depth = 0,
+): boolean {
+  if (depth > 20 || value == null) return false;
+  if (typeof value === "string") return value.includes(quote);
+  if (typeof value !== "object") return false;
+  return (
+    JSON.stringify(value, null, 2).includes(quote) ||
+    Object.values(value).some((child) =>
+      containsAccountQuote(child, quote, depth + 1),
+    )
+  );
 }

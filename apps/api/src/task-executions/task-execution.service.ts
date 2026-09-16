@@ -75,6 +75,7 @@ import {
 } from "./task-analysis-input.js";
 import { refreshedTaskDeadline } from "./task-deadline.js";
 import { caseExecutionGoal } from "./task-case-context.js";
+import { resolveCaseExecutionDefinition } from "./case-account-definition.js";
 import { taskDeploymentMatrix } from "./task-deployment-matrix.js";
 import { TaskLogBundleService } from "./task-log-bundle.service.js";
 import { TaskProfileResolverService } from "./task-profile-resolver.service.js";
@@ -3333,12 +3334,15 @@ function taskCaseRunRequest(
   targetUrl: string,
   runtimeProfileKey: string | null,
 ): ExecutionRunCreateInput {
-  const agentDefinition = runtimeGeneratedSpecCaseSchema.safeParse(
+  const effectiveDefinition = resolveCaseExecutionDefinition(
     item.testCase.definition,
+    item.testAccountPlan,
   );
+  const agentDefinition =
+    runtimeGeneratedSpecCaseSchema.safeParse(effectiveDefinition);
   const legacyDefinition = agentDefinition.success
     ? null
-    : generatedTestCaseDefinitionSchema.parse(item.testCase.definition);
+    : generatedTestCaseDefinitionSchema.parse(effectiveDefinition);
   const context = testGenerationContextSchema.parse(
     item.testCase.snapshot.context,
   );
@@ -3374,6 +3378,19 @@ function taskCaseRunRequest(
     }),
   );
   return {
+    ...(agentDefinition.success &&
+    (agentDefinition.data.accountRequirementsVersion === 2 ||
+      readAccountPlan(item.testAccountPlan)?.version === 2)
+      ? {
+          accountRequirements: {
+            version: 2 as const,
+            definitionHash: specificationDefinitionHash(
+              item.testCase.definition,
+            ),
+            requirements: agentDefinition.data.accountRequirements ?? [],
+          },
+        }
+      : {}),
     testAccounts: readAccountPlan(item.testAccountPlan)?.bindings,
     concurrencyPolicy: executionConcurrencyPolicySchema.safeParse(
       item.executionPolicy,

@@ -381,3 +381,46 @@ describe("SpecCheckCatalog", () => {
     ).toThrow();
   });
 });
+
+it("resolves referenced account bindings against the Case check order", () => {
+  const catalog = new SpecCheckCatalog();
+  catalog.define(
+    {
+      expectedRevision: 0,
+      checks: [option, { ...style, supportingSourceRefs: [ui] }],
+    },
+    requirements,
+    sources,
+  );
+  const base = draft(["check-2", "check-1"]);
+  const expanded = catalog.expand(
+    {
+      ...base,
+      cases: [
+        {
+          ...base.cases[0],
+          accountRequirementsVersion: 2,
+          accountRequirements: [
+            {
+              role: "subject",
+              label: "权限测试用户",
+              usage: "READ_EXISTING",
+              rationale: "指定账号为权限验收对象",
+              subjectBinding: {
+                kind: "AUTH_SUBJECT",
+                target: "指定用户权限",
+                stepOrders: [1],
+                criterionIds: ["check-1"],
+                basis: { sourceRef: issue, quote: "新增旧版对公转账白名单" },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    requirements,
+  );
+  expect(
+    expanded.cases[0]!.accountRequirements![0]!.subjectBinding!.criterionIds,
+  ).toEqual([expanded.cases[0]!.criteria[1]!.id]);
+});

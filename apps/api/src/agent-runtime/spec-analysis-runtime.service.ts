@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Optional,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -17,6 +18,8 @@ import {
   specRequirementCoverageError,
   specCapabilityError,
   specNecessityError,
+  validateCaseAccountRequirements,
+  accountRequirementIssuesMessage,
   type RuntimeSpecAnalysisOutcome,
   type RuntimeSpecAnalysisTaskOutcomeInput,
   type RuntimeSpecAnalysisToolInput,
@@ -37,6 +40,7 @@ import { z } from "zod";
 
 import { AgentModelConfigurationService } from "../console/agent-model-configuration.service.js";
 import { env } from "../config/env.js";
+import { MetricsService } from "../observability/metrics.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import {
@@ -50,7 +54,7 @@ import {
 } from "../task-executions/task-analysis-input.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
 
-const SPEC_PROTOCOL_MINOR = 18;
+const SPEC_PROTOCOL_MINOR = 20;
 const SOURCE_PAGE_SIZE = 20;
 const MAX_SOURCE_BYTES = 2_000_000;
 const MAX_SOURCE_COUNT = 3_250;
@@ -91,6 +95,7 @@ export class SpecAnalysisRuntimeService {
     private readonly models: AgentModelConfigurationService,
     private readonly linear: LinearContextClient,
     private readonly github: GithubPullRequestClient,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
 
   async claim(
@@ -755,6 +760,25 @@ export class SpecAnalysisRuntimeService {
     outcome: Extract<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
   ) {
     const spec = runtimeGeneratedSpecSchema.parse(outcome.spec);
+    const accountIssues = validateCaseAccountRequirements(spec.cases, {
+      requireVersion: true,
+      sourceContents: new Map(
+        attempt.analysisSources.map((source) => [
+          source.externalId,
+          stringLeaves(sourceContent(source.content)).join("\n"),
+        ]),
+      ),
+    });
+    const accountError = accountRequirementIssuesMessage(accountIssues);
+    if (accountError) {
+      for (const code of new Set(accountIssues.map((issue) => issue.code)))
+        this.metrics?.increment(
+          "devproof_account_requirement_rejections_total",
+          "Account requirement validation rejections.",
+          { boundary: "spec_api", code },
+        );
+      throw new BadRequestException(accountError);
+    }
     const issueTexts = new Map(
       attempt.analysisSources
         .filter((source) => source.kind === "LINEAR_ISSUE")
@@ -1802,6 +1826,11 @@ function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
         ...(item.changeBasis ? [item.changeBasis.sourceRef] : []),
       ]),
       ...spec.cases.flatMap((testCase) => [
+        ...(testCase.accountRequirements ?? []).flatMap((requirement) =>
+          requirement.subjectBinding
+            ? [requirement.subjectBinding.basis.sourceRef]
+            : [],
+        ),
         ...testCase.sourceRefs,
         ...testCase.criteria.flatMap((criterion) => criterion.sourceRefs),
       ]),

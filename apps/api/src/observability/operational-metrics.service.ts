@@ -11,6 +11,20 @@ export class OperationalMetricsService {
     private readonly metrics: MetricsService,
   ) {}
 
+  async collectAccountCorrections(since = new Date(Date.now() - 15 * 60_000)) {
+    const count = await this.prisma.taskExecutionEvent.count({
+      where: {
+        kind: "task.accounts.requirements_corrected",
+        createdAt: { gte: since },
+      },
+    });
+    this.metrics.setGauge(
+      "devproof_account_requirement_corrections_recent",
+      "Reviewed account requirement corrections in the last 15 minutes.",
+      count,
+    );
+  }
+
   async collect() {
     const recentCutoff = new Date(Date.now() - 15 * 60_000);
     const [
@@ -91,6 +105,7 @@ export class OperationalMetricsService {
         where: { status: "WAITING_INPUT" },
       }),
       this.collectExecutionScheduling(),
+      this.collectAccountCorrections(recentCutoff),
     ]);
     this.groupGauge(
       "devproof_verification_runs",

@@ -174,3 +174,16 @@ Recommended sequence:
 7. Keep the old repository read-only as a private archive.
 
 Rewriting the old repository in place is not required and risks losing the private audit trail.
+
+## Business account requirements (Agent v2.20)
+
+Deploy API before upgrading both Spec Analysis and Browser Execution Agent pools,
+then Web. New Spec claims require Agent minor 20; older Browser Execution workers
+skip tasks carrying versioned account requirements. New claims may pause while
+workers roll. No database migration or Browser Runtime daemon update is needed.
+
+Historical operator-account misclassifications require an explicit reviewed
+correction; upgrading alone does not rewrite persisted plans. Use the
+[account recovery runbook](test-account-requirement-design.md). Retain an API
+that can read v2 account plans during rollback; an old v1-only reader must not
+resume dispatch or recreate original account demands.
