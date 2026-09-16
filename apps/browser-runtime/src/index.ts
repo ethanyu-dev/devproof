@@ -3886,7 +3886,7 @@ export class BrowserSessionManager {
     const data = await this.screenshot(session.page, {
       format: "jpeg",
       fullPage: false,
-      quality: 58,
+      quality: 88,
     });
     const viewport = session.page.viewportSize() ?? {
       height: 720,
@@ -3939,7 +3939,7 @@ export class BrowserSessionManager {
         maxWidth: 1280,
         mimeTypes: ["video/webm;codecs=vp8", "video/webm"],
         name: "native",
-        videoBitsPerSecond: 1_000_000,
+        videoBitsPerSecond: 2_500_000,
       },
       {
         maxHeight: 540,
