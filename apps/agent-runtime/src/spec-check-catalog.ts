@@ -25,6 +25,24 @@ export const defineChecksSchema = z.object({
 type Check = z.infer<typeof specCheckSchema>;
 type CatalogIssue = SpecCheckIssue & { inputIndex?: number; checkId?: string };
 
+// Union errors otherwise hide the actionable field (for example a missing EQ
+// operator). Return the closest branch's leaf errors without weakening parsing.
+function actionableIssues(
+  issues: readonly z.core.$ZodIssue[],
+): z.core.$ZodIssue[] {
+  return issues.flatMap((issue) => {
+    if (issue.code !== "invalid_union") return [issue];
+    const branches = issue.errors.map(actionableIssues);
+    const closest = branches.reduce((best, branch) =>
+      branch.length < best.length ? branch : best,
+    );
+    return closest.map((child) => ({
+      ...child,
+      path: [...issue.path, ...child.path],
+    }));
+  });
+}
+
 /** Attempt-local state. Failed items never replace previously accepted checks. */
 export class SpecCheckCatalog {
   private readonly checks = new Map<string, Check>();
@@ -59,12 +77,14 @@ export class SpecCheckCatalog {
       const parsed = checkUpdateSchema.safeParse(item);
       if (!parsed.success) {
         issues.push(
-          ...parsed.error.issues.map((issue) => ({
-            inputIndex,
-            code: "INVALID_CHECK",
-            path: issue.path.join("."),
-            message: issue.message,
-          })),
+          ...actionableIssues(parsed.error.issues)
+            .slice(0, 30)
+            .map((issue) => ({
+              inputIndex,
+              code: "INVALID_CHECK",
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
         );
         return;
       }
@@ -103,6 +123,18 @@ export class SpecCheckCatalog {
           "REQUIREMENT_CHANGED",
           "requirementId",
           "已保存标准的需求映射不可更换；不同需求请定义新标准。",
+        );
+        return;
+      }
+      if (
+        checkId &&
+        this.checks.get(checkId)!.observationContract &&
+        !check.observationContract
+      ) {
+        fail(
+          "CONTRACT_DOWNGRADE",
+          "observationContract",
+          "已保存的对象状态契约不能退回文字目标；请修正原 observationContract。",
         );
         return;
       }

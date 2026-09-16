@@ -69,6 +69,90 @@ const draft = (checkIds = ["check-1", "check-2"]) => ({
 });
 
 describe("SpecCheckCatalog", () => {
+  it("identifies malformed assertion fields and preserves accepted v2 contracts", () => {
+    const catalog = new SpecCheckCatalog();
+    const assertion = {
+      assertionId: "visible",
+      subject: { kind: "SWITCH", label: "启用状态" },
+      property: "VISIBLE",
+      operator: "EQ",
+      expected: true,
+    };
+    const target = {
+      targetId: "legacy",
+      label: "旧版配置",
+      scope: { kind: "DIALOG", names: ["新增配置"] },
+      entity: {
+        controlKind: "SELECT",
+        label: "类型",
+        property: "SELECTED_LABEL",
+        oneOf: ["旧版对公转账白名单"],
+      },
+      phase: "CURRENT",
+      assertions: [assertion],
+      requiredEvidenceKinds: ["DOM"],
+      temporal: "SAME_OBSERVATION",
+    };
+    const check = {
+      requirementId: "requirement-2",
+      description: "旧版对公转账配置显示启用开关。",
+      supportingSourceRefs: [ui],
+      observationContract: { version: 2, targets: [target], comparisons: [] },
+    };
+    const { operator, ...missingOperator } = assertion;
+    const invalid = catalog.define(
+      {
+        expectedRevision: 0,
+        checks: [
+          {
+            ...check,
+            observationContract: {
+              ...check.observationContract,
+              targets: [{ ...target, assertions: [missingOperator] }],
+            },
+          },
+        ],
+      },
+      requirements,
+      sources,
+    );
+    expect(invalid.saved).toEqual([]);
+    expect(invalid.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "observationContract.targets.0.assertions.0.operator",
+          message: expect.stringContaining("EQ"),
+        }),
+      ]),
+    );
+    expect(
+      catalog.define(
+        { expectedRevision: 0, checks: [check] },
+        requirements,
+        sources,
+      ),
+    ).toMatchObject({ accepted: true, revision: 1 });
+    expect(
+      catalog.define(
+        {
+          expectedRevision: 1,
+          checks: [
+            { ...style, checkId: "check-1", supportingSourceRefs: [ui] },
+          ],
+        },
+        requirements,
+        sources,
+      ),
+    ).toMatchObject({
+      accepted: false,
+      issues: [expect.objectContaining({ code: "CONTRACT_DOWNGRADE" })],
+    });
+    expect(
+      catalog.expand(draft(["check-1"]), requirements).cases[0]!.criteria[0]!
+        .observationContract?.version,
+    ).toBe(2);
+  });
+
   it("requires delivered evidence for both expanded comparison targets in browser execution", () => {
     const catalog = new SpecCheckCatalog();
     catalog.define(

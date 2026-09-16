@@ -23,6 +23,7 @@ const fixtures: Array<[string, Record<string, unknown>]> = [
   ["page.network", { includeResponseBodies: true, urlIncludes: "/api" }],
   ["page.click", { target }],
   ["page.fill", { target, text: "测试" }],
+  ["page.fill_fields", { fields: [{ ref: "e1", text: "测试" }] }],
   ["page.type", { target, text: "测试" }],
   ["page.press", { key: "Enter" }],
   ["page.check", { target }],
@@ -59,7 +60,7 @@ describe("command-specific action validation", () => {
     expect(fixtures.map(([name]) => name).sort()).toEqual(
       [...registered].sort(),
     );
-    expect(registered).toHaveLength(39);
+    expect(registered).toHaveLength(40);
     for (const name of [
       "session.open",
       "session.close",

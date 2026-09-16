@@ -1,9 +1,17 @@
+import { ObservationBindingService } from "./observation-binding.service.js";
+import {
+  bindObservationInputSchema,
+  readBindingsInputSchema,
+  readEvidenceImagesInputSchema,
+  visualComparisonInputSchema,
+} from "@devproof/agent-runtime-protocol";
+import { z } from "zod";
 import {
   VISUAL_OBSERVATION_MAX_BYTES,
   visualObservationMetadataSchema,
 } from "@devproof/runtime-protocol";
 import { ObjectStorageService } from "../infrastructure/object-storage.service.js";
-import { ConflictException, Injectable } from "@nestjs/common";
+import { ConflictException, Injectable, Optional } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import {
   runtimeTaskSnapshotSchema,
@@ -30,6 +38,7 @@ export class UnifiedBrowserExecutionService {
     private readonly prisma: PrismaService,
     private readonly browser: BrowserExecutionRunner,
     private readonly storage: ObjectStorageService,
+    @Optional() private readonly bindings?: ObservationBindingService,
   ) {}
 
   async acquire(
@@ -39,6 +48,18 @@ export class UnifiedBrowserExecutionService {
   ): Promise<RuntimeBrowserAcquireOutput> {
     const task = await this.requireLeasedTask(teamId, taskId, input);
     const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+    const requiredObservationCapabilities = [
+      ...(snapshot.criteria.some((c) => c.observationContract)
+        ? [
+            "structured-observation-v1",
+            "scope-phase-v1",
+            "action-observation-v1",
+          ]
+        : []),
+      ...(snapshot.executionPolicy.formSequences === true
+        ? ["form-sequence-v1"]
+        : []),
+    ];
     const execution = await this.prisma.browserExecution.upsert({
       create: {
         attemptId: task.attemptId,
@@ -55,7 +76,13 @@ export class UnifiedBrowserExecutionService {
       });
       if (
         !Array.isArray(session?.runtime.capabilities) ||
-        !session.runtime.capabilities.includes("dom-vision-v1")
+        !session.runtime.capabilities.includes("dom-vision-v1") ||
+        requiredObservationCapabilities.some(
+          (c) =>
+            !(session?.runtime.capabilities as string[] | undefined)?.includes(
+              c,
+            ),
+        )
       ) {
         throw new ConflictException({
           code: "BROWSER_RUNTIME_UPGRADE_REQUIRED",
@@ -84,6 +111,7 @@ export class UnifiedBrowserExecutionService {
           ...new Set([
             ...input.execution.requiredCapabilities,
             "dom-vision-v1",
+            ...requiredObservationCapabilities,
           ]),
         ],
         runTimeoutSeconds: Math.max(
@@ -150,6 +178,14 @@ export class UnifiedBrowserExecutionService {
     input: RuntimeBrowserCommandInput,
   ) {
     const task = await this.requireLeasedTask(teamId, taskId, input);
+    const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+    if (
+      (input.command.after &&
+        snapshot.executionPolicy.combinedObservation === false) ||
+      (input.command.commandType === "page.fill_fields" &&
+        snapshot.executionPolicy.formSequences !== true)
+    )
+      throw new ConflictException("OBSERVATION_FEATURE_DISABLED");
     const execution = await this.prisma.browserExecution.findUnique({
       where: { attemptId: task.attemptId },
     });
@@ -158,7 +194,7 @@ export class UnifiedBrowserExecutionService {
         "Acquire browser execution before sending commands.",
       );
     }
-    const result = await this.browser.executeForExecutionRun(
+    let result = await this.browser.executeForExecutionRun(
       teamId,
       execution.id,
       input.command,
@@ -171,6 +207,27 @@ export class UnifiedBrowserExecutionService {
         expiresAt: task.leaseExpiresAt!,
       },
     );
+    let boundEvidence: Record<string, unknown> = {};
+    if (
+      this.bindings &&
+      runtimeTaskSnapshotSchema
+        .parse(task.snapshot)
+        .criteria.some((c) => c.observationContract)
+    ) {
+      try {
+        boundEvidence = await this.bindings.capture(task, result);
+      } catch (error) {
+        boundEvidence = {
+          bindings: [],
+          observationError: "BINDING_PERSIST_PENDING",
+          nextAction: "Read a fresh observation without replaying the action.",
+          detail:
+            error instanceof Error
+              ? error.message.slice(0, 300)
+              : "Unavailable",
+        };
+      }
+    }
     // Only hydrate artifacts returned by this leased task's own command. Never
     // accept storage keys or arbitrary artifact IDs from Agent tool arguments.
     const artifact =
@@ -185,10 +242,11 @@ export class UnifiedBrowserExecutionService {
               ).success,
           )
         : undefined;
-    if (!artifact) return result;
+    if (!artifact) return { ...result, boundEvidence };
     if (artifact.byteSize > VISUAL_OBSERVATION_MAX_BYTES) {
       return {
         ...result,
+        boundEvidence,
         visualObservationError:
           "VIEWPORT_IMAGE_TOO_LARGE: reduce viewport or capture a JPEG screenshot.",
       };
@@ -205,6 +263,7 @@ export class UnifiedBrowserExecutionService {
         throw new Error("Unexpected screenshot byte size.");
       return {
         ...result,
+        boundEvidence,
         visualObservation: {
           ...visualObservationMetadataSchema.parse(
             (artifact.metadata as Record<string, unknown>).visualObservation,
@@ -219,9 +278,57 @@ export class UnifiedBrowserExecutionService {
       // image fetch into a transport error that could replay a save/delete.
       return {
         ...result,
+        boundEvidence,
         visualObservationError:
           "VIEWPORT_IMAGE_UNAVAILABLE: capture a fresh viewport screenshot before visual interaction.",
       };
+    }
+  }
+
+  async observationOperation(
+    teamId: string,
+    taskId: string,
+    identity: LeaseInput,
+    operation: string,
+    arguments_: unknown,
+  ) {
+    const task = await this.requireLeasedTask(teamId, taskId, identity);
+    if (!this.bindings) throw new ConflictException("CONTRACT_UNSUPPORTED");
+    switch (operation) {
+      case "bind":
+        return this.bindings.bind(
+          task,
+          bindObservationInputSchema.parse(arguments_),
+        );
+      case "read":
+        return this.bindings.read(
+          task,
+          readBindingsInputSchema.parse(arguments_),
+        );
+      case "images":
+        return this.bindings.images(
+          task,
+          readEvidenceImagesInputSchema.parse(arguments_).bindingIds,
+        );
+      case "compare":
+        return this.bindings.compare(
+          task,
+          visualComparisonInputSchema.parse(arguments_),
+        );
+      case "deliver":
+        return this.bindings.deliver(
+          task,
+          z
+            .object({
+              modelRequestId: z.string().uuid(),
+              bindingIds: z.array(z.string().uuid()).max(200),
+              imageDeliveryId: z.string().uuid().optional(),
+            })
+            .strict()
+            .parse(arguments_),
+        );
+      default:
+        throw new ConflictException("Unknown observation operation.");
     }
   }
 

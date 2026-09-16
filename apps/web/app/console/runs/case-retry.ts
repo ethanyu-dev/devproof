@@ -16,6 +16,8 @@ export interface CaseRetryPlan {
   name: string;
   blockedReason: string | null;
   recoveries: RuntimeRecoveryDetail[];
+  preparationConditions?: string[];
+  hasTestAccounts?: boolean;
 }
 
 /** Keep request keys after transport failures: either write may have committed. */
@@ -54,6 +56,28 @@ export class CaseRetryRequest {
       name: testCase.name,
       recoveries: [],
       blockedReason: null,
+      hasTestAccounts: (task.testAccountPreparation?.cases ?? []).some(
+        (item) =>
+          item.slots.length > 0 &&
+          executions.some((execution) => execution.id === item.caseExecutionId),
+      ),
+      preparationConditions: [
+        ...new Set(
+          (task.testAccountPreparation?.cases ?? [])
+            .filter((item) =>
+              executions.some(
+                (execution) => execution.id === item.caseExecutionId,
+              ),
+            )
+            .flatMap((item) =>
+              item.slots.flatMap((slot) =>
+                slot.constraints.map(
+                  (condition) => `${slot.label}：${condition}`,
+                ),
+              ),
+            ),
+        ),
+      ],
     };
     if (
       !executions.length ||
@@ -111,7 +135,11 @@ export class CaseRetryRequest {
     return plan;
   }
 
-  async submit(plan: CaseRetryPlan, acknowledgeUnknownWrite = false) {
+  async submit(
+    plan: CaseRetryPlan,
+    acknowledgeUnknownWrite = false,
+    reuseTestAccounts = true,
+  ) {
     if (plan.blockedReason) throw new Error(plan.blockedReason);
     // A retry authorization is an explicit user decision, never a fabricated
     // NO_WRITE attestation. Validate every recovery before writing any of them.
@@ -140,6 +168,7 @@ export class CaseRetryRequest {
         method: "POST",
         body: JSON.stringify({
           idempotencyKey: this.key(`retry:${plan.taskId}:${plan.caseId}`),
+          ...(!reuseTestAccounts ? { reuseTestAccounts: false } : {}),
         }),
       },
     );

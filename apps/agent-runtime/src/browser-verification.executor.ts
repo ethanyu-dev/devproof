@@ -1,3 +1,10 @@
+import { BoundEvidence } from "./bound-evidence.js";
+import {
+  bindObservationInputSchema,
+  readBindingsInputSchema,
+  readEvidenceImagesInputSchema,
+  visualComparisonInputSchema,
+} from "@devproof/agent-runtime-protocol";
 import {
   accountInputSlots,
   accountInputResponseSchema,
@@ -109,7 +116,9 @@ const recordProgressInputSchema = z
           .strict(),
       )
       .min(1)
-      .max(6),
+      .max(6)
+      .optional(),
+    bindingIds: z.array(z.string().uuid()).min(1).max(20).optional(),
     executionState: executionStateSchema.optional(),
     nextAction: z.string().trim().min(1).max(500),
   })
@@ -171,6 +180,9 @@ export class BrowserVerificationExecutor {
     const catalog = new BrowserToolCatalog(
       task.snapshot.criteria,
       this.options.toolSurfaceMode,
+      task.snapshot.executionPolicy.formSequences === true,
+      task.snapshot.criteria.some((c) => c.observationContract) &&
+        task.snapshot.executionPolicy.combinedObservation !== false,
     );
     const context = new ModelContext(
       [
@@ -188,7 +200,21 @@ export class BrowserVerificationExecutor {
       ],
       this.options,
     );
-    const observations = new BrowserObservations(undefined, context.bounded);
+    const bound = new BoundEvidence(
+      task.snapshot.criteria,
+      task.snapshot.runId,
+      task.snapshot.attemptId,
+    );
+    const observations = new BrowserObservations(
+      undefined,
+      context.bounded,
+      bound,
+      {
+        focus: task.snapshot.executionPolicy.observationFocus !== false,
+        delta: task.snapshot.executionPolicy.observationDelta === true,
+        combined: task.snapshot.executionPolicy.combinedObservation !== false,
+      },
+    );
     const journal = new ExecutionJournal(task.snapshot.executionPolicy);
     const segmentId = `${task.taskId}:${lease.fencingToken}`;
     const segmentStartedAt = Date.now();
@@ -250,10 +276,26 @@ export class BrowserVerificationExecutor {
     }
     if (resumableProgress)
       observations.restoreCriterionFacts(savedProgress?.observations ?? []);
+    if (bound.enabled) {
+      let continuationToken: string | undefined;
+      do {
+        const restored = (await this.controlPlane.observationOperation(
+          lease,
+          "read",
+          continuationToken ? { continuationToken } : {},
+          signal,
+        )) as { continuationToken?: string | null };
+        bound.ingest(restored);
+        collectEvidence(restored, evidence);
+        continuationToken = restored.continuationToken ?? undefined;
+      } while (continuationToken);
+    }
     const checkpoint = async () => {
       const saved = {
         criteria: [...criterionResults.values()],
         observations: observations.retainedCriterionFacts(),
+        bindingIds: bound.ids(),
+        comparisonReviewIds: bound.reviewIds(),
         evidence: [...evidence.values()],
       };
       await this.saveJournal(lease, journal, saved);
@@ -292,6 +334,8 @@ export class BrowserVerificationExecutor {
     };
     const deadlinePolicy = readDeadlinePolicy(task.snapshot.executionPolicy);
     let progress = new VerificationProgress();
+    let progressRecoveryUsed = false;
+    let progressRecovery: { sequence: number; guidance: string } | undefined;
     let cleanupRecoveryUsed = false;
     let finalizationDeadline: number | undefined;
     const beginFinalization = () => {
@@ -435,7 +479,12 @@ export class BrowserVerificationExecutor {
         };
         const requestBase = {
           ...requestSettings,
-          tools: toolDefinitions(catalog, hitlPolicy.enabled, context.bounded),
+          tools: toolDefinitions(
+            catalog,
+            hitlPolicy.enabled,
+            context.bounded,
+            bound.enabled,
+          ),
         };
         const prepareView = async () => {
           let view: ReturnType<ModelContext["build"]>;
@@ -526,6 +575,7 @@ export class BrowserVerificationExecutor {
             const prepared = context.build(
               requestBase,
               {
+                ...(bound.enabled ? { objectEvidence: bound.view() } : {}),
                 savedCriterionObservations: observations.criterionFactView(
                   task.snapshot.criteria
                     .filter((c) => !criterionResults.has(c.id))
@@ -566,6 +616,11 @@ export class BrowserVerificationExecutor {
                     finalizationReserveMs(deadlinePolicy) / 1000,
                 },
                 progress: progress.state(),
+                progressRecovery:
+                  progressRecovery &&
+                  progress.state().sequence <= progressRecovery.sequence
+                    ? progressRecovery
+                    : undefined,
                 browserTools: toolSurface,
                 automaticObservationCount,
                 pageRefresh,
@@ -573,6 +628,7 @@ export class BrowserVerificationExecutor {
               observations.currentVisual(),
               currentPage,
               observations.currentPage(),
+              bound.referenceImages(),
             );
             if (context.bounded)
               observations.deliverCurrentPage(prepared.currentPage!);
@@ -699,6 +755,18 @@ export class BrowserVerificationExecutor {
             signal.throwIfAborted();
             if (finalizationDue(task, deadlinePolicy)) {
               return await finalize("FINALIZATION_RESERVE_REACHED");
+            }
+            if (bound.enabled) {
+              const delivery = bound.deliveredRequest(
+                view.messages,
+                observations.currentVisual(),
+              );
+              await this.controlPlane.observationOperation(
+                lease,
+                "deliver",
+                { modelRequestId: modelCallId, ...delivery },
+                signal,
+              );
             }
             selectedModel = candidate;
             this.modelHealth.success(candidate);
@@ -929,6 +997,30 @@ export class BrowserVerificationExecutor {
           if (locatorRecoveryState?.exhausted)
             return await finalize("LOCATOR_RECOVERY_EXHAUSTED");
           if (
+            !stalled &&
+            !progressRecoveryUsed &&
+            progress.state().repeatedSteps >= 4 &&
+            !finalizationDue(task, deadlinePolicy)
+          ) {
+            progressRecoveryUsed = true;
+            progressRecovery = {
+              sequence: progress.state().sequence,
+              guidance:
+                "已连续重复操作且没有新进展。先核对 savedCriterionObservations、objectEvidence 和当前页面：已有足够证据的标准直接记录；名称或状态不符应记录实际差异，不能通过重复搜索改变结果。对未观察的区域推进到该区域；选项出现后应按目标选择或进入下一步骤，不要继续交替输入同样关键词。需要跨轮保留时用 record_progress 保存下一步。若前置条件不满足，记录受影响项为 INCONCLUSIVE 并继续独立项。此次纠偏不增加工具预算、不重置停滞计数，也不授权重放提交或修改原有数据。",
+            };
+            context.compactForRecovery();
+            await this.controlPlane.appendEvent(
+              lease,
+              "executor.stagnation.recovery_requested",
+              {
+                progress: progress.state(),
+                unresolvedCriterionIds: task.snapshot.criteria
+                  .filter((c) => !criterionResults.has(c.id))
+                  .map((c) => c.id),
+              },
+            );
+          }
+          if (
             stalled &&
             !cleanupRecoveryUsed &&
             journal
@@ -1045,6 +1137,32 @@ export class BrowserVerificationExecutor {
     observations?: BrowserObservations,
   ) {
     try {
+      if (
+        command.after &&
+        (!observations?.bound?.enabled || !observations.viewFeatures.combined)
+      ) {
+        const { after: _after, ...single } = command;
+        command = single;
+      }
+      if (
+        observations?.bound?.enabled &&
+        observations.viewFeatures.combined &&
+        !READ_COMMANDS.has(command.commandType) &&
+        [
+          "page.click",
+          "page.fill",
+          "page.fill_fields",
+          "page.select",
+          "page.check",
+          "page.uncheck",
+          "page.type",
+          "page.press",
+        ].includes(command.commandType)
+      )
+        command = {
+          ...command,
+          after: { observe: "ACTIVE_REGION", timeoutMs: 1500 },
+        };
       const result = await this.controlPlane.browserCommand(
         lease,
         command,
@@ -1153,6 +1271,47 @@ export class BrowserVerificationExecutor {
       };
     }
 
+    const boundTools = {
+      bind_observation: ["bind", bindObservationInputSchema],
+      read_observation_bindings: ["read", readBindingsInputSchema],
+      read_evidence_images: ["images", readEvidenceImagesInputSchema],
+      record_visual_comparison: ["compare", visualComparisonInputSchema],
+    } as const;
+    if (
+      input.call.function.name in boundTools &&
+      input.observations?.bound?.enabled
+    ) {
+      const [operation, schema] =
+        boundTools[input.call.function.name as keyof typeof boundTools];
+      const parsed = schema.safeParse(raw);
+      if (!parsed.success)
+        return correction(
+          input.browserCommandCount,
+          schemaCorrection(parsed.error),
+        );
+      try {
+        const response = await this.controlPlane.observationOperation(
+          input.lease,
+          operation,
+          parsed.data,
+          input.signal,
+        );
+        const memory = input.observations.bound;
+        memory.ingest(response);
+        collectEvidence(response, input.evidence);
+        const output =
+          operation === "images"
+            ? memory.imageResponse(response)
+            : operation === "compare"
+              ? memory.review(response)
+              : response;
+        return { browserCommandCount: input.browserCommandCount, output };
+      } catch (error) {
+        input.signal.throwIfAborted();
+        return correction(input.browserCommandCount, String(error));
+      }
+    }
+
     if (input.call.function.name === "read_observation" && input.observations) {
       const parsed = readObservationInputSchema.safeParse(raw);
       if (!parsed.success)
@@ -1178,7 +1337,7 @@ export class BrowserVerificationExecutor {
           schemaCorrection(parsed.error),
         );
       if (
-        !parsed.data.observations.every((item) =>
+        !(parsed.data.observations ?? []).every((item) =>
           input.observations!.hasDeliveredQuote(
             item.observationId,
             item.cursor,
@@ -1189,6 +1348,16 @@ export class BrowserVerificationExecutor {
         return correction(
           input.browserCommandCount,
           "进度引用必须逐字来自本执行段已交付分页；请先读取观察，不得编造已确认事实。",
+        );
+      if (
+        (!parsed.data.observations?.length &&
+          !parsed.data.bindingIds?.length) ||
+        (parsed.data.bindingIds &&
+          !input.observations.bound?.hasDelivered(parsed.data.bindingIds))
+      )
+        return correction(
+          input.browserCommandCount,
+          "Progress requires delivered quotes or saved bindingIds.",
         );
       if (input.journal && parsed.data.executionState) {
         if (
@@ -1305,6 +1474,20 @@ export class BrowserVerificationExecutor {
           },
         };
       }
+      if (
+        ["page.snapshot", "page.screenshot", "frame.snapshot"].includes(
+          command.commandType,
+        )
+      )
+        input.observations?.bound?.clearImages();
+      if (
+        command.commandType === "page.fill_fields" &&
+        input.task.snapshot.executionPolicy.formSequences !== true
+      )
+        return correction(
+          input.browserCommandCount,
+          "FORM_SEQUENCE_DISABLED: use the individual field commands for this execution.",
+        );
       const unreadCorrection = input.observations?.unreadRefCorrection(command);
       if (unreadCorrection)
         return {
@@ -1315,7 +1498,9 @@ export class BrowserVerificationExecutor {
       const staleVisual =
         command.commandType === "page.click" &&
         "point" in command.payload &&
-        (!command.payload.visualObservationId ||
+        ((!input.observations?.bound?.canUseCurrentImage() &&
+          input.observations?.bound?.enabled) ||
+          !command.payload.visualObservationId ||
           command.payload.visualObservationId !==
             input.observations?.currentVisual()?.observationId);
       const attempted = staleRef || staleVisual ? 0 : 1;
@@ -2453,8 +2638,43 @@ function toolDefinitions(
   catalog: BrowserToolCatalog,
   hitlEnabled = true,
   boundedContext = true,
+  boundEvidence = false,
 ) {
   return [
+    ...(boundEvidence
+      ? [
+          {
+            name: "bind_observation",
+            schema: bindObservationInputSchema,
+            description:
+              "Resolve an ambiguous observation by selecting observed scope/entity/assertion refs. API verifies relationships and reads actual values; do not supply invented state.",
+          },
+          {
+            name: "read_observation_bindings",
+            schema: readBindingsInputSchema,
+            description:
+              "Read persisted object facts by bindingIds or returned continuationToken. Historical facts are evidence, not current refs.",
+          },
+          {
+            name: "read_evidence_images",
+            schema: readEvidenceImagesInputSchema,
+            description:
+              "Read at most two saved object screenshots for required visual comparison. They are attached to the next model request; never use them for coordinate actions.",
+          },
+          {
+            name: "record_visual_comparison",
+            schema: visualComparisonInputSchema,
+            description:
+              "After seeing both reference images, record the declared comparison dimensions, subject/reference bindingIds in that order, and the deliveryId returned by read_evidence_images.",
+          },
+        ].map((t) => ({
+          type: "function",
+          name: t.name,
+          description: t.description,
+          parameters: openAiFunctionSchema(t.schema),
+          strict: false,
+        }))
+      : []),
     {
       type: "function",
       name: "browser_command",
@@ -2614,6 +2834,9 @@ executionState.accounts 提供用户填写并按角色分配的账号，slotId �
 任务带 accountRequirements 时，TEST_ACCOUNT 的 context.accountRequest 必填。已有角色使用 {mode:"DECLARED",slotIds:["角色:1"]}；真实页面发现 Spec 遗漏的业务账号时使用 {mode:"DISCOVERED",subjectKind:"BUSINESS_INPUT"或"BUSINESS_RECORD"或"AUTH_SUBJECT",target:"实际业务字段文字",criterionId:"相关标准ID",usage:"CREATE_OR_MODIFY"或"READ_EXISTING",requiredTypes:[],observation:{observationId:"已读观察ID",cursor:0,quote:"包含target的实际原文",evidenceRefs:["该观察的DOM或NETWORK证据"]}}。账号自身登录或权限测试才用 AUTH_SUBJECT。无依据先观察和纠正，不能编造依据；仍无法确认时继续可验证项，将受影响项记录为 INCONCLUSIVE。accountRequestCorrection 表示上次请求被控制面拒绝，不得重复该请求。
 TEST_ACCOUNT 用于被加入名单等业务测试对象，区别于管理后台的登录身份；不要退出已有管理会话或要求两者相同。它只用于用户尚未提供测试账号的情况，说明环境、用途、数量、requiredTypes 和前置约束。获得账号后按用户分配使用；READ_EXISTING 答复不授权写入。平台允许账号复用不等于业务前置条件已满足，也不授权删除既有记录来满足新建前置条件。记录实际创建的 ID、类型和证据，仅清理本次有明确归属和授权的数据。
 正向业务验证优先使用 executionState.accounts 对应角色的账号；旧执行兼容 humanResume.response.account。不要编造手机号、把时间戳示例填入账号字段，或自行拿列表中的其他用户做写入测试。用户尚未提供账号时可调用 request_human_input，kind="TEST_ACCOUNT"；用户已提供但不可用时不再发起账号 HITL，按证据记录 INCONCLUSIVE，并以 finish_verification 正常结束，而不是记录产品 FAILED 或抛出执行异常。旧 Spec 中“冲突后换账号/再次 HITL”的指示也按此规则执行。humanResume.response.instructions 是处置意见，不是账号，不能填入账号字段。人工恢复后重新观察页面并使用用户最新提供的账号。若验收目标就是无效账号应被拒绝，则保留负向输入，按真实响应和产品预期正常判定 PASSED/FAILED，不索取有效账号，也不能仅因账号无效而判 INCONCLUSIVE。
+对于 observationContract.version=2，objectEvidence 覆盖表按区域、对象和阶段保存实际状态。使用 bindingIds 引用事实；视觉要求须 read_evidence_images 后 record_visual_comparison，再引用 comparisonReviewIds。READY 不等于 PASSED：核对 evaluation、缺失项和反例。手动修改后的值不能证明默认状态。三类目标齐全后进入比较与提交，不重复选择已验证的对象。ACTIVE_REGION 合并观察只有通过 API 绑定和完整性校验的事实可以验收；历史图片不能用于坐标点击。SCOPE_NOT_OBSERVED 表示尚未进入或观察到所需区域，不是同名节点歧义。下拉选项存在不等于已选中；完成选项检查后继续下一业务步骤。名称不同须记录实际文案，并依据来源判断，不能自行扩充等价名称来让验收通过。
+progressRecovery 出现时，执行器已发现连续重复操作。按其中 guidance 核对已有事实、保存可验收结果并调整下一步；不得继续交替输入相同关键词或重读同一旧观察。纠偏只有一次，不增加预算，不授权重新提交业务写入。
+
 result.actionFeedback 是浏览器采集的操作反馈，不是产品结论。inputCompleted 只代表操作完成；requests 是本次观察窗口内发起的候选请求，temporal 关联不证明因果。检查响应中的业务错误，即使 HTTP 200 也不能直接判成功。pending 或 coverageIncomplete 时继续只读观察，不重复提交；同一输入出现明确拒绝时先纠正数据或请求 HITL。latestActionFeedback 保留最近反馈，不能用它替代最新页面。
 保存后出现错误、弹窗不关闭或结果未更新时，先启用 diagnostics，读取 page.network（精确 urlIncludes、includeResponseBodies=true）及 page.console/page.errors。旧 Runtime 缺少 actionFeedback 时也必须走这条只读诊断路径；重复点击同一保存不能代替诊断。already exists 等唯一性拒绝要结合创建前检查、本次写入回执和记录归属核对；若是用户提供账号的前置数据问题，记录 INCONCLUSIVE 并说明原因，不循环换号或直接判产品失败。
 remainingToolCalls 不足 3 次时进入收尾，不发起新的提交；优先核对最近操作并提交已完成标准，剩余标准记录 INCONCLUSIVE。范围标签 fN 不是元素 ref，不要将它当作 frame.snapshot 的引用；恢复过的无效方法不要重复尝试。

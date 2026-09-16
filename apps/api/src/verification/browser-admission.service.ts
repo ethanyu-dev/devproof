@@ -494,9 +494,22 @@ export class BrowserAdmissionService {
             availabilityPolicy:
               browser.availabilityPolicy === "FAIL_FAST" ? "FAIL_FAST" : "WAIT",
             profile: browser.profile ?? { mode: "EPHEMERAL" },
-            requiredCapabilities: Array.isArray(browser.requiredCapabilities)
-              ? browser.requiredCapabilities
-              : ["browser"],
+            requiredCapabilities: [
+              ...(policy.formSequences === true ? ["form-sequence-v1"] : []),
+              ...(Array.isArray(browser.requiredCapabilities)
+                ? browser.requiredCapabilities
+                : ["browser"]),
+              ...(Array.isArray(record(task.snapshot).criteria) &&
+              (
+                record(task.snapshot).criteria as Array<Record<string, unknown>>
+              ).some((c) => c.observationContract)
+                ? [
+                    "structured-observation-v1",
+                    "scope-phase-v1",
+                    "action-observation-v1",
+                  ]
+                : []),
+            ],
             ...(typeof environment.targetUrl === "string"
               ? { targetUrl: environment.targetUrl }
               : {}),

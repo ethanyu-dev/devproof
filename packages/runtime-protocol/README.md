@@ -1,5 +1,22 @@
 # @devproof/runtime-protocol
 
+## Unreleased: object observations (draft)
+
+The working branch adds `structured-observation-v1`, `scope-phase-v1`,
+`action-observation-v1`, `observation-delta-v1`, and `form-sequence-v1` capabilities.
+Commands may request bounded `after.observe` capture; `page.fill_fields` accepts
+at most six native text fields from one observed form and does not submit it.
+Canonical observations preserve capture identity, frame/document identity,
+region lifecycle, relationships, state, coverage, and screenshot consistency.
+
+This draft still advertises minor 18. Allocate the next minor, update command
+minimums and negotiation tests, and publish a distinct Browser Runtime release
+before rollout. A stock v1.18/0.2.28 daemon does not contain this extension.
+See [Browser observation V2](../../docs/browser-observation-v2.md) for the current
+implementation, known blockers, migration, and rollback constraints.
+
+## Released protocol history
+
 Protocol v1.18 adds optional `runtime.heartbeat.machineMetrics`, emitted only
 after negotiating minor 18 or later. It carries a host-wide CPU interval average,
 logical CPU count, total/used/available memory and its availability source, plus

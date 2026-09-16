@@ -1,4 +1,5 @@
 import {
+  observationContractSchema,
   runtimeGeneratedSpecSchema,
   businessAccountRequirementsError,
   validateCaseAccountRequirements,
@@ -41,7 +42,12 @@ export const specCheckSchema = z.object({
   description: conciseText.describe(
     "一句可判定的业务结果；字段值和枚举放 observationTargets，不复述步骤。",
   ),
-  observationTargets: z.array(runtimeObservationTargetSchema).min(1).max(20),
+  observationTargets: z
+    .array(runtimeObservationTargetSchema)
+    .min(1)
+    .max(20)
+    .optional(),
+  observationContract: observationContractSchema.optional(),
   supportingSourceRefs: z
     .array(z.string().trim().min(1).max(500))
     .max(99)
@@ -117,7 +123,11 @@ export function expandSpecCheck(
     basis: {
       sourceRef: requirement.sourceRef,
       quote: requirement.quote,
-      observationTarget: check.observationTargets
+      observationTarget: (
+        check.observationContract?.targets ??
+        check.observationTargets ??
+        []
+      )
         .map((target) => target.label)
         .join("、")
         .slice(0, 500),

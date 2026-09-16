@@ -1316,7 +1316,7 @@ describe("context delivery and slow models", () => {
         contextData(request, "recent_operations")
           .turns.flat()
           .some((op: { tool: string }) => op.tool === "record_progress"),
-      ).toBe(true);
+      ).toBe(false);
       return reply("finish_verification", finish, step);
     });
     const { executor, controlPlane, runTask } = convergenceHarness(create);
@@ -2281,7 +2281,8 @@ describe("browser verification bounded context", () => {
     const metrics = controlPlane.appendEvent.mock.calls
       .filter((call) => call[1] === "agent.model.started")
       .map((call) => call[2].inputPreview.context);
-    expect(metrics.at(-1).retainedTurns).toBeGreaterThan(4);
+    expect(metrics.at(-1).retainedTurns).toBeLessThanOrEqual(4);
+    expect(metrics.at(-1).compactedTurns).toBeGreaterThan(0);
   });
 
   it("blocks a ref outside the returned page, allows it after local paging, and invalidates it after mutation", async () => {
@@ -3318,6 +3319,90 @@ describe("browser verification convergence", () => {
     });
     expect(outcome.summary).toContain("重复操作");
     expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    expect(
+      controlPlane.appendEvent.mock.calls.filter(
+        (call) => call[1] === "executor.stagnation.recovery_requested",
+      ),
+    ).toHaveLength(1);
+    expect(
+      create.mock.calls.some(
+        ([request]) =>
+          contextData(request, "browser_working_state").data.progressRecovery,
+      ),
+    ).toBe(true);
+  });
+
+  it("offers one early correction that can advance to an unvisited region without replaying a write", async () => {
+    let index = 0;
+    let advanced = false;
+    const create = vi.fn(async (request) => {
+      index++;
+      const state = contextData(request, "browser_working_state").data;
+      const correction = state.progressRecovery;
+      const name = advanced ? "finish_verification" : "browser_command";
+      const args = advanced
+        ? {
+            verdict: "INCONCLUSIVE",
+            summary: "已进入新增区域，其余验证留待继续。",
+            criteria: [
+              {
+                criterionId: "page-visible",
+                status: "INCONCLUSIVE",
+                summary: "已停止搜索并进入新增区域，尚未完成全部验证。",
+                evidenceRefs: [],
+              },
+            ],
+          }
+        : correction
+          ? {
+              commandType: "page.click",
+              payload: { target: { selector: "#open-create" } },
+            }
+          : { commandType: "page.snapshot", payload: {} };
+      if (advanced) expect(correction).toBeUndefined();
+      if (correction) {
+        expect(correction.guidance).toContain("不重置停滞计数");
+        expect(
+          contextData(request, "recent_operations").turns.length,
+        ).toBeLessThanOrEqual(2);
+      }
+      return {
+        id: `response-${index}`,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [functionCall(name, args, index)],
+        },
+      };
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockImplementation(async (_lease, command) => {
+      if (command.commandType === "page.click") advanced = true;
+      return {
+        status: "SUCCEEDED",
+        result: { content: advanced ? "新增区域已打开" : "页面搜索区" },
+      };
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+    });
+    expect(index).toBeLessThan(10);
+    expect(
+      controlPlane.browserCommand.mock.calls.filter(
+        (call) => call[1].commandType === "page.click",
+      ),
+    ).toHaveLength(1);
+    expect(
+      controlPlane.appendEvent.mock.calls.filter(
+        (call) => call[1] === "executor.stagnation.recovery_requested",
+      ),
+    ).toHaveLength(1);
   });
 
   it("bounds text-only responses even though they never consume a tool call", async () => {

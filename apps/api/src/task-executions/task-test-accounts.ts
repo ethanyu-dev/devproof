@@ -30,6 +30,35 @@ import { refreshedTaskDeadline } from "./task-deadline.js";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"];
+
+/** A new plan can retain corrected requirements, but never previous assignments. */
+export function unassignedTestAccountPlan(
+  definition: unknown,
+  timeoutSeconds: number,
+  now: Date,
+  previousValue?: unknown,
+): TestAccountPlan {
+  const previous = readAccountPlan(previousValue);
+  if (previous) resolveCaseExecutionDefinition(definition, previous);
+  return {
+    version: 2,
+    definitionHash: specificationDefinitionHash(definition),
+    effectiveAuthRole: String(
+      (definition as Record<string, unknown>).authRole ?? "default",
+    ),
+    resolution: {
+      kind: "DECLARED",
+      removedRoles: [],
+      reason: "按当前用例准备业务测试对象。",
+    },
+    requirements: caseAccountRequirements(definition),
+    ...(previous?.version === 2 ? previous : {}),
+    revision: randomUUID(),
+    bindings: [],
+    requestedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + timeoutSeconds * 1000).toISOString(),
+  };
+}
 export function missingAccountSlots(plan: TestAccountPlan) {
   return testAccountSlots(plan.requirements).filter(
     (slot) => !plan.bindings.some((binding) => binding.slotId === slot.slotId),
@@ -67,33 +96,17 @@ export async function prepareTestAccountPlans(
     take: 500,
   });
   for (const row of rows) {
-    const requirements = caseAccountRequirements(row.testCase.definition);
     const now = new Date();
     const policy = taskExecutionCreateInputSchema.parse(
       row.taskExecution.inputSnapshot,
     );
     const hitl =
       policy.kind === "ISSUE_SPEC" ? policy.hitlPolicy : policy.run.hitlPolicy;
-    let plan: TestAccountPlan = {
-      version: 2,
-      definitionHash: specificationDefinitionHash(row.testCase.definition),
-      effectiveAuthRole: String(
-        (row.testCase.definition as Record<string, unknown>).authRole ??
-          "default",
-      ),
-      resolution: {
-        kind: "DECLARED",
-        removedRoles: [],
-        reason: "按当前用例准备业务测试对象。",
-      },
-      revision: randomUUID(),
-      requirements,
-      bindings: [],
-      requestedAt: now.toISOString(),
-      expiresAt: new Date(
-        now.getTime() + hitl.timeoutSeconds * 1000,
-      ).toISOString(),
-    };
+    let plan = unassignedTestAccountPlan(
+      row.testCase.definition,
+      hitl.timeoutSeconds,
+      now,
+    );
     await db.$transaction(async (tx) => {
       await acquireAdvisoryTransactionLock(
         tx,

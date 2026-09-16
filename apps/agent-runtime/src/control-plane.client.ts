@@ -1,3 +1,4 @@
+import { BOUND_EVIDENCE_CAPABILITIES } from "@devproof/agent-runtime-protocol";
 import {
   acceptanceReviewClaimOutputSchema,
   type AcceptanceReviewResult,
@@ -52,6 +53,7 @@ export class ControlPlaneClient {
     const result = await this.request("/internal/v2/runtime/tasks/claim", {
       body: {
         capabilities: ["BROWSER_VERIFICATION"],
+        features: [...BOUND_EVIDENCE_CAPABILITIES],
         protocol: AGENT_RUNTIME_PROTOCOL,
         workerId,
       },
@@ -220,6 +222,28 @@ export class ControlPlaneClient {
       {
         body: { ...this.identity(lease), command },
         timeoutMs: ((command.timeoutSeconds ?? 30) + 5) * 1_000,
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  async observationOperation(
+    lease: ActiveLease,
+    operation: "bind" | "read" | "images" | "compare" | "deliver",
+    arguments_: unknown,
+    signal?: AbortSignal,
+  ) {
+    const paths = {
+      bind: "observation-bindings",
+      read: "observation-bindings/read",
+      images: "evidence-images/read",
+      compare: "visual-comparisons",
+      deliver: "evidence-deliveries",
+    };
+    return this.request(
+      `/internal/v2/runtime/tasks/${lease.taskId}/${paths[operation]}`,
+      {
+        body: { ...this.identity(lease), arguments: arguments_ },
         ...(signal ? { signal } : {}),
       },
     );

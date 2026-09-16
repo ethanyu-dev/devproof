@@ -80,12 +80,47 @@ export function specCriterionIssues(
       "requiredEvidenceKinds",
       "检查接口参数或载荷时必须包含 NETWORK；DOM 只能证明页面状态。",
     );
-  if (!targets.length)
+  if (!targets.length && !criterion.observationContract)
     add(
       "MISSING_TARGETS",
       "observationTargets",
       "缺少 observationTargets；请为每个待验证对象声明 label 和可在页面或接口中核对的 expectedText。",
     );
+  if (criterion.observationContract) {
+    const contents = criterion.sourceRefs.map(
+      (ref) => sourceContents.get(ref) ?? "",
+    );
+    for (const target of criterion.observationContract.targets) {
+      for (const value of target.entity.oneOf)
+        if (!contents.some((content) => content.includes(value)))
+          add(
+            "TARGET_TEXT_UNSUPPORTED",
+            "observationContract.targets",
+            "对象身份必须来自引用来源。",
+            value,
+          );
+      if (
+        target.requiredEvidenceKinds.some(
+          (kind) => !criterion.requiredEvidenceKinds.includes(kind),
+        )
+      )
+        add(
+          "EVIDENCE_CAPABILITY_MISMATCH",
+          "requiredEvidenceKinds",
+          "必须包含所有结构化目标要求的证据类型。",
+        );
+    }
+    for (const comparison of criterion.observationContract.comparisons)
+      if (
+        !criterion.sourceRefs.includes(comparison.sourceRef) ||
+        !sourceContents.get(comparison.sourceRef)?.includes(comparison.quote)
+      )
+        add(
+          "QUOTE_NOT_FOUND",
+          "observationContract.comparisons",
+          "视觉比较必须引用支持比较要求的来源原文。",
+        );
+  }
   const labels = new Set<string>();
   const texts = new Set<string>();
   for (const [index, target] of targets.entries()) {

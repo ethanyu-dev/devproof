@@ -10,6 +10,8 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 const progressSchema = z.object({
+  bindingIds: z.array(z.string().uuid()).max(2000).optional(),
+  comparisonReviewIds: z.array(z.string().uuid()).max(100).optional(),
   observations: z.array(savedCriterionObservationSchema).max(200).optional(),
   criteria: z.array(runtimeCriterionResultSchema).max(100),
   evidence: z.array(runtimeEvidenceRefSchema).max(2000),

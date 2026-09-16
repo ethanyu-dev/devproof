@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fillFields } from "./fill-fields.js";
 import { comboboxClickTarget } from "./combobox-click.js";
 import { DomObservations } from "./dom-observation.js";
 import { stepVideoPlan } from "./step-video-plan.js";
@@ -31,6 +32,7 @@ import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import {
+  structuredObservationSchema,
   RUNTIME_PROTOCOL,
   RUNTIME_TELEMETRY_MINOR,
   RUNTIME_MAX_FRAME_BYTES,
@@ -214,6 +216,8 @@ interface StepVideoEncodingFailure {
 }
 
 interface RuntimeCommand {
+  after?:
+    { observe: "ACTIVE_REGION" | "VIEWPORT"; timeoutMs: number } | undefined;
   permit?: RuntimeSessionPermit | undefined;
   ownerTaskId?: string | undefined;
   ownerFencingToken?: string | undefined;
@@ -266,6 +270,7 @@ const STEP_SCREENSHOT_COMMANDS = new Set<RuntimeCommandType>([
   "page.reload",
   "page.click",
   "page.fill",
+  "page.fill_fields",
   "page.type",
   "page.press",
   "page.check",
@@ -1189,6 +1194,8 @@ export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
 export class BrowserSessionManager {
   private scrollFeedbackEnabled = true;
   private readonly domObservations = new DomObservations();
+  private readonly activeCommands = new Map<string, string>();
+  private readonly cancelledCommands = new Set<string>();
   private readonly visualObservations = new VisualObservations();
   private readonly sessions = new Map<string, LiveSession>();
   private readonly openingProfileKeys = new Set<string>();
@@ -1507,6 +1514,7 @@ export class BrowserSessionManager {
   }
 
   async execute(command: RuntimeCommand) {
+    this.activeCommands.set(command.sessionId, command.commandId);
     const active = this.sessions.get(command.sessionId);
     if (active && FEEDBACK_ACTIONS.has(command.commandType))
       active.actionFeedback.begin(
@@ -1514,10 +1522,27 @@ export class BrowserSessionManager {
         command.commandType,
         this.pageId(active, active.page),
       );
+    if (
+      active &&
+      FEEDBACK_ACTIONS.has(command.commandType) &&
+      command.commandType !== "page.fill_fields"
+    ) {
+      const ref = (command.payload.target as { ref?: string } | undefined)?.ref;
+      await this.domObservations.markAction(
+        active.page,
+        command.commandId,
+        ref ?? "unmapped-action",
+      );
+    }
     let result;
     try {
       result = (await this.executeCommand(command)) ?? {};
-      if (active && FEEDBACK_ACTIONS.has(command.commandType))
+      if (
+        active &&
+        FEEDBACK_ACTIONS.has(command.commandType) &&
+        (result as { result?: { formSequence?: { status?: string } } }).result
+          ?.formSequence?.status !== "PARTIAL"
+      )
         active.actionFeedback.completed(command.commandId);
     } finally {
       if (STEP_SCREENSHOT_COMMANDS.has(command.commandType)) {
@@ -1531,19 +1556,95 @@ export class BrowserSessionManager {
       ) &&
       (command.permit || this.requirePermits)
     ) {
-      const session = this.sessions.get(command.sessionId);
-      if (!session)
-        throw codedError(
-          "SESSION_PERMIT_EXPIRED",
-          "Session closed before its command completed.",
-        );
-      this.permits.assert(session, {
-        controlGeneration: command.permit?.controlGeneration,
-        ownerKind: command.permit?.ownerKind,
-        ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
-        ownerFencingToken:
-          command.ownerFencingToken ?? command.permit?.ownerFencingToken,
-      });
+      try {
+        const session = this.sessions.get(command.sessionId);
+        if (!session)
+          throw codedError(
+            "SESSION_PERMIT_EXPIRED",
+            "Session closed before its command completed.",
+          );
+        this.permits.assert(session, {
+          controlGeneration: command.permit?.controlGeneration,
+          ownerKind: command.permit?.ownerKind,
+          ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
+          ownerFencingToken:
+            command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+        });
+      } catch (error) {
+        const sequence = (result as { result?: { formSequence?: unknown } })
+          .result?.formSequence;
+        if (sequence && error instanceof Error) {
+          const typed = error as Error & { details?: Record<string, unknown> };
+          typed.details = {
+            ...typed.details,
+            formSequence: sequence,
+            nextAction:
+              "Lease lost after form input. Do not replay completed fields or submit automatically.",
+          };
+        }
+        throw error;
+      }
+    }
+    if (command.after && active && FEEDBACK_ACTIONS.has(command.commandType)) {
+      // The action has completed. Observation failure must never replay it.
+      try {
+        if (Date.now() >= Date.parse(command.deadlineAt))
+          throw new Error("Observation deadline reached.");
+        const observed = await this.executeCommand({
+          ...command,
+          commandType: "page.snapshot",
+          payload: {},
+          deadlineAt: new Date(
+            Math.min(
+              Date.parse(command.deadlineAt),
+              Date.now() + command.after.timeoutMs,
+            ),
+          ).toISOString(),
+        });
+        const action = result as {
+          result?: Record<string, unknown>;
+          artifacts?: RuntimeArtifactPayload[];
+        };
+        const after = observed as {
+          result?: Record<string, unknown>;
+          artifacts?: RuntimeArtifactPayload[];
+        };
+        result = {
+          artifacts: [...(action.artifacts ?? []), ...(after.artifacts ?? [])],
+          result: {
+            ...after.result,
+            actionOutcome: {
+              status:
+                (action.result?.formSequence as { status?: string } | undefined)
+                  ?.status === "PARTIAL"
+                  ? "PARTIAL"
+                  : "SUCCEEDED",
+              result: action.result,
+            },
+            observationCombined: true,
+          },
+        };
+      } catch (error) {
+        const action = result as { result?: Record<string, unknown> };
+        result = {
+          ...result,
+          result: {
+            ...action.result,
+            actionOutcome: {
+              status:
+                (action.result?.formSequence as { status?: string } | undefined)
+                  ?.status === "PARTIAL"
+                  ? "PARTIAL"
+                  : "SUCCEEDED",
+            },
+            observationError: {
+              code: "AFTER_OBSERVATION_FAILED",
+              message: String(error).slice(0, 500),
+              nextAction: "Observe without repeating the action.",
+            },
+          },
+        };
+      }
     }
     if (!STEP_SCREENSHOT_COMMANDS.has(command.commandType))
       return this.withActionFeedback(command, result);
@@ -1552,7 +1653,42 @@ export class BrowserSessionManager {
         command.sessionId,
         command.commandType,
       );
-      if (!stepArtifact) return this.withActionFeedback(command, result);
+      if (!stepArtifact)
+        return this.withActionFeedback(
+          command,
+          this.preserveStructuredDom(result),
+        );
+      const structured = structuredObservationSchema.safeParse(
+        (result as { result?: Record<string, unknown> }).result
+          ?.structuredObservation,
+      );
+      let canonical: RuntimeArtifactPayload | undefined;
+      if (structured.success && active) {
+        structured.data.consistency = (await this.domObservations.verifyCapture(
+          active.page,
+          structured.data,
+        ))
+          ? "VERIFIED"
+          : "DRIFTED";
+        structured.data.capturedUntil = new Date().toISOString();
+        stepArtifact.metadata = {
+          ...stepArtifact.metadata,
+          captureId: structured.data.captureId,
+        };
+        canonical = this.artifact(
+          "DOM",
+          "application/json",
+          Buffer.from(JSON.stringify(structured.data)),
+          {
+            observationSchemaVersion: 2,
+            captureId: structured.data.captureId,
+            url: safeObservedUrl(active.page.url()),
+          },
+        );
+        (
+          result as { result: Record<string, unknown> }
+        ).result.structuredObservation = structured.data;
+      }
       const artifacts = (result as { artifacts?: RuntimeArtifactPayload[] })
         .artifacts;
       return this.withActionFeedback(command, {
@@ -1560,6 +1696,7 @@ export class BrowserSessionManager {
         artifacts: [
           ...(Array.isArray(artifacts) ? artifacts : []),
           stepArtifact,
+          ...(canonical ? [canonical] : []),
         ],
       });
     } catch (error) {
@@ -1573,8 +1710,36 @@ export class BrowserSessionManager {
         },
         error,
       );
-      return this.withActionFeedback(command, result);
+      return this.withActionFeedback(
+        command,
+        this.preserveStructuredDom(result),
+      );
     }
+  }
+
+  private preserveStructuredDom(output: object) {
+    const result = output as {
+      result?: Record<string, unknown>;
+      artifacts?: RuntimeArtifactPayload[];
+    };
+    const structured = structuredObservationSchema.safeParse(
+      result.result?.structuredObservation,
+    );
+    if (!structured.success) return output;
+    structured.data.consistency = "DOM_ONLY";
+    return {
+      ...result,
+      result: { ...result.result, structuredObservation: structured.data },
+      artifacts: [
+        ...(result.artifacts ?? []),
+        this.artifact(
+          "DOM",
+          "application/json",
+          Buffer.from(JSON.stringify(structured.data)),
+          { observationSchemaVersion: 2, captureId: structured.data.captureId },
+        ),
+      ],
+    };
   }
 
   private withActionFeedback(command: RuntimeCommand, output: object) {
@@ -1938,6 +2103,9 @@ export class BrowserSessionManager {
             ),
           ],
           result: {
+            structuredObservation: JSON.parse(
+              redactText(JSON.stringify(snapshot.structured)),
+            ) as unknown,
             format: snapshot.format,
             ...(this.scrollFeedbackEnabled && snapshot.focusRef
               ? { focusRef: snapshot.focusRef }
@@ -2165,6 +2333,41 @@ export class BrowserSessionManager {
           result: {
             url: safeObservedUrl(session.page.url()),
             ...(interaction ? { interaction } : {}),
+          },
+        };
+      }
+      case "page.fill_fields": {
+        const assertActive = () => {
+          if (
+            this.cancelledCommands.has(command.commandId) ||
+            Date.now() >= Date.parse(command.deadlineAt) ||
+            session.page.isClosed()
+          )
+            throw new Error("FORM_SEQUENCE_CANCELLED");
+          if (command.permit || this.requirePermits)
+            this.permits.assert(session, {
+              controlGeneration: command.permit?.controlGeneration,
+              ownerKind: command.permit?.ownerKind,
+              ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
+              ownerFencingToken:
+                command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+            });
+        };
+        return {
+          result: {
+            formSequence: await fillFields({
+              fields: parsed.payload.fields,
+              locator: (ref) => this.domObservations.locator(session.page, ref),
+              assertActive,
+              beforeField: (ref) =>
+                this.domObservations.markAction(
+                  session.page,
+                  command.commandId,
+                  ref,
+                ),
+              timeout: () =>
+                Math.max(1, Date.parse(command.deadlineAt) - Date.now()),
+            }),
           },
         };
       }
@@ -2610,10 +2813,12 @@ export class BrowserSessionManager {
         };
       }
       case "human.takeover":
+        await this.domObservations.invalidatePhases(session.page);
         session.state = "HUMAN_CONTROL";
         await this.store.replaceSession(this.descriptor(session));
         return { result: { humanControl: true } };
       case "human.release":
+        await this.domObservations.invalidatePhases(session.page);
         await this.releaseHumanInput(session);
         this.stopPreviewsForSession(session.sessionId);
         session.state = "OPEN";
@@ -2625,6 +2830,12 @@ export class BrowserSessionManager {
   }
 
   async cancel(sessionId: string, commandType?: RuntimeCommandType) {
+    const id = this.activeCommands.get(sessionId);
+    if (id) this.cancelledCommands.add(id);
+    if (this.cancelledCommands.size > 1000)
+      this.cancelledCommands.delete(
+        this.cancelledCommands.values().next().value!,
+      );
     if (commandType === "session.close" || commandType === "session.open") {
       await this.close(sessionId);
       return;
@@ -3020,6 +3231,7 @@ export class BrowserSessionManager {
       );
     }
     this.sessions.delete(sessionId);
+    this.activeCommands.delete(sessionId);
     await this.store.removeSession(sessionId);
     if (!this.sessions.size && this.leaseWatchdog) {
       clearInterval(this.leaseWatchdog);

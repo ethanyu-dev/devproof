@@ -1,3 +1,4 @@
+import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -243,6 +244,10 @@ export class SpecAnalysisRuntimeService {
           leaseToken: attempt.leaseToken!,
           serverTime: serverTime.toISOString(),
           snapshot: {
+            ...(input.protocol.minor >= 21 &&
+            env().BROWSER_OBSERVATION_V2_ENABLED
+              ? { observationContractVersion: 2 as const }
+              : {}),
             specFormat:
               input.protocol.minor >= 19
                 ? ("CHECK_REFERENCES" as const)
@@ -778,6 +783,30 @@ export class SpecAnalysisRuntimeService {
           { boundary: "spec_api", code },
         );
       throw new BadRequestException(accountError);
+    }
+    if (
+      !env().BROWSER_OBSERVATION_V2_ENABLED &&
+      spec.cases.some((c) => c.criteria.some((c) => c.observationContract))
+    )
+      throw new BadRequestException(
+        "OBSERVATION_V2_DISABLED: new v2 Specs are paused.",
+      );
+    for (const [caseIndex, testCase] of spec.cases.entries()) {
+      let targets = 0,
+        comparisons = 0;
+      for (const criterion of testCase.criteria)
+        if (criterion.observationContract) {
+          criterion.observationContract = freezeObservationContract(
+            criterion.observationContract,
+            `${caseIndex}:${criterion.id}`,
+          );
+          targets += criterion.observationContract.targets.length;
+          comparisons += criterion.observationContract.comparisons.length;
+        }
+      if (targets > 200 || comparisons > 100)
+        throw new BadRequestException(
+          "Observation contract exceeds 200 targets or 100 comparisons per case.",
+        );
     }
     const issueTexts = new Map(
       attempt.analysisSources

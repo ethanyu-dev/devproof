@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { Body, Controller, Param, Post, UseGuards } from "@nestjs/common";
 import {
   runtimeTaskClaimInputSchema,
@@ -101,6 +102,106 @@ export class AgentRuntimeTaskController {
       current.team.id,
       id,
       parseBody(runtimeBrowserCommandInputSchema, body),
+    );
+  }
+
+  @Post(":id/observation-bindings")
+  bindObservation(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireAgentRuntimePool(current, "BROWSER_EXECUTION");
+    const input = parseBody(
+      runtimeBrowserReleaseInputSchema.extend({ arguments: z.unknown() }),
+      body,
+    );
+    return this.browser.observationOperation(
+      current.team.id,
+      id,
+      input,
+      "bind",
+      input.arguments,
+    );
+  }
+
+  @Post(":id/observation-bindings/read")
+  readBindings(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireAgentRuntimePool(current, "BROWSER_EXECUTION");
+    const input = parseBody(
+      runtimeBrowserReleaseInputSchema.extend({ arguments: z.unknown() }),
+      body,
+    );
+    return this.browser.observationOperation(
+      current.team.id,
+      id,
+      input,
+      "read",
+      input.arguments,
+    );
+  }
+
+  @Post(":id/evidence-images/read")
+  readImages(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireAgentRuntimePool(current, "BROWSER_EXECUTION");
+    const input = parseBody(
+      runtimeBrowserReleaseInputSchema.extend({ arguments: z.unknown() }),
+      body,
+    );
+    return this.browser.observationOperation(
+      current.team.id,
+      id,
+      input,
+      "images",
+      input.arguments,
+    );
+  }
+
+  @Post(":id/visual-comparisons")
+  compareImages(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireAgentRuntimePool(current, "BROWSER_EXECUTION");
+    const input = parseBody(
+      runtimeBrowserReleaseInputSchema.extend({ arguments: z.unknown() }),
+      body,
+    );
+    return this.browser.observationOperation(
+      current.team.id,
+      id,
+      input,
+      "compare",
+      input.arguments,
+    );
+  }
+
+  @Post(":id/evidence-deliveries")
+  deliverEvidence(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireAgentRuntimePool(current, "BROWSER_EXECUTION");
+    const input = parseBody(
+      runtimeBrowserReleaseInputSchema.extend({ arguments: z.unknown() }),
+      body,
+    );
+    return this.browser.observationOperation(
+      current.team.id,
+      id,
+      input,
+      "deliver",
+      input.arguments,
     );
   }
 

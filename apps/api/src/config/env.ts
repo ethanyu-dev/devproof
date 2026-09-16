@@ -7,6 +7,10 @@ for (const envPath of ["../../.env", ".env"]) {
 
 const envSchema = z
   .object({
+    BROWSER_OBSERVATION_V2_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     API_PORT: z.coerce.number().int().positive().default(4433),
     API_PUBLIC_URL: z.string().url().default("http://localhost:4433"),
     BROWSER_EXECUTION_DATA_LOCKS_ENABLED: z

@@ -600,6 +600,15 @@ export const DEFAULT_EXECUTION_BUDGET_SECONDS = 1_800;
 export const executionRunCreateInputSchema = z
   .object({
     accountRequirements: executionAccountRequirementsSchema.optional(),
+    observationPolicy: z
+      .object({
+        combinedObservation: z.boolean().default(true),
+        observationFocus: z.boolean().default(true),
+        observationDelta: z.boolean().default(false),
+        formSequences: z.boolean().default(false),
+      })
+      .strict()
+      .optional(),
     testAccounts: testAccountBindingsSchema.optional(),
     concurrencyPolicy: executionConcurrencyPolicySchema.optional(),
     businessReferences: z
@@ -1062,6 +1071,7 @@ export const taskStageRetryInputSchema = z.object({
 
 export const taskCaseRerunInputSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(200),
+  reuseTestAccounts: z.boolean().optional(),
 });
 
 export const taskCaseRerunSourceSchema = z.object({

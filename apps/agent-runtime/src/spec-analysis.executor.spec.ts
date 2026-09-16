@@ -587,7 +587,6 @@ describe("SpecAnalysisExecutor", () => {
     expect(caseInput.properties.criteria.items.required).toEqual([
       "requirementId",
       "description",
-      "observationTargets",
     ]);
     const transcript = JSON.stringify(create.mock.calls.at(-1)![0].messages);
     expect(transcript).toContain("遗漏需求：requirement-2");

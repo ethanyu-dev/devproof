@@ -7,6 +7,7 @@ export const FEEDBACK_ACTIONS = new Set([
   "frame.click",
   "page.press",
   "page.fill",
+  "page.fill_fields",
   "frame.fill",
   "page.type",
   "page.select",

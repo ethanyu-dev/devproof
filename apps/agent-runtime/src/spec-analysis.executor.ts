@@ -1,6 +1,7 @@
 import {
   validateCaseAccountRequirements,
   accountRequirementIssuesMessage,
+  OBSERVATION_CONTRACT_GUIDANCE,
 } from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
@@ -59,10 +60,8 @@ const finishSpecSchema = z.object({
         runtimeGeneratedSpecCaseSchema.extend({
           criteria: z
             .array(
-              runtimeSpecCriterionSchema.extend({
+              runtimeSpecCriterionSchema.safeExtend({
                 basis: runtimeSpecCriterionSchema.shape.basis.unwrap(),
-                observationTargets:
-                  runtimeSpecCriterionSchema.shape.observationTargets.unwrap(),
               }),
             )
             .min(1)
@@ -107,7 +106,14 @@ export class SpecAnalysisExecutor {
     let requirements: SpecRequirement[] | null = null;
     const issueTexts = new Map<string, string>();
     const history: ModelMessage[] = [
-      { role: "system", content: systemPrompt(compact, checkReferences) },
+      {
+        role: "system",
+        content:
+          systemPrompt(compact, checkReferences) +
+          (task.snapshot.observationContractVersion === 2
+            ? "\n\n" + OBSERVATION_CONTRACT_GUIDANCE
+            : ""),
+      },
       {
         role: "user",
         content: JSON.stringify(

@@ -36,7 +36,7 @@ describe("browser tool catalog", () => {
       ),
       "page.open",
     ];
-    expect(canonical).toHaveLength(39);
+    expect(canonical).toHaveLength(40);
     expect(coreBrowserCommands).toHaveLength(15);
     expect(new Set(names).size).toBe(names.length);
     expect([...names].sort()).toEqual([...canonical].sort());
@@ -75,7 +75,7 @@ describe("browser tool catalog", () => {
   });
 
   it("describes every optional group without putting its schema in the enable result", () => {
-    const catalog = new BrowserToolCatalog([]);
+    const catalog = new BrowserToolCatalog([], "GROUPED", true);
     const description = catalog.discoveryTools()[0]!.description;
     for (const [group, definition] of Object.entries(browserToolGroups)) {
       expect(description).toContain(group);
@@ -166,10 +166,12 @@ describe("browser tool catalog", () => {
     const catalog = new BrowserToolCatalog(
       [{ requiredEvidenceKinds: ["NETWORK"] }],
       "LEGACY",
+      true,
+      true,
     );
     expect(catalog.discoveryTools()).toEqual([]);
     expect(catalog.activeGroups()).toEqual([]);
-    expect(catalog.commandNames()).toHaveLength(39);
+    expect(catalog.commandNames()).toHaveLength(40);
     expect(catalog.correctionFor("page.open", [])).toBeNull();
     expect(catalog.correctionFor("network.arm", [])).toBeNull();
     const actual = structuredClone(catalog.parameters()) as CommandSchema;

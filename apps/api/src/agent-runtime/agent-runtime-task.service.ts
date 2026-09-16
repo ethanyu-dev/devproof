@@ -1,3 +1,6 @@
+import { runtimeCriterionResultSchema } from "@devproof/agent-runtime-protocol";
+import { ObservationBindingService } from "./observation-binding.service.js";
+import { BOUND_EVIDENCE_CAPABILITIES } from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -255,6 +258,8 @@ export class AgentRuntimeTaskService {
     @Optional() private readonly commands?: RuntimeCommandDispatcher,
     @Optional() private readonly sessionRecovery?: SessionRecoveryService,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional()
+    private readonly observationBindings?: ObservationBindingService,
   ) {}
 
   onModuleInit() {
@@ -792,6 +797,20 @@ export class AgentRuntimeTaskService {
               where: {
                 id: { notIn: [...skipped] },
                 capability: { in: input.capabilities },
+                ...(BOUND_EVIDENCE_CAPABILITIES.some(
+                  (capability) => !input.features?.includes(capability),
+                )
+                  ? {
+                      NOT: {
+                        snapshot: {
+                          path: ["criteria"],
+                          array_contains: [
+                            { observationContract: { version: 2 } },
+                          ],
+                        },
+                      },
+                    }
+                  : {}),
                 deadlineAt: { gt: now },
                 OR: [
                   { recoveryStatus: null },
@@ -824,9 +843,15 @@ export class AgentRuntimeTaskService {
             });
             if (!candidate) return null;
             if (
-              input.protocol.minor < 20 &&
-              runtimeTaskSnapshotSchema.parse(candidate.snapshot)
-                .executionPolicy.accountRequirements
+              (input.protocol.minor < 20 &&
+                runtimeTaskSnapshotSchema.parse(candidate.snapshot)
+                  .executionPolicy.accountRequirements) ||
+              (runtimeTaskSnapshotSchema
+                .parse(candidate.snapshot)
+                .criteria.some((c) => c.observationContract) &&
+                BOUND_EVIDENCE_CAPABILITIES.some(
+                  (c) => !input.features?.includes(c),
+                ))
             ) {
               skipped.add(candidate.id);
               return undefined;
@@ -1289,6 +1314,35 @@ export class AgentRuntimeTaskService {
             });
           }
         }
+        if (input.event.kind === "execution.checkpoint") {
+          const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+          if (snapshot.criteria.some((c) => c.observationContract)) {
+            if (!this.observationBindings)
+              throw new ConflictException("CONTRACT_UNSUPPORTED");
+            const progress = input.event.payload.verificationCheckpoint as
+              | {
+                  criteria?: unknown[];
+                  bindingIds?: string[];
+                  comparisonReviewIds?: string[];
+                }
+              | undefined;
+            if (progress)
+              await this.observationBindings.validateReferences(
+                task,
+                progress.bindingIds ?? [],
+                progress.comparisonReviewIds ?? [],
+                tx,
+              );
+            if (progress?.criteria)
+              await this.observationBindings.validate(
+                task,
+                progress.criteria.map((c) =>
+                  runtimeCriterionResultSchema.parse(c),
+                ),
+                tx,
+              );
+          }
+        }
         const checkpointResult =
           input.event.kind === "execution.checkpoint"
             ? await saveExecutionCheckpoint(tx, task, input.event.payload)
@@ -1481,6 +1535,15 @@ export class AgentRuntimeTaskService {
             },
             where: { attemptId: task.attemptId },
           });
+          if (snapshot.criteria.some((c) => c.observationContract)) {
+            if (!this.observationBindings)
+              throw new ConflictException("CONTRACT_UNSUPPORTED");
+            await this.observationBindings.validate(
+              task,
+              completedVerification.criteria,
+              tx,
+            );
+          }
           const validationError = completedOutcomeEvidenceError(
             snapshot,
             completedVerification,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as config from "../config/env.js";
 
 import {
   ExecutionRunService,
@@ -44,6 +45,79 @@ const current = {
 } as never;
 
 describe("ExecutionRunService events", () => {
+  it("pauses new v2 runs during rollback while retaining existing evidence reads", async () => {
+    const contract = {
+      version: 2,
+      targets: [
+        {
+          targetId: "type",
+          label: "类型默认状态",
+          scope: { kind: "DIALOG", names: ["新增"] },
+          entity: {
+            controlKind: "SELECT",
+            label: "类型",
+            property: "SELECTED_LABEL",
+            oneOf: ["合规模型映射"],
+          },
+          phase: "INITIAL_AFTER_OPEN",
+          assertions: [
+            {
+              assertionId: "checked",
+              subject: { kind: "SWITCH", label: "启用状态" },
+              property: "CHECKED",
+              operator: "EQ",
+              expected: true,
+            },
+          ],
+          requiredEvidenceKinds: ["DOM"],
+          temporal: "SAME_OBSERVATION",
+        },
+      ],
+      comparisons: [],
+    };
+    const existing = {
+      id: runId,
+      criteriaSnapshot: [{ id: "default", observationContract: contract }],
+      executionPolicy: snapshot.executionPolicy,
+      browserProfileId: null,
+      browserExecutions: [],
+      evidences: [],
+      observationBindings: Array.from({ length: 1001 }, (_, i) => ({
+        id: String(i),
+        facts: {},
+      })),
+      events: [],
+    };
+    const prisma = {
+      executionRun: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findFirst: vi.fn().mockResolvedValue(existing),
+      },
+      $transaction: vi.fn(),
+    };
+    const env = vi.spyOn(config, "env").mockReturnValue({
+      ...config.env(),
+      BROWSER_OBSERVATION_V2_ENABLED: false,
+    });
+    try {
+      const service = new ExecutionRunService(prisma as never, {} as never);
+      await expect(
+        service.create(current, {
+          criteria: [{ id: "default", observationContract: contract }],
+          idempotencyKey: "v2-paused",
+          deadlineSeconds: 600,
+        } as never),
+      ).rejects.toThrow("OBSERVATION_V2_DISABLED");
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      const detail = await service.consoleDetail(current, runId);
+      expect(detail.criteriaSnapshot).toEqual(existing.criteriaSnapshot);
+      expect(detail.observationHistoryTruncated).toBe(true);
+      expect(detail.observationBindings).toHaveLength(1000);
+    } finally {
+      env.mockRestore();
+    }
+  });
+
   it("includes team-scoped recovery links in execution details without exposing recovery credentials", async () => {
     const recovery = {
       id: "recovery",
@@ -60,6 +134,8 @@ describe("ExecutionRunService events", () => {
             { runtimeSessionId: "session", runtimeSession: null },
           ],
           evidences: [],
+          observationBindings: [],
+          events: [],
         }),
       },
       runtimeSessionRecovery: {

@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./observation-digest": {
+      "types": "./dist/observation-digest.d.ts",
+      "default": "./dist/observation-digest.js"
     }
   },
   "files": [

@@ -1,3 +1,4 @@
+import { actionObservationSchema } from "@devproof/runtime-protocol";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -70,6 +71,7 @@ export class RuntimeCommandDispatcher {
     signal?: AbortSignal;
     source: "SYSTEM" | "AGENT" | "CONSOLE" | "HUMAN";
     timeoutSeconds?: number;
+    after?: z.infer<typeof actionObservationSchema>;
     commandId?: string;
     owner?: {
       taskId: string;
@@ -157,7 +159,10 @@ export class RuntimeCommandDispatcher {
         "The persisted command belongs to a different session epoch.",
       );
     if (!command) {
-      const payload = { ...(input.payload ?? {}) };
+      const payload = {
+        ...(input.payload ?? {}),
+        ...(input.after ? { __devproofAfter: input.after } : {}),
+      };
       if (input.commandType === "session.close") {
         if (!this.recovery)
           throw new ConflictException("Session recovery is unavailable.");
@@ -305,6 +310,35 @@ export class RuntimeCommandDispatcher {
     if (input.owner) await this.requireOwner(input.owner, session);
 
     const wirePayload = { ...record(command.payload) };
+    const after = wirePayload.__devproofAfter;
+    delete wirePayload.__devproofAfter;
+    const requiredCapabilities = [
+      ...(after ? ["action-observation-v1", "structured-observation-v1"] : []),
+      ...(input.commandType === "page.fill_fields" ? ["form-sequence-v1"] : []),
+    ];
+    if (
+      requiredCapabilities.some(
+        (capability) =>
+          !Array.isArray(runtime.capabilities) ||
+          !runtime.capabilities.includes(capability),
+      ) ||
+      (requiredCapabilities.length && (runtime.protocolMinor ?? 0) < 18)
+    ) {
+      await this.prisma.browserRuntimeCommand.updateMany({
+        where: { id: command.id, status: "PENDING" },
+        data: {
+          status: "FAILED",
+          completedAt: new Date(),
+          error: asJson({
+            code: "CONTRACT_UNSUPPORTED",
+            message: "Runtime capabilities changed before dispatch.",
+          }),
+        },
+      });
+      throw new ConflictException(
+        "CONTRACT_UNSUPPORTED: Runtime capabilities changed before dispatch.",
+      );
+    }
     if (
       input.commandType === "session.close" &&
       wirePayload.recovery &&
@@ -325,6 +359,7 @@ export class RuntimeCommandDispatcher {
         fencingToken: session.fencingToken.toString(),
         leaseToken: session.leaseToken,
         payload: wirePayload,
+        ...(after ? { after: actionObservationSchema.parse(after) } : {}),
         sessionId: session.id,
         type: "command.execute",
         ...(permit ? { permit } : {}),

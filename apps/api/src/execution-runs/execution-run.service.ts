@@ -1,3 +1,5 @@
+import { env } from "../config/env.js";
+import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import {
@@ -151,6 +153,34 @@ export class ExecutionRunService {
     taskExecutionId: string | null,
     browserProfileId: string | null = null,
   ) {
+    input = {
+      ...input,
+      criteria: input.criteria.map((c) =>
+        c.observationContract
+          ? {
+              ...c,
+              observationContract: freezeObservationContract(
+                c.observationContract,
+                c.id,
+              ),
+            }
+          : c,
+      ),
+    };
+    if (
+      new Set(input.criteria.map((c) => c.id)).size !== input.criteria.length ||
+      input.criteria.reduce(
+        (n, c) => n + (c.observationContract?.targets.length ?? 0),
+        0,
+      ) > 200 ||
+      input.criteria.reduce(
+        (n, c) => n + (c.observationContract?.comparisons.length ?? 0),
+        0,
+      ) > 100
+    )
+      throw new BadRequestException(
+        "OBSERVATION_CONTRACT_LIMIT: criterion IDs must be unique, with at most 200 targets and 100 comparisons per execution.",
+      );
     const deadlinePolicy = runDeadlinePolicySchema.parse(
       input.deadlinePolicy ?? { mode: "FIXED" },
     );
@@ -200,6 +230,19 @@ export class ExecutionRunService {
       throw new ConflictException("The parent task deadline has elapsed.");
     }
     const hardDeadlineAt = deadlineAt;
+    if (
+      !env().BROWSER_OBSERVATION_V2_ENABLED &&
+      input.criteria.some((c) => c.observationContract)
+    )
+      throw new BadRequestException(
+        "OBSERVATION_V2_DISABLED: new v2 executions are paused.",
+      );
+    const observationPolicy = input.observationPolicy ?? {
+      combinedObservation: true,
+      observationFocus: true,
+      observationDelta: false,
+      formSequences: false,
+    };
     const runId = randomUUID();
     const attemptId = randomUUID();
     const taskId = randomUUID();
@@ -219,6 +262,7 @@ export class ExecutionRunService {
             version: 2,
             requirements: [],
           },
+          ...observationPolicy,
           testAccounts: input.testAccounts,
           browser: input.browserPolicy,
           concurrency: input.concurrencyPolicy,
@@ -259,6 +303,7 @@ export class ExecutionRunService {
                 version: 2,
                 requirements: [],
               },
+              ...observationPolicy,
               initialTestAccounts: input.testAccounts ?? [],
               testAccounts: input.testAccounts,
               browser: input.browserPolicy,
@@ -365,6 +410,12 @@ export class ExecutionRunService {
         attempts: { orderBy: { number: "asc" } },
         browserExecutions: { orderBy: { createdAt: "asc" } },
         criterionResults: { orderBy: { criterionId: "asc" } },
+        events: {
+          where: { kind: "observation.visual.reviewed" },
+          select: { id: true, attemptId: true, payload: true },
+          orderBy: { occurredAt: "asc" },
+          take: 1000,
+        },
         evidences: { orderBy: { createdAt: "asc" } },
         interventions: { orderBy: { requestedAt: "asc" } },
         tasks: {
@@ -439,6 +490,13 @@ export class ExecutionRunService {
           orderBy: { createdAt: "asc" },
         },
         criterionResults: { orderBy: { criterionId: "asc" } },
+        observationBindings: { orderBy: { createdAt: "desc" }, take: 1001 },
+        events: {
+          where: { kind: "observation.visual.reviewed" },
+          select: { id: true, attemptId: true, payload: true },
+          orderBy: { occurredAt: "desc" },
+          take: 1001,
+        },
         evidences: {
           include: { runtimeArtifact: true },
           orderBy: { createdAt: "asc" },
@@ -500,6 +558,10 @@ export class ExecutionRunService {
     return {
       ...run,
       recoveries,
+      observationHistoryTruncated:
+        run.observationBindings.length > 1000 || run.events.length > 1000,
+      observationBindings: run.observationBindings.slice(0, 1000),
+      events: run.events.slice(0, 1000).reverse(),
       executionPolicy: safeExecutionPolicy(
         run.executionPolicy,
         run.browserProfileId,
@@ -1577,6 +1639,12 @@ function assertCompatibleRunRequest(
     },
     initialTestAccounts: input.testAccounts ?? [],
     concurrency: input.concurrencyPolicy,
+    ...(input.observationPolicy ?? {
+      combinedObservation: true,
+      observationFocus: true,
+      observationDelta: false,
+      formSequences: false,
+    }),
     browser: input.browserPolicy,
     businessReferences: input.businessReferences,
     deadline: runDeadlinePolicySchema.parse(
@@ -1603,6 +1671,10 @@ function assertCompatibleRunRequest(
         },
         initialTestAccounts:
           storedPolicy.initialTestAccounts ?? storedPolicy.testAccounts ?? [],
+        combinedObservation: storedPolicy.combinedObservation ?? true,
+        observationFocus: storedPolicy.observationFocus ?? true,
+        observationDelta: storedPolicy.observationDelta ?? false,
+        formSequences: storedPolicy.formSequences ?? false,
         businessReferences:
           storedPolicy.businessReferences ?? input.businessReferences,
         deadline:

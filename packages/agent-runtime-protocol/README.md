@@ -180,3 +180,10 @@ same lease and remaining tool budget. Browser workers below minor 20 skip tasks
 carrying this contract. Account plan v2 stores a definition hash and reviewed
 role corrections without rewriting the original Spec; reruns preserve and
 remap those corrections. See the [implementation and recovery runbook](../../docs/test-account-requirement-design.md).
+
+Protocol v2.21 adds object observation contracts. Spec snapshots advertise
+`observationContractVersion: 2` only to workers at minor 21 or newer while
+`BROWSER_OBSERVATION_V2_ENABLED` is enabled. Minor 20 workers still receive
+account requirements without the observation contract. Browser tasks with object
+observation contracts additionally require the bound-evidence capabilities;
+the protocol version alone does not qualify a browser worker.

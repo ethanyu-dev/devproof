@@ -14,13 +14,23 @@ The package README is the canonical field-level changelog: [`packages/runtime-pr
 
 The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. Browser Runtime has its own release version and is compatible based on protocol negotiation, not matching application version numbers.
 
-The separate Agent protocol is currently v2.20. It carries Spec source grounding,
+The separate Agent protocol is currently v2.21. It carries Spec source grounding,
 diagnostic finalization checkpoints, locator recovery exhaustion reasons, and
 optional meaningful tool-progress telemetry for adaptive deadlines, and
 per-object observation targets and delivered quotations for criterion results,
 negotiated Spec generation using validated check references, and versioned
 business account subject declarations and observed account requests;
 see its [changelog](../packages/agent-runtime-protocol/README.md).
+
+## Unreleased object-observation extension
+
+The draft [Browser observation V2](browser-observation-v2.md) adds structured
+captures, phase proofs, action observation, optional deltas, and bounded form
+sequences behind capability and creation gates. Its development implementation
+still advertises Browser protocol 1.18. Assign the next minor and a distinct
+Browser Runtime release before rollout; stock v1.18 nodes must not be treated as
+supporting these capabilities. The design document tracks known blocking defects
+and enablement criteria.
 
 ## Current capability milestones
 

@@ -449,9 +449,19 @@ describe("SpecAnalysisRuntimeService", () => {
     resetEnvForTests();
   });
 
-  it.each([20, 21])(
-    "recovers and negotiates generation format for protocol %s",
-    async (minor) => {
+  it.each([
+    { minor: 20, observationEnabled: true, expectedContractVersion: undefined },
+    { minor: 21, observationEnabled: true, expectedContractVersion: 2 },
+    {
+      minor: 21,
+      observationEnabled: false,
+      expectedContractVersion: undefined,
+    },
+  ])(
+    "recovers and negotiates generation format for protocol $minor with observations $observationEnabled",
+    async ({ minor, observationEnabled, expectedContractVersion }) => {
+      vi.stubEnv("BROWSER_OBSERVATION_V2_ENABLED", String(observationEnabled));
+      resetEnvForTests();
       const expired = analysisAttempt({
         leaseExpiresAt: new Date(now.getTime() - 1),
       });
@@ -488,6 +498,9 @@ describe("SpecAnalysisRuntimeService", () => {
       });
       expect(result.task?.snapshot.specFormat).toBe(
         minor >= 19 ? "CHECK_REFERENCES" : "COMPACT",
+      );
+      expect(result.task?.snapshot.observationContractVersion).toBe(
+        expectedContractVersion,
       );
 
       expect(result.task).toMatchObject({

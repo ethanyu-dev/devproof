@@ -57,9 +57,28 @@ export function resolveCriterionEvidence(
     path: string;
     expected: string;
   }[] = [];
+  const bound = criterion.observationContract
+    ? observations?.bound?.resolve(
+        criterion.id,
+        submitted.status,
+        submitted.bindingIds ?? [],
+        submitted.comparisonReviewIds ?? [],
+      )
+    : undefined;
+  if (criterion.observationContract && (!bound || bound.error))
+    return {
+      error: toolCorrection(bound?.error ?? "CONTRACT_UNSUPPORTED", {
+        criterionId: criterion.id,
+        nextAction:
+          "Read saved bindings, resolve missing scope/entity/phase evidence, and review the required images before submitting.",
+      }),
+    };
   const quotes = [...(submitted.observations ?? [])];
   const networkQuotes = new Set<string>();
-  const refs = new Set(submitted.evidenceRefs);
+  const refs = new Set([
+    ...submitted.evidenceRefs,
+    ...(bound?.evidenceRefs ?? []),
+  ]);
   for (const [index, citation] of (
     submitted.networkCitations ?? []
   ).entries()) {
@@ -146,7 +165,7 @@ export function resolveCriterionEvidence(
       expected:
         "验收标准引用了尚未观察到的证据；使用 citations 绑定当前节点的真实证据，不要手写或修补 artifact ID。",
     });
-  if (result.status !== "INCONCLUSIVE") {
+  if (result.status !== "INCONCLUSIVE" && !criterion.observationContract) {
     const stageError = observations?.verdictEvidenceError(result.evidenceRefs);
     if (stageError)
       issues.push({
@@ -157,8 +176,9 @@ export function resolveCriterionEvidence(
   }
   if (result.status === "PASSED") {
     if (
-      criterion.requireObservedEvidence ||
-      criterion.observationTargets?.length
+      !criterion.observationContract &&
+      (criterion.requireObservedEvidence ||
+        criterion.observationTargets?.length)
     ) {
       if (!criterion.observationTargets?.length)
         issues.push({

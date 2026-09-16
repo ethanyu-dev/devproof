@@ -29,6 +29,8 @@
     "test": "pnpm -r --if-present test && node --test scripts/dev-process-tree.spec.mjs scripts/local-browser/*.spec.mjs",
     "test:browser-comparison": "node scripts/browser-comparison.mjs",
     "test:browser-comparison-unit": "node --test scripts/local-browser/*.spec.mjs",
+    "test:object-evidence": "node scripts/object-evidence-comparison.mjs",
+    "test:object-evidence-suite": "node scripts/object-evidence-suite.mjs",
     "typecheck": "pnpm prisma:generate && pnpm build:packages && pnpm -r --if-present typecheck"
   },
   "devDependencies": {

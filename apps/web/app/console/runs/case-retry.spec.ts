@@ -51,6 +51,43 @@ function harness(needsReview = false) {
 }
 
 describe("manual Case retry", () => {
+  it("exposes the current case's account constraints before another retry", async () => {
+    const { task, request, api } = harness();
+    task.testAccountPreparation = {
+      revision: "revision",
+      missingCount: 0,
+      totalCount: 1,
+      cases: [
+        {
+          caseExecutionId: "case-execution",
+          caseName: "新增",
+          started: true,
+          deployment: { name: "测试", targetUrl: "https://example.test" },
+          slots: [
+            {
+              label: "新增账号",
+              constraints: ["不存在目标类型白名单"],
+              account: "assigned",
+            },
+          ],
+        },
+        {
+          caseExecutionId: "other-case",
+          slots: [{ label: "无关账号", constraints: ["无关条件"] }],
+        },
+      ],
+    } as unknown as NonNullable<TaskDetail["testAccountPreparation"]>;
+    const plan = await request.prepare("task-1", "run-1");
+    expect(plan.preparationConditions).toEqual([
+      "新增账号：不存在目标类型白名单",
+    ]);
+    expect(plan.hasTestAccounts).toBe(true);
+    expect(api.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+    await request.submit(plan, false, false);
+    expect(
+      JSON.parse(api.mock.lastCall![1]!.body as string).reuseTestAccounts,
+    ).toBe(false);
+  });
   it("retries a finished Case without regenerating its Spec", async () => {
     const { api, request } = harness();
     const plan = await request.prepare("task-1", "run-1");

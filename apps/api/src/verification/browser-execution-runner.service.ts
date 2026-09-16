@@ -813,7 +813,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         code: "LEASE_LOST",
         message: "Browser execution ownership is stale.",
       });
-    const requiredMinor = runtimeCommandMinimumMinor(input.commandType);
+    const requiredMinor = Math.max(
+      runtimeCommandMinimumMinor(input.commandType),
+      input.after ? 18 : 0,
+    );
     if (session.protocolMinor < requiredMinor) {
       throw new ConflictException({
         code: "PROTOCOL_UNSUPPORTED",
@@ -838,6 +841,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       commandId,
       commandType: input.commandType,
       payload: input.payload,
+      ...(input.after ? { after: input.after } : {}),
       sessionId: session.id,
       ...(signal ? { signal } : {}),
       source: "AGENT",
@@ -1026,7 +1030,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           : "Browser execution session is not active.",
       );
     }
-    const requiredMinor = runtimeCommandMinimumMinor(input.commandType);
+    const requiredMinor = Math.max(
+      runtimeCommandMinimumMinor(input.commandType),
+      input.after ? 18 : 0,
+    );
     if (session.protocolMinor < requiredMinor) {
       throw new ConflictException({
         code: "PROTOCOL_UNSUPPORTED",
@@ -1053,6 +1060,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         commandId,
         commandType: input.commandType,
         payload: input.payload,
+        ...(input.after ? { after: input.after } : {}),
         sessionId: session.id,
         ...(signal ? { signal } : {}),
         source: "AGENT",

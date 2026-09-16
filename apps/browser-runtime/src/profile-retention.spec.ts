@@ -39,6 +39,7 @@ describe("user Browser Profile inactivity retention", () => {
     );
     const goto = vi.fn().mockResolvedValue({ status: () => 200 });
     const page = {
+      frames: vi.fn().mockReturnValue([]),
       goto,
       title: vi.fn().mockResolvedValue("Feishu login"),
       url: vi.fn().mockReturnValue("https://open.feishu.cn/"),

@@ -37,7 +37,7 @@ export const browserToolGroups = {
   },
   input: {
     description: "逐字输入、悬停和拖拽",
-    commands: ["page.type", "page.hover", "page.drag"],
+    commands: ["page.type", "page.hover", "page.drag", "page.fill_fields"],
   },
   tabs: {
     description: "列出、新建、切换和关闭标签页",
@@ -97,6 +97,8 @@ export class BrowserToolCatalog {
   constructor(
     criteria: ReadonlyArray<{ requiredEvidenceKinds: readonly string[] }>,
     mode: BrowserToolSurfaceMode = "GROUPED",
+    private readonly formSequences = false,
+    private readonly combinedObservation = false,
   ) {
     this.grouped = mode !== "LEGACY";
     if (
@@ -116,19 +118,21 @@ export class BrowserToolCatalog {
 
   commandNames(): CommandName[] {
     if (!this.grouped)
-      return [
-        ...coreBrowserCommands,
-        ...browserToolGroupNames.flatMap(
-          (group) => browserToolGroups[group].commands,
-        ),
-        "page.open",
-      ];
+      return (
+        [
+          ...coreBrowserCommands,
+          ...browserToolGroupNames.flatMap(
+            (group) => browserToolGroups[group].commands,
+          ),
+          "page.open",
+        ] as CommandName[]
+      ).filter((name) => this.formSequences || name !== "page.fill_fields");
     return [
       ...coreBrowserCommands,
       ...this.activeGroups().flatMap(
         (group) => browserToolGroups[group].commands,
       ),
-    ];
+    ].filter((name) => this.formSequences || name !== "page.fill_fields");
   }
 
   enable(groups: readonly BrowserToolGroup[]) {
@@ -170,22 +174,26 @@ export class BrowserToolCatalog {
 
   parameters(): unknown {
     if (this.schema !== undefined) return this.schema;
-    const schema = this.grouped
-      ? z.union(
-          this.commandNames().map((name) => {
-            const variant = getRuntimeActionCommandSchema(name);
-            if (!variant)
-              throw new Error(
-                `Missing canonical browser command schema: ${name}`,
-              );
-            return variant;
-          }),
-        )
-      : runtimeActionCommandInputSchema;
+    const schema =
+      !this.grouped && this.formSequences
+        ? runtimeActionCommandInputSchema
+        : z.union(
+            this.commandNames().map((name) => {
+              const variant = getRuntimeActionCommandSchema(name);
+              if (!variant)
+                throw new Error(
+                  `Missing canonical browser command schema: ${name}`,
+                );
+              return variant;
+            }),
+          );
     this.schema = addLocatorRecoveryToken(
       openAiFunctionSchema(schema),
       !this.grouped,
     );
+    if (!this.combinedObservation)
+      delete (this.schema as { properties: Record<string, unknown> }).properties
+        .after;
     return this.schema;
   }
 
@@ -201,7 +209,7 @@ export class BrowserToolCatalog {
               browserToolGroupNames
                 .map(
                   (group) =>
-                    `${group}：${browserToolGroups[group].description}（${browserToolGroups[group].commands.join("、")}）`,
+                    `${group}：${browserToolGroups[group].description}（${browserToolGroups[group].commands.filter((name) => this.formSequences || name !== "page.fill_fields").join("、")}）`,
                 )
                 .join("\n"),
             parameters: openAiFunctionSchema(enableBrowserToolsInputSchema),

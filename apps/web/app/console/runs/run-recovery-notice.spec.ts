@@ -40,5 +40,7 @@ describe("completed verification recovery", () => {
     );
     expect(notice.diagnosticOnly).toBe(false);
     expect(notice.guidance).toContain("已停止自动重试");
+    expect(notice.title).toBe("浏览器已关闭，业务结果待核实");
+    expect(notice.guidance).toContain("不表示已发生业务提交");
   });
 });

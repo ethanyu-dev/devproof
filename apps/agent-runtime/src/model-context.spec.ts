@@ -47,6 +47,41 @@ function turn(context: ModelContext, index: number, content = "observed") {
 }
 
 describe("bounded model context", () => {
+  it("compacts repeated narration without losing checkpoints or old failures", () => {
+    const context = new ModelContext(initial, { maxBytes: 262144 });
+    for (const [name, result] of [
+      [
+        "record_progress",
+        { accepted: true, checkpoint: { next: "Open the create dialog" } },
+      ],
+      ["browser_command", { status: "FAILED", error: "Observed conflict" }],
+    ] as const) {
+      context.completeTurn(
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: name, type: "function", function: { name, arguments: "{}" } },
+          ],
+        },
+        [{ role: "tool", tool_call_id: name, content: JSON.stringify(result) }],
+      );
+    }
+    for (let i = 0; i < 27; i++) turn(context, i);
+    expect(context.build({}, {}).metrics.retainedTurns).toBe(4);
+    context.compactForRecovery();
+    const view = context.build({}, { acceptedCriteria: ["done"] });
+    expect(view.metrics).toMatchObject({
+      retainedTurns: 1,
+      compactedTurns: 28,
+    });
+    const state = JSON.parse(String(view.messages[2]!.content)).data;
+    expect(state.executionMemory.checkpoint.next).toBe(
+      "Open the create dialog",
+    );
+    expect(state.executionMemory.recentFailures).toHaveLength(1);
+    expect(state.acceptedCriteria).toEqual(["done"]);
+  });
   it("selects complete DOM at the exact request budget and paginates when it no longer fits", () => {
     const complete = { snapshot: { content: '"中文😀"\\\n'.repeat(1500) } };
     const paged = { snapshot: { content: "First page", nextCursor: 10 } };
@@ -186,7 +221,7 @@ describe("bounded model context", () => {
     );
   });
 
-  it("retains complete turn summaries while they fit the budget and keeps exact requirements and accepted state", () => {
+  it("caps recent turns even with spare budget and keeps exact requirements and accepted state", () => {
     const context = new ModelContext(initial);
     for (let index = 0; index < 9; index += 1) turn(context, index);
     const state = {
@@ -207,23 +242,18 @@ describe("bounded model context", () => {
       data: state,
     });
     expect(view.metrics).toMatchObject({
-      retainedTurns: 9,
-      compactedTurns: 0,
+      retainedTurns: 4,
+      compactedTurns: 5,
       historyMode: "OPERATION_SUMMARIES",
     });
     const history = JSON.parse(String(view.messages[3]!.content));
     expect(history.kind).toBe("recent_operations");
-    expect(history.turns).toHaveLength(9);
+    expect(history.turns).toHaveLength(4);
     expect(
       history.turns
         .flat()
         .map((operation: { callId: string }) => operation.callId),
-    ).toEqual(
-      [0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap((index) => [
-        `${index}-0`,
-        `${index}-1`,
-      ]),
-    );
+    ).toEqual([5, 6, 7, 8].flatMap((index) => [`${index}-0`, `${index}-1`]));
     expect(history.turns[0][0]).toMatchObject({
       tool: "browser_command",
       outcome: "RETURNED",

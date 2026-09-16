@@ -1,3 +1,4 @@
+import { ObservationBindingService } from "./agent-runtime/observation-binding.service.js";
 import { AcceptanceReviewRuntimeController } from "./agent-runtime/acceptance-review-runtime.controller.js";
 import { TaskAcceptanceReviewService } from "./task-executions/task-acceptance-review.service.js";
 import { Module } from "@nestjs/common";
@@ -132,6 +133,7 @@ import { VerificationService } from "./verification/verification.service.js";
     SpecAnalysisRuntimeService,
     TaskAcceptanceReviewService,
     UnifiedBrowserExecutionService,
+    ObservationBindingService,
     AuditService,
     AuthGuard,
     AuthService,

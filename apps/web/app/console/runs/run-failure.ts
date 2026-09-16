@@ -35,7 +35,7 @@ const reasons: Record<string, [string, string]> = {
     "检查耗时步骤，调整执行时限或拆分用例后再重试。",
   ],
   WRITE_OUTCOME_UNKNOWN: [
-    "操作可能已产生业务写入，但写入结果尚未确认，已停止自动重试。",
+    "写入审计尚无法确认是否产生业务写入，已停止自动重试。",
     "先核对可能受影响的业务数据，再通过恢复记录确认结果。",
   ],
   RUNTIME_LEASE_LOST: [
