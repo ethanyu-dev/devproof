@@ -89,6 +89,12 @@ diagnostic failure does not undo the saved closure proof.
 
 Browser Runtime protocol v1.10 captures a screenshot after each successful navigation or interaction and composes the frames into a WebM action video when a Session closes. Screenshots and video are returned as Runtime Artifacts; API uploads them to the configured S3-compatible object store.
 
+Step screenshots use JPEG quality 88, with the existing size-based fallback to
+quality 45 for large images. Videos preserve the source aspect ratio up to
+1280 × 720, with a target bitrate of 2.5 Mbps. If encoding fails or the video
+exceeds the artifact size limit, the compatibility profile retries at up to
+960 × 540 and 0.6 Mbps.
+
 Interaction screenshots capture progress, including loading overlays and the
 previous query's rows. The Agent labels them `AFTER_ACTION` and rejects their
 use in `PASSED`/`FAILED` criterion results. After checking that the relevant
