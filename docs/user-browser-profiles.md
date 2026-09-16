@@ -20,6 +20,14 @@ The physical `runtimeProfileKey` is opaque and never returned to Console, Feishu
 
 ## Creation and preparation
 
+Owners can prepare a login before creating a Task: open Console → Browser Identities → **Add website and log in**, enter a page that requires authentication, and optionally name the identity or specify its environment and role. The API creates a user-owned Profile with a Console grant, then the UI immediately opens its preparation session. Existing hostname/environment/role scopes lead back to the existing identity. If opening the browser fails, the identity stays available for retry.
+
+![Add a website and prepare its login from Console](assets/proactive-browser-login/desktop.png)
+
+`POST /console/api/browser-profiles` accepts a `displayName` and `verificationUrl`; omitted `verificationRules` use automatic target-page verification. Saving revisits the configured page and requires the same origin/path, rejecting login redirects. Explicit verification rules remain supported. Environment and role default to `default`, matching ordinary Tasks; Feishu and issue-assignee access still require separate grants. A Task using `REQUESTER` can reuse a matching prepared identity after it reaches `READY`.
+
+Tasks can also request preparation when needed:
+
 1. A Task selects `REQUESTER` or `ISSUE_ASSIGNEE`. If no usable state exists and policy is `WAIT_FOR_PROFILE`, the API creates a logical Profile from the target URL, environment, role, and trigger source.
 2. The API generates the display name, exact hostname, verification URL, success rule, and an unguessable Runtime key.
 3. The owner opens Console → Browser Identities and starts a preparation session.
@@ -62,7 +70,7 @@ Profile authorization decides whether a Task may use login state. It does not co
 
 ### Console
 
-Users can prepare, reauthenticate, verify, grant, disable, and delete their own Profiles. The UI displays the logical ID, owner, site, status, and last-use time without exposing the Runtime key.
+Users can add websites and log in proactively, prepare, reauthenticate, verify, grant, disable, and delete their own Profiles. The UI displays site, status, and last-use time without exposing the Runtime key.
 
 ### Feishu
 

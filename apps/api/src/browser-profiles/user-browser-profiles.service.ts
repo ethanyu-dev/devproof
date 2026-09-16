@@ -137,7 +137,14 @@ export class UserBrowserProfilesService {
             runtimeProfileKey: `ubp-${randomUUID().replaceAll("-", "")}`,
             scopeKey,
             teamId: current.team.id,
-            verificationRules: json(input.verificationRules),
+            verificationRules: json(
+              input.verificationRules ??
+                automaticVerificationRules(
+                  input.verificationUrl,
+                  [],
+                  "USER_TARGET",
+                ),
+            ),
             verificationUrl: input.verificationUrl,
           },
         });
@@ -1607,7 +1614,11 @@ export class UserBrowserProfilesService {
     const rules = verificationRules(profile.verificationRules);
     return {
       ...safe,
-      configurationSource: rules.automatic ? "TASK" : "MANUAL",
+      configurationSource:
+        verificationRuleRecord(profile.verificationRules).provisionedBy ===
+        "TASK_TARGET"
+          ? "TASK"
+          : "MANUAL",
       isolatedExecutionAvailable:
         process.env.BROWSER_ISOLATED_AUTH_ENABLED === "true",
       grants: profile.grants.filter((grant) => !grant.revokedAt),
@@ -1762,13 +1773,14 @@ function automaticProfileName(
 function automaticVerificationRules(
   verificationUrl: string,
   requestedTriggerSources: ProfileTriggerSource[],
+  provisionedBy: "TASK_TARGET" | "USER_TARGET" = "TASK_TARGET",
 ) {
   const target = new URL(verificationUrl);
   target.hash = "";
   target.search = "";
   return {
     loginUrlPatterns: ["*/login*", "*/signin*"],
-    provisionedBy: "TASK_TARGET",
+    provisionedBy,
     requestedTriggerSources,
     successUrlPatterns: [`${target.toString()}*`],
   };
@@ -1783,7 +1795,9 @@ function verificationRuleRecord(value: Prisma.JsonValue) {
 function verificationRules(value: Prisma.JsonValue) {
   const record = verificationRuleRecord(value);
   return {
-    automatic: record.provisionedBy === "TASK_TARGET",
+    automatic:
+      record.provisionedBy === "TASK_TARGET" ||
+      record.provisionedBy === "USER_TARGET",
     authenticatedSelector:
       typeof record.authenticatedSelector === "string"
         ? record.authenticatedSelector
