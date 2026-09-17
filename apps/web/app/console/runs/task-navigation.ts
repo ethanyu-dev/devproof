@@ -1,5 +1,5 @@
 export interface TaskFilters {
-  kind: "ALL" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
+  kind: "ALL" | "SPEC_TASK" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
   period: "ALL" | "DAY" | "WEEK" | "MONTH";
   query: string;
   status:
@@ -32,7 +32,9 @@ export function readTaskListState(params: Pick<URLSearchParams, "get">) {
   return {
     page: Number.isSafeInteger(page) && page > 0 ? page : 1,
     filters: {
-      kind: ["ISSUE_SPEC", "DIRECT_RUN", "LEGACY_RUN"].includes(kind ?? "")
+      kind: ["SPEC_TASK", "ISSUE_SPEC", "DIRECT_RUN", "LEGACY_RUN"].includes(
+        kind ?? "",
+      )
         ? (kind as TaskFilters["kind"])
         : "ALL",
       period: ["DAY", "WEEK", "MONTH"].includes(period ?? "")

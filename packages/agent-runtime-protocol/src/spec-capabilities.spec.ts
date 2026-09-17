@@ -24,7 +24,7 @@ describe("source-bound browser test scope", () => {
         { cases: [testCase] },
         new Map([["issue", "新增两种配置，样式参考 ZDR"]]),
       ),
-    ).toContain("无 Issue 依据");
+    ).toContain("无明确需求依据");
   });
   it("accepts explicit localization requirements with issue provenance", () => {
     const requirement = {
@@ -49,6 +49,30 @@ describe("source-bound browser test scope", () => {
       ),
     ).toBeTruthy();
   });
+  it.each(["pr", "brief"])(
+    "accepts explicit intent evidence from %s without an Issue",
+    (sourceRef) => {
+      const quote = "英文环境下显示名称必须正确";
+      const requirement = {
+        id: "r1",
+        description: quote,
+        testScope: "LOCALIZATION",
+        intentEvidence: { sourceRef, quote },
+      };
+      expect(
+        specCapabilityError(
+          { requirements: [requirement], cases: [testCase] },
+          new Map([[sourceRef, quote]]),
+        ),
+      ).toBeNull();
+      expect(
+        specCapabilityError(
+          { requirements: [requirement], cases: [testCase] },
+          new Map([["unrelated", quote]]),
+        ),
+      ).toBeTruthy();
+    },
+  );
   it("does not confuse English functional UI or enum identifiers with localization", () => {
     const functional = {
       ...testCase,

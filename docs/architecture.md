@@ -66,11 +66,13 @@ The runner boundary is intentionally capability-based so HTTP, shell, container,
 
 ## Task and Run model
 
-`TaskExecution` is the user-facing aggregate. An Issue Task has three durable stages:
+`TaskExecution` is the user-facing aggregate. A Spec Task (`SPEC_TASK`, or legacy `ISSUE_SPEC`) has three durable stages:
 
-1. `SPEC_ANALYSIS` is leased to Agent Runtime with the `ISSUE_ANALYSIS` capability. Its Spec Analysis Executor adaptively reads the issue, linked pull requests, diffs, and code pinned to the PR head SHA through read-only control-plane tools, then writes a source-cited immutable `agent-spec-v2` Task Specification Snapshot. Model, analysis-summary, tool, validation, and terminal events share the Task trajectory.
+1. `SPEC_ANALYSIS` is leased to Agent Runtime with the `ISSUE_ANALYSIS` capability. Its Spec Analysis Executor reads the selected Issue, PRs and/or manual brief, plus PR diffs and code pinned to the PR head SHA through read-only control-plane tools, then writes a source-cited immutable `agent-spec-v3` Task Specification Snapshot. Model, analysis-summary, tool, validation, and terminal events share the Task trajectory.
 2. `PROFILE_RESOLUTION` selects an ephemeral or authorized user Browser Profile without opening a browser session.
 3. `SPEC_EXECUTION` dispatches deterministic Cases as `ExecutionRun` records.
+
+Task identity is an independent UUID; `(teamId, idempotencyKey)` deduplicates creation requests. Issue/PR references are optional analysis context. Each attempt freezes its selected source manifest and actual cited sources; the original creation input is retained separately from human supplements. Spec claims require Agent protocol v2.21.
 
 A Direct Task skips the first two stages and creates one Run. Each Run owns its attempts, Agent Runtime Task, Browser Execution, interventions, evidence, and outcome. Parent Task status is a projection of its stages and child Runs.
 

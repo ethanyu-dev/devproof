@@ -122,7 +122,7 @@ HTTP 使用 `POST /v2/tasks/:id/cases/:caseId/rerun-task`，请求体为 `{"idem
 
 Agent 模型需要支持 OpenAI 兼容的 Chat Completions API：Runtime 在配置的 Base URL（通常以 `/v1` 结尾）后追加 `/chat/completions`。两个池均使用 `tool_choice: auto`，并通过工具提交完成结果；思考字段保留在内存中，用于工具调用的多轮传递。
 
-6. Issue Task 的 Spec 分析优先使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。
+6. Spec Task 仅在提供 Issue 时使用 `LINEAR_API_TOKEN` 调用官方 GraphQL，也可回退到 `LINEAR_MCP_BEARER_TOKEN`。Issue owner Profile 映射建议同时配置 `LINEAR_WORKSPACE_ID`，并以 Linear 稳定用户 ID 为主、唯一且已验证的邮箱为一次性回填兜底。在 Console 的“接入配置”中按组织或精确仓库保存多条团队加密 GitHub PAT，并设置优先级，用于补充 PR、Checks、Files 与 Deployment。
 
 安全迁移会撤销原先通过 Console 签发的 Runtime Token，需要使用上述运维命令重新签发。旧的 Runtime Token 环境变量名、Worker ID、轮询间隔和工具上限环境变量名在迁移期间仍可读取；模型 API Key 与 Base URL 只在 Console 管理，新的 Runtime 参数统一使用 `.env.example` 中的 `DEVPROOF_AGENT_*` 名称。
 
@@ -205,23 +205,25 @@ MCP 地址为 `http://localhost:4433/mcp`，使用同一 Bearer Token。Agent Ru
 
 MCP 只提供统一 Task 控制面：`get_integration_status`、`create_task`、`get_task`、`list_tasks`、`set_task_deployment_target`、`retry_task_stage` 和 `cancel_task`。需要下钻 Case Runtime 时再使用 `get_run`、`resolve_run_intervention` 和 `read_run_evidence`。旧 Spec、Verification、Browser command、Profile 清理及 `create_run` 兼容工具均不再发布；调用方不获取 Browser Session，也不调用 command/complete/release 等低层生命周期工具。只读发现资源为 `devproof://task-tools`。
 
-在 Console → 任务执行中点击“创建任务”，填写 Linear Issue 链接或编号、GitHub PR 链接（选填，每行一个，最多 25 个）和执行测试环境地址（每行一个，最多 20 个）。至少填写一个 HTTP 或 HTTPS 测试环境；PR 留空时自动查找关联 PR。创建成功后进入任务详情；在当前页面内重试失败请求会复用同一请求标识，避免重复创建。
+在 Console → 任务执行中点击“创建任务”，提供 Linear Issue、GitHub PR（每行一个，最多 25 个）或具体测试说明，至少填写其中一种；可选填任务标题。手动创建时还需至少一个 HTTP 或 HTTPS 测试环境（最多 20 个）。只有 PR、只有 Issue 或只有测试说明都可进入 Spec 分析；有 Issue 且 PR 留空时自动查找关联 PR。创建后进入任务详情，失败重试复用请求标识；主动新建时，同一 Issue/PR 可以拥有多个独立任务。HTTP/MCP 使用 `kind: "SPEC_TASK"`，来源字段是顶层 `issueRef`、`pullRequestUrls`、`goal`，旧 `ISSUE_SPEC` 继续兼容。
 
-也可通过 HTTP 或 MCP 创建任务，在 Console 查看执行详情。Issue 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
+也可通过 HTTP 或 MCP 创建任务，在 Console 查看执行详情。Spec 模式先创建 Task，后台 Worker 解析上下文并写入任务级不可变 Spec Snapshot，再解析 `EPHEMERAL`、`REQUESTER`、`ISSUE_ASSIGNEE` 或 `EXPLICIT_PROFILE` 策略，最后为每个 Case 幂等创建 Run v2；直接模式创建 Task 并跳过分析和 Profile 解析。用户 Profile 只能在所有者授权的触发来源与目标域名中使用，同一 Profile 的 Task 按 FIFO 独占执行。Case 派发使用数据库 claim、稳定幂等键与后台补偿，阶段、Case 和最近错误统一显示在“任务执行”详情中。
 
 当 Agent 在仍然存活的 Browser Session 上请求 HITL 时，“任务执行”详情会显示 Browser Human Handoff：人工接管 Agent 的原页面完成登录、验证码或 MFA，释放控制后将结构化响应写回同一个 Runtime Task，再由新的 fencing lease 恢复执行。实时 JPEG 和鼠标/键盘输入只走受租约保护的瞬时通道，不写入 Prompt、Trace、数据库或对象存储。完整 Browser 数据面、SSRF 与故障注入能力要求 Browser Runtime protocol v1.2；控制面物理清理要求 v1.6；增强证据采集要求 v1.7；用户 Profile 30 天自动清理与生命周期回报要求 v1.8；逐步截图和操作视频要求 v1.10；结构化定位恢复诊断要求 v1.11；带确认、有限且脱敏的视频收尾诊断要求 v1.12。升级代码后需重新构建并重启 Runtime。
+
+本次来源解耦需要迁移数据库并协同升级 API、Web 和 Agent Runtime（Spec 协议 v2.21），见 [升级说明](docs/upgrading.md#source-independent-spec-tasks)。
 
 ## 用户级 Browser Profile
 
 Task 需要用户登录态但没有可用 Profile 时，控制面会根据目标 URL、环境、角色和触发来源自动创建逻辑 Profile；用户在 Console 的“浏览器身份”中只负责完成远程登录并确认入口授权，不填写域名、URL pattern 或 selector。Cookie、localStorage 和浏览器目录只保存在指定 Browser Runtime；控制面只保存随机逻辑 key、状态、授权与使用审计，API 不向 Console、飞书或 Agent 返回底层 key。
 
-Issue Task 可使用四种策略：默认 `EPHEMERAL`；`REQUESTER` 使用控制台或飞书发起人的 Profile；`ISSUE_ASSIGNEE` 通过 Linear workspace + stable user id 映射 owner；`EXPLICIT_PROFILE` 只允许已登录用户指定自己名下的 Profile。Profile 不可用时可等待、失败或显式降级为临时会话。完整模型、状态机、清理与上线方案见 [docs/user-browser-profiles.md](docs/user-browser-profiles.md)。
+Spec Task 可使用四种策略：HTTP/MCP 默认 `EPHEMERAL`，Console/飞书默认 `REQUESTER`；`REQUESTER` 使用控制台或飞书发起人的 Profile；`ISSUE_ASSIGNEE` 仅在提供 Issue 时可选，通过 Linear workspace + stable user id 映射 owner；`EXPLICIT_PROFILE` 只允许已登录用户指定自己名下的 Profile。Profile 不可用时可等待、失败或显式降级为临时会话。完整模型、状态机、清理与上线方案见 [docs/user-browser-profiles.md](docs/user-browser-profiles.md)。
 
 ## 飞书群机器人
 
-开启 `FEISHU_BOT_ENABLED` 后，配置机器人的稳定 `FEISHU_BOT_OPEN_ID`，并在飞书开发者后台把加密事件订阅回调配置为 `/integrations/feishu/events`，订阅 `im.message.receive_v1` 并授予读取群消息、读取用户身份和回复消息所需权限。服务端验证原始请求签名、时间窗、verification token、app id、tenant key 和被 @ 的 bot open_id，按 event id 幂等入库后异步创建 Task。群内使用 `@DevProof ENG-123 https://preview.example.com`；默认采用发起人 Profile，可加 `--owner` 使用 Issue owner，或 `--ephemeral` 强制临时会话。用户须先通过飞书 SSO 登录一次以建立稳定身份映射。
+开启 `FEISHU_BOT_ENABLED` 后，配置机器人的稳定 `FEISHU_BOT_OPEN_ID`，并在飞书开发者后台把加密事件订阅回调配置为 `/integrations/feishu/events`，订阅 `im.message.receive_v1` 并授予读取群消息、读取用户身份和回复消息所需权限。服务端验证原始请求签名、时间窗、verification token、app id、tenant key 和被 @ 的 bot open_id，按 event id 幂等入库后异步创建 Task。群内可使用 `@DevProof ENG-123 https://preview.example.com` 或 `@DevProof https://github.com/acme/web/pull/42 --target https://preview.example.com`；也可用 `--target https://preview.example.com --goal 保存后应显示成功状态` 创建纯手动说明任务（`--goal` 放在最后）。多个环境重复使用 `--target`，多个未标记的环境链接会提示澄清。PR 链接不会被当作环境；环境缺失时自动发现或等待在 Console 补充。默认采用发起人 Profile，提供 Issue 时可加 `--owner`，或用 `--ephemeral` 强制临时会话。用户须先通过飞书 SSO 登录一次以建立稳定身份映射。
 
-飞书发起的 Task 会回复一张简洁的交互卡片；任务创建、等待人工协助和最终判定都会更新同一张卡片，并通过按钮引导到 Console 处理或查看完整结果。Task 进入终态后，控制面通过 durable outbox 更新该卡片（仅配置群机器人 Webhook 时发送独立卡片），并把同一份汇总结果幂等回写到关联的 GitHub PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。结果链接可查看逐步截图和 R2 中的操作视频。GitHub 回写要求路由命中的 Console PAT 对目标仓库具备 Issue/PR comment 写权限。
+飞书发起的 Task 会回复一张简洁的交互卡片；任务创建、等待人工协助和最终判定都会更新同一张卡片，并通过按钮引导到 Console 处理或查看完整结果。Task 进入终态后，控制面通过 durable outbox 更新该卡片（仅配置群机器人 Webhook 时发送独立卡片），并在存在选定的主 PR 时把同一份汇总结果幂等回写到该 PR；重复投递会更新带任务标记的原评论，不会刷出重复评论。结果链接可查看逐步截图和 R2 中的操作视频。GitHub 回写要求路由命中的 Console PAT 对目标仓库具备 Issue/PR comment 写权限。
 
 飞书 HITL 通知使用群自定义机器人：
 

@@ -1,5 +1,18 @@
 # DevProof Agent Runtime Protocol
 
+Protocol v2.21 supports source-independent Spec tasks. The lease carries optional
+`issueRef`, `pullRequestUrls` and `goal`, with `contextVersion: 2`. Workers bootstrap
+through `get_task_context`; `linear_get_issue` is retained as an alias. `TASK_BRIEF`
+is an actual cited source, and `intentEvidence` supports explicit requirements
+from briefs, Issues and PRs while historical `issueEvidence` remains readable.
+Only selected PRs require metadata/diff/relevant-file coverage; no PR is valid
+for Issue-only or brief-only work. A deletion-only PR does not require reading
+deleted files at head. Unclear intent can return `INPUT_REQUIRED / TEST_INTENT`.
+
+All new Spec claims require minor 21. Drain old Spec workers and deploy the
+database migration, API, Web and workers together; see [the upgrade procedure](../../docs/upgrading.md#source-independent-spec-tasks).
+The historical protocol sections below describe earlier minimum versions.
+
 The protocol between the DevProof control plane and the thin Agent Runtime
 runtime. DevProof owns run state, retries, cancellation, HITL, and cleanup. The
 runtime leases one task, executes it, emits observations, and submits one

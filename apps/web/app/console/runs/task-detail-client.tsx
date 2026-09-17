@@ -1,4 +1,5 @@
 "use client";
+import { isSpecTask } from "@devproof/contracts";
 
 import {
   ArrowLeft,
@@ -247,12 +248,9 @@ export function TaskDetailClient({ id }: { id: string }) {
               scroll={false}
               aria-current={view === "specs" ? "page" : undefined}
             >
-              <Layers3 />{" "}
-              {detail.kind === "ISSUE_SPEC" ? "执行用例" : "执行记录"}{" "}
+              <Layers3 /> {isSpecTask(detail) ? "执行用例" : "执行记录"}{" "}
               <span>
-                {detail.kind === "ISSUE_SPEC"
-                  ? detail.cases.length
-                  : detail.runs.length}
+                {isSpecTask(detail) ? detail.cases.length : detail.runs.length}
               </span>
             </Link>
             <Link

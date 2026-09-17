@@ -1,3 +1,10 @@
+import { taskSourcePresentation } from "../task-executions/task-source-context.js";
+import {
+  resolveSpecTaskContext,
+  readAnalysisManifest,
+  type AnalysisContextManifest,
+} from "../specifications/spec-task-context.js";
+import { isSpecTask } from "@devproof/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -15,6 +22,7 @@ import {
   runtimeSpecSourceRefSchema,
   runtimeTraceEventSchema,
   specPullRequestCoverage,
+  specSelectedSourceCoverageError,
   specRequirementCoverageError,
   specCapabilityError,
   specNecessityError,
@@ -54,7 +62,7 @@ import {
 } from "../task-executions/task-analysis-input.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
 
-const SPEC_PROTOCOL_MINOR = 20;
+const SPEC_PROTOCOL_MINOR = 21;
 const SOURCE_PAGE_SIZE = 20;
 const MAX_SOURCE_BYTES = 2_000_000;
 const MAX_SOURCE_COUNT = 3_250;
@@ -229,8 +237,8 @@ export class SpecAnalysisRuntimeService {
       const createInput = taskExecutionCreateInputSchema.parse(
         attempt.stage.taskExecution.inputSnapshot,
       );
-      if (createInput.kind !== "ISSUE_SPEC") {
-        throw new ConflictException("Only Issue tasks support Spec analysis.");
+      if (!isSpecTask(createInput)) {
+        throw new ConflictException("Only Spec tasks support Spec analysis.");
       }
       return {
         task: {
@@ -249,7 +257,10 @@ export class SpecAnalysisRuntimeService {
                 : ("COMPACT" as const),
             attemptNumber: attempt.number,
             deadlineAt: attempt.stage.taskExecution.deadlineAt.toISOString(),
+            contextVersion: 2 as const,
             issueRef: createInput.issueRef,
+            goal: createInput.goal,
+            pullRequestUrls: createInput.pullRequestUrls,
             modelCandidates,
             stageAttemptId: attempt.id,
             ...((createInput.deployments[0]?.targetUrl ?? createInput.targetUrl)
@@ -410,120 +421,125 @@ export class SpecAnalysisRuntimeService {
     const createInput = taskExecutionCreateInputSchema.parse(
       attempt.stage.taskExecution.inputSnapshot,
     );
-    if (createInput.kind !== "ISSUE_SPEC") {
-      throw new ConflictException("Only Issue tasks support analysis tools.");
+    if (!isSpecTask(createInput)) {
+      throw new ConflictException("Only Spec tasks support analysis tools.");
     }
 
-    if (input.name === "linear_get_issue") {
+    if (
+      input.name === "get_task_context" ||
+      input.name === "linear_get_issue"
+    ) {
       analysisSummarySchema.parse(input.arguments.analysisSummary);
-      // Resolve every required input before asking once for missing information.
-      // Read PR metadata here so deployment discovery does not cause a second HITL.
+      const resolved = await resolveSpecTaskContext(
+        createInput,
+        teamId,
+        this.linear,
+        this.github,
+        (url) => this.pinnedRevision(attempt.id, url),
+        readAnalysisManifest(attempt.contextSnapshot),
+        async (linear) => {
+          await this.prisma.$transaction(async (tx) => {
+            if (
+              !(await this.lockActiveTask(
+                tx,
+                attempt.stage.taskExecutionId,
+                teamId,
+              ))
+            )
+              throw new ConflictException("The task is no longer active.");
+            const locked = await this.findAttempt(tx, teamId, attempt.id);
+            const now = await databaseNow(tx);
+            this.requireLease(locked, input, now);
+            requireActiveTask(locked.stage.taskExecution, now);
+            await tx.taskExecution.update({
+              where: { id: attempt.stage.taskExecutionId },
+              data: taskSourcePresentation(createInput, {
+                issue: linear.issue,
+              }),
+            });
+          });
+        },
+      );
+      const { linear, manifest } = resolved;
       const sourceRefs: RuntimeSpecSourceRef[] = [];
       const sources: Array<{ kind: string; uri: string; content: unknown }> =
         [];
-      let linear: Awaited<ReturnType<LinearContextClient["getIssue"]>> | null =
-        null;
-      try {
-        linear = await this.linear.getIssue(createInput.issueRef);
-      } catch {
-        // A corrected Issue reference or restored access can resume this task.
-      }
-      if (linear) {
-        const issue = linear.issue;
-        await this.prisma.$transaction(async (tx) => {
-          if (
-            !(await this.lockActiveTask(
-              tx,
-              attempt.stage.taskExecutionId,
-              teamId,
-            ))
-          )
-            throw new ConflictException("The task is no longer active.");
-          const locked = await this.findAttempt(tx, teamId, attempt.id);
-          const now = await databaseNow(tx);
-          this.requireLease(locked, input, now);
-          requireActiveTask(locked.stage.taskExecution, now);
-          await tx.taskExecution.update({
-            data: {
-              sourceRef: issue.identifier,
-              title: `${issue.identifier} · ${issue.title}`,
-            },
-            where: { id: locked.stage.taskExecutionId },
-          });
-        });
-      }
-      const directUrls = [
-        ...new Set(
-          [
-            ...(createInput.pullRequestUrls ?? []),
-            ...(linear?.pullRequestUrls ?? []),
-          ].map((url) => url.replace(/\/$/u, "")),
-        ),
-      ];
-      const discovery =
-        !directUrls.length && linear
-          ? await this.github.discoverIssuePullRequests(
-              teamId,
-              linear.issue.url,
-            )
-          : null;
-      const result = {
-        ...(linear ?? {}),
-        pullRequestUrls: [
-          ...new Set([...directUrls, ...(discovery?.pullRequestUrls ?? [])]),
-        ].slice(0, 25),
-        discoveryDiagnostics: [
-          ...(linear?.diagnostics ?? []),
-          ...(discovery?.diagnostics ?? []),
-        ],
+      const add = async (
+        item: Parameters<SpecAnalysisRuntimeService["persistSource"]>[1],
+      ) => {
+        const ref = await this.persistSource(attempt, item);
+        sourceRefs.push(ref);
+        sources.push({ ...ref, content: item.content });
+        return ref;
       };
-      if (linear) {
-        const source = await this.persistSource(attempt, {
-          content: result,
-          excerpt: linear.issue.description.slice(0, 2_000),
+      if (createInput.goal)
+        await add({
+          kind: "TASK_BRIEF",
+          content: { goal: createInput.goal },
+          excerpt: createInput.goal.slice(0, 2_000),
+          label: "任务测试说明",
+          locator: {},
+          revision: null,
+          uri: `task://${attempt.stage.taskExecutionId}/brief`,
+        });
+      if (linear)
+        await add({
           kind: "LINEAR_ISSUE",
+          content: {
+            ...linear,
+            pullRequestUrls: manifest.pullRequestUrls,
+            discoveryDiagnostics: manifest.diagnostics,
+          },
+          excerpt: linear.issue.description.slice(0, 2_000),
           label: `${linear.issue.identifier} · ${linear.issue.title}`,
           locator: { issueId: linear.issue.id },
           revision: null,
           uri: linear.issue.url,
         });
-        sourceRefs.push(source);
-        sources.push({ ...source, content: result });
-      }
       const pullRequests = [];
-      for (const url of result.pullRequestUrls) {
-        const revision = await this.pinnedRevision(attempt.id, url);
-        let resolved: Awaited<
-          ReturnType<GithubPullRequestClient["getPullRequest"]>
-        >;
-        try {
-          resolved = await this.github.getPullRequest(
-            teamId,
-            url,
-            url === result.pullRequestUrls[0],
-            revision,
-          );
-        } catch {
-          continue;
-        }
-        const pr = resolved.pullRequest;
-        const source = await this.persistSource(attempt, {
-          content: resolved,
-          excerpt: pr.body.slice(0, 2_000),
+      for (const result of resolved.pullRequests) {
+        const pr = result.pullRequest;
+        const ref = await add({
           kind: "GITHUB_PULL_REQUEST",
+          content: result,
+          excerpt: pr.body.slice(0, 2_000),
           label: `${pr.repository}#${pr.number} · ${pr.title}`,
           locator: { pullRequestNumber: pr.number },
           revision: pr.headSha,
-          uri: url,
+          uri: pr.url,
         });
-        sourceRefs.push(source);
-        sources.push({ ...source, content: resolved });
-        pullRequests.push({ ...resolved, sourceRef: source.externalId });
+        pullRequests.push({ ...result, sourceRef: ref.externalId });
       }
-      const assessment = assessAnalysisInputs(createInput, sources);
+      await this.prisma.$transaction(async (tx) => {
+        if (
+          !(await this.lockActiveTask(
+            tx,
+            attempt.stage.taskExecutionId,
+            teamId,
+          ))
+        )
+          throw new ConflictException("The task is no longer active.");
+        const locked = await this.findAttempt(tx, teamId, attempt.id);
+        const now = await databaseNow(tx);
+        this.requireLease(locked, input, now);
+        requireActiveTask(locked.stage.taskExecution, now);
+        await tx.taskStageAttempt.update({
+          where: { id: attempt.id },
+          data: { contextSnapshot: json(manifest) },
+        });
+        if (!linear && (resolved.pullRequests.length || createInput.goal))
+          await tx.taskExecution.update({
+            where: { id: attempt.stage.taskExecutionId },
+            data: taskSourcePresentation(createInput, resolved.context),
+          });
+      });
+      const assessment = assessAnalysisInputs(createInput, sources, manifest);
       return runtimeSpecAnalysisToolOutputSchema.parse({
         result: {
-          ...result,
+          ...(linear ?? {}),
+          goal: createInput.goal,
+          pullRequestUrls: manifest.pullRequestUrls,
+          discoveryDiagnostics: manifest.diagnostics,
           pullRequests,
           targetUrl: assessment.targetUrl,
           sourceRef: sourceRefs.find((source) => source.kind === "LINEAR_ISSUE")
@@ -534,11 +550,12 @@ export class SpecAnalysisRuntimeService {
       });
     }
 
-    const issueSource = await this.requireIssueSource(attempt.id);
-    const issuePayload = sourceContent(issueSource.content);
-    const allowedPullRequests = new Set(
-      z.array(z.string().url()).parse(record(issuePayload).pullRequestUrls),
-    );
+    const manifest = readAnalysisManifest(attempt.contextSnapshot);
+    if (!manifest)
+      throw new BadRequestException(
+        "Read get_task_context before using GitHub tools.",
+      );
+    const allowedPullRequests = new Set(manifest.pullRequestUrls);
 
     if (input.name === "github_get_pull_request") {
       const arguments_ = githubToolSchema.parse(input.arguments);
@@ -549,6 +566,10 @@ export class SpecAnalysisRuntimeService {
         [...allowedPullRequests][0] === arguments_.pullRequestUrl,
         await this.pinnedRevision(attempt.id, arguments_.pullRequestUrl),
       );
+      result.pullRequest = {
+        ...result.pullRequest,
+        url: arguments_.pullRequestUrl,
+      };
       const source = await this.persistSource(attempt, {
         content: result,
         excerpt: result.pullRequest.body.slice(0, 2_000),
@@ -717,8 +738,23 @@ export class SpecAnalysisRuntimeService {
       const assessment = assessAnalysisInputs(
         attempt.stage.taskExecution.inputSnapshot,
         attempt.analysisSources,
+        readAnalysisManifest(attempt.contextSnapshot),
       );
-      if (assessment.request) {
+      const request =
+        assessment.request ??
+        (outcome.kind === "INPUT_REQUIRED" &&
+        outcome.request.missing.length === 1 &&
+        outcome.request.missing[0] === "TEST_INTENT"
+          ? {
+              ...outcome.request,
+              issueRef: String(
+                record(attempt.stage.taskExecution.inputSnapshot).issueRef ??
+                  "",
+              ),
+              pullRequestUrls: assessment.pullRequestUrls,
+            }
+          : null);
+      if (request) {
         return this.prisma.$transaction(async (tx) => {
           if (
             !(await this.lockActiveTask(
@@ -737,7 +773,7 @@ export class SpecAnalysisRuntimeService {
           return pauseAnalysisForInput(
             tx,
             locked,
-            assessment.request!,
+            request,
             now,
             input.completionId,
           );
@@ -781,13 +817,23 @@ export class SpecAnalysisRuntimeService {
     }
     const issueTexts = new Map(
       attempt.analysisSources
-        .filter((source) => source.kind === "LINEAR_ISSUE")
+        .filter((source) =>
+          ["LINEAR_ISSUE", "TASK_BRIEF", "GITHUB_PULL_REQUEST"].includes(
+            source.kind,
+          ),
+        )
         .map((source) => {
-          const issue = record(record(sourceContent(source.content)).issue);
+          const payload = record(sourceContent(source.content));
+          const intent =
+            source.kind === "LINEAR_ISSUE"
+              ? record(payload.issue)
+              : source.kind === "GITHUB_PULL_REQUEST"
+                ? record(payload.pullRequest)
+                : payload;
           return [
             source.externalId,
-            [issue.title, issue.description]
-              .filter((v) => typeof v === "string")
+            [intent.title, intent.description, intent.body, intent.goal]
+              .filter((value) => typeof value === "string")
               .join("\n"),
           ] as const;
         }),
@@ -844,8 +890,9 @@ export class SpecAnalysisRuntimeService {
     const assessment = assessAnalysisInputs(
       attempt.stage.taskExecution.inputSnapshot,
       attempt.analysisSources,
+      readAnalysisManifest(attempt.contextSnapshot),
     );
-    for (const coverage of specPullRequestCoverage(
+    const sourceCoverageError = specSelectedSourceCoverageError(
       assessment.pullRequestUrls.map((url) => ({
         url,
         changedFiles: z
@@ -865,18 +912,12 @@ export class SpecAnalysisRuntimeService {
         ...source,
         locator: record(source.locator),
       })),
-    )) {
-      if (
-        !coverage.metadataRead ||
-        !coverage.diffSourceCount ||
-        !coverage.fileSourceCount ||
-        coverage.unreadRouteSpecs.length
-      )
-        throw new BadRequestException(
-          `生成 Spec 前必须读取关联 PR 的元数据、变更 diff 和相关代码（包含 Route Spec）：${coverage.url}`,
-        );
-    }
-    const context = buildSpecAnalysisContext(attempt.analysisSources);
+    );
+    if (sourceCoverageError) throw new BadRequestException(sourceCoverageError);
+    const context = buildSpecAnalysisContext(
+      attempt.analysisSources,
+      readAnalysisManifest(attempt.contextSnapshot),
+    );
     const { cases: _cases, ...specification } = spec;
     context.specification = specification;
     for (const uncovered of spec.uncoveredRequirements ?? []) {
@@ -927,12 +968,13 @@ export class SpecAnalysisRuntimeService {
     const createInput = taskExecutionCreateInputSchema.parse(
       attempt.stage.taskExecution.inputSnapshot,
     );
-    if (createInput.kind !== "ISSUE_SPEC") {
-      throw new ConflictException("Only Issue tasks support generated Specs.");
+    if (!isSpecTask(createInput)) {
+      throw new ConflictException("Only Spec tasks support generated Specs.");
     }
     const targetUrl = assessAnalysisInputs(
       createInput,
       attempt.analysisSources,
+      readAnalysisManifest(attempt.contextSnapshot),
     ).targetUrl;
     const normalizedTarget = targetUrl ? normalizeTargetUrl(targetUrl) : null;
     const target = normalizedTarget ? new URL(normalizedTarget) : null;
@@ -1091,8 +1133,7 @@ export class SpecAnalysisRuntimeService {
           }),
           lifecycle: "RUNNING",
           projectionNeededAt: null,
-          sourceRef: context.issue.identifier,
-          title: `${context.issue.identifier} · ${context.issue.title}`,
+          ...taskSourcePresentation(createInput, context),
           waitingReason: null,
         },
         where: { id: attempt.stage.taskExecutionId },
@@ -1555,13 +1596,6 @@ export class SpecAnalysisRuntimeService {
     return sources;
   }
 
-  private requireIssueSource(stageAttemptId: string) {
-    return this.prisma.taskAnalysisSource.findFirstOrThrow({
-      orderBy: { createdAt: "desc" },
-      where: { kind: "LINEAR_ISSUE", stageAttemptId },
-    });
-  }
-
   private findAttempt(
     tx: Prisma.TransactionClient,
     teamId: string,
@@ -1692,7 +1726,7 @@ function canonicalValue(value: unknown): unknown {
 function requireAllowedPullRequest(url: string, allowed: ReadonlySet<string>) {
   if (!allowed.has(url)) {
     throw new BadRequestException(
-      "GitHub tools may read only pull requests resolved for this Issue task.",
+      "GitHub tools may read only pull requests selected for this task.",
     );
   }
 }
@@ -1723,16 +1757,19 @@ export function buildSpecAnalysisContext(
     uri: string;
     locator: Prisma.JsonValue;
   }>,
+  manifest?: AnalysisContextManifest,
 ) {
   const issueSource = [...sources]
     .reverse()
     .find((source) => source.kind === "LINEAR_ISSUE");
-  if (!issueSource)
-    throw new BadRequestException(
-      "Spec analysis did not read the Linear Issue.",
-    );
-  const issuePayload = record(sourceContent(issueSource.content));
-  const issue = issuePayload.issue;
+  const issuePayload = issueSource
+    ? record(sourceContent(issueSource.content))
+    : {};
+  const issue = issuePayload.issue ?? null;
+  const brief = [...sources]
+    .reverse()
+    .find((source) => source.kind === "TASK_BRIEF");
+  const goal = brief ? record(sourceContent(brief.content)).goal : undefined;
   const metadata = new Map(
     sources
       .filter((source) => source.kind === "GITHUB_PULL_REQUEST")
@@ -1743,9 +1780,15 @@ export function buildSpecAnalysisContext(
     .filter(Boolean);
   const expectedPullRequests = z
     .array(z.string().url())
-    .parse(issuePayload.pullRequestUrls ?? []);
+    .parse(
+      manifest?.pullRequestUrls ??
+        issuePayload.pullRequestUrls ?? [...metadata.keys()],
+    );
   const diagnostics: SpecificationContextDiagnostic[] = [
-    { diagnostics: issuePayload.discoveryDiagnostics ?? [] },
+    {
+      diagnostics:
+        manifest?.diagnostics ?? issuePayload.discoveryDiagnostics ?? [],
+    },
     ...metadata.values(),
   ].flatMap((payload) =>
     z
@@ -1760,13 +1803,6 @@ export function buildSpecAnalysisContext(
       reference,
       source: "GITHUB",
     });
-  if (!expectedPullRequests.length) {
-    warn(
-      "GITHUB_PR_NOT_LINKED",
-      "Linear Issue 未提供关联 PR，未读取 GitHub 代码或检查结果；当前 Spec 仅基于 Issue，代码来源分析不完整。请在 Issue 中关联 PR 后重新分析。",
-      issueSource.uri,
-    );
-  }
   for (const coverage of specPullRequestCoverage(
     expectedPullRequests.map((url) => ({
       url,
@@ -1788,7 +1824,7 @@ export function buildSpecAnalysisContext(
         "生成 Spec 前未读取该关联 PR 的变更 diff。",
         coverage.url,
       );
-    if (!coverage.fileSourceCount)
+    if (coverage.fileReadRequired && !coverage.fileSourceCount)
       warn(
         "GITHUB_FILE_NOT_ANALYZED",
         "生成 Spec 前未读取该关联 PR 的相关文件内容；代码搜索片段不能替代文件读取。",
@@ -1805,7 +1841,9 @@ export function buildSpecAnalysisContext(
       );
   }
   return testGenerationContextSchema.parse({
+    contextVersion: 2,
     issue,
+    ...(typeof goal === "string" ? { goal } : {}),
     pullRequests,
     resolution: {
       completeness: diagnostics.some(
@@ -1824,6 +1862,8 @@ function specSourceIds(spec: z.infer<typeof runtimeGeneratedSpecSchema>) {
       ...(spec.requirements ?? []).flatMap((item) => [
         item.sourceRef,
         ...(item.changeBasis ? [item.changeBasis.sourceRef] : []),
+        ...(item.intentEvidence ? [item.intentEvidence.sourceRef] : []),
+        ...(item.issueEvidence ? [item.issueEvidence.sourceRef] : []),
       ]),
       ...spec.cases.flatMap((testCase) => [
         ...(testCase.accountRequirements ?? []).flatMap((requirement) =>

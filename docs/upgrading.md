@@ -88,6 +88,38 @@ Task/notification/model/credential data:
 
 `DEVPROOF_CONCURRENCY_TEST_DATABASE_URL=<disposable-local-url> node apps/api/scripts/test-analysis-retirement.mjs`
 
+## Source-independent Spec tasks
+
+Apply migration `20260917090000_source_independent_tasks`. It adds `SPEC_TASK`,
+an immutable creation-input snapshot, and a per-attempt context manifest.
+Existing Issue tasks and their immutable Specs remain readable; no task IDs or
+foreign keys change.
+
+Drain active Spec workers, apply the migration, then deploy API, Web and Agent
+Runtime together. New Spec claims require protocol v2.21, including legacy Issue
+tasks; older workers cannot claim new analysis work. Do not deploy new workers
+against an old API, which does not understand `get_task_context`. Browser Runtime
+does not need an update for this change. Keep the database migration on rollback;
+old API versions cannot operate `SPEC_TASK` rows, so drain or restore a matched
+API/database backup instead of performing an image-only rollback after creation
+has been enabled.
+
+Verify PR-only with no Linear credentials, Issue-only with no PR, brief-only,
+Console creation, Feishu creation/replay, missing-input resume and Case reruns.
+Only configured/selected providers need credentials. Console still requires a
+target at creation; API/MCP/Feishu may wait for one. Issue-owner identity requires
+an Issue; PR authors never implicitly become browser identity owners.
+
+For the isolated database regression, use a disposable database named
+`devproof_spec_task_test_<8 hexadecimal characters>`, apply all migrations, then:
+
+```sh
+DEVPROOF_SPEC_TASK_TEST_DATABASE_URL=<disposable-local-url> pnpm --filter @devproof/api exec vitest run src/task-executions/spec-task.db.spec.ts
+```
+
+The test leaves fixtures in that disposable database and mocks external source,
+model and browser calls. It must not point to shared or production data.
+
 ## Concurrency and recovery upgrade
 
 Current admission defaults to parallel business access (`BROWSER_EXECUTION_DATA_LOCKS_ENABLED=false`, also the unset default). Update all API replicas consistently. Existing normal and quarantined business-data leases stop blocking other executions without deleting recovery evidence or claiming that an unknown write was resolved. New executions do not acquire business-data leases or materialize recovery guards in this mode. Runtime slots, persistent Profile exclusion, identity concurrency limits, explicit dependencies, and closure proof remain enforced. The failed execution itself still requires its own recovery decision.

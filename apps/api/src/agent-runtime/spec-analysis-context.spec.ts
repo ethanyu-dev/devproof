@@ -84,22 +84,13 @@ describe("Spec analysis source completeness", () => {
     expect(context.resolution.completeness).toBe("PARTIAL");
     expect(context.resolution.diagnostics).toContainEqual(diagnostic);
   });
-  it("marks the incident's Issue-only result PARTIAL with an actionable diagnostic", () => {
+  it("accepts Issue-only context without inventing missing PR requirements", () => {
     const context = buildSpecAnalysisContext([issue([])]);
     expect(context.pullRequests).toEqual([]);
-    expect(context.resolution).toMatchObject({
-      completeness: "PARTIAL",
-      diagnostics: [
-        {
-          code: "GITHUB_PR_NOT_LINKED",
-          source: "GITHUB",
-          reference: issue().uri,
-        },
-      ],
+    expect(context.resolution).toEqual({
+      completeness: "COMPLETE",
+      diagnostics: [],
     });
-    expect(context.resolution.diagnostics[0]!.message).toContain(
-      "未读取 GitHub 代码或检查结果",
-    );
   });
 
   it("reports missing sources per PR instead of accepting coverage from another PR", () => {

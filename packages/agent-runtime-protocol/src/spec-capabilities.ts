@@ -6,12 +6,13 @@ export function testsLocalization(value: string) {
 }
 
 export const SPEC_EXECUTION_SCOPE_GUIDANCE =
-  "测试范围由 Linear Issue 的明确需求决定。默认不生成语言切换、翻译一致性或跨语言品牌环境测试；PR 的 i18n 文件、英文枚举和 Route Spec 的多语言标签不能扩展测试范围。普通英文界面的功能测试仍保留。多语言需求必须在对应 requirement 中声明 testScope=LOCALIZATION，并通过 issueEvidence 引用 Linear issue 标题/描述中的明确原文。混合用例只移除无依据的语言步骤与验收，保留普通功能覆盖。同类型的创建、修改和清理优先组织为一个生命周期用例，分别记录验收。不同写入用例不能把文档示例账号当作已分配资源；缺少独立账号时明确声明需提供测试数据。浏览器验收优先使用用户可见结果；需要请求方法、参数、请求体或响应数据时 requiredEvidenceKinds 必须包含 NETWORK，JSON 按结构核对。";
+  "测试范围由任务说明、Issue 或 PR 中的明确需求决定。默认不生成语言切换、翻译一致性或跨语言品牌环境测试；PR 的 i18n 文件、英文枚举和 Route Spec 的多语言标签不能扩展测试范围。普通英文界面的功能测试仍保留。多语言需求必须在对应 requirement 中声明 testScope=LOCALIZATION，并通过 intentEvidence 引用任务说明、Issue 或 PR 验收要求中的明确原文。混合用例只移除无依据的语言步骤与验收，保留普通功能覆盖。同类型的创建、修改和清理优先组织为一个生命周期用例，分别记录验收。不同写入用例不能把文档示例账号当作已分配资源；缺少独立账号时明确声明需提供测试数据。浏览器验收优先使用用户可见结果；需要请求方法、参数、请求体或响应数据时 requiredEvidenceKinds 必须包含 NETWORK，JSON 按结构核对。";
 
 type Requirement = {
   id: string;
   description: string;
   testScope?: string | undefined;
+  intentEvidence?: { sourceRef: string; quote: string } | undefined;
   issueEvidence?: { sourceRef: string; quote: string } | undefined;
 };
 export function localizationRequirementError(
@@ -23,7 +24,7 @@ export function localizationRequirementError(
     !testsLocalization(requirement.description)
   )
     return null;
-  const proof = requirement.issueEvidence;
+  const proof = requirement.intentEvidence ?? requirement.issueEvidence;
   if (
     !proof ||
     !issueTexts.get(proof.sourceRef)?.includes(proof.quote) ||
@@ -32,7 +33,7 @@ export function localizationRequirementError(
       proof.quote,
     )
   )
-    return `需求 ${requirement.id} 的多语言验证缺少 Linear Issue 明确要求。移除次级来源扩展的多语言范围，或提供 issueEvidence 的来源和原文。`;
+    return `需求 ${requirement.id} 的多语言验证缺少明确测试意图。移除次级来源扩展的多语言范围，或提供 intentEvidence 的来源和原文。`;
   return null;
 }
 
@@ -77,7 +78,7 @@ export function specCapabilityError(
         ].join("\n"),
       )
     )
-      return `用例「${testCase.name}」包含无 Issue 依据的多语言步骤或验收，请移除额外范围并保留普通功能检查。`;
+      return `用例「${testCase.name}」包含无明确需求依据的多语言步骤或验收，请移除额外范围并保留普通功能检查。`;
     for (const criterion of testCase.criteria) {
       if (
         requiresNetworkEvidence(criterion.description) &&

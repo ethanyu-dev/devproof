@@ -5,6 +5,8 @@ import {
 
 export interface TaskCreateDraft {
   issueRef: string;
+  title?: string;
+  goal?: string;
   pullRequestUrls: string;
   targetUrls: string;
   profileStrategy: TaskProfilePolicy["strategy"];
@@ -27,10 +29,10 @@ export function taskCreateInput(
   idempotencyKey: string,
 ) {
   const issueRef = draft.issueRef.trim();
-  if (!issueRef || issueRef.length > 500) {
+  if (issueRef.length > 500) {
     throw new Error("请填写 Issue 链接或编号，最多 500 个字符。");
   }
-  if (!/^[a-z][a-z0-9]*-\d+$/iu.test(issueRef)) {
+  if (issueRef && !/^[a-z][a-z0-9]*-\d+$/iu.test(issueRef)) {
     let url: URL;
     try {
       url = new URL(issueRef);
@@ -53,8 +55,10 @@ export function taskCreateInput(
   const targetUrls = uniqueLines(draft.targetUrls);
   if (!targetUrls.length) throw new Error("请至少填写一个执行测试环境地址。");
   const parsed = taskExecutionCreateInputSchema.safeParse({
-    kind: "ISSUE_SPEC",
-    issueRef,
+    kind: "SPEC_TASK",
+    ...(issueRef ? { issueRef } : {}),
+    ...(draft.title?.trim() ? { title: draft.title.trim() } : {}),
+    ...(draft.goal?.trim() ? { goal: draft.goal.trim() } : {}),
     idempotencyKey,
     profilePolicy: {
       strategy: draft.profileStrategy,
@@ -72,8 +76,14 @@ export function taskCreateInput(
   });
   if (!parsed.success) {
     const field = parsed.error.issues[0]?.path[0];
+    if (field === "goal")
+      throw new Error("请至少填写 Issue、GitHub PR 或具体测试说明。");
     if (field === "profilePolicy") {
-      throw new Error("请选择有效的浏览器身份。");
+      throw new Error(
+        draft.profileStrategy === "ISSUE_ASSIGNEE" && !issueRef
+          ? "使用 Issue 负责人身份需要填写 Issue。"
+          : "请选择有效的浏览器身份。",
+      );
     }
     if (field === "pullRequestUrls") {
       throw new Error(

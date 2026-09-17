@@ -50,7 +50,7 @@ export class TestSpecificationConsoleController {
 
 function legacySpecificationWriteRemoved() {
   return new GoneException(
-    "Specification writes moved to /console/api/tasks. Create an ISSUE_SPEC task instead.",
+    "Specification writes moved to /console/api/tasks. Create a SPEC_TASK instead.",
   );
 }
 

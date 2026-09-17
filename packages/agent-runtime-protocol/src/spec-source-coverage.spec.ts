@@ -1,10 +1,37 @@
 import { describe, expect, it } from "vitest";
 
-import { specPullRequestCoverage } from "./spec-source-coverage.js";
+import {
+  specPullRequestCoverage,
+  specSelectedSourceCoverageError,
+} from "./spec-source-coverage.js";
 
 const url = "https://github.com/acme/web/pull/42";
 
 describe("specPullRequestCoverage", () => {
+  it("allows no PR and deletion-only changes but still requires selected metadata and diffs", () => {
+    expect(specSelectedSourceCoverageError([], [])).toBeNull();
+    expect(specSelectedSourceCoverageError([{ url }], [])).toContain("元数据");
+    const sources = [
+      { kind: "GITHUB_PULL_REQUEST", uri: url, locator: {} },
+      {
+        kind: "GITHUB_DIFF",
+        uri: `${url}/files#deleted`,
+        locator: { path: "src/deleted.ts", status: "removed" },
+      },
+    ];
+    expect(
+      specSelectedSourceCoverageError(
+        [{ url, changedFiles: ["src/deleted.ts"] }],
+        sources,
+      ),
+    ).toBeNull();
+    expect(
+      specSelectedSourceCoverageError(
+        [{ url, changedFiles: ["src/deleted.ts", "src/modified.ts"] }],
+        sources,
+      ),
+    ).toContain("相关文件");
+  });
   it("does not match a PR with the same numeric prefix", () => {
     expect(
       specPullRequestCoverage(

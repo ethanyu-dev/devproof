@@ -83,7 +83,7 @@ export function feishuTaskCardPresentation(payload: Record<string, unknown>) {
       actionLabel: "前往补充",
       actionType: "primary",
       label: "DevProof · 等待补充信息",
-      summary: "请完成所需配置后继续验证",
+      summary: compactText(payload.message, "请完成所需配置后继续验证", 800),
       template: "orange",
     } as const;
   }

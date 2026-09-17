@@ -222,3 +222,121 @@ describe("Feishu interactive message API", () => {
     );
   });
 });
+
+describe("Feishu task creation", () => {
+  function harness(text: string, existingTaskId?: string) {
+    const row = {
+      id: "inbound-1",
+      externalEventId: "event-1",
+      attempts: 1,
+      team: { id: "team-1", name: "Team", slug: "team" },
+      metadata: {
+        appId: "cli_app",
+        eventType: "im.message.receive_v1",
+        tenantKey: "tenant-1",
+        sender: { openId: "sender" },
+        message: {
+          chatId: "chat-1",
+          chatType: "p2p",
+          messageId: "message-1",
+          messageType: "text",
+          mentions: [],
+          text,
+        },
+      },
+    };
+    const events = {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUniqueOrThrow: vi.fn().mockResolvedValue(row),
+      update: vi.fn().mockResolvedValue(row),
+    };
+    const task = { id: existingTaskId ?? "task-1", title: "订单保存" };
+    const tasks = {
+      create: vi.fn().mockResolvedValue(task),
+      detail: vi.fn().mockResolvedValue(task),
+    };
+    const findTask = vi
+      .fn()
+      .mockResolvedValue(existingTaskId ? { id: existingTaskId } : null);
+    const service = new FeishuIntegrationService(
+      {
+        inboundIntegrationEvent: events,
+        taskExecution: { findUnique: findTask },
+      } as never,
+      tasks as never,
+    );
+    const internal = service as unknown as {
+      process(id: string): Promise<void>;
+      resolveSender(): Promise<string>;
+      replyBestEffort(...args: unknown[]): Promise<void>;
+      replyTaskCardBestEffort(...args: unknown[]): Promise<void>;
+    };
+    vi.spyOn(internal, "resolveSender").mockResolvedValue("user-1");
+    const reply = vi.spyOn(internal, "replyBestEffort").mockResolvedValue();
+    const card = vi
+      .spyOn(internal, "replyTaskCardBestEffort")
+      .mockResolvedValue();
+    return { internal, events, tasks, findTask, reply, card };
+  }
+  it("creates a PR-only task with requester identity and the actual environment", async () => {
+    const h = harness(
+      "https://github.com/acme/web/pull/42/files --target https://preview.example.com",
+    );
+    await h.internal.process("inbound-1");
+    expect(h.tasks.create).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        kind: "SPEC_TASK",
+        idempotencyKey: "feishu-event:event-1",
+        pullRequestUrls: ["https://github.com/acme/web/pull/42"],
+        profilePolicy: expect.objectContaining({ strategy: "REQUESTER" }),
+        deployments: [
+          expect.objectContaining({ targetUrl: "https://preview.example.com" }),
+        ],
+      }),
+      expect.objectContaining({ triggerSource: "FEISHU", userId: "user-1" }),
+    );
+    expect(h.tasks.create.mock.calls[0]![1]).not.toHaveProperty("issueRef");
+    expect(h.events.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "PROCESSED",
+          taskExecutionId: "task-1",
+        }),
+      }),
+    );
+    expect(h.card).toHaveBeenCalledOnce();
+  });
+  it("reuses a task committed before event completion, including legacy tasks", async () => {
+    const h = harness("ENG-123 https://preview.example.com", "legacy-task");
+    await h.internal.process("inbound-1");
+    expect(h.tasks.create).not.toHaveBeenCalled();
+    expect(h.tasks.detail).toHaveBeenCalledWith(
+      expect.anything(),
+      "legacy-task",
+    );
+    expect(h.card).toHaveBeenCalledWith(
+      expect.objectContaining({ taskExecutionId: "legacy-task" }),
+    );
+  });
+  it.each([
+    "https://github.com/acme/web/pull/42 --owner",
+    "https://github.com/acme/web/pull/42 https://a.example.com https://b.example.com",
+  ])(
+    "marks invalid commands permanent instead of retrying: %s",
+    async (text) => {
+      const h = harness(text);
+      await h.internal.process("inbound-1");
+      expect(h.tasks.create).not.toHaveBeenCalled();
+      expect(h.events.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "IGNORED",
+            nextAttemptAt: null,
+          }),
+        }),
+      );
+      expect(h.reply).toHaveBeenCalledOnce();
+    },
+  );
+});

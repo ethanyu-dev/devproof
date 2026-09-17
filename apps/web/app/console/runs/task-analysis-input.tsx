@@ -14,10 +14,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 export function TaskAnalysisInputCard({
+  issueOwnerSelected = false,
   request,
   busy,
   onSubmit,
 }: {
+  issueOwnerSelected?: boolean;
   request: SpecAnalysisInputRequest & { attemptId: string };
   busy: boolean;
   onSubmit: (input: TaskAnalysisInput) => Promise<unknown>;
@@ -26,9 +28,13 @@ export function TaskAnalysisInputCard({
   const [pullRequests, setPullRequests] = useState(
     request.pullRequestUrls.join("\n"),
   );
+  const [goal, setGoal] = useState(request.goal ?? "");
   const [targets, setTargets] = useState("");
   const [error, setError] = useState<string | null>(null);
   const missing = new Set(request.missing);
+  const needsContext = request.missing.some(
+    (item) => item !== "DEPLOYMENT_TARGET",
+  );
   const lines = (value: string) => [
     ...new Set(
       value
@@ -40,9 +46,12 @@ export function TaskAnalysisInputCard({
   async function submit() {
     const parsed = taskAnalysisInputSchema.safeParse({
       expectedAttemptId: request.attemptId,
-      ...(missing.has("ISSUE") ? { issueRef } : {}),
-      ...(missing.has("PULL_REQUEST")
-        ? { pullRequestUrls: lines(pullRequests) }
+      ...(needsContext
+        ? {
+            issueRef: issueRef.trim() || null,
+            pullRequestUrls: lines(pullRequests),
+            ...(goal.trim() ? { goal: goal.trim() } : {}),
+          }
         : {}),
       ...(missing.has("DEPLOYMENT_TARGET")
         ? {
@@ -71,12 +80,18 @@ export function TaskAnalysisInputCard({
         <Badge tone="warning">等待人工补充</Badge>
       </div>
       <p className="whitespace-pre-line text-sm">{request.message}</p>
+      {issueOwnerSelected && (
+        <p className="text-sm">
+          当前使用 Issue 负责人身份。若要移除
+          Issue，请先在下方切换浏览器身份；分析等待会保留。
+        </p>
+      )}
       <p className="text-sm text-muted-foreground">
-        Issue、关联 PR
-        内容和明确的测试环境均为必需信息。补齐后继续分析并生成用例。
+        Issue、PR
+        或测试说明均可作为测试依据。可修正无法读取的来源，或移除它并提供其他依据；执行前需要明确测试环境。
       </p>
       <div className="dp-task-form">
-        {missing.has("ISSUE") && (
+        {needsContext && (
           <Field
             label="Issue 链接或编号"
             description="确认需求正文可读取；修复访问权限后也可以提交原编号重试。"
@@ -89,7 +104,7 @@ export function TaskAnalysisInputCard({
             />
           </Field>
         )}
-        {missing.has("PULL_REQUEST") && (
+        {needsContext && (
           <Field
             label="关联 PR（每行一个）"
             description="请确保 DevProof 可以读取所有关联 PR 的内容与代码。"
@@ -99,6 +114,20 @@ export function TaskAnalysisInputCard({
               value={pullRequests}
               onChange={(event) => setPullRequests(event.target.value)}
               placeholder="https://github.com/组织/仓库/pull/123"
+              disabled={busy}
+            />
+          </Field>
+        )}
+        {needsContext && (
+          <Field
+            label="测试说明"
+            description="说明需要验证的业务结果；移除来源后仍需保留至少一种有效依据。"
+          >
+            <Textarea
+              aria-label="测试说明"
+              value={goal}
+              maxLength={20_000}
+              onChange={(event) => setGoal(event.target.value)}
               disabled={busy}
             />
           </Field>
@@ -132,8 +161,12 @@ export function TaskAnalysisInputCard({
         <Button
           disabled={
             busy ||
-            (missing.has("ISSUE") && !issueRef.trim()) ||
-            (missing.has("PULL_REQUEST") && !pullRequests.trim()) ||
+            (needsContext && issueOwnerSelected && !issueRef.trim()) ||
+            (needsContext &&
+              !issueRef.trim() &&
+              !pullRequests.trim() &&
+              !goal.trim()) ||
+            (missing.has("TEST_INTENT") && !goal.trim()) ||
             (missing.has("DEPLOYMENT_TARGET") && !targets.trim())
           }
           onClick={() => void submit()}

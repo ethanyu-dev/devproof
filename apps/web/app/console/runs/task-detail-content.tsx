@@ -1,4 +1,5 @@
 "use client";
+import { isSpecTask } from "@devproof/contracts";
 import { TaskTestAccountsCard } from "./task-test-accounts";
 
 import { Badge } from "@/components/ui/badge";
@@ -122,7 +123,17 @@ export function TaskDetailContent({
     detail.profileBinding?.requestedProfile ??
     detail.profileBinding?.resolvedProfile ??
     null;
-  const profileNeedsInput = detail.profileBinding?.status === "WAITING_INPUT";
+  const hasIssue = Boolean(
+    detail.input &&
+    typeof detail.input === "object" &&
+    "issueRef" in detail.input &&
+    detail.input.issueRef,
+  );
+  const issueOwnerSelected =
+    detail.profileBinding?.strategy === "ISSUE_ASSIGNEE";
+  const profileNeedsInput =
+    detail.profileBinding?.status === "WAITING_INPUT" ||
+    (detail.waitingReason === "ANALYSIS_INPUT_REQUIRED" && issueOwnerSelected);
   const explicitBoundProfile =
     detail.profileBinding?.strategy === "EXPLICIT_PROFILE"
       ? boundProfile
@@ -134,7 +145,7 @@ export function TaskDetailContent({
     (stage) => stage.status === "FAILED",
   );
   const canRetryStage =
-    detail.kind === "ISSUE_SPEC" &&
+    isSpecTask(detail) &&
     !detail.cancelRequestedAt &&
     new Date(detail.deadlineAt).getTime() > Date.now();
 
@@ -228,7 +239,7 @@ export function TaskDetailContent({
     <>
       <section
         className="dp-task-detail-section"
-        aria-label={detail.kind === "ISSUE_SPEC" ? "执行用例" : "执行记录"}
+        aria-label={isSpecTask(detail) ? "执行用例" : "执行记录"}
         hidden={view !== "specs"}
       >
         {detail.caseRerunSource && (
@@ -278,6 +289,7 @@ export function TaskDetailContent({
             <TaskAnalysisInputCard
               key={detail.analysisInputRequest.attemptId}
               request={detail.analysisInputRequest}
+              issueOwnerSelected={issueOwnerSelected}
               busy={busy}
               onSubmit={(input) => onMutate("/analysis-input", input)}
             />
@@ -371,7 +383,7 @@ export function TaskDetailContent({
                 >
                   <option value="EPHEMERAL">不需要登录（临时会话）</option>
                   <option value="REQUESTER">使用我的浏览器身份</option>
-                  <option value="ISSUE_ASSIGNEE">
+                  <option disabled={!hasIssue} value="ISSUE_ASSIGNEE">
                     使用 Issue 负责人的浏览器身份
                   </option>
                   <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
@@ -439,7 +451,7 @@ export function TaskDetailContent({
                 只需完成登录并确认授权。
               </p>
               <p>
-                如果这个 Issue
+                如果这个任务
                 验证的是公开页面、不需要登录，可以直接改用临时会话。
               </p>
               <div className="dp-form-actions">
@@ -483,7 +495,7 @@ export function TaskDetailContent({
                   value={profileStrategy}
                 >
                   <option value="REQUESTER">使用我的浏览器身份</option>
-                  <option value="ISSUE_ASSIGNEE">
+                  <option disabled={!hasIssue} value="ISSUE_ASSIGNEE">
                     使用 Issue 负责人的浏览器身份
                   </option>
                   <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
@@ -546,11 +558,11 @@ export function TaskDetailContent({
             )}
           <div className="dp-specification-case-list">
             <h2 className="dp-task-section-title">
-              {detail.kind === "ISSUE_SPEC"
+              {isSpecTask(detail)
                 ? `执行用例 · ${detail.cases.length}`
                 : `执行记录 · ${detail.runs.length}`}
             </h2>
-            {detail.kind === "ISSUE_SPEC" && detail.cases.length === 0 && (
+            {isSpecTask(detail) && detail.cases.length === 0 && (
               <p className="dp-task-empty-copy">
                 {analysis?.status === "FAILED"
                   ? "需求分析未完成，尚未生成执行用例。"
@@ -559,7 +571,7 @@ export function TaskDetailContent({
                     : "暂无执行用例，分析完成后将在这里显示。"}
               </p>
             )}
-            {detail.kind !== "ISSUE_SPEC" && detail.runs.length === 0 && (
+            {!isSpecTask(detail) && detail.runs.length === 0 && (
               <p className="dp-task-empty-copy">暂无执行记录。</p>
             )}
             {detail.kind === "DIRECT_RUN" || detail.kind === "LEGACY_RUN"
@@ -597,7 +609,7 @@ export function TaskDetailContent({
 
       <TaskLogs
         hidden={view !== "logs"}
-        hasAnalysis={detail.kind === "ISSUE_SPEC"}
+        hasAnalysis={isSpecTask(detail)}
         analysisSnapshot={<SpecificationSnapshot detail={detail} />}
         trajectory={trajectory}
         events={events}

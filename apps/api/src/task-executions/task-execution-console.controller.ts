@@ -58,7 +58,7 @@ export class TaskExecutionConsoleController {
     const createdAfter = optionalDate(rawCreatedAfter, "createdAfter");
     const kind = optionalEnum(
       rawKind,
-      ["ISSUE_SPEC", "DIRECT_RUN", "LEGACY_RUN"] as const,
+      ["SPEC_TASK", "ISSUE_SPEC", "DIRECT_RUN", "LEGACY_RUN"] as const,
       "kind",
     );
     const query = optionalText(rawQuery, 200, "query");

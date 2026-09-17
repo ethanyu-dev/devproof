@@ -30,7 +30,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 20,
+  minor: 21,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -194,6 +194,7 @@ export const runtimeSpecSourceRefSchema = z.object({
     .regex(/^analysis-source:\/\//u),
   kind: z.enum([
     "LINEAR_ISSUE",
+    "TASK_BRIEF",
     "GITHUB_PULL_REQUEST",
     "GITHUB_DIFF",
     "GITHUB_FILE",
@@ -261,6 +262,12 @@ export const runtimeSpecRequirementSchema = z.object({
     })
     .optional(),
   testScope: z.enum(["FUNCTIONAL", "LOCALIZATION"]).optional(),
+  intentEvidence: z
+    .object({
+      sourceRef: z.string().min(1).max(500),
+      quote: z.string().min(1).max(2000),
+    })
+    .optional(),
   issueEvidence: z
     .object({
       sourceRef: z.string().min(1).max(500),
@@ -310,7 +317,10 @@ export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
   specFormat: z.enum(["COMPACT", "CHECK_REFERENCES"]).optional(),
   attemptNumber: z.number().int().positive(),
   deadlineAt: z.string().datetime(),
-  issueRef: z.string().trim().min(1).max(500),
+  contextVersion: z.literal(2).optional(),
+  issueRef: z.string().trim().min(1).max(500).optional(),
+  goal: z.string().max(20_000).optional(),
+  pullRequestUrls: z.array(z.string().url()).max(25).optional(),
   modelCandidates: z.array(runtimeModelCandidateSchema).min(1).max(10),
   stageAttemptId: z.string().uuid(),
   targetUrl: z.string().url().max(2_048).optional(),
@@ -339,6 +349,7 @@ export const runtimeSpecAnalysisClaimOutputSchema = z.object({
 });
 
 export const runtimeSpecAnalysisToolNameSchema = z.enum([
+  "get_task_context",
   "linear_get_issue",
   "github_get_pull_request",
   "github_list_changed_files",
@@ -348,10 +359,13 @@ export const runtimeSpecAnalysisToolNameSchema = z.enum([
 
 export const specAnalysisInputRequestSchema = z.object({
   missing: z
-    .array(z.enum(["ISSUE", "PULL_REQUEST", "DEPLOYMENT_TARGET"]))
+    .array(
+      z.enum(["ISSUE", "PULL_REQUEST", "DEPLOYMENT_TARGET", "TEST_INTENT"]),
+    )
     .min(1),
   message: z.string().min(1).max(8_000),
-  issueRef: z.string(),
+  issueRef: z.string().default(""),
+  goal: z.string().max(20_000).optional(),
   pullRequestUrls: z.array(z.string().url()).max(25),
   deploymentCandidates: z.array(z.string().url()).max(25),
 });
@@ -950,7 +964,10 @@ export type RuntimeTaskLease = z.infer<typeof runtimeTaskLeaseSchema>;
 export type RuntimeTaskOutcomeInput = z.infer<
   typeof runtimeTaskOutcomeInputSchema
 >;
-export { specPullRequestCoverage } from "./spec-source-coverage.js";
+export {
+  specPullRequestCoverage,
+  specSelectedSourceCoverageError,
+} from "./spec-source-coverage.js";
 export { specRequirementCoverageError } from "./spec-requirement-coverage.js";
 
 export * from "./acceptance-review.js";
