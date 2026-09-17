@@ -5683,8 +5683,7 @@
   }
 }
 @media (pointer: coarse) {
-  .dp-task-detail-page .dp-task-detail-tabs a,
-  .dp-run-detail-page .dp-run-detail-tabs a {
+  .dp-task-detail-page .dp-task-detail-tabs a {
     min-height: 44px;
   }
 }
@@ -5740,13 +5739,13 @@
   border-top: 1px solid var(--border);
   padding: 10px 16px;
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) {
+.dp-task-detail-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) a {
+.dp-task-detail-tabs a {
   display: flex;
   min-height: 40px;
   align-items: center;
@@ -5758,23 +5757,23 @@
   font-weight: 500;
   text-decoration: none;
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) a:hover {
+.dp-task-detail-tabs a:hover {
   background: var(--secondary);
   color: var(--foreground);
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) a[aria-current="page"] {
+.dp-task-detail-tabs a[aria-current="page"] {
   color: var(--primary);
   background: var(--accent);
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) a:focus-visible {
+.dp-task-detail-tabs a:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) svg {
+.dp-task-detail-tabs svg {
   width: 16px;
   height: 16px;
 }
-:is(.dp-task-detail-tabs, .dp-run-detail-tabs) span {
+.dp-task-detail-tabs span {
   border-radius: var(--radius-sm);
   background: var(--secondary);
   padding: 1px 6px;
@@ -5819,17 +5818,7 @@
   .dp-task-overview-meta {
     gap: 12px;
   }
-  :is(.dp-task-detail-tabs, .dp-run-detail-tabs) {
+  .dp-task-detail-tabs {
     gap: 8px;
   }
-}
-
-.dp-run-detail-tabs {
-  margin-bottom: 0;
-}
-
-.dp-run-log-panel {
-  display: grid;
-  min-width: 0;
-  gap: 16px;
 }

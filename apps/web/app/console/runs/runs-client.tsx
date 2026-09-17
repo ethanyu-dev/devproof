@@ -13,11 +13,9 @@ import {
   CircleCheckBig,
   Download,
   ExternalLink,
-  FileCheck2,
   Film,
   Monitor,
   RefreshCw,
-  ScrollText,
   TriangleAlert,
   XCircle,
 } from "lucide-react";
@@ -387,12 +385,6 @@ export function RunsClient({ initialId }: { initialId: string }) {
 
 function RunDetailClient({ id }: { id: string }) {
   const searchParams = useSearchParams();
-  const activeView = searchParams.get("view") === "logs" ? "logs" : "result";
-  const viewHref = (view: "result" | "logs") => {
-    const params = new URLSearchParams(searchParams.toString());
-    params.set("view", view);
-    return `/console/executions/${encodeURIComponent(id)}?${params.toString()}`;
-  };
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const returnTo = executionReturnHref(
     searchParams.get("returnTo") ??
@@ -409,7 +401,7 @@ function RunDetailClient({ id }: { id: string }) {
   const [refreshing, setRefreshing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [runtimeView, setRuntimeView] = useState<"browser" | "trajectory">(
-    "trajectory",
+    "browser",
   );
   const loadingRef = useRef(false);
   const load = useCallback(
@@ -669,7 +661,7 @@ function RunDetailClient({ id }: { id: string }) {
             </Button>
           </>
         }
-        description="查看执行结果与操作回放，或切换到日志排查查看执行轨迹、浏览器节点与证据。"
+        description="先查看验证结论与操作回放，需要排查时再展开技术详情。"
         title="执行详情"
       />
       <Link className="dp-back-link" href={returnTo}>
@@ -858,301 +850,177 @@ function RunDetailClient({ id }: { id: string }) {
               </Card>
             ) : null}
 
-            <nav aria-label="执行详情视图" className="dp-run-detail-tabs">
-              <Link
-                aria-current={activeView === "result" ? "page" : undefined}
-                href={viewHref("result")}
-                replace
-                scroll={false}
-              >
-                <FileCheck2 />
-                执行结果
-              </Link>
-              <Link
-                aria-current={activeView === "logs" ? "page" : undefined}
-                href={viewHref("logs")}
-                replace
-                scroll={false}
-              >
-                <ScrollText />
-                日志排查
-              </Link>
-            </nav>
-
-            {activeView === "result" ? (
-              <section
-                aria-label="执行结果"
-                className={`dp-run-decision-grid ${!runtimeIsRunning && videos.length === 0 && stepScreenshots.length === 0 ? "is-without-media" : ""}`}
-              >
-                {runtimeIsRunning ||
-                videos.length > 0 ||
-                stepScreenshots.length > 0 ? (
-                  <Card className="dp-verification-detail dp-run-card dp-run-media-card">
-                    {runtimeIsRunning ? (
-                      <RunLiveBrowser
-                        key={id}
-                        runId={id}
-                        fallback={
-                          stepScreenshots.length > 0 ? (
-                            <RunScreenshotCarousel
-                              screenshots={stepScreenshots}
-                            />
-                          ) : null
-                        }
-                      />
-                    ) : (
-                      <>
-                        <div className="dp-section-head">
-                          <span>
-                            <Film />
-                            <b>操作回放</b>
-                          </span>
-                          <small>
-                            {videos.length > 0
-                              ? "真实浏览器操作回放"
-                              : terminal
-                                ? videoFailure
-                                  ? `视频生成失败（${videoFailure.code}），步骤截图已保留`
-                                  : "本次执行未生成操作视频，步骤截图已保留"
-                                : "视频生成中，步骤截图已可查看"}
-                          </small>
-                        </div>
-                        {videos.map((video) => (
-                          <div className="dp-run-video" key={video.id}>
-                            {video.downloadUrl ? (
-                              <video
-                                controls
-                                playsInline
-                                poster={
-                                  stepScreenshots.at(-1)?.downloadUrl ??
-                                  undefined
-                                }
-                                preload="metadata"
-                                src={video.downloadUrl}
-                              >
-                                当前浏览器不支持 WebM
-                                视频，请使用下方链接下载查看。
-                              </video>
-                            ) : null}
-                            <div>
-                              <span>
-                                <b>{video.label || "完整操作视频"}</b>
-                                <small>
-                                  {evidenceMetadata(video).frameCount
-                                    ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
-                                    : ""}
-                                  {video.runtimeArtifact
-                                    ? formatByteSize(
-                                        video.runtimeArtifact.byteSize,
-                                      )
-                                    : "已上传对象存储"}
-                                </small>
-                              </span>
-                              {video.downloadUrl ? (
-                                <a href={video.downloadUrl} download>
-                                  <Download /> 下载视频
-                                </a>
-                              ) : null}
-                            </div>
-                          </div>
-                        ))}
-                        {videos.length === 0 && stepScreenshots.length > 0 ? (
+            <div
+              className={`dp-run-decision-grid ${!runtimeIsRunning && videos.length === 0 && stepScreenshots.length === 0 ? "is-without-media" : ""}`}
+            >
+              {runtimeIsRunning ||
+              videos.length > 0 ||
+              stepScreenshots.length > 0 ? (
+                <Card className="dp-verification-detail dp-run-card dp-run-media-card">
+                  {runtimeIsRunning ? (
+                    <RunLiveBrowser
+                      key={id}
+                      runId={id}
+                      fallback={
+                        stepScreenshots.length > 0 ? (
                           <RunScreenshotCarousel
-                            key={id}
                             screenshots={stepScreenshots}
                           />
-                        ) : null}
-                      </>
-                    )}
-                  </Card>
-                ) : (
-                  <Card className="dp-verification-detail dp-run-card dp-run-media-empty">
-                    <Film />
-                    <span>
-                      <b>
-                        {terminal
-                          ? "本次执行没有生成操作视频"
-                          : "操作视频生成中"}
-                      </b>
-                      <small>
-                        {terminal
-                          ? videoFailure
-                            ? `${videoFailure.code}：${videoFailure.message}`
-                            : "浏览器执行结束时未返回视频制品。"
-                          : "执行过程中会逐步生成截图与操作回放。"}
-                      </small>
-                    </span>
-                  </Card>
-                )}
-
-                <Card className="dp-verification-detail dp-run-card dp-run-key-info-card">
-                  <div className="dp-section-head">
-                    <span>
-                      <b>关键验证信息</b>
-                    </span>
-                    <Badge tone={outcome?.tone ?? "neutral"}>
-                      {passedCriteria}/{criteria.length} 通过
-                    </Badge>
-                  </div>
-                  <div className="dp-run-key-info-scroll">
-                    <section>
-                      <span className="dp-run-key-label">任务目标</span>
-                      <RunGoal goal={detail.goal} />
-                    </section>
-                    <section>
-                      <div className="dp-run-key-section-head">
-                        <span className="dp-run-key-label">验收标准</span>
-                        <small>{criteria.length} 项</small>
-                      </div>
-                      {criteria.length === 0 ? (
-                        <p className="dp-run-card-copy">未声明验收标准。</p>
-                      ) : (
-                        criteria.map((criterion, index) => (
-                          <div className="dp-run-criterion" key={criterion.id}>
-                            <div className="dp-run-criterion-head">
-                              <b>标准 {index + 1}</b>
-                              {criterion.status ? (
-                                <Badge tone={tone(criterion.status)}>
-                                  {displayLabel(criterion.status)}
-                                </Badge>
-                              ) : criterion.required ? (
-                                <small>必需</small>
-                              ) : null}
-                            </div>
-                            <p>{criterion.description}</p>
-                            {criterion.summary ? (
-                              <small>{criterion.summary}</small>
-                            ) : null}
-                            <details className="mt-2 text-xs text-muted-foreground">
-                              <summary className="cursor-pointer">
-                                查看依据
-                              </summary>
-                              <div className="mt-2 space-y-2 whitespace-pre-wrap break-words">
-                                <div>标准编号：{criterion.id}</div>
-                                {criterion.basis.map((item, index) => (
-                                  <div key={index}>{item}</div>
-                                ))}
-                              </div>
-                            </details>
-                          </div>
-                        ))
-                      )}
-                    </section>
-                  </div>
-                </Card>
-              </section>
-            ) : (
-              <section aria-label="日志排查" className="dp-run-log-panel">
-                <Card className="dp-verification-detail dp-run-card dp-run-runtime-workspace">
-                  <div
-                    aria-label="执行技术详情视图"
-                    className="dp-run-runtime-tabs"
-                    role="tablist"
-                  >
-                    <button
-                      aria-controls="run-trajectory-panel"
-                      id="run-trajectory-tab"
-                      aria-selected={runtimeView === "trajectory"}
-                      onClick={() => setRuntimeView("trajectory")}
-                      role="tab"
-                      type="button"
-                    >
-                      <Activity />
-                      执行轨迹
-                      <span>{trajectoryPage.records.length}</span>
-                    </button>
-                    <button
-                      aria-controls="run-browser-runtime-panel"
-                      id="run-browser-runtime-tab"
-                      aria-selected={runtimeView === "browser"}
-                      onClick={() => setRuntimeView("browser")}
-                      role="tab"
-                      type="button"
-                    >
-                      <Monitor />
-                      浏览器执行节点
-                      <span>{detail.browserExecutions.length}</span>
-                    </button>
-                  </div>
-                  {runtimeView === "browser" ? (
-                    <div
-                      className="dp-run-runtime-panel dp-run-browser-panel"
-                      id="run-browser-runtime-panel"
-                      aria-labelledby="run-browser-runtime-tab"
-                      role="tabpanel"
-                    >
-                      {detail.browserExecutions.length === 0 ? (
-                        <p className="dp-run-card-copy">尚未创建浏览器执行。</p>
-                      ) : (
-                        detail.browserExecutions.map((execution) => (
-                          <section
-                            className="dp-run-browser-execution"
-                            key={execution.id}
-                          >
-                            <header>
-                              <span>
-                                <b>
-                                  {execution.runtimeSession?.runtime.name ??
-                                    "等待分配执行节点"}
-                                </b>
-                                <small>
-                                  {execution.runtimeSession
-                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · 会话 ${displayLabel(execution.runtimeSession.status)} · Runtime ${execution.runtimeSession.runtime.version ?? "未知版本"} · 协议 v${execution.runtimeSession.protocolMajor}.${execution.runtimeSession.protocolMinor}`
-                                    : "尚未分配浏览器执行会话"}
-                                </small>
-                              </span>
-                              <Badge tone={tone(execution.status)}>
-                                {displayLabel(execution.status)}
-                              </Badge>
-                            </header>
-                            <VideoFinalizationDiagnostics
-                              value={videoFinalizationDiagnosticValue(
-                                execution.runtimeSession,
-                              )}
-                            />
-                            {execution.runtimeSession?.commands.length ? (
-                              <div className="dp-run-runtime-list">
-                                {execution.runtimeSession.commands.map(
-                                  (command) => (
-                                    <div key={command.id}>
-                                      <span>{command.commandType}</span>
-                                      <Badge tone={tone(command.status)}>
-                                        {displayLabel(command.status)}
-                                      </Badge>
-                                      <small>
-                                        {new Date(
-                                          command.createdAt,
-                                        ).toLocaleString("zh-CN")}
-                                      </small>
-                                    </div>
-                                  ),
-                                )}
-                              </div>
-                            ) : (
-                              <p className="dp-run-card-copy">
-                                尚无浏览器命令。
-                              </p>
-                            )}
-                          </section>
-                        ))
-                      )}
-                    </div>
+                        ) : null
+                      }
+                    />
                   ) : (
-                    <div
-                      className="dp-run-runtime-panel dp-run-trajectory-panel"
-                      id="run-trajectory-panel"
-                      aria-labelledby="run-trajectory-tab"
-                      role="tabpanel"
-                    >
-                      <RunTrajectory
-                        loadingOlder={loadingOlder}
-                        onLoadOlder={loadOlderTrajectory}
-                        page={trajectoryPage}
-                      />
-                    </div>
+                    <>
+                      <div className="dp-section-head">
+                        <span>
+                          <Film />
+                          <b>操作回放</b>
+                        </span>
+                        <small>
+                          {videos.length > 0
+                            ? "真实浏览器操作回放"
+                            : terminal
+                              ? videoFailure
+                                ? `视频生成失败（${videoFailure.code}），步骤截图已保留`
+                                : "本次执行未生成操作视频，步骤截图已保留"
+                              : "视频生成中，步骤截图已可查看"}
+                        </small>
+                      </div>
+                      {videos.map((video) => (
+                        <div className="dp-run-video" key={video.id}>
+                          {video.downloadUrl ? (
+                            <video
+                              controls
+                              playsInline
+                              poster={
+                                stepScreenshots.at(-1)?.downloadUrl ?? undefined
+                              }
+                              preload="metadata"
+                              src={video.downloadUrl}
+                            >
+                              当前浏览器不支持 WebM
+                              视频，请使用下方链接下载查看。
+                            </video>
+                          ) : null}
+                          <div>
+                            <span>
+                              <b>{video.label || "完整操作视频"}</b>
+                              <small>
+                                {evidenceMetadata(video).frameCount
+                                  ? `${String(evidenceMetadata(video).frameCount)} 帧 · `
+                                  : ""}
+                                {video.runtimeArtifact
+                                  ? formatByteSize(
+                                      video.runtimeArtifact.byteSize,
+                                    )
+                                  : "已上传对象存储"}
+                              </small>
+                            </span>
+                            {video.downloadUrl ? (
+                              <a href={video.downloadUrl} download>
+                                <Download /> 下载视频
+                              </a>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                      {videos.length === 0 && stepScreenshots.length > 0 ? (
+                        <RunScreenshotCarousel
+                          key={id}
+                          screenshots={stepScreenshots}
+                        />
+                      ) : null}
+                    </>
                   )}
                 </Card>
+              ) : (
+                <Card className="dp-verification-detail dp-run-card dp-run-media-empty">
+                  <Film />
+                  <span>
+                    <b>
+                      {terminal ? "本次执行没有生成操作视频" : "操作视频生成中"}
+                    </b>
+                    <small>
+                      {terminal
+                        ? videoFailure
+                          ? `${videoFailure.code}：${videoFailure.message}`
+                          : "浏览器执行结束时未返回视频制品。"
+                        : "执行过程中会逐步生成截图与操作回放。"}
+                    </small>
+                  </span>
+                </Card>
+              )}
 
+              <Card className="dp-verification-detail dp-run-card dp-run-key-info-card">
+                <div className="dp-section-head">
+                  <span>
+                    <b>关键验证信息</b>
+                  </span>
+                  <Badge tone={outcome?.tone ?? "neutral"}>
+                    {passedCriteria}/{criteria.length} 通过
+                  </Badge>
+                </div>
+                <div className="dp-run-key-info-scroll">
+                  <section>
+                    <span className="dp-run-key-label">任务目标</span>
+                    <RunGoal goal={detail.goal} />
+                  </section>
+                  <section>
+                    <div className="dp-run-key-section-head">
+                      <span className="dp-run-key-label">验收标准</span>
+                      <small>{criteria.length} 项</small>
+                    </div>
+                    {criteria.length === 0 ? (
+                      <p className="dp-run-card-copy">未声明验收标准。</p>
+                    ) : (
+                      criteria.map((criterion, index) => (
+                        <div className="dp-run-criterion" key={criterion.id}>
+                          <div className="dp-run-criterion-head">
+                            <b>标准 {index + 1}</b>
+                            {criterion.status ? (
+                              <Badge tone={tone(criterion.status)}>
+                                {displayLabel(criterion.status)}
+                              </Badge>
+                            ) : criterion.required ? (
+                              <small>必需</small>
+                            ) : null}
+                          </div>
+                          <p>{criterion.description}</p>
+                          {criterion.summary ? (
+                            <small>{criterion.summary}</small>
+                          ) : null}
+                          <details className="mt-2 text-xs text-muted-foreground">
+                            <summary className="cursor-pointer">
+                              查看依据
+                            </summary>
+                            <div className="mt-2 space-y-2 whitespace-pre-wrap break-words">
+                              <div>标准编号：{criterion.id}</div>
+                              {criterion.basis.map((item, index) => (
+                                <div key={index}>{item}</div>
+                              ))}
+                            </div>
+                          </details>
+                        </div>
+                      ))
+                    )}
+                  </section>
+                </div>
+              </Card>
+            </div>
+
+            <details className="dp-run-technical-details">
+              <summary>
+                <span>
+                  <Activity />
+                  <b>运行记录与证据</b>
+                </span>
+                <small>
+                  {detail.attempts.length} 次尝试 · {detail.evidences.length}{" "}
+                  条证据 · 浏览器节点{" "}
+                  {browserRuntimeNames.join(" / ") || "待分配"}
+                </small>
+              </summary>
+              <div className="dp-run-technical-body">
                 <div className="dp-run-result-row">
                   <Card className="dp-verification-detail dp-run-card dp-run-result-card">
                     <div className="dp-section-head">
@@ -1280,8 +1148,114 @@ function RunDetailClient({ id }: { id: string }) {
                     )}
                   </Card>
                 </div>
-              </section>
-            )}
+
+                <Card className="dp-verification-detail dp-run-card dp-run-runtime-workspace">
+                  <div
+                    aria-label="执行技术详情视图"
+                    className="dp-run-runtime-tabs"
+                    role="tablist"
+                  >
+                    <button
+                      aria-controls="run-browser-runtime-panel"
+                      aria-selected={runtimeView === "browser"}
+                      onClick={() => setRuntimeView("browser")}
+                      role="tab"
+                      type="button"
+                    >
+                      <Monitor />
+                      浏览器执行节点
+                      <span>{detail.browserExecutions.length}</span>
+                    </button>
+                    <button
+                      aria-controls="run-trajectory-panel"
+                      aria-selected={runtimeView === "trajectory"}
+                      onClick={() => setRuntimeView("trajectory")}
+                      role="tab"
+                      type="button"
+                    >
+                      <Activity />
+                      执行轨迹
+                      <span>{trajectoryPage.records.length}</span>
+                    </button>
+                  </div>
+                  {runtimeView === "browser" ? (
+                    <div
+                      className="dp-run-runtime-panel dp-run-browser-panel"
+                      id="run-browser-runtime-panel"
+                      role="tabpanel"
+                    >
+                      {detail.browserExecutions.length === 0 ? (
+                        <p className="dp-run-card-copy">尚未创建浏览器执行。</p>
+                      ) : (
+                        detail.browserExecutions.map((execution) => (
+                          <section
+                            className="dp-run-browser-execution"
+                            key={execution.id}
+                          >
+                            <header>
+                              <span>
+                                <b>
+                                  {execution.runtimeSession?.runtime.name ??
+                                    "等待分配执行节点"}
+                                </b>
+                                <small>
+                                  {execution.runtimeSession
+                                    ? `${displayLabel(execution.runtimeSession.profileMode)} · 会话 ${displayLabel(execution.runtimeSession.status)} · Runtime ${execution.runtimeSession.runtime.version ?? "未知版本"} · 协议 v${execution.runtimeSession.protocolMajor}.${execution.runtimeSession.protocolMinor}`
+                                    : "尚未分配浏览器执行会话"}
+                                </small>
+                              </span>
+                              <Badge tone={tone(execution.status)}>
+                                {displayLabel(execution.status)}
+                              </Badge>
+                            </header>
+                            <VideoFinalizationDiagnostics
+                              value={videoFinalizationDiagnosticValue(
+                                execution.runtimeSession,
+                              )}
+                            />
+                            {execution.runtimeSession?.commands.length ? (
+                              <div className="dp-run-runtime-list">
+                                {execution.runtimeSession.commands.map(
+                                  (command) => (
+                                    <div key={command.id}>
+                                      <span>{command.commandType}</span>
+                                      <Badge tone={tone(command.status)}>
+                                        {displayLabel(command.status)}
+                                      </Badge>
+                                      <small>
+                                        {new Date(
+                                          command.createdAt,
+                                        ).toLocaleString("zh-CN")}
+                                      </small>
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                            ) : (
+                              <p className="dp-run-card-copy">
+                                尚无浏览器命令。
+                              </p>
+                            )}
+                          </section>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      className="dp-run-runtime-panel dp-run-trajectory-panel"
+                      id="run-trajectory-panel"
+                      role="tabpanel"
+                    >
+                      <RunTrajectory
+                        loadingOlder={loadingOlder}
+                        onLoadOlder={loadOlderTrajectory}
+                        page={trajectoryPage}
+                      />
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </details>
           </div>
         </>
       )}
