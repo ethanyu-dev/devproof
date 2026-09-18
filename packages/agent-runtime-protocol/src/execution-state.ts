@@ -8,13 +8,33 @@ const text = z.string().trim().min(1).max(500);
 export const executionRecordSchema = z.object({
   recordRef: text.optional(),
   id: text,
-  type: text.optional(),
+  type: text
+    .describe(
+      "平台观察到的业务类型编码；显示名称单独保存。优先引用 observedRecords 中的 recordRef。",
+    )
+    .optional(),
+  displayType: text.optional(),
   resourceUrl: z.string().max(2000).optional(),
   account: text.optional(),
   accountAliases: z.array(text).max(20).default([]),
   ownership: z.enum(["CREATED_THIS_RUN", "EXISTING", "UNCONFIRMED"]),
-  initialState: z.string().max(2000).optional(),
+  initialState: z
+    .string()
+    .max(2000)
+    .describe(
+      "修改前真实观察到的状态，以 JSON 保存；由平台从 observedRecords 继承，不填自然语言说明。",
+    )
+    .optional(),
   currentState: z.string().max(2000).optional(),
+  uiBaseline: z
+    .object({
+      observationId: z.string().uuid(),
+      pageIdentity: z.string().max(2000),
+      capturedAt: z.string().datetime(),
+      values: z.array(z.string().max(500)).min(1).max(100),
+      evidenceRefs: z.array(text).min(1).max(20),
+    })
+    .optional(),
   evidenceRefs: z.array(text).min(1).max(20),
   cleanup: z
     .object({
@@ -26,6 +46,7 @@ export const executionRecordSchema = z.object({
 });
 
 export const executionRecordDeltaSchema = executionRecordSchema
+  .omit({ uiBaseline: true })
   .partial()
   .extend({
     accountAliases: z.array(text).max(20).optional(),
@@ -59,6 +80,7 @@ export const executionStateSchema = z.object({
         recordRef: text,
         writeKey: text,
         readKey: text,
+        source: z.enum(["NETWORK", "UI"]).optional(),
         evidenceRefs: z.array(text).max(20),
       }),
     )
@@ -76,6 +98,8 @@ export const executionStateSchema = z.object({
   existingRecordKeys: z.array(z.string().max(3000)).max(200).default([]),
   accountAliases: z.array(businessTestAccountSchema).max(20).default([]),
   records: z.array(executionRecordSchema).max(50).default([]),
+  // Read-only candidates retain the baseline before a model registers cleanup.
+  observedRecords: z.array(executionRecordSchema).max(100).default([]),
   // Observed after a matching POST, awaiting its complete business receipt.
   pendingRecords: z
     .array(
@@ -111,6 +135,7 @@ export const executionStateSchema = z.object({
         confirmed: z.boolean().default(false),
         request: z.string().max(4000).optional(),
         response: z.string().max(4000).optional(),
+        uiTypeLabel: text.optional(),
         evidenceRefs: z.array(text).max(20),
       }),
     )

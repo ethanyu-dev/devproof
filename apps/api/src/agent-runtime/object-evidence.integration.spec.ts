@@ -7,7 +7,9 @@ import {
   businessCheckSchema,
   compileBusinessCheck,
   runtimeTaskSnapshotSchema,
+  observationCoverage,
 } from "@devproof/agent-runtime-protocol";
+import { structuredObservationSchema } from "@devproof/runtime-protocol";
 import { BrowserSessionManager } from "../../../browser-runtime/src/index.js";
 import { startSsrfProxy } from "../../../browser-runtime/src/ssrf-proxy.js";
 import { ObservationBindingService } from "./observation-binding.service.js";
@@ -43,15 +45,14 @@ function database(task: unknown) {
                 "targetId",
                 "contractDigest",
                 "observationId",
+                "bindingDigest",
               ].every((k) => b[k] === row[k]),
             )
           )
             bindings.push(row);
       }),
       findUniqueOrThrow: vi.fn(({ where }) =>
-        bindings.find((b) =>
-          matches(b, where.attemptId_targetId_contractDigest_observationId),
-        ),
+        bindings.find((b) => matches(b, where.observationResolution)),
       ),
       findMany: vi.fn((args) =>
         find(bindings, args)
@@ -81,6 +82,149 @@ function database(task: unknown) {
   prisma.$transaction = (fn: any) => fn(prisma);
   return { prisma, bindings, events, evidence };
 }
+
+it("appends explicit resolutions after an automatic partial binding without hiding counterexamples", async () => {
+  const contract = observationContractSchema.parse({
+    version: 3,
+    comparisons: [],
+    targets: [
+      {
+        targetId: "mapping",
+        label: "合规模型映射",
+        identity: { text: "合规模型映射" },
+        phase: "CURRENT",
+        assertions: [
+          {
+            assertionId: "state",
+            label: "配置值",
+            property: "TEXT",
+            expected: "禁用",
+          },
+        ],
+        requiredEvidenceKinds: ["DOM"],
+      },
+    ],
+  });
+  const task: any = {
+    id: randomUUID(),
+    runId: randomUUID(),
+    attemptId: randomUUID(),
+  };
+  task.snapshot = runtimeTaskSnapshotSchema.parse({
+    runId: task.runId,
+    attemptId: task.attemptId,
+    attemptNumber: 1,
+    teamId: randomUUID(),
+    traceId: "b".repeat(32),
+    deadlineAt: new Date(Date.now() + 60000).toISOString(),
+    goal: "核对配置",
+    criteria: [
+      { id: "config", description: "禁用", observationContract: contract },
+    ],
+  });
+  const observation = structuredObservationSchema.parse({
+    version: 2,
+    captureId: randomUUID(),
+    capturedFrom: new Date().toISOString(),
+    capturedUntil: new Date().toISOString(),
+    pageIdentity: "https://example.test/records",
+    frames: [],
+    nodes: [
+      { nodeId: "row", ref: "row", tag: "tr" },
+      {
+        nodeId: "identity",
+        ref: "identity",
+        tag: "td",
+        parentId: "row",
+        text: "合规模型映射",
+      },
+      {
+        nodeId: "disabled",
+        ref: "disabled",
+        tag: "span",
+        parentId: "row",
+        text: "禁用",
+      },
+      {
+        nodeId: "enabled",
+        ref: "enabled",
+        tag: "span",
+        parentId: "row",
+        text: "启用",
+      },
+    ].map((n) => ({
+      ...n,
+      frameId: "frame",
+      documentEpoch: "frame",
+      visible: true,
+      attributes: {},
+      relations: [],
+      textLocation: { start: 0, end: 0 },
+    })),
+    regions: [],
+    renderedText: "",
+    consistency: "VERIFIED",
+    coverage: {
+      scope: "VIEWPORT",
+      completeWithinScope: true,
+      truncated: false,
+      unavailableFrames: [],
+    },
+  });
+  const body = Buffer.from(JSON.stringify(observation));
+  const command = {
+    id: randomUUID(),
+    status: "SUCCEEDED",
+    artifacts: [
+      {
+        id: randomUUID(),
+        kind: "DOM",
+        contentType: "application/json",
+        storageKey: "observation",
+        byteSize: body.length,
+        sha256: createHash("sha256").update(body).digest("hex"),
+        metadata: {
+          captureId: observation.captureId,
+          observationSchemaVersion: 2,
+        },
+      },
+    ],
+  };
+  const db = database(task);
+  const service = new ObservationBindingService(db.prisma, {
+    get: vi.fn(async () => ({ body })),
+  } as never);
+  const automatic = await service.capture(task, command);
+  expect(automatic.bindings[0]?.readiness).toBe("PARTIAL");
+  const selection = {
+    observationId: observation.captureId,
+    targetId: "mapping",
+    scopeRef: "row",
+    entityRef: "identity",
+    assertionRefs: { state: "disabled" },
+  };
+  const resolved = await service.capture(task, command, selection);
+  expect(resolved.bindings[0]).toMatchObject({
+    readiness: "READY",
+    evaluation: "MATCHED",
+  });
+  expect(
+    (await service.capture(task, command, selection)).bindings[0]?.id,
+  ).toBe(resolved.bindings[0]?.id);
+  const counterexample = await service.capture(task, command, {
+    ...selection,
+    assertionRefs: { state: "enabled" },
+  });
+  expect(counterexample.bindings[0]?.evaluation).toBe("MISMATCHED");
+  expect(
+    observationCoverage(contract, [
+      ...automatic.bindings,
+      ...resolved.bindings,
+      ...counterexample.bindings,
+    ])[0]?.readiness,
+  ).toBe("CONFLICT");
+  expect(db.bindings).toHaveLength(3);
+});
 
 it.each([2, 3] as const)(
   "verifies three real modal defaults, persists their screenshots, compares and submits bound evidence (v%s)",

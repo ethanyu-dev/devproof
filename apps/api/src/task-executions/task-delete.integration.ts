@@ -377,9 +377,33 @@ describe("task hard deletion", () => {
     });
     await locked;
     const deletion = deleteTask(serviceDb, f.team.id, f.task.id);
-    unlock();
-    await retry;
-    await expect(deletion).rejects.toThrow(/任务尚未结束|状态刚刚发生变化/u);
-    expect(await db.taskExecution.count()).toBe(1);
+    const rejected = expect(deletion).rejects.toMatchObject({
+      status: 409,
+      message: "任务状态刚刚发生变化，请刷新后重试删除。",
+    });
+    try {
+      // Wait until deletion's serializable snapshot is blocked on the row;
+      // releasing immediately can skip the raw-query serialization error.
+      let waiting = false;
+      for (let poll = 0; poll < 100 && !waiting; poll++) {
+        const rows = await db.$queryRaw<Array<{ waiting: bigint }>>`
+          SELECT count(*) AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query ILIKE '%task_executions%' AND query ILIKE '%FOR UPDATE%'
+        `;
+        waiting = Number(rows[0]!.waiting) > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      unlock();
+      await retry;
+      await rejected;
+    }
+    expect(
+      await db.taskExecution.findUniqueOrThrow({ where: { id: f.task.id } }),
+    ).toMatchObject({ lifecycle: "RUNNING" });
+    expect(await db.executionRun.count()).toBe(1);
+    expect(await db.objectStorageDeletionTask.count()).toBe(0);
   });
 });

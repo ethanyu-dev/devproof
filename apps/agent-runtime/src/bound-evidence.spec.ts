@@ -84,6 +84,22 @@ function fixture() {
   };
 }
 
+it("stops retrying immutable binding conflicts and retains the real cause", () => {
+  const { memory } = fixture();
+  expect(
+    memory.bindingResult("type", "page", {
+      bindings: [],
+      error: "BINDING_CONFLICT",
+      retryable: false,
+    }),
+  ).toMatchObject({
+    accepted: false,
+    error: "BINDING_CONFLICT",
+    retryable: false,
+    code: "OBSERVATION_BINDING_EXHAUSTED",
+  });
+});
+
 it("expands both binding and coverage budgets, prioritizing unfinished criteria", () => {
   const { binding, contract } = fixture();
   const criteria = Array.from({ length: 40 }, (_, i) => ({

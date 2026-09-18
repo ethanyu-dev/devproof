@@ -32,6 +32,13 @@ export function ContextBudget({ metrics }: { metrics: unknown }) {
           {bytesLabel(data.textRequestBytes)} / {bytesLabel(data.maxTextBytes)}
         </span>
       </summary>
+      {typeof data.configuredMaxTextBytes === "number" && (
+        <p>
+          Runtime 本次生效配置：{bytesLabel(data.configuredMaxTextBytes)}；
+          模型窗口约束后的文本预算：{bytesLabel(data.maxTextBytes)}。
+          配置来自执行进程；修改配置文件后需在新进程、新请求中核对生效值。
+        </p>
+      )}
       <p>
         本轮保留 {number(data.detailedTurns)} 轮详细事实、
         {number(data.summaryTurns)} 轮摘要，附带 {number(data.imageCount)}{" "}

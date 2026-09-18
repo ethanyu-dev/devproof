@@ -156,6 +156,7 @@ export function compactValue(
     "nextAction",
     "observationId",
     "error",
+    "recordUpdates",
     "locatorRecovery",
     "result",
   ].filter((key) => key in source);

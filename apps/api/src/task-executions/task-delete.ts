@@ -6,6 +6,25 @@ import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 const terminal = ["COMPLETED", "CANCELLED", "TIMED_OUT"] as const;
 const finished = (status: string) => terminal.some((value) => value === status);
 
+function isTransactionConflict(error: unknown) {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === "P2034") return true;
+  if (error.code !== "P2010") return false;
+  // Raw queries expose SQLSTATE directly with the query engine, but Prisma's
+  // pg adapter nests it under the original driver error.
+  const adapter = error.meta?.driverAdapterError;
+  const cause =
+    adapter && typeof adapter === "object" && "cause" in adapter
+      ? adapter.cause
+      : undefined;
+  const code =
+    error.meta?.code ??
+    (cause && typeof cause === "object" && "originalCode" in cause
+      ? cause.originalCode
+      : undefined);
+  return code === "40001" || code === "40P01";
+}
+
 /** Remove the aggregate and its owned traces atomically; files use the durable deletion outbox. */
 export async function deleteTask(
   prisma: PrismaService,
@@ -213,10 +232,7 @@ export async function deleteTask(
       },
     );
   } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2034"
-    ) {
+    if (isTransactionConflict(error)) {
       throw new ConflictException("任务状态刚刚发生变化，请刷新后重试删除。");
     }
     throw error;

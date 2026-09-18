@@ -341,6 +341,7 @@ export class ModelContext {
         textRequestBytes,
         maxTextBytes: maxBytes,
         configuredMaxTextBytes: this.maxBytes,
+        configurationSource: "AGENT_RUNTIME_PROCESS",
         retention: this.retention,
         windowBudget: {
           ...windowBudget,
