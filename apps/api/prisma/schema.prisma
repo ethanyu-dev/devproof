@@ -355,6 +355,7 @@ enum SpecificationTargetSource {
 }
 
 enum TaskExecutionKind {
+  SPEC_TASK
   ISSUE_SPEC
   DIRECT_RUN
   LEGACY_RUN
@@ -1209,6 +1210,7 @@ model TaskExecution {
   waitingReason             String?                        @map("waiting_reason")
   executionDisposition      ExecutionDisposition?          @map("execution_disposition")
   verdict                   RunProductVerdict?
+  creationInputSnapshot     Json?                          @map("creation_input_snapshot")
   inputSnapshot             Json                           @map("input_snapshot")
   environmentSnapshot       Json                           @default("{}") @map("environment_snapshot")
   notificationContext       Json                           @default("{}") @map("notification_context")
@@ -1321,6 +1323,7 @@ model TaskStageAttempt {
   stageId               String                     @map("stage_id") @db.Uuid
   number                Int
   status                TaskStageAttemptStatus     @default(PENDING)
+  contextSnapshot       Json                       @default("{}") @map("context_snapshot")
   inputSnapshot         Json                       @map("input_snapshot")
   result                Json?
   error                 Json?

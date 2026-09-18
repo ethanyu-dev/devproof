@@ -555,15 +555,25 @@ describe("PostgreSQL human resume after browser loss", () => {
       where: { id: task.id },
       data: { recoveryNextAttemptAt: new Date(0) },
     });
-    await recoveryWorker.recoverExpiredLeases();
-    expect(await db.runAttempt.count({ where: { runId: run.id } })).toBe(1);
+    // Closure cleanup can race the serializable recovery transaction. A
+    // serialization conflict intentionally defers recovery to the next sweep.
+    await vi.waitFor(
+      async () => {
+        await recoveryWorker.recoverExpiredLeases();
+        expect(await db.runAttempt.count({ where: { runId: run.id } })).toBe(1);
+        expect(
+          await db.executionRun.findUnique({ where: { id: run.id } }),
+        ).toMatchObject({
+          lifecycle: "COMPLETED",
+          executionDisposition: "BLOCKED",
+          verdict: null,
+        });
+      },
+      { timeout: 5000 },
+    );
     expect(
-      await db.executionRun.findUnique({ where: { id: run.id } }),
-    ).toMatchObject({
-      lifecycle: "COMPLETED",
-      executionDisposition: "BLOCKED",
-      verdict: null,
-    });
+      await db.agentRuntimeTask.findUnique({ where: { id: task.id } }),
+    ).toMatchObject({ recoveryStatus: "WRITE_OUTCOME_UNKNOWN" });
     expect(
       await db.executionResourceLease.count({
         where: { sessionId: session.id, quarantined: true, mode: "WRITE" },

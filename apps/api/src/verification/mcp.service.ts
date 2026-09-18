@@ -177,7 +177,7 @@ export class VerificationMcpService {
       "create_task",
       {
         description:
-          "Create one durable user-visible task. Issue tasks run tracked analysis and execution stages; direct tasks wrap one Run v2.",
+          "Create one durable user-visible task. Spec tasks accept an Issue, GitHub PRs or a testing brief and run tracked analysis and execution stages; direct tasks wrap one Run v2.",
         inputSchema: { request: taskExecutionCreateInputSchema },
       },
       async ({ request }) => {
@@ -216,7 +216,7 @@ export class VerificationMcpService {
       "provide_task_analysis_input",
       {
         description:
-          "Supply all missing Issue, PR and test environment inputs in one request to resume Spec analysis.",
+          "Correct unreadable selected sources, clarify test intent or provide the missing environment to resume Spec analysis.",
         inputSchema: {
           taskId: z.string().uuid(),
           ...taskAnalysisInputSchema.shape,
@@ -234,7 +234,7 @@ export class VerificationMcpService {
       "set_task_deployment_target",
       {
         description:
-          "Provide the HTTP(S) deployment target for an Issue task waiting to start Spec execution.",
+          "Provide the HTTP(S) deployment target for a Spec task waiting to start Spec execution.",
         inputSchema: {
           taskId: z.string().uuid(),
           ...taskDeploymentTargetInputSchema.shape,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeGeneratedSpecSchema } from "@devproof/agent-runtime-protocol";
 
 import { resetEnvForTests } from "../config/env.js";
+import { ContextSourceError } from "../specifications/context-source.error.js";
 
 import { SpecAnalysisRuntimeService } from "./spec-analysis-runtime.service.js";
 
@@ -12,7 +13,7 @@ const leaseToken = "70844616-602c-475b-95f6-393015b82ed1";
 const nextAttemptId = "cc61de8d-cf29-4561-b2cd-c67c304668a6";
 const now = new Date("2026-09-04T10:00:00.000Z");
 const identity = { fencingToken: "4", leaseToken, workerId: "worker-1" };
-const claimInput = { protocol: { minor: 20 }, workerId: "worker-2" };
+const claimInput = { protocol: { minor: 21 }, workerId: "worker-2" };
 
 function analysisAttempt(
   options: {
@@ -75,6 +76,7 @@ function recoveryHarness(attempt = analysisAttempt()) {
     },
     taskStageAttempt: {
       create: vi.fn().mockResolvedValue({ id: nextAttemptId }),
+      update: vi.fn().mockResolvedValue({}),
       findFirst: vi.fn().mockResolvedValueOnce(attempt).mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(attempt),
       findUniqueOrThrow: vi.fn().mockResolvedValue(attempt),
@@ -123,6 +125,24 @@ function issueToolHarness(attempt = analysisAttempt()) {
     }),
   };
   const github = {
+    getPullRequest: vi
+      .fn()
+      .mockImplementation(
+        async (_team: string, url: string, isPrimary: boolean) => ({
+          diagnostics: [],
+          pullRequest: {
+            id: "pr-42",
+            number: 42,
+            organization: "acme",
+            repository: "acme/web",
+            title: "Refund flow",
+            body: "Users can request a refund.",
+            url,
+            isPrimary,
+            headSha: "head-a",
+          },
+        }),
+      ),
     discoverIssuePullRequests: vi.fn().mockResolvedValue({
       pullRequestUrls: [],
       diagnostics: [],
@@ -168,7 +188,7 @@ function issueTaskInput() {
 
 describe("SpecAnalysisRuntimeService", () => {
   it.each([false, true])(
-    "requests PR and environment together without persisting Issue-only Specs (compact: %s)",
+    "requests only the environment before persisting an Issue-only Spec (compact: %s)",
     async (compact) => {
       const source = {
         externalId: `analysis-source://${attemptId}/issue`,
@@ -285,7 +305,7 @@ describe("SpecAnalysisRuntimeService", () => {
       expect(createSnapshot).not.toHaveBeenCalled();
       expect(updateAttempt.mock.calls[0]![0].data.result).toMatchObject({
         stageStatus: "WAITING_INPUT",
-        inputRequest: { missing: ["PULL_REQUEST", "DEPLOYMENT_TARGET"] },
+        inputRequest: { missing: ["DEPLOYMENT_TARGET"] },
       });
       expect(tx.taskExecution.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -450,7 +470,7 @@ describe("SpecAnalysisRuntimeService", () => {
   });
 
   it.each([
-    { minor: 20, observationEnabled: true, expectedContractVersion: undefined },
+    { minor: 22, observationEnabled: true, expectedContractVersion: 2 },
     { minor: 21, observationEnabled: true, expectedContractVersion: 2 },
     { minor: 23, observationEnabled: true, expectedContractVersion: 3 },
     {
@@ -793,6 +813,12 @@ describe("SpecAnalysisRuntimeService", () => {
       taskStageAttempt: {
         findUnique: vi.fn().mockResolvedValue({
           ...analysisAttempt(),
+          contextSnapshot: {
+            version: 2,
+            pullRequestUrls: [pullRequestUrl],
+            diagnostics: [],
+            sources: [],
+          },
           leaseExpiresAt: new Date(Date.now() + 60_000),
         }),
       },
@@ -865,7 +891,11 @@ describe("SpecAnalysisRuntimeService", () => {
     const { tx, github, readIssue } = issueToolHarness();
     github.discoverIssuePullRequests.mockImplementation(async () => {
       expect(tx.taskExecution.update).toHaveBeenCalledWith({
-        data: { sourceRef: "ENG-123", title: "ENG-123 · Refund flow" },
+        data: {
+          sourceKind: "LINEAR_ISSUE",
+          sourceRef: "ENG-123",
+          title: "ENG-123 · Refund flow",
+        },
         where: { id: taskExecutionId },
       });
       return { pullRequestUrls: [], diagnostics: [] };
@@ -874,16 +904,21 @@ describe("SpecAnalysisRuntimeService", () => {
     const output = await readIssue();
 
     expect(github.discoverIssuePullRequests).toHaveBeenCalledOnce();
-    expect(output.inputRequest?.missing).toEqual([
-      "PULL_REQUEST",
-      "DEPLOYMENT_TARGET",
-    ]);
+    expect(output.inputRequest?.missing).toEqual(["DEPLOYMENT_TARGET"]);
     expect(tx.taskExecutionStage.update).not.toHaveBeenCalled();
   });
 
   it("keeps the existing task title when the Issue cannot be read", async () => {
     const { tx, linear, readIssue } = issueToolHarness();
-    linear.getIssue.mockRejectedValue(new Error("Issue unavailable"));
+    linear.getIssue.mockRejectedValue(
+      new ContextSourceError(
+        "LINEAR",
+        "NOT_FOUND",
+        "Issue unavailable",
+        "ENG-123",
+        404,
+      ),
+    );
 
     const output = await readIssue();
 
@@ -958,7 +993,7 @@ describe("SpecAnalysisRuntimeService", () => {
       });
       const output = await readIssue();
 
-      expect(output.sourceRefs).toHaveLength(1);
+      expect(output.sourceRefs).toHaveLength(2);
       expect(output.sourceRefs[0]).toMatchObject({
         kind: "LINEAR_ISSUE",
         label: "ENG-123 · Refund flow",
@@ -991,7 +1026,7 @@ it("refuses pre-contract Spec workers", async () => {
   const { service } = recoveryHarness(analysisAttempt());
   await expect(
     service.claim(teamId, { ...claimInput, protocol: { minor: 19 } }),
-  ).rejects.toThrow("minor 20");
+  ).rejects.toThrow("minor 21");
 });
 
 it.each(["missing-version", "operator-role", "forged-source"])(

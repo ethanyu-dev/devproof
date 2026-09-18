@@ -1,3 +1,5 @@
+import { parseFeishuTaskCommand } from "./feishu-task-command.js";
+import { taskExecutionCreateInputSchema } from "@devproof/contracts";
 import { createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
 
 import { Injectable, Logger } from "@nestjs/common";
@@ -208,14 +210,27 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         metadata.message.text,
         metadata.message.mentions,
       );
-      const issueRef = extractIssueRef(text);
-      if (!issueRef) {
+      let command: ReturnType<typeof parseFeishuTaskCommand>;
+      try {
+        command = parseFeishuTaskCommand(text);
+      } catch (error) {
         await this.finish(row.id, "IGNORED");
         await this.replyBestEffort(
           row.id,
           metadata.message.messageId,
           row.externalEventId,
-          "请在 @DevProof 后附上 Linear Issue ID 或 URL，例如：ENG-123。",
+          error instanceof Error ? error.message : "任务指令无效。",
+        );
+        return;
+      }
+      const { issueRef, pullRequestUrls, targetUrls, goal } = command;
+      if (!issueRef && !pullRequestUrls.length && !goal) {
+        await this.finish(row.id, "IGNORED");
+        await this.replyBestEffort(
+          row.id,
+          metadata.message.messageId,
+          row.externalEventId,
+          "请在 @DevProof 后附上 Issue 编号或 GitHub PR 链接及测试环境，例如：@DevProof https://github.com/组织/仓库/pull/123 https://preview.example.com。也可使用 --goal 填写具体测试说明。",
         );
         return;
       }
@@ -233,8 +248,39 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         );
         return;
       }
-      const profileStrategy = profileStrategyFromText(text);
-      const targetUrl = extractTargetUrl(text, issueRef);
+      const profileStrategy = profileStrategyFromText(
+        text.split(/(?:^|\s)--goal\s/iu)[0]!,
+      );
+      const parsed = taskExecutionCreateInputSchema.safeParse({
+        kind: "SPEC_TASK",
+        idempotencyKey: `feishu-event:${row.externalEventId}`,
+        ...(issueRef ? { issueRef } : {}),
+        ...(pullRequestUrls.length ? { pullRequestUrls } : {}),
+        ...(goal ? { goal } : {}),
+        profilePolicy: {
+          onUnavailable: "WAIT_FOR_PROFILE",
+          scope: { authRole: "default", environmentKey: "default" },
+          strategy: profileStrategy,
+        },
+        deployments: targetUrls.map((targetUrl, index) => ({
+          key: `deployment-${index + 1}`,
+          name: `测试环境 ${index + 1}`,
+          targetUrl,
+        })),
+      });
+      if (!parsed.success) {
+        await this.finish(row.id, "IGNORED");
+        await this.replyBestEffort(
+          row.id,
+          metadata.message.messageId,
+          row.externalEventId,
+          parsed.error.issues
+            .map((item) => item.message)
+            .join("\n")
+            .slice(0, 1000),
+        );
+        return;
+      }
       const context: ToolAuthContext = {
         credential: {
           id: `feishu:${env().FEISHU_APP_ID}`,
@@ -243,30 +289,27 @@ export class FeishuIntegrationService implements OnModuleInit, OnModuleDestroy {
         },
         team: { id: row.team.id, name: row.team.name, slug: row.team.slug },
       };
-      const task = await this.tasks.create(
-        context,
-        {
-          idempotencyKey: `feishu-event:${row.externalEventId}`,
-          issueRef,
-          kind: "ISSUE_SPEC",
-          profilePolicy: {
-            onUnavailable: "WAIT_FOR_PROFILE",
-            scope: { authRole: "default", environmentKey: "default" },
-            strategy: profileStrategy,
+      const existingTask = await this.prisma.taskExecution.findUnique({
+        where: {
+          teamId_idempotencyKey: {
+            teamId: row.team.id,
+            idempotencyKey: parsed.data.idempotencyKey,
           },
-          ...(targetUrl ? { targetUrl } : {}),
         },
-        {
-          kind: "INTEGRATION_EVENT",
-          notificationContext: {
-            feishu: {
-              replyToMessageId: metadata.message.messageId,
+        select: { id: true },
+      });
+      const task = existingTask
+        ? await this.tasks.detail(context, existingTask.id)
+        : await this.tasks.create(context, parsed.data, {
+            kind: "INTEGRATION_EVENT",
+            notificationContext: {
+              feishu: {
+                replyToMessageId: metadata.message.messageId,
+              },
             },
-          },
-          triggerSource: "FEISHU",
-          userId,
-        },
-      );
+            triggerSource: "FEISHU",
+            userId,
+          });
       await this.prisma.inboundIntegrationEvent.update({
         data: {
           error: Prisma.JsonNull,
@@ -721,11 +764,6 @@ export function profileStrategyFromText(text: string) {
   return /(?:^|\s)--owner(?:\s|$)|issue\s*owner|负责人/iu.test(text)
     ? ("ISSUE_ASSIGNEE" as const)
     : ("REQUESTER" as const);
-}
-
-function extractTargetUrl(text: string, issueRef: string) {
-  const urls = text.match(/https?:\/\/[^\s<>]+/giu) ?? [];
-  return urls.find((url) => url !== issueRef && !url.includes("linear.app/"));
 }
 
 function parseJsonRecord(value: unknown) {

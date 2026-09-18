@@ -141,6 +141,166 @@ async function executeCalls(
 }
 
 describe("SpecAnalysisExecutor", () => {
+  it("retains independently cited testing-intent sources in the submitted source set", async () => {
+    const brief = {
+      ...source,
+      kind: "TASK_BRIEF" as const,
+      uri: "task:brief",
+      externalId: `${source.externalId}-brief`,
+      excerpt: "需要验证退款后的业务状态。",
+    };
+    const spec = refundSpec();
+    spec.requirements = [
+      {
+        id: "refund",
+        description: "退款后显示结果",
+        sourceRef: source.externalId,
+        quote: source.excerpt,
+        intentEvidence: { sourceRef: brief.externalId, quote: brief.excerpt },
+      },
+    ];
+    spec.cases[0]!.criteria[0]!.requirementId = "refund";
+    const { outcome } = await executeCalls(
+      [
+        call(
+          "get_task_context",
+          { analysisSummary: "读取全部测试依据" },
+          "context",
+        ),
+        call("finish_spec", { analysisSummary: "提交规格", spec }, "finish"),
+      ],
+      vi.fn().mockResolvedValue({
+        result: {
+          pullRequestUrls: [],
+          issue: { description: source.excerpt },
+          goal: brief.excerpt,
+        },
+        sourceRefs: [source, brief],
+      }),
+    );
+    expect(outcome).toMatchObject({
+      kind: "SPEC_GENERATED",
+      sourceRefs: expect.arrayContaining([
+        expect.objectContaining({ externalId: brief.externalId }),
+      ]),
+    });
+  });
+  it.each(["PR", "BRIEF"])(
+    "generates from %s without an Issue in the lease",
+    async (kind) => {
+      const primary =
+        kind === "PR"
+          ? requiredPrSources[0]!
+          : { ...source, kind: "TASK_BRIEF" as const, uri: "task:brief" };
+      const executeSpecTool = vi.fn().mockResolvedValue({
+        result:
+          kind === "PR"
+            ? {
+                pullRequestUrls: [requiredPrUrl],
+                pullRequests: [
+                  {
+                    sourceRef: primary.externalId,
+                    pullRequest: { body: primary.excerpt },
+                  },
+                ],
+              }
+            : { pullRequestUrls: [], goal: primary.excerpt },
+        sourceRefs: kind === "PR" ? requiredPrSources : [primary],
+      });
+      const { issueRef: _issueRef, ...snapshot } = task.snapshot;
+      const spec = refundSpec(primary.externalId, primary.excerpt);
+      if (kind === "PR") {
+        spec.requirements = [
+          {
+            id: "refund",
+            description: "支持退款并显示结果",
+            sourceRef: primary.externalId,
+            quote: primary.excerpt,
+            changeBasis: {
+              sourceRef: primary.externalId,
+              quote: primary.excerpt,
+              reason: "PR 明确新增退款能力，需验证退款后的结果。",
+            },
+          },
+        ];
+        spec.cases[0]!.criteria[0]!.requirementId = "refund";
+      }
+      const { outcome } = await executeCalls(
+        [
+          call(
+            "get_task_context",
+            { analysisSummary: "读取测试依据" },
+            "context",
+          ),
+          call(
+            "finish_spec",
+            {
+              analysisSummary: "提交测试规格",
+              spec,
+            },
+            "finish",
+          ),
+        ],
+        executeSpecTool,
+        {
+          ...task,
+          snapshot: {
+            ...snapshot,
+            contextVersion: 2,
+            ...(kind === "PR"
+              ? { pullRequestUrls: [requiredPrUrl] }
+              : { goal: primary.excerpt }),
+          },
+        },
+      );
+      expect(outcome.kind).toBe("SPEC_GENERATED");
+      expect(executeSpecTool).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("asks for concrete intent when a manual brief cannot establish acceptance criteria", async () => {
+    const executeSpecTool = vi.fn().mockResolvedValue({
+      result: { pullRequestUrls: [], goal: "帮我测试一下" },
+      sourceRefs: [{ ...source, kind: "TASK_BRIEF", excerpt: "帮我测试一下" }],
+    });
+    const { issueRef: _issueRef, ...snapshot } = task.snapshot;
+    const { outcome, appendSpecEvent } = await executeCalls(
+      [
+        call(
+          "get_task_context",
+          { analysisSummary: "读取测试说明" },
+          "context",
+        ),
+        call(
+          "request_analysis_input",
+          {
+            analysisSummary: "澄清验收目标",
+            message: "请说明测试哪项功能，以及预期看到的结果。",
+          },
+          "clarify",
+        ),
+      ],
+      executeSpecTool,
+      {
+        ...task,
+        snapshot: { ...snapshot, contextVersion: 2, goal: "帮我测试一下" },
+      },
+    );
+    expect(outcome).toMatchObject({
+      kind: "INPUT_REQUIRED",
+      request: { missing: ["TEST_INTENT"], issueRef: "", pullRequestUrls: [] },
+    });
+    expect(appendSpecEvent).toHaveBeenCalledWith(
+      lease,
+      "agent.tool.completed",
+      expect.objectContaining({
+        name: "request_analysis_input",
+        status: "SUCCEEDED",
+      }),
+      expect.anything(),
+    );
+  });
+
   it.each(["COMPACT", "CHECK_REFERENCES"] as const)(
     "rejects scope expansion before freezing requirements and retains change provenance (%s)",
     async (specFormat) => {
@@ -568,7 +728,7 @@ describe("SpecAnalysisExecutor", () => {
       create.mock.calls[index]![0].tools.map(
         (tool: { function: { name: string } }) => tool.function.name,
       );
-    expect(toolNames(0)).toEqual(["linear_get_issue"]);
+    expect(toolNames(0)).toEqual(["get_task_context"]);
     expect(toolNames(1)).toContain("define_requirements");
     expect(toolNames(1)).not.toContain("finish_spec");
     expect(toolNames(3)).not.toContain("define_requirements");
@@ -594,7 +754,7 @@ describe("SpecAnalysisExecutor", () => {
     expect(transcript).toContain("不能为通过校验删除需求");
   });
 
-  it("rejects the incident's Linear URL passed to GitHub and refuses Issue-only Specs", async () => {
+  it("rejects a Linear URL passed to GitHub while allowing an Issue-only Spec", async () => {
     const executeSpecTool = vi.fn().mockResolvedValue({
       result: { pullRequestUrls: [] },
       sourceRefs: [source],
@@ -628,20 +788,20 @@ describe("SpecAnalysisExecutor", () => {
       ],
       executeSpecTool,
     );
-    expect(outcome.kind).toBe("RETRYABLE_FAILURE");
+    expect(outcome.kind).toBe("SPEC_GENERATED");
     expect(executeSpecTool).toHaveBeenCalledTimes(1);
     expect(
       create.mock.calls[0]![0].tools.map(
         (tool: { function: { name: string } }) => tool.function.name,
       ),
-    ).toEqual(["linear_get_issue"]);
+    ).toEqual(["get_task_context"]);
     expect(
       create.mock.calls
         .at(-1)![0]
         .tools.map(
           (tool: { function: { name: string } }) => tool.function.name,
         ),
-    ).toEqual(["linear_get_issue", "finish_spec"]);
+    ).toEqual(["get_task_context", "request_analysis_input", "finish_spec"]);
     expect(
       appendSpecEvent.mock.calls.filter(
         (args) => args[1] === "agent.tool.failed",
@@ -651,9 +811,7 @@ describe("SpecAnalysisExecutor", () => {
       appendSpecEvent.mock.calls.find(
         (args) => args[1] === "agent.spec.validation_failed",
       )?.[2],
-    ).toMatchObject({
-      errorMessage: expect.stringContaining("生成 Spec 前必须补充关联 PR"),
-    });
+    ).toBeUndefined();
   });
 
   it("pauses immediately when prerequisite checks request missing input", async () => {

@@ -43,7 +43,7 @@ describe("IssueContextResolverService", () => {
     expect(result.context.pullRequests).toEqual([]);
   });
 
-  it("keeps a normalized placeholder when one GitHub repository is unavailable", async () => {
+  it("retains a warning but excludes an unavailable discovered PR", async () => {
     const urls = [
       "https://github.com/private/web/pull/1",
       "https://github.com/acme/api/pull/2",
@@ -83,6 +83,7 @@ describe("IssueContextResolverService", () => {
             body: "Implements PAY-1",
             changedFiles: ["services/refund.ts"],
             id: "pr-2",
+            headSha: "abc123",
             isPrimary,
             number: 2,
             organization: "acme",
@@ -99,10 +100,10 @@ describe("IssueContextResolverService", () => {
     ).resolve("PAY-1", "team-1");
 
     expect(result.completeness).toBe("PARTIAL");
-    expect(result.context.pullRequests).toHaveLength(2);
+    expect(result.context.pullRequests).toHaveLength(1);
     expect(result.context.pullRequests[0]).toMatchObject({
       isPrimary: true,
-      repository: "private/web",
+      repository: "acme/api",
     });
     expect(result.context.resolution.diagnostics).toEqual(
       expect.arrayContaining([

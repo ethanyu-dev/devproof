@@ -56,6 +56,6 @@ export class TestSpecificationController {
 
 function legacySpecificationWriteRemoved() {
   return new GoneException(
-    "Specification writes moved to /v2/tasks. Create an ISSUE_SPEC task instead.",
+    "Specification writes moved to /v2/tasks. Create a SPEC_TASK instead.",
   );
 }

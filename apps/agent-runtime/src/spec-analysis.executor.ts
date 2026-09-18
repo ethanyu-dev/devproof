@@ -12,7 +12,7 @@ import {
   runtimeSpecCriterionSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeTraceEventSchema,
-  specPullRequestCoverage,
+  specSelectedSourceCoverageError,
   specRequirementCoverageError,
   specCapabilityError,
   specNecessityError,
@@ -81,6 +81,7 @@ const MAX_CONSECUTIVE_SOURCE_FAILURES = 2;
 const MAX_TEXT_ONLY_STEPS = 4;
 
 type SourceToolName =
+  | "get_task_context"
   | "linear_get_issue"
   | "github_get_pull_request"
   | "github_list_changed_files"
@@ -130,8 +131,10 @@ export class SpecAnalysisExecutor {
         content: JSON.stringify(
           {
             issueRef: task.snapshot.issueRef,
+            pullRequestUrls: task.snapshot.pullRequestUrls,
+            goal: task.snapshot.goal,
             objective:
-              "分析 Issue、关联 PR 和代码，生成优先覆盖本次必要业务结果的中文测试规格；保留明确要求，避免扩展为整页回归。",
+              "分析选定的测试说明、Issue、PR 和相关代码，生成优先覆盖本次必要业务结果的中文测试规格；保留明确要求，避免扩展为整页回归。",
             targetUrl: task.snapshot.targetUrl ?? null,
           },
           null,
@@ -212,7 +215,8 @@ export class SpecAnalysisExecutor {
                 tools: toolDefinitions(
                   sources.keys(),
                   unavailableTools,
-                  calledTools.has("linear_get_issue"),
+                  calledTools.has("get_task_context") ||
+                    calledTools.has("linear_get_issue"),
                   linkedPullRequests.map((pr) => pr.url),
                   compact,
                   requirements,
@@ -366,6 +370,65 @@ export class SpecAnalysisExecutor {
             },
           });
           signal.throwIfAborted();
+
+          if (call.function.name === "request_analysis_input") {
+            const request = z
+              .object({ message: z.string().trim().min(1).max(4_000) })
+              .safeParse(parsedArguments);
+            if (
+              !request.success ||
+              !(
+                calledTools.has("get_task_context") ||
+                calledTools.has("linear_get_issue")
+              )
+            ) {
+              await this.toolCorrection(
+                lease,
+                signal,
+                task,
+                segmentId,
+                step,
+                call,
+                startedAt,
+                "请先读取任务上下文，并说明需要澄清的具体验收目标。",
+              );
+              history.push(
+                toolOutput(call, {
+                  accepted: false,
+                  error: "请先读取任务上下文，并说明需要澄清的具体验收目标。",
+                }),
+              );
+              continue;
+            }
+            await this.appendTrace(lease, signal, {
+              kind: "agent.tool.completed",
+              payload: {
+                attemptNumber: task.snapshot.attemptNumber,
+                callId: call.id,
+                durationMs: Date.now() - startedAt,
+                name: call.function.name,
+                inputPreview: tracePreview(parsedArguments),
+                outputPreview: { message: request.data.message },
+                segmentId,
+                sourceRefs: [],
+                status: "SUCCEEDED",
+                step,
+              },
+            });
+            segmentStatus = "WAITING_HUMAN";
+            return {
+              kind: "INPUT_REQUIRED",
+              summary: request.data.message,
+              request: {
+                missing: ["TEST_INTENT"],
+                message: request.data.message,
+                issueRef: task.snapshot.issueRef ?? "",
+                goal: task.snapshot.goal,
+                pullRequestUrls: linkedPullRequests.map((item) => item.url),
+                deploymentCandidates: [],
+              },
+            };
+          }
 
           if (compact && call.function.name === "define_requirements") {
             try {
@@ -646,12 +709,16 @@ export class SpecAnalysisExecutor {
           const sourceToolName = call.function.name;
           const sourceToolError = unavailableTools.has(sourceToolName)
             ? `数据源 ${sourceToolName} 已标记为不可用，请使用其余来源并说明风险。`
-            : sourceToolName !== "linear_get_issue" &&
-                (!calledTools.has("linear_get_issue") ||
+            : sourceToolName !== "get_task_context" &&
+                sourceToolName !== "linear_get_issue" &&
+                (!(
+                  calledTools.has("get_task_context") ||
+                  calledTools.has("linear_get_issue")
+                ) ||
                   !linkedPullRequests.some(
                     (pr) => pr.url === record(parsedArguments).pullRequestUrl,
                   ))
-              ? "GitHub 工具只能使用 linear_get_issue 返回的 pullRequestUrls。不得传入 Linear 链接或猜测 PR；没有关联 PR 时必须等待用户补充，不能生成仅基于 Issue 的规格。"
+              ? "GitHub 工具只能使用 get_task_context 返回的 pullRequestUrls。不得传入 Issue 链接或猜测 PR。没有 PR 时按已有 Issue 或测试说明生成规格。"
               : null;
           if (sourceToolError) {
             await this.appendTrace(
@@ -722,18 +789,21 @@ export class SpecAnalysisExecutor {
                 observedSourceContent(source, output.result),
               );
             }
-            if (call.function.name === "linear_get_issue") {
+            if (
+              call.function.name === "get_task_context" ||
+              call.function.name === "linear_get_issue"
+            ) {
               const result = record(output.result);
-              const issue = record(result.issue);
-              for (const source of output.sourceRefs.filter(
-                (s) => s.kind === "LINEAR_ISSUE",
-              ))
+              for (const source of output.sourceRefs.filter((item) =>
+                ["LINEAR_ISSUE", "TASK_BRIEF", "GITHUB_PULL_REQUEST"].includes(
+                  item.kind,
+                ),
+              )) {
                 issueTexts.set(
                   source.externalId,
-                  [issue.title, issue.description]
-                    .filter((v) => typeof v === "string")
-                    .join("\n"),
+                  observedSourceContent(source, output.result),
                 );
+              }
               linkedPullRequests = z
                 .array(z.string().url())
                 .parse(result.pullRequestUrls ?? [])
@@ -939,6 +1009,7 @@ export class SpecAnalysisExecutor {
 }
 
 const sourceToolNames = new Set<SourceToolName>([
+  "get_task_context",
   "linear_get_issue",
   "github_get_pull_request",
   "github_list_changed_files",
@@ -946,6 +1017,7 @@ const sourceToolNames = new Set<SourceToolName>([
   "github_search_code",
 ]);
 const requiredSourceToolNames = new Set<SourceToolName>([
+  "get_task_context",
   "linear_get_issue",
   "github_get_pull_request",
   "github_list_changed_files",
@@ -959,7 +1031,7 @@ function isSourceToolName(name: string): name is SourceToolName {
 function toolDefinitions(
   sourceIds: Iterable<string> = [],
   unavailableTools: ReadonlySet<string> = new Set(),
-  issueRead = false,
+  contextRead = false,
   pullRequestUrls: readonly string[] = [],
   compact = false,
   requirements: readonly SpecRequirement[] | null = null,
@@ -982,17 +1054,31 @@ function toolDefinitions(
   return [
     {
       type: "function",
-      name: "linear_get_issue",
+      name: "get_task_context",
       description:
-        "读取权威的 Linear Issue，并发现其关联的 Pull Request；必须最先调用此工具。",
+        "读取任务选择的 Issue、PR、测试说明和环境候选；必须先调用，缺少某类来源不会阻塞。",
       parameters: objectSchema({ analysisSummary }, ["analysisSummary"]),
+      strict: false,
+    },
+    {
+      type: "function",
+      name: "request_analysis_input",
+      description:
+        "已读来源不能确定可观察的验收目标时，请求用户补充明确的测试目标。不能仅因没有 Issue 或 PR 调用。",
+      parameters: objectSchema(
+        {
+          analysisSummary,
+          message: { type: "string", minLength: 1, maxLength: 4000 },
+        },
+        ["analysisSummary", "message"],
+      ),
       strict: false,
     },
     {
       type: "function",
       name: "github_get_pull_request",
       description:
-        "读取 Issue 关联 Pull Request 的元数据、描述、检查结果、版本和部署信息。",
+        "读取任务选定 Pull Request 的元数据、描述、检查结果、版本和部署信息。",
       parameters: objectSchema({ analysisSummary, pullRequestUrl }, [
         "analysisSummary",
         "pullRequestUrl",
@@ -1052,7 +1138,7 @@ function toolDefinitions(
             type: "function",
             name: "define_requirements",
             description:
-              "先筛选本次必要的业务结果，再固定需求清单。保留 Issue 明确要求；次级来源推导的行为必须提供 changeBasis 引用 Issue 或实际 diff 并解释变更关联。等价类型可共用需求，操作和取证不单列需求。系统分配编号，后续必须覆盖或说明未覆盖原因。",
+              "先筛选本次必要的业务结果，再固定需求清单。保留任务上下文中的明确要求；次级来源推导的行为必须提供 changeBasis 引用测试说明、Issue、PR 明确验收要求或实际 diff 并解释变更关联。等价类型可共用需求，操作和取证不单列需求。系统分配编号，后续必须覆盖或说明未覆盖原因。",
             parameters: constrainSourceRefs(
               stripFormats(
                 z.toJSONSchema(
@@ -1147,9 +1233,10 @@ function toolDefinitions(
         ) &&
         !(tool.name === "define_checks" && !requirements) &&
         !(tool.name === "define_requirements" && requirements) &&
-        (tool.name === "linear_get_issue" ||
-          (issueRead &&
-            (tool.name === "finish_spec" ||
+        (tool.name === "get_task_context" ||
+          (contextRead &&
+            (tool.name === "request_analysis_input" ||
+              tool.name === "finish_spec" ||
               tool.name === "define_requirements" ||
               tool.name === "define_checks" ||
               pullRequestUrls.length > 0))),
@@ -1264,11 +1351,11 @@ function systemPrompt(
   const prompt = `你是 DevProof 的 Spec 分析 Agent。
 ${SPEC_EXECUTION_SCOPE_GUIDANCE}
 ${SPEC_NECESSITY_GUIDANCE}
-请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成覆盖必要业务结果的可执行验证 Spec。
-必须先调用 linear_get_issue。对于每个关联 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
-GitHub 工具的 pullRequestUrl 只能逐字选择 linear_get_issue 返回的 pullRequestUrls，不能使用 Issue URL 或猜测链接。Issue 内容、关联 PR 内容和明确的测试环境地址都是生成 Spec 的必要条件。linear_get_issue 会同时检查这些信息，缺失时由系统统一请求人工补充；不得生成仅基于 Issue 的规格。该工具也会返回已读取的 PR 元数据与确定的 targetUrl，继续读取各 PR 的 diff 和必要实现文件。
+请基于任务提供的测试说明、Issue、GitHub Pull Request 和相关代码，生成覆盖必要业务结果的可执行验证 Spec。Issue 和 PR 都是可选上下文，不是任务身份。
+必须先调用 get_task_context。对于每个选定 Pull Request，都要检查元数据和变更文件；为了理解实际行为，应读取必要的实现文件，不能只依赖文件名或 PR 描述。
+GitHub 工具的 pullRequestUrl 只能逐字选择 get_task_context 返回的 pullRequestUrls，不能猜测链接。只提供 PR 时根据明确目标和变更生成规格；只提供 Issue 或测试说明时直接根据其生成规格，不要求补齐另一类来源。该工具读取选择的来源并返回 targetUrl；inputRequest 表示需要补充实际缺失的信息。若来源虽可读但测试目标不明确，调用 request_analysis_input 说明要澄清的可观察结果，不要编造验收目标。
 若变更包含 specs/routes 下的 Route Spec，必须用 github_read_file 读取它，并结合相关实现及界面文案核对。若 Issue、Route Spec 和实现存在名称或行为冲突，应在 risks 中注明来源与差异，把未确定部分作为待确认事项，不能擅自把其中一种说法设为硬性失败条件。
-同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。Issue 和 PR 元数据、diff、相关文件都是必需来源，必需工具持续不可用时停止生成；前置检查返回 inputRequest 时等待用户补齐。
+同一非必需数据源连续两次返回 5xx 或限流错误后，执行器会将其标记为不可用并移除对应工具；不要继续尝试该工具，应在风险中说明数据源缺失并使用其余可用来源完成分析。已选定的来源及 PR 元数据、diff、相关文件是必需来源，必需工具持续不可用时停止生成；前置检查返回 inputRequest 时等待用户补齐。
 每次工具调用都必须包含 analysisSummary：用简体中文给出简洁、用户可见的决策摘要，不要输出隐藏思维链。
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 ${compact ? "每条需求引用实际返回的 analysis-source 和原文，由系统传递给 Case 及验收标准；不要手工重复来源字段。" : "每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。"}
@@ -1286,7 +1373,7 @@ Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；�
 按数据前置条件拆分新增与编辑：新增要求账号下不存在目标记录，编辑要求已有目标记录，不能仅为合并步骤把独立编辑验收绑死在新增成功之后。只有来源明确要求同一记录的完整生命周期时才合并。独立编辑用例不得添加“新增成功”验收来绕过前置检查；数据不足时可在准备步骤说明经授权创建临时记录，准备动作不能充当编辑验收。独立编辑用例必须说明测试记录归属、可修改授权、初始值记录与恢复步骤；仅提供账号不代表授权修改该账号的全部既有数据。无法确认授权时请求 DATA_PRECONDITION，不自动删除既有记录来满足新增条件。账号 constraints 只声明真实业务约束；不同类型的唯一键互不冲突时，不自行增加跨 Case 必须不同账号的要求。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，确有隔离需要时在账号约束中说明独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，已存在且不满足场景前置条件时，可由 DATA_PRECONDITION 人工接管处理或明确授权删除指定记录后继续；未授权不得自行删除，不反复索取新账号。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
-只有完成所有可用来源的调查后才能调用 finish_spec；Issue 或 PR 内容不可用时不得提交规格；代码来源不可用时应报告明确的数据源错误，不能以部分规格跳过必需来源。绝不能泄露凭据。
+只有完成所有可用来源的调查后才能调用 finish_spec；显式选定的来源不可用时不得提交规格，但没有选择 Issue 或 PR 不构成错误；代码来源不可用时应报告明确的数据源错误，不能以部分规格跳过必需来源。绝不能泄露凭据。
 ${
   compact
     ? `当前使用精简 Spec 协议。先读取必要来源并完成范围筛选，再调用 define_requirements 固定本次必要需求；保留所有明确要求的业务对象与样式参照，不按操作、字段和等价类型机械拆分。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。outOfScope 只记录不属于本次要求或改动影响的内容及排除原因。
@@ -1408,25 +1495,17 @@ function sourceCoverageError(
     "calledTools" | "linkedPullRequests" | "sources" | "unavailableTools"
   >,
 ) {
-  if (!input.calledTools.has("linear_get_issue")) {
-    return "完成 Spec 前必须读取 Linear Issue。";
+  if (!(
+    input.calledTools.has("get_task_context") ||
+    input.calledTools.has("linear_get_issue")
+  )) {
+    return "完成 Spec 前必须读取任务上下文。";
   }
-  if (!input.linkedPullRequests.length)
-    return "生成 Spec 前必须补充关联 PR，不能只依据 Issue 生成。";
-  for (const coverage of specPullRequestCoverage(input.linkedPullRequests, [
+  if (!input.sources.size)
+    return "生成 Spec 前必须有可引用的测试说明、Issue 或 PR 内容。";
+  return specSelectedSourceCoverageError(input.linkedPullRequests, [
     ...input.sources.values(),
-  ])) {
-    if (!coverage.metadataRead) {
-      return `完成 Spec 前必须读取关联 Pull Request 的元数据：${coverage.url}`;
-    }
-    if (!coverage.diffSourceCount || !coverage.fileSourceCount) {
-      return `完成 Spec 前必须同时检查该 PR 的变更 diff 和相关文件内容，代码搜索片段不能替代文件读取：${coverage.url}`;
-    }
-    if (coverage.unreadRouteSpecs.length) {
-      return `完成 Spec 前必须读取 ${coverage.url} 的 Route Spec：${coverage.unreadRouteSpecs.join("、")}`;
-    }
-  }
-  return null;
+  ]);
 }
 
 function stringLeaves(value: unknown): string[] {
@@ -1441,12 +1520,14 @@ function observedSourceContent(source: RuntimeSpecSourceRef, result: unknown) {
   // A batched diff/search response contains multiple independent sources. Do
   // not let a quote from one file validate a citation to another file.
   const output = record(result);
+  if (source.kind === "TASK_BRIEF")
+    return typeof output.goal === "string" ? output.goal : "";
   const items = Array.isArray(output.files)
     ? output.files
     : Array.isArray(output.matches)
       ? output.matches
       : null;
-  const { pullRequests, ...issueOutput } = output;
+  const { pullRequests } = output;
   const content = items
     ? items.find((item) => record(item).sourceRef === source.externalId)
     : Array.isArray(pullRequests)
@@ -1454,7 +1535,7 @@ function observedSourceContent(source: RuntimeSpecSourceRef, result: unknown) {
         ? pullRequests.find(
             (item) => record(item).sourceRef === source.externalId,
           )
-        : issueOutput
+        : { issue: output.issue }
       : output;
   return [source.excerpt, ...stringLeaves(content)].join("\n");
 }
@@ -1587,6 +1668,16 @@ function specSourceRefEntries(
             },
           ]
         : []),
+      ...(["intentEvidence", "issueEvidence"] as const).flatMap((field) =>
+        item[field]
+          ? [
+              {
+                path: `spec.requirements[${index}].${field}.sourceRef`,
+                sourceRef: item[field].sourceRef,
+              },
+            ]
+          : [],
+      ),
     ]),
     ...spec.cases.flatMap((testCase, caseIndex) => [
       ...(testCase.accountRequirements ?? []).flatMap((requirement, index) =>

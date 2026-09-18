@@ -1,3 +1,5 @@
+import { taskSourcePresentation } from "./task-source-context.js";
+import { isSpecTask } from "@devproof/contracts";
 import { Prisma } from "@prisma/client";
 import type { SpecAnalysisInputRequest } from "@devproof/agent-runtime-protocol";
 import {
@@ -20,13 +22,14 @@ const record = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
-/** Only persisted Issue/PR content can satisfy analysis prerequisites. */
+/** Missing source types are optional; explicitly requested sources must be read. */
 export function assessAnalysisInputs(
   inputSnapshot: unknown,
   sources: Source[],
+  manifest?: { pullRequestUrls?: string[] },
 ) {
   const input = taskExecutionCreateInputSchema.parse(inputSnapshot);
-  if (input.kind !== "ISSUE_SPEC") throw new Error("Issue task required.");
+  if (!isSpecTask(input)) throw new Error("Spec task required.");
   const issueSource = sources.findLast(
     (source) => source.kind === "LINEAR_ISSUE",
   );
@@ -38,7 +41,8 @@ export function assessAnalysisInputs(
     ...new Set<string>(
       [
         ...(input.pullRequestUrls ?? []),
-        ...(Array.isArray(issue.pullRequestUrls)
+        ...(manifest?.pullRequestUrls ?? []),
+        ...(!manifest && Array.isArray(issue.pullRequestUrls)
           ? issue.pullRequestUrls.filter(
               (url): url is string => typeof url === "string",
             )
@@ -59,9 +63,8 @@ export function assessAnalysisInputs(
       };
     });
   const missing: SpecAnalysisInputRequest["missing"] = [];
-  if (!issueReady) missing.push("ISSUE");
+  if (input.issueRef && !issueReady) missing.push("ISSUE");
   if (
-    !pullRequestUrls.length ||
     pullRequestUrls.some(
       (url) =>
         !prs.some(
@@ -77,6 +80,14 @@ export function assessAnalysisInputs(
   ) {
     missing.push("PULL_REQUEST");
   }
+  const briefReady = sources.some(
+    (source) =>
+      source.kind === "TASK_BRIEF" &&
+      typeof record(source.content).goal === "string" &&
+      Boolean(String(record(source.content).goal).trim()),
+  );
+  if (!input.issueRef && !pullRequestUrls.length && !briefReady)
+    missing.push("TEST_INTENT");
   const deploymentCandidates = [
     ...new Set<string>(
       prs.flatMap((pr) => [
@@ -97,10 +108,11 @@ export function assessAnalysisInputs(
       : null);
   if (!targetUrl) missing.push("DEPLOYMENT_TARGET");
   const descriptions = {
+    TEST_INTENT: "请补充本次需要验证的业务目标和可观察的预期结果。",
     ISSUE:
-      "Issue 内容不可用或为空，请补充有效的 Issue 链接，并确认需求内容和访问权限。",
+      "指定的 Issue 内容不可用或为空。请修复访问权限、替换链接，或明确移除并提供其他测试依据。",
     PULL_REQUEST:
-      "未找到关联 PR 或无法读取其内容，请补充 PR 链接，并确认仓库访问权限。",
+      "指定的 PR 内容不可用。请修复仓库权限、替换链接，或明确移除并提供其他测试依据。",
     DEPLOYMENT_TARGET:
       "测试环境地址缺失或无法唯一确定，请明确本次需要验证的环境地址。",
   };
@@ -108,7 +120,8 @@ export function assessAnalysisInputs(
     ? {
         missing,
         message: missing.map((field) => descriptions[field]).join("\n"),
-        issueRef: input.issueRef,
+        issueRef: input.issueRef ?? "",
+        ...(input.goal ? { goal: input.goal } : {}),
         pullRequestUrls,
         deploymentCandidates: deploymentCandidates.slice(0, 25),
       }
@@ -190,7 +203,7 @@ export async function pauseAnalysisForInput(
   });
   const input = taskExecutionCreateInputSchema.parse(task.inputSnapshot);
   if (
-    input.kind === "ISSUE_SPEC" &&
+    isSpecTask(input) &&
     input.hitlPolicy.notificationChannels.includes("FEISHU")
   ) {
     await enqueueTaskWaitingNotification(tx, {
@@ -228,7 +241,7 @@ export async function resumeAnalysisWithInput(
     const environment = record(task.environmentSnapshot);
     const pending = record(environment.analysisInputRequest);
     if (
-      task.kind !== "ISSUE_SPEC" ||
+      !isSpecTask(task) ||
       task.cancelRequestedAt ||
       task.lifecycle !== "WAITING_INPUT" ||
       stage?.status !== "WAITING_INPUT" ||
@@ -239,21 +252,29 @@ export async function resumeAnalysisWithInput(
       throw new ConflictException("任务已变化，请刷新后再补充分析信息。");
     const request = specAnalysisInputRequestSchema.parse(pending);
     if (
-      request.missing.includes("PULL_REQUEST") &&
-      !input.pullRequestUrls?.length
-    )
-      throw new BadRequestException("请补充关联 PR 链接。");
-    if (
       request.missing.includes("DEPLOYMENT_TARGET") &&
       !input.deployments?.length
     )
       throw new BadRequestException("请补充明确的测试环境地址。");
-    if (request.missing.includes("ISSUE") && !input.issueRef?.trim())
-      throw new BadRequestException("请补充有效的 Issue 链接或编号。");
+    if (request.missing.includes("TEST_INTENT") && !input.goal?.trim())
+      throw new BadRequestException("请补充具体测试目标和预期结果。");
+    if (request.missing.includes("ISSUE") && input.issueRef === undefined)
+      throw new BadRequestException("请修正 Issue，或明确移除该来源。");
+    if (
+      request.missing.includes("PULL_REQUEST") &&
+      input.pullRequestUrls === undefined
+    )
+      throw new BadRequestException("请修正 PR，或明确移除该来源。");
+    const previous = record(task.inputSnapshot);
     const nextInput = taskExecutionCreateInputSchema.parse({
-      ...record(task.inputSnapshot),
+      ...previous,
+      // A legacy Issue task may explicitly replace its Issue with another input.
+      ...(input.issueRef === null
+        ? { kind: "SPEC_TASK", issueRef: undefined }
+        : {}),
       ...(input.issueRef ? { issueRef: input.issueRef } : {}),
-      ...(input.pullRequestUrls
+      ...(input.goal ? { goal: input.goal } : {}),
+      ...(input.pullRequestUrls !== undefined
         ? { pullRequestUrls: input.pullRequestUrls }
         : {}),
       ...(input.deployments?.length
@@ -271,6 +292,8 @@ export async function resumeAnalysisWithInput(
       where: { id },
       data: {
         inputSnapshot: json(nextInput),
+        kind: nextInput.kind,
+        ...(isSpecTask(nextInput) ? taskSourcePresentation(nextInput) : {}),
         environmentSnapshot: json(previousEnvironment),
         lifecycle: "QUEUED",
         currentStage: "SPEC_ANALYSIS",

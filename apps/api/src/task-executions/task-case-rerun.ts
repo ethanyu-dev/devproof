@@ -1,3 +1,4 @@
+import { isSpecTask } from "@devproof/contracts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ConflictException, ForbiddenException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -121,8 +122,8 @@ export async function insertCaseRerunTask(
   if (executions.some((item) => item.testCase.snapshotId !== snapshot.id))
     throw new ConflictException("用例规格不一致，无法创建重跑任务。");
   const input = taskExecutionCreateInputSchema.parse(source.inputSnapshot);
-  if (input.kind !== "ISSUE_SPEC")
-    throw new ConflictException("仅 Issue 任务支持单用例重跑。");
+  if (!isSpecTask(input))
+    throw new ConflictException("仅 Spec 任务支持单用例重跑。");
   if (input.profilePolicy.strategy === "EXPLICIT_PROFILE") {
     if (actor.kind !== "USER" || !actor.userId)
       throw new ForbiddenException(
@@ -185,7 +186,7 @@ export async function insertCaseRerunTask(
     })),
     caseExecutionPolicies: undefined,
   };
-  const title = `${source.sourceRef ?? input.issueRef} · ${originalCase.name}（重跑）`;
+  const title = `${source.sourceRef ?? source.title} · ${originalCase.name}（重跑）`;
   const environment = {
     ...asRecord(source.environmentSnapshot),
     allowedHosts: [new URL(deployments[0]!.targetUrl).hostname],
@@ -197,10 +198,11 @@ export async function insertCaseRerunTask(
     data: {
       id: taskId,
       teamId: source.teamId,
-      kind: "ISSUE_SPEC",
+      kind: input.kind,
       title,
       idempotencyKey,
       inputSnapshot: json(rerunInput),
+      creationInputSnapshot: json(rerunInput),
       environmentSnapshot: json(environment),
       sourceKind: source.sourceKind,
       sourceRef: source.sourceRef,
