@@ -26,7 +26,7 @@ export const requirementPlanSchema = z.object({
     .array(
       runtimeSpecRequirementSchema.omit({ id: true }).extend({
         changeBasis: runtimeSpecRequirementSchema.shape.changeBasis.describe(
-          "依据来自次级来源时必填：引用 Issue 或实际 diff 增删行，并说明为何是本次必要验证。直接引用 Issue 的需求可省略。",
+          "依据来自次级来源时必填：引用测试说明、Issue、PR 明确验收要求或实际 diff 增删行，并说明为何是本次必要验证。直接引用 Issue 或测试说明的需求可省略。",
         ),
       }),
     )

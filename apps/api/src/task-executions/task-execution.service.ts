@@ -1,3 +1,5 @@
+import { taskSourcePresentation } from "./task-source-context.js";
+import { isSpecTask } from "@devproof/contracts";
 import { TaskAcceptanceReviewService } from "./task-acceptance-review.service.js";
 import { RetentionWorker } from "../observability/retention-worker.service.js";
 import { deleteTask } from "./task-delete.js";
@@ -10,7 +12,6 @@ import {
   taskAccountPreparation,
 } from "./task-test-accounts.js";
 import type { TaskTestAccountsInput } from "@devproof/contracts";
-import { ContextSourceError } from "../specifications/context-source.error.js";
 import {
   acceptanceReportInclude,
   buildTaskAcceptanceReport,
@@ -236,7 +237,7 @@ export interface TaskRequestActor {
 
 export interface TaskListFilters {
   createdAfter?: Date;
-  kind?: "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
+  kind?: "SPEC_TASK" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
   query?: string;
   status?:
     | "ACTIVE"
@@ -343,8 +344,8 @@ export class TaskExecutionService {
       },
     });
     if (existing) return this.idempotentDetail(current, existing, input);
-    return input.kind === "ISSUE_SPEC"
-      ? this.createIssueTask(current, input, actor)
+    return isSpecTask(input)
+      ? this.createSpecTask(current, input, actor)
       : this.createDirectTask(
           current,
           input,
@@ -520,13 +521,38 @@ export class TaskExecutionService {
       ...(filters.createdAfter
         ? { createdAt: { gte: filters.createdAfter } }
         : {}),
-      ...(filters.kind ? { kind: filters.kind } : {}),
+      ...(filters.kind
+        ? {
+            kind:
+              filters.kind === "SPEC_TASK"
+                ? { in: ["SPEC_TASK", "ISSUE_SPEC"] }
+                : filters.kind,
+          }
+        : {}),
       ...(filters.query
         ? {
             OR: [
               { title: { contains: filters.query, mode: "insensitive" } },
               { sourceRef: { contains: filters.query, mode: "insensitive" } },
               { sourceKind: { contains: filters.query, mode: "insensitive" } },
+              {
+                analysisSources: {
+                  some: {
+                    OR: [
+                      { uri: { contains: filters.query, mode: "insensitive" } },
+                      {
+                        label: { contains: filters.query, mode: "insensitive" },
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                inputSnapshot: {
+                  path: ["pullRequestUrls"],
+                  array_contains: [filters.query],
+                },
+              },
             ],
           }
         : {}),
@@ -769,9 +795,9 @@ export class TaskExecutionService {
     });
     if (!task)
       throw new NotFoundException(`Task execution ${id} was not found.`);
-    if (task.kind !== "ISSUE_SPEC") {
+    if (!isSpecTask(task)) {
       throw new ConflictException(
-        "Deployment targets can only be provided to Issue tasks.",
+        "Deployment targets can only be provided to Spec tasks.",
       );
     }
     if (task.executionRuns.length) {
@@ -929,8 +955,8 @@ export class TaskExecutionService {
     }
     const now = new Date();
     if (stageType === "SPEC_ANALYSIS") {
-      if (task.kind !== "ISSUE_SPEC") {
-        throw new ConflictException("Only Issue tasks have an analysis stage.");
+      if (!isSpecTask(task)) {
+        throw new ConflictException("Only Spec tasks have an analysis stage.");
       }
       if (stage.status !== "FAILED") {
         throw new ConflictException(
@@ -982,9 +1008,9 @@ export class TaskExecutionService {
         });
       });
     } else {
-      if (task.kind !== "ISSUE_SPEC") {
+      if (!isSpecTask(task)) {
         throw new ConflictException(
-          "Only Issue task Case executions can be retried in place.",
+          "Only Spec task Case executions can be retried in place.",
         );
       }
       if (stage.status !== "FAILED") {
@@ -1151,7 +1177,7 @@ export class TaskExecutionService {
         if (!task) {
           throw new NotFoundException(`Task execution ${id} was not found.`);
         }
-        if (task.kind !== "ISSUE_SPEC") {
+        if (!isSpecTask(task)) {
           throw new ConflictException(
             "Only Spec Runtime executions can be rerun in place.",
           );
@@ -1397,8 +1423,8 @@ export class TaskExecutionService {
       });
       if (!source)
         throw new NotFoundException(`Task execution ${id} was not found.`);
-      if (source.kind !== "ISSUE_SPEC")
-        throw new ConflictException("仅 Issue 任务支持单用例重跑。");
+      if (!isSpecTask(source))
+        throw new ConflictException("仅 Spec 任务支持单用例重跑。");
       const executions = latestCaseExecutions(source.caseExecutions);
       if (!executions.length)
         throw new NotFoundException(`Spec Case ${caseId} was not found.`);
@@ -1707,7 +1733,7 @@ export class TaskExecutionService {
     // Profile resolution owns its active wait, but cannot block completion of
     // a failed/cancelled Spec or the parent deadline before a profile exists.
     if (
-      task.kind === "ISSUE_SPEC" &&
+      isSpecTask(task) &&
       analysis.status === "SUCCEEDED" &&
       task.profileBinding &&
       task.profileBinding.status !== "RESOLVED" &&
@@ -1905,11 +1931,15 @@ export class TaskExecutionService {
 
   private idempotentDetail(
     current: ToolAuthContext,
-    existing: { id: string; inputSnapshot: Prisma.JsonValue },
+    existing: {
+      id: string;
+      inputSnapshot: Prisma.JsonValue;
+      creationInputSnapshot?: Prisma.JsonValue | null;
+    },
     input: TaskExecutionCreateInput,
   ) {
     const normalizedExisting = taskExecutionCreateInputSchema.safeParse(
-      existing.inputSnapshot,
+      existing.creationInputSnapshot ?? existing.inputSnapshot,
     );
     if (
       !normalizedExisting.success ||
@@ -1922,9 +1952,12 @@ export class TaskExecutionService {
     return this.detail(current, existing.id);
   }
 
-  private async createIssueTask(
+  private async createSpecTask(
     current: ToolAuthContext,
-    input: Extract<TaskExecutionCreateInput, { kind: "ISSUE_SPEC" }>,
+    input: Extract<
+      TaskExecutionCreateInput,
+      { kind: "ISSUE_SPEC" | "SPEC_TASK" }
+    >,
     actor: TaskRequestActor,
   ) {
     if (input.profilePolicy.strategy === "EXPLICIT_PROFILE") {
@@ -1982,14 +2015,13 @@ export class TaskExecutionService {
             id: taskId,
             idempotencyKey: input.idempotencyKey,
             inputSnapshot: json(input),
-            kind: "ISSUE_SPEC",
+            creationInputSnapshot: json(input),
+            kind: input.kind,
             notificationContext: json(actor.notificationContext ?? {}),
             requestedByKind: actor.kind,
             requestedByUserId: actor.userId ?? null,
-            sourceKind: "LINEAR_ISSUE",
-            sourceRef: input.issueRef,
+            ...taskSourcePresentation(input),
             teamId: current.team.id,
-            title: input.issueRef,
             traceId: randomBytes(16).toString("hex"),
             deployments: {
               create: deployments.map((deployment) => ({
@@ -2053,6 +2085,7 @@ export class TaskExecutionService {
             "task.created",
             {
               issueRef: input.issueRef,
+              pullRequestUrls: input.pullRequestUrls,
               kind: input.kind,
             },
           ),
@@ -2095,6 +2128,7 @@ export class TaskExecutionService {
             id: taskId,
             idempotencyKey: input.idempotencyKey,
             inputSnapshot: json(input),
+            creationInputSnapshot: json(input),
             kind: "DIRECT_RUN",
             lifecycle: "RUNNING",
             migrationSource: preserveRunIdempotency
@@ -2413,33 +2447,41 @@ export class TaskExecutionService {
     const input = taskExecutionCreateInputSchema.parse(
       attempt.stage.taskExecution.inputSnapshot,
     );
-    if (input.kind !== "ISSUE_SPEC") {
-      throw new ConflictException("Only Issue tasks have an analysis stage.");
+    if (!isSpecTask(input)) {
+      throw new ConflictException("Only Spec tasks have an analysis stage.");
     }
-    const resolved = await this.resolver
-      .resolve(
-        input.issueRef,
-        attempt.stage.taskExecution.teamId,
-        input.pullRequestUrls,
-      )
-      .catch((error: unknown) => {
-        if (error instanceof ContextSourceError && error.source === "LINEAR")
-          return null;
-        throw error;
-      });
+    const resolved = await this.resolver.resolve(
+      input.issueRef,
+      attempt.stage.taskExecution.teamId,
+      input.pullRequestUrls,
+      input.goal,
+    );
     const context = resolved?.context;
     const assessment = assessAnalysisInputs(
       input,
       context
         ? [
-            {
-              kind: "LINEAR_ISSUE",
-              uri: context.issue.url,
-              content: {
-                issue: context.issue,
-                pullRequestUrls: context.pullRequests.map((pr) => pr.url),
-              },
-            },
+            ...(context.issue
+              ? [
+                  {
+                    kind: "LINEAR_ISSUE",
+                    uri: context.issue.url,
+                    content: {
+                      issue: context.issue,
+                      pullRequestUrls: context.pullRequests.map((pr) => pr.url),
+                    },
+                  },
+                ]
+              : []),
+            ...(context.goal
+              ? [
+                  {
+                    kind: "TASK_BRIEF",
+                    uri: `task://${attempt.stage.taskExecutionId}/brief`,
+                    content: { goal: context.goal },
+                  },
+                ]
+              : []),
             ...context.pullRequests.map((pr) => ({
               kind: "GITHUB_PULL_REQUEST",
               uri: pr.url,
@@ -2447,6 +2489,7 @@ export class TaskExecutionService {
             })),
           ]
         : [],
+      resolved?.manifest,
     );
     if (!resolved || !context || assessment.request) {
       await this.prisma.$transaction(async (tx) => {
@@ -2469,12 +2512,15 @@ export class TaskExecutionService {
         if (context) {
           locked.stage.taskExecution = await tx.taskExecution.update({
             data: {
-              sourceRef: context.issue.identifier,
-              title: `${context.issue.identifier} · ${context.issue.title}`,
+              ...taskSourcePresentation(input, context),
             },
             where: { id: locked.stage.taskExecutionId },
           });
         }
+        await tx.taskStageAttempt.update({
+          where: { id: attemptId },
+          data: { contextSnapshot: json(resolved.manifest) },
+        });
         await pauseAnalysisForInput(
           tx,
           locked,
@@ -2561,6 +2607,7 @@ export class TaskExecutionService {
       });
       await tx.taskStageAttempt.update({
         data: {
+          contextSnapshot: json(resolved.manifest),
           finishedAt: now,
           leaseExpiresAt: null,
           leaseOwner: null,
@@ -2612,8 +2659,7 @@ export class TaskExecutionService {
           }),
           lifecycle: "RUNNING",
           projectionNeededAt: null,
-          sourceRef: context.issue.identifier,
-          title: `${context.issue.identifier} · ${context.issue.title}`,
+          ...taskSourcePresentation(input, context),
           waitingReason: null,
         },
         where: { id: locked.stage.taskExecutionId },
@@ -3349,10 +3395,8 @@ function taskCaseRunRequest(
   const input = taskExecutionCreateInputSchema.parse(
     item.taskExecution.inputSnapshot,
   );
-  if (input.kind !== "ISSUE_SPEC") {
-    throw new ConflictException(
-      "Generated Cases must belong to an Issue task.",
-    );
+  if (!isSpecTask(input)) {
+    throw new ConflictException("Generated Cases must belong to a Spec task.");
   }
   const target = new URL(targetUrl);
   const agentBusinessReferences = agentDefinition.success
@@ -3622,20 +3666,33 @@ function taskBusinessReferences(
   context: ReturnType<typeof testGenerationContextSchema.parse>,
 ): ExecutionRunCreateInput["businessReferences"] {
   const prefix = `reference://task/${taskId}/spec/${snapshotId}`;
-  const references: ExecutionRunCreateInput["businessReferences"] = [
-    {
-      externalId: `${prefix}/issue`,
+  const references: ExecutionRunCreateInput["businessReferences"] =
+    context.issue
+      ? [
+          {
+            externalId: `${prefix}/issue`,
+            kind: "BUSINESS_REFERENCE",
+            label: `${context.issue.identifier} · ${context.issue.title}`,
+            metadata: {
+              excerpt: referenceExcerpt(context.issue.description),
+              source: "LINEAR",
+              state: context.issue.state,
+              title: context.issue.title,
+              url: safeReferenceUrl(context.issue.url),
+            },
+          },
+        ]
+      : [];
+  if (context.goal)
+    references.push({
+      externalId: `${prefix}/brief`,
       kind: "BUSINESS_REFERENCE",
-      label: `${context.issue.identifier} · ${context.issue.title}`,
+      label: "任务测试说明",
       metadata: {
-        excerpt: referenceExcerpt(context.issue.description),
-        source: "LINEAR",
-        state: context.issue.state,
-        title: context.issue.title,
-        url: safeReferenceUrl(context.issue.url),
+        excerpt: referenceExcerpt(context.goal),
+        source: "TASK_BRIEF",
       },
-    },
-  ];
+    });
   context.pullRequests.slice(0, 25).forEach((pullRequest, index) => {
     references.push({
       externalId: `${prefix}/pull-request/${index + 1}`,
@@ -3864,12 +3921,11 @@ function toTaskSummary(
           ...execution,
           scheduling: caseSchedulingForDisplay(execution, row.lifecycle),
         }));
-  const total =
-    row.kind === "ISSUE_SPEC"
-      ? (row.specificationSnapshots[0]?._count.cases ?? 0) *
-        row.deployments.filter((deployment) => deployment.enabled !== false)
-          .length
-      : row.executionRuns.length;
+  const total = isSpecTask(row)
+    ? (row.specificationSnapshots[0]?._count.cases ?? 0) *
+      row.deployments.filter((deployment) => deployment.enabled !== false)
+        .length
+    : row.executionRuns.length;
   return {
     counts: executionCounts(executions, total, row.lifecycle),
     scheduling: summarizeCaseScheduling(executions, row.lifecycle),
@@ -4081,7 +4137,7 @@ function event(
 function profilePolicyScopeKey(
   policy: Extract<
     TaskExecutionCreateInput,
-    { kind: "ISSUE_SPEC" }
+    { kind: "ISSUE_SPEC" | "SPEC_TASK" }
   >["profilePolicy"],
 ) {
   return createHash("sha256")

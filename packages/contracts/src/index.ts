@@ -777,6 +777,7 @@ export const runTrajectoryPageSchema = z.object({
 
 export const taskExecutionKindSchema = z.enum([
   "ISSUE_SPEC",
+  "SPEC_TASK",
   "DIRECT_RUN",
   "LEGACY_RUN",
 ]);
@@ -942,7 +943,46 @@ export const taskDeploymentSchema = z.object({
     }),
 });
 
-const issueTaskExecutionCreateInputSchema = z.object({
+/** Canonical PR references are shared by API, Console and integrations. */
+export function normalizeGithubPullRequestUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      url.username ||
+      url.password ||
+      url.port
+    )
+      return null;
+    const match =
+      /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)(?:\/(?:files|commits|checks))?\/?$/u.exec(
+        url.pathname,
+      );
+    return match
+      ? `https://github.com/${match[1]!.toLowerCase()}/${match[2]!.toLowerCase()}/pull/${match[3]}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+export const githubPullRequestUrlSchema = z
+  .string()
+  .trim()
+  .max(2_000)
+  .transform((value, ctx) => {
+    const canonical = normalizeGithubPullRequestUrl(value);
+    if (!canonical) {
+      ctx.addIssue({
+        code: "custom",
+        message: "请填写有效的 GitHub PR 链接。",
+      });
+      return z.NEVER;
+    }
+    return canonical;
+  });
+
+const specTaskCreateBaseSchema = z.object({
   analysisMaxAttempts: z.number().int().min(1).max(10).default(3),
   browserPolicy: taskBrowserPolicySchema,
   deadlineSeconds: z.number().int().min(60).max(86_400).default(7_200),
@@ -956,7 +996,7 @@ const issueTaskExecutionCreateInputSchema = z.object({
         if (keys.has(deployment.key)) {
           context.addIssue({
             code: "custom",
-            message: "Deployment keys must be unique within an Issue task.",
+            message: "Deployment keys must be unique within a Spec task.",
             path: [index, "key"],
           });
         }
@@ -970,20 +1010,14 @@ const issueTaskExecutionCreateInputSchema = z.object({
     timeoutSeconds: 3600,
   }),
   idempotencyKey: z.string().trim().min(8).max(200),
-  issueRef: z.string().trim().min(1).max(500),
-  kind: z.literal("ISSUE_SPEC"),
+  issueRef: z.string().trim().min(1).max(500).optional(),
+  title: z.string().trim().min(1).max(500).optional(),
+  goal: z.string().trim().min(1).max(20_000).optional(),
+  kind: z.literal("SPEC_TASK"),
   pullRequestUrls: z
-    .array(
-      z
-        .string()
-        .trim()
-        .url()
-        .max(2_000)
-        .regex(
-          /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\/?$/u,
-        ),
-    )
+    .array(githubPullRequestUrlSchema)
     .max(25)
+    .transform((urls) => [...new Set(urls)])
     .optional(),
   model: z
     .object({
@@ -1021,10 +1055,43 @@ const directTaskExecutionCreateInputSchema = z.object({
   run: executionRunCreateInputSchema,
 });
 
-export const taskExecutionCreateInputSchema = z.discriminatedUnion("kind", [
-  issueTaskExecutionCreateInputSchema,
-  directTaskExecutionCreateInputSchema,
-]);
+const issueTaskExecutionCreateInputSchema = specTaskCreateBaseSchema.extend({
+  kind: z.literal("ISSUE_SPEC"),
+  issueRef: z.string().trim().min(1).max(500),
+});
+
+export const taskExecutionCreateInputSchema = z
+  .discriminatedUnion("kind", [
+    issueTaskExecutionCreateInputSchema,
+    specTaskCreateBaseSchema,
+    directTaskExecutionCreateInputSchema,
+  ])
+  .superRefine((input, ctx) => {
+    if (input.kind === "DIRECT_RUN") return;
+    if (!input.issueRef && !input.pullRequestUrls?.length && !input.goal)
+      ctx.addIssue({
+        code: "custom",
+        path: ["goal"],
+        message: "请提供 Issue、GitHub PR 或测试说明。",
+      });
+    if (input.profilePolicy.strategy === "ISSUE_ASSIGNEE" && !input.issueRef)
+      ctx.addIssue({
+        code: "custom",
+        path: ["profilePolicy"],
+        message:
+          "使用 Issue 负责人身份需要提供 Issue；也可选择发起人身份或临时会话。",
+      });
+  });
+
+export function isSpecTask<T extends { kind: string }>(
+  value: T,
+): value is T & { kind: "ISSUE_SPEC" | "SPEC_TASK" } {
+  return value.kind === "ISSUE_SPEC" || value.kind === "SPEC_TASK";
+}
+export type SpecTaskCreateInput = Extract<
+  TaskExecutionCreateInput,
+  { kind: "ISSUE_SPEC" | "SPEC_TASK" }
+>;
 
 export const taskDeploymentTargetInputSchema = z.object({
   url: z
@@ -1046,9 +1113,10 @@ export const taskDeploymentsInputSchema = z.object({
 
 export const taskAnalysisInputSchema = z.object({
   expectedAttemptId: z.string().uuid(),
-  issueRef: issueTaskExecutionCreateInputSchema.shape.issueRef.optional(),
-  pullRequestUrls: issueTaskExecutionCreateInputSchema.shape.pullRequestUrls,
-  deployments: issueTaskExecutionCreateInputSchema.shape.deployments.optional(),
+  issueRef: specTaskCreateBaseSchema.shape.issueRef.nullable().optional(),
+  goal: specTaskCreateBaseSchema.shape.goal,
+  pullRequestUrls: specTaskCreateBaseSchema.shape.pullRequestUrls,
+  deployments: specTaskCreateBaseSchema.shape.deployments.optional(),
 });
 export type TaskAnalysisInput = z.infer<typeof taskAnalysisInputSchema>;
 export {
@@ -1150,7 +1218,9 @@ export const specificationContextDiagnosticSchema = z.object({
 
 export const testGenerationContextSchema = z
   .object({
-    issue: specificationIssueContextSchema,
+    contextVersion: z.literal(2).optional(),
+    issue: specificationIssueContextSchema.nullable().default(null),
+    goal: z.string().max(20_000).optional(),
     specification: runtimeGeneratedSpecSchema.omit({ cases: true }).optional(),
     knowledge: z
       .array(specificationKnowledgeContextSchema)
@@ -1172,12 +1242,14 @@ export const testGenerationContextSchema = z
   })
   .transform((context) => ({
     ...context,
-    issue: {
-      ...context.issue,
-      labels: [...new Set(context.issue.labels)].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-    },
+    issue: context.issue
+      ? {
+          ...context.issue,
+          labels: [...new Set(context.issue.labels)].sort((left, right) =>
+            left.localeCompare(right),
+          ),
+        }
+      : null,
     knowledge: [...context.knowledge].sort((left, right) =>
       left.id.localeCompare(right.id),
     ),

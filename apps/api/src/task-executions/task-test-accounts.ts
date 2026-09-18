@@ -1,3 +1,4 @@
+import { isSpecTask } from "@devproof/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   BadRequestException,
@@ -72,8 +73,7 @@ export async function prepareTestAccountPlans(
     const policy = taskExecutionCreateInputSchema.parse(
       row.taskExecution.inputSnapshot,
     );
-    const hitl =
-      policy.kind === "ISSUE_SPEC" ? policy.hitlPolicy : policy.run.hitlPolicy;
+    const hitl = isSpecTask(policy) ? policy.hitlPolicy : policy.run.hitlPolicy;
     let plan: TestAccountPlan = {
       version: 2,
       definitionHash: specificationDefinitionHash(row.testCase.definition),

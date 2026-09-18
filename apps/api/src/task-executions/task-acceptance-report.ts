@@ -1,3 +1,4 @@
+import { isSpecTask } from "@devproof/contracts";
 import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import type {
@@ -287,11 +288,11 @@ export function buildTaskAcceptanceReport(
     row.environmentSnapshot,
   )
     ? "CASE"
-    : row.kind === "ISSUE_SPEC"
+    : isSpecTask(row)
       ? "REQUIREMENT"
       : "DIRECT";
   const cases: AcceptanceCase[] = [];
-  if (row.kind === "ISSUE_SPEC") {
+  if (isSpecTask(row)) {
     for (const testCase of snapshot?.cases ?? [])
       for (const deployment of row.deployments) {
         const execution = row.caseExecutions

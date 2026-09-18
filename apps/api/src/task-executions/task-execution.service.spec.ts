@@ -61,7 +61,7 @@ describe("executionCounts", () => {
 });
 
 describe("TaskExecutionService deterministic Issue titles", () => {
-  it("uses the resolved title while waiting for PR and environment input", async () => {
+  it("uses the resolved title while waiting only for the environment", async () => {
     const issue = {
       id: "issue-1",
       identifier: "ENG-123",
@@ -137,7 +137,7 @@ describe("TaskExecutionService deterministic Issue titles", () => {
       lifecycle: "WAITING_INPUT",
       environmentSnapshot: {
         analysisInputRequest: {
-          missing: ["PULL_REQUEST", "DEPLOYMENT_TARGET"],
+          missing: ["DEPLOYMENT_TARGET"],
         },
       },
     });
@@ -1545,6 +1545,22 @@ describe("TaskExecutionService rerun", () => {
         { title: { contains: "ENG-42", mode: "insensitive" } },
         { sourceRef: { contains: "ENG-42", mode: "insensitive" } },
         { sourceKind: { contains: "ENG-42", mode: "insensitive" } },
+        {
+          analysisSources: {
+            some: {
+              OR: [
+                { uri: { contains: "ENG-42", mode: "insensitive" } },
+                { label: { contains: "ENG-42", mode: "insensitive" } },
+              ],
+            },
+          },
+        },
+        {
+          inputSnapshot: {
+            path: ["pullRequestUrls"],
+            array_contains: ["ENG-42"],
+          },
+        },
       ],
       createdAt: { gte: createdAfter },
       kind: "LEGACY_RUN",

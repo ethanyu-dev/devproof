@@ -192,7 +192,7 @@ describe("DevProof contracts", () => {
       ],
     });
 
-    expect(context.issue.labels).toEqual(["critical", "frontend"]);
+    expect(context.issue).toMatchObject({ labels: ["critical", "frontend"] });
     expect(context.pullRequests[0]?.changedFiles).toEqual(["a.ts", "z.ts"]);
   });
 

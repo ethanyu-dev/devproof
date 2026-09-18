@@ -1,22 +1,21 @@
 import {
-  specificationPullRequestContextSchema,
-  testGenerationContextSchema,
+  resolveSpecTaskContext,
+  type AnalysisContextManifest,
+} from "./spec-task-context.js";
+import {
   type SpecificationContextDiagnostic,
   type TestGenerationContext,
 } from "@devproof/contracts";
 import { Injectable } from "@nestjs/common";
 
-import { ContextSourceError } from "./context-source.error.js";
-import {
-  GithubPullRequestClient,
-  parsePullRequestUrl,
-} from "./github-pull-request.client.js";
+import { GithubPullRequestClient } from "./github-pull-request.client.js";
 import { LinearContextClient } from "./linear-context.client.js";
 
 export interface ResolvedIssueContext {
   completeness: "COMPLETE" | "PARTIAL";
   context: TestGenerationContext;
   diagnostics: SpecificationContextDiagnostic[];
+  manifest: AnalysisContextManifest;
 }
 
 @Injectable()
@@ -28,9 +27,10 @@ export class IssueContextResolverService {
 
   async readiness(teamId: string) {
     const linear = this.linear.configured();
+    const github = await this.github.configured(teamId);
     return {
       github: {
-        configured: await this.github.configured(teamId),
+        configured: github,
         mode: "TOKEN" as const,
       },
       linear: {
@@ -38,83 +38,27 @@ export class IssueContextResolverService {
         mode: this.linear.mode(),
         tool: this.linear.configuredTool(),
       },
-      ready: linear,
+      ready: linear || github,
     };
   }
 
   async resolve(
-    issueRef: string,
+    issueRef: string | undefined,
     teamId: string,
-    explicitPullRequestUrls: string[] = [],
+    explicitPullRequestUrls?: string[],
+    goal?: string,
   ): Promise<ResolvedIssueContext> {
-    const linear = await this.linear.getIssue(issueRef);
-    const directUrls = [
-      ...new Set([...explicitPullRequestUrls, ...linear.pullRequestUrls]),
-    ];
-    const discovery = directUrls.length
-      ? null
-      : await this.github.discoverIssuePullRequests(teamId, linear.issue.url);
-    const urls = [
-      ...new Set([...directUrls, ...(discovery?.pullRequestUrls ?? [])]),
-    ];
-    const diagnostics: SpecificationContextDiagnostic[] = [
-      ...(discovery?.diagnostics ?? []),
-    ];
-    const pullRequests = await Promise.all(
-      urls.map(async (url, index) => {
-        try {
-          const result = await this.github.getPullRequest(
-            teamId,
-            url,
-            index === 0,
-          );
-          diagnostics.push(...result.diagnostics);
-          return result.pullRequest;
-        } catch (error) {
-          const sourceError =
-            error instanceof ContextSourceError
-              ? error
-              : new ContextSourceError(
-                  "GITHUB",
-                  "GITHUB_PR_RESOLUTION_FAILED",
-                  error instanceof Error ? error.message : String(error),
-                  url,
-                );
-          diagnostics.push({
-            code: sourceError.code,
-            level: "WARNING",
-            message: sourceError.message,
-            reference: sourceError.reference,
-            source: "GITHUB",
-          });
-          return minimalPullRequest(url, index === 0);
-        }
-      }),
+    const resolved = await resolveSpecTaskContext(
+      { issueRef, pullRequestUrls: explicitPullRequestUrls, goal },
+      teamId,
+      this.linear,
+      this.github,
     );
-    const completeness = diagnostics.some(
-      (diagnostic) =>
-        diagnostic.level === "WARNING" || diagnostic.level === "ERROR",
-    )
-      ? "PARTIAL"
-      : "COMPLETE";
-    const context = testGenerationContextSchema.parse({
-      issue: linear.issue,
-      pullRequests,
-      resolution: { completeness, diagnostics },
-    });
-    return { completeness, context, diagnostics };
+    return {
+      context: resolved.context,
+      completeness: resolved.context.resolution.completeness,
+      diagnostics: resolved.manifest.diagnostics,
+      manifest: resolved.manifest,
+    };
   }
-}
-
-function minimalPullRequest(url: string, isPrimary: boolean) {
-  const reference = parsePullRequestUrl(url);
-  return specificationPullRequestContextSchema.parse({
-    id: url,
-    isPrimary,
-    number: reference.number,
-    organization: reference.owner,
-    repository: `${reference.owner}/${reference.repository}`,
-    title: `Pull Request #${reference.number}`,
-    url,
-  });
 }

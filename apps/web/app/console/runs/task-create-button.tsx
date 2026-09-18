@@ -12,6 +12,8 @@ import { TaskCreateRequest, type TaskCreateDraft } from "./task-create";
 
 const emptyDraft: TaskCreateDraft = {
   issueRef: "",
+  goal: "",
+  title: "",
   pullRequestUrls: "",
   targetUrls: "",
   profileStrategy: "REQUESTER",
@@ -89,7 +91,15 @@ export function TaskCreateButton({
     field: K,
     value: TaskCreateDraft[K],
   ) {
-    setDraft((current) => ({ ...current, [field]: value }));
+    setDraft((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === "issueRef" &&
+      !String(value).trim() &&
+      current.profileStrategy === "ISSUE_ASSIGNEE"
+        ? { profileStrategy: "REQUESTER" as const }
+        : {}),
+    }));
     setError(null);
   }
 
@@ -138,7 +148,7 @@ export function TaskCreateButton({
               id={descriptionId}
               className="mt-1.5 text-sm leading-6 text-muted-foreground"
             >
-              分析 Issue 和 PR，生成测试用例并在指定环境执行。
+              根据 Issue、PR 或测试说明生成用例，并在指定环境执行。
             </p>
           </div>
           <Button
@@ -162,12 +172,11 @@ export function TaskCreateButton({
         >
           <div className="grid min-h-0 gap-5 overflow-y-auto">
             <Field
-              label="Issue 链接或编号"
+              label="Issue 链接或编号（选填）"
               description="支持 Linear Issue 链接或编号，例如 ENG-123。"
             >
               <Input
                 autoFocus
-                required
                 maxLength={500}
                 disabled={busy}
                 autoComplete="off"
@@ -179,7 +188,7 @@ export function TaskCreateButton({
             </Field>
             <Field
               label="GitHub PR 链接（选填）"
-              description="每行一个，最多 25 个；留空时自动查找 Issue 关联的 PR。"
+              description="每行一个，最多 25 个；可直接通过 PR 创建，无需 Issue。留空时尝试查找 Issue 关联 PR。"
             >
               <Textarea
                 rows={3}
@@ -191,6 +200,29 @@ export function TaskCreateButton({
                 onChange={(event) =>
                   update("pullRequestUrls", event.target.value)
                 }
+              />
+            </Field>
+            <Field
+              label="测试说明（选填）"
+              description="Issue、PR 和测试说明至少填写一项。请说明本次需要验证的操作及预期结果。"
+            >
+              <Textarea
+                rows={3}
+                maxLength={20_000}
+                disabled={busy}
+                value={draft.goal ?? ""}
+                onChange={(event) => update("goal", event.target.value)}
+              />
+            </Field>
+            <Field
+              label="任务名称（选填）"
+              description="留空时根据分析来源自动命名。"
+            >
+              <Input
+                maxLength={500}
+                disabled={busy}
+                value={draft.title ?? ""}
+                onChange={(event) => update("title", event.target.value)}
               />
             </Field>
             <Field
@@ -224,7 +256,10 @@ export function TaskCreateButton({
               >
                 <option value="REQUESTER">使用我的浏览器身份</option>
                 <option value="EXPLICIT_PROFILE">指定我的浏览器身份</option>
-                <option value="ISSUE_ASSIGNEE">
+                <option
+                  value="ISSUE_ASSIGNEE"
+                  disabled={!draft.issueRef.trim()}
+                >
                   使用 Issue 负责人的浏览器身份
                 </option>
                 <option value="EPHEMERAL">使用临时会话</option>

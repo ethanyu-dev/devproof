@@ -17,6 +17,32 @@ const draft: TaskCreateDraft = {
 };
 
 describe("manual task creation", () => {
+  it.each([
+    {
+      issueRef: "",
+      goal: "",
+      pullRequestUrls: "https://github.com/Acme/Web/pull/42/files?diff=split",
+    },
+    { issueRef: "", goal: "保存后显示成功状态", pullRequestUrls: "" },
+  ])(
+    "creates a manual task without an Issue: $goal $pullRequestUrls",
+    (context) => {
+      const input = taskCreateInput(
+        { ...draft, ...context },
+        "manual-test-key",
+      );
+      expect(input.kind).toBe("SPEC_TASK");
+      expect(input).not.toHaveProperty("issueRef");
+    },
+  );
+  it("rejects owner identity for a PR-only task", () => {
+    expect(() =>
+      taskCreateInput(
+        { ...draft, issueRef: "", profileStrategy: "ISSUE_ASSIGNEE" },
+        "manual-test-key",
+      ),
+    ).toThrow("负责人身份需要填写 Issue");
+  });
   it("submits normalized Issue, PRs and every environment through the existing task contract", async () => {
     const api = vi.fn().mockResolvedValue({ id: "new-task" });
     const request = new TaskCreateRequest(api);
@@ -27,7 +53,7 @@ describe("manual task creation", () => {
     const input = JSON.parse(init.body);
     expect(taskExecutionCreateInputSchema.safeParse(input).success).toBe(true);
     expect(input).toMatchObject({
-      kind: "ISSUE_SPEC",
+      kind: "SPEC_TASK",
       profilePolicy: {
         strategy: "REQUESTER",
         onUnavailable: "WAIT_FOR_PROFILE",
@@ -107,7 +133,7 @@ describe("manual task creation", () => {
   });
 
   it.each([
-    { change: { issueRef: "  " }, message: "Issue" },
+    { change: { issueRef: "  ", pullRequestUrls: "" }, message: "至少填写" },
     { change: { issueRef: "not-an-issue" }, message: "Linear" },
     {
       change: { issueRef: "https://linear.app.evil.test/acme/issue/ENG-123" },

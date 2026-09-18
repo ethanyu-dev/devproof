@@ -1,3 +1,4 @@
+import { isSpecTask } from "@devproof/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -61,11 +62,12 @@ export class TaskProfileResolverService {
       include: {
         executionRuns: { select: { id: true } },
         profileBinding: true,
+        stages: true,
       },
       where: { id: taskExecutionId, teamId },
     });
     if (!task) throw new NotFoundException("Task execution was not found.");
-    if (!task.profileBinding || task.kind !== "ISSUE_SPEC") {
+    if (!task.profileBinding || !isSpecTask(task)) {
       throw new ConflictException(
         "This task does not support profile selection.",
       );
@@ -106,11 +108,20 @@ export class TaskProfileResolverService {
     const parsedInput = taskExecutionCreateInputSchema.parse(
       task.inputSnapshot,
     );
-    if (parsedInput.kind !== "ISSUE_SPEC") {
+    if (!isSpecTask(parsedInput)) {
       throw new ConflictException(
         "This task does not support profile selection.",
       );
     }
+    taskExecutionCreateInputSchema.parse({
+      ...parsedInput,
+      profilePolicy: input.profilePolicy,
+    });
+    const analysisPending =
+      task.stages?.some(
+        (stage) =>
+          stage.type === "SPEC_ANALYSIS" && stage.status !== "SUCCEEDED",
+      ) ?? false;
     const previousRequestedProfileIds = requestedProfileIds(
       task.profileBinding.requestedProfileId,
       task.profileBinding.externalIdentitySnapshot,
@@ -153,30 +164,35 @@ export class TaskProfileResolverService {
       }
       await tx.taskExecution.update({
         data: {
-          currentStage: "PROFILE_RESOLUTION",
+          ...(!analysisPending
+            ? {
+                currentStage: "PROFILE_RESOLUTION" as const,
+                lifecycle: "RUNNING" as const,
+                waitingReason: null,
+              }
+            : {}),
           deadlineAt: refreshedDeadlineAt,
           inputSnapshot: json({
             ...parsedInput,
             profilePolicy: input.profilePolicy,
           }),
-          lifecycle: "RUNNING",
           ...(claimRequester
             ? { requestedByKind: "USER", requestedByUserId: userId }
             : {}),
-          waitingReason: null,
         },
         where: { id: task.id },
       });
-      await tx.taskExecutionStage.updateMany({
-        data: {
-          finishedAt: null,
-          lastError: Prisma.JsonNull,
-          startedAt: now,
-          status: "PENDING",
-          waitingReason: null,
-        },
-        where: { taskExecutionId: task.id, type: "PROFILE_RESOLUTION" },
-      });
+      if (!analysisPending)
+        await tx.taskExecutionStage.updateMany({
+          data: {
+            finishedAt: null,
+            lastError: Prisma.JsonNull,
+            startedAt: now,
+            status: "PENDING",
+            waitingReason: null,
+          },
+          where: { taskExecutionId: task.id, type: "PROFILE_RESOLUTION" },
+        });
       await tx.taskExecutionEvent.create({
         data: taskEvent(
           teamId,
@@ -191,7 +207,7 @@ export class TaskProfileResolverService {
         ),
       });
     });
-    return this.resolve(task.id);
+    return analysisPending ? null : this.resolve(task.id);
   }
 
   async releasePendingRequests(
@@ -231,7 +247,7 @@ export class TaskProfileResolverService {
       where: {
         cancelRequestedAt: null,
         deadlineAt: { gt: new Date() },
-        kind: "ISSUE_SPEC",
+        kind: { in: ["SPEC_TASK", "ISSUE_SPEC"] },
         lifecycle: { in: ["RUNNING", "WAITING_INPUT"] },
         stages: {
           some: {
@@ -405,7 +421,7 @@ export class TaskProfileResolverService {
       include: bindingInclude,
       where: { id: taskExecutionId },
     });
-    if (!task?.profileBinding || task.kind !== "ISSUE_SPEC") return null;
+    if (!task?.profileBinding || !isSpecTask(task)) return null;
     if (["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle)) {
       return task.profileBinding;
     }
@@ -415,7 +431,7 @@ export class TaskProfileResolverService {
     if (analysis?.status !== "SUCCEEDED") return task.profileBinding;
 
     const input = taskExecutionCreateInputSchema.parse(task.inputSnapshot);
-    if (input.kind !== "ISSUE_SPEC") return task.profileBinding;
+    if (!isSpecTask(input)) return task.profileBinding;
     const policy = taskProfilePolicySchema.parse(input.profilePolicy);
     const environment = record(task.environmentSnapshot);
     const deployments = task.deployments ?? [];
@@ -612,7 +628,7 @@ export class TaskProfileResolverService {
       };
     }
     const assignee = testGenerationContextSchema.parse(snapshot.context).issue
-      .assignee;
+      ?.assignee;
     if (!assignee) {
       return {
         code: "PROFILE_ISSUE_UNASSIGNED",

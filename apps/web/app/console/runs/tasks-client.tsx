@@ -222,7 +222,7 @@ export function TasksClient() {
             value={filters.kind}
           >
             <option value="ALL">全部类型</option>
-            <option value="ISSUE_SPEC">Issue 分析任务</option>
+            <option value="SPEC_TASK">Spec 分析任务</option>
             <option value="DIRECT_RUN">直接任务</option>
             <option value="LEGACY_RUN">历史迁移任务</option>
           </Select>

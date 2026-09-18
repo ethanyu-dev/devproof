@@ -151,7 +151,7 @@ export interface TaskDetail {
   finishedAt: string | null;
   id: string;
   input: unknown;
-  kind: "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
+  kind: "SPEC_TASK" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
   lifecycle: string;
   profileBinding: {
     failureCode: string | null;

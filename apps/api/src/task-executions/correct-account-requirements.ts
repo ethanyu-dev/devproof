@@ -1,3 +1,4 @@
+import { isSpecTask } from "@devproof/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   BadRequestException,
@@ -99,10 +100,9 @@ export async function correctAccountRequirements(
       throw new ConflictException("已结束或已取消任务不能原地修复。");
     const now = new Date();
     const taskInput = taskExecutionCreateInputSchema.parse(task.inputSnapshot);
-    const hitl =
-      taskInput.kind === "ISSUE_SPEC"
-        ? taskInput.hitlPolicy
-        : taskInput.run.hitlPolicy;
+    const hitl = isSpecTask(taskInput)
+      ? taskInput.hitlPolicy
+      : taskInput.run.hitlPolicy;
     const changes = input.cases.map((change) => {
       const row = task.caseExecutions.find(
         (c) => c.id === change.caseExecutionId,

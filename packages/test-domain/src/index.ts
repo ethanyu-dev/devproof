@@ -347,6 +347,7 @@ function taskProjection(
 }
 
 export interface SpecificationGenerationContext {
+  goal?: string | undefined;
   issue: {
     description: string;
     id: string;
@@ -356,7 +357,7 @@ export interface SpecificationGenerationContext {
     state: string;
     title: string;
     url: string;
-  };
+  } | null;
   pullRequests: Array<{
     body: string;
     changedFiles: string[];
@@ -402,8 +403,19 @@ export function generateBusinessTestSpec(
   context: SpecificationGenerationContext,
 ): GeneratedBusinessTestSpecification {
   const primaryPullRequest = selectPrimaryPullRequest(context);
+  const title =
+    context.issue?.title ??
+    primaryPullRequest?.title ??
+    context.goal?.slice(0, 200) ??
+    "测试任务";
+  const reference =
+    context.issue?.identifier ??
+    (primaryPullRequest
+      ? `${primaryPullRequest.repository}#${primaryPullRequest.number}`
+      : "测试说明");
   const sourceTexts = [
-    context.issue.description,
+    context.goal ?? "",
+    context.issue?.description ?? "",
     ...context.pullRequests.flatMap((pullRequest) => [
       pullRequest.title,
       pullRequest.body,
@@ -414,7 +426,7 @@ export function generateBusinessTestSpec(
   ).slice(0, 10);
   const expectations = extracted.length
     ? extracted
-    : [`用户可以完成「${context.issue.title}」，且结果符合 Issue 描述。`];
+    : [`用户可以完成「${title}」，且结果符合测试说明。`];
   const changedAreas = unique(
     context.pullRequests
       .flatMap((pullRequest) => pullRequest.changedFiles)
@@ -422,14 +434,15 @@ export function generateBusinessTestSpec(
       .filter((area): area is string => area !== null),
   ).slice(0, 3);
   const comparisonSources = [
-    "Issue",
+    ...(context.issue ? ["Issue"] : []),
+    ...(context.goal ? ["测试说明"] : []),
     ...(context.pullRequests.length ? ["Pull Request"] : []),
   ].join("、");
 
   const cases = expectations.map((expected, index) => {
     const preconditions = [
-      `与 ${context.issue.identifier} 关联的变更已处于可验证状态`,
-      `使用具备「${context.issue.title}」业务流程所需权限的测试身份`,
+      `与 ${reference} 关联的变更已处于可验证状态`,
+      `使用具备「${title}」业务流程所需权限的测试身份`,
     ];
     if (primaryPullRequest?.deploymentUrl) {
       preconditions[0] = `GitHub PR ${primaryPullRequest.repository}#${primaryPullRequest.number} 的部署产物可访问`;
@@ -441,18 +454,15 @@ export function generateBusinessTestSpec(
       authRole: "default",
       evidence: inferEvidence(expected),
       expected: [expected],
-      name: truncate(
-        `${context.issue.identifier} · ${caseName(expected, index)}`,
-        500,
-      ),
+      name: truncate(`${reference} · ${caseName(expected, index)}`, 500),
       preconditions,
       rationale: truncate(
-        `由 ${context.issue.identifier} 的验收描述自动生成${scopeHint}；结论必须绑定可追溯证据。`,
+        `由 ${reference} 的验收描述自动生成${scopeHint}；结论必须绑定可追溯证据。`,
         5_000,
       ),
       steps: [
         {
-          action: `进入与「${context.issue.title}」相关的业务入口`,
+          action: `进入与「${title}」相关的业务入口`,
           order: 1,
         },
         {
@@ -468,7 +478,8 @@ export function generateBusinessTestSpec(
   });
 
   const sources = [
-    "Linear Issue",
+    ...(context.issue ? ["Linear Issue"] : []),
+    ...(context.goal ? ["测试说明"] : []),
     ...(context.pullRequests.length === 1
       ? ["GitHub PR"]
       : context.pullRequests.length > 1
@@ -478,7 +489,7 @@ export function generateBusinessTestSpec(
   return {
     cases,
     summary: truncate(
-      `围绕「${context.issue.title}」生成 ${cases.length} 个业务验证场景。` +
+      `围绕「${title}」生成 ${cases.length} 个业务验证场景。` +
         `生成依据：${sources.join("、")}。` +
         (changedAreas.length
           ? `代码变更主要涉及 ${changedAreas.join("、")}。`
@@ -492,10 +503,6 @@ export function selectPrimaryPullRequest(
   context: SpecificationGenerationContext,
 ) {
   return (
-    context.pullRequests.find(
-      (pullRequest) => pullRequest.isPrimary && pullRequest.deploymentUrl,
-    ) ??
-    context.pullRequests.find((pullRequest) => pullRequest.deploymentUrl) ??
     context.pullRequests.find((pullRequest) => pullRequest.isPrimary) ??
     context.pullRequests[0] ??
     null
