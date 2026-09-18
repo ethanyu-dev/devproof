@@ -52,6 +52,8 @@ async function bootstrap() {
   // Full context archives include the exact model images; only the leased event
   // ingestion route accepts these larger payloads. Other routes retain 1 MiB.
   rawFastify.addHook("onRoute", (route) => {
+    if (route.url === "/runtime/:runtimeId/sessions/:sessionId/auth-snapshot")
+      route.bodyLimit = 25 * 1024 * 1024;
     if (route.url === "/internal/v2/runtime/tasks/:id/events")
       route.bodyLimit = 26 * 1024 * 1024;
   });

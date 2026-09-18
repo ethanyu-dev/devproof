@@ -1,3 +1,4 @@
+import { browserConnection } from "../runtime/direct-control-ticket.js";
 import { resolveAccountReplacement } from "./account-replacement.js";
 import {
   ConflictException,
@@ -175,6 +176,21 @@ export class RunHitlBrowserService {
       throw new GoneException("Browser control lease has expired.");
     }
     return { controlId, expiresAt };
+  }
+
+  async connection(
+    current: AuthContext,
+    runId: string,
+    interventionId: string,
+    controlId: string,
+  ) {
+    const { session, lease } = await this.controlledSession(
+      current,
+      runId,
+      interventionId,
+      controlId,
+    );
+    return browserConnection(current, session, lease.expiresAt);
   }
 
   async input(
@@ -391,7 +407,7 @@ export class RunHitlBrowserService {
     ) {
       throw new GoneException("Browser control is no longer active.");
     }
-    return { context, session };
+    return { context, session, lease };
   }
 
   private consumeInputBudget(controlId: string, count: number) {

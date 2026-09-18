@@ -2366,3 +2366,21 @@ model RunObservationBinding {
   @@index([runId, attemptId, criterionId, targetId])
   @@map("run_observation_bindings")
 }
+
+// Kept independently of Profile deletion so encrypted objects remain retryably collectible.
+model BrowserAuthSnapshot {
+  // Retain tombstones so even an interrupted/late object upload remains collectible.
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz
+  id          String   @id @default(uuid()) @db.Uuid
+  profileId   String   @map("profile_id") @db.Uuid
+  teamId      String   @map("team_id") @db.Uuid
+  generation  Int
+  uploadedAt  DateTime? @map("uploaded_at") @db.Timestamptz
+  storageKey  String   @unique @map("storage_key")
+  checksum    String
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([profileId, generation])
+  @@index([createdAt])
+  @@map("browser_auth_snapshots")
+}

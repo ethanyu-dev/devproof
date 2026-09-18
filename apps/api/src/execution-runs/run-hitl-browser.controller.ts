@@ -74,6 +74,22 @@ export class RunHitlBrowserController {
     );
   }
 
+  @Post(":runId/interventions/:interventionId/browser/connection")
+  connection(
+    @CurrentAuth() current: AuthContext,
+    @Param("runId") runId: string,
+    @Param("interventionId") interventionId: string,
+    @Body() body: unknown,
+  ) {
+    const input = parseBody(controlSchema, body);
+    return this.browser.connection(
+      current,
+      runId,
+      interventionId,
+      input.controlId,
+    );
+  }
+
   @Post(":runId/interventions/:interventionId/browser/control/input")
   input(
     @CurrentAuth() current: AuthContext,

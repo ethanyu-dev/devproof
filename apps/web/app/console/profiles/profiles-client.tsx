@@ -43,6 +43,7 @@ import {
   LoadingState,
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
+import { BrowserControlConnection } from "@/lib/browser-connection";
 import { BrowserInputQueue } from "@/lib/browser-input-queue";
 import {
   BrowserPointerController,
@@ -251,7 +252,7 @@ export function ProfilesClient() {
   return (
     <div className={styles.page}>
       <PageHeader
-        description="提前登录常用网站，保存身份供后续任务复用，也可在这里续期登录或授权。"
+        description="在你的身份库中分别保存各网站、环境和角色的登录状态，供后续任务复用。"
         title="浏览器身份"
         actions={
           <>
@@ -296,7 +297,7 @@ export function ProfilesClient() {
           <Card className={styles.sidebar}>
             <section aria-labelledby="profile-list-heading">
               <header className={styles.listHeader}>
-                <h2 id="profile-list-heading">我的浏览器身份</h2>
+                <h2 id="profile-list-heading">我的身份库</h2>
                 <span>{profiles.length}</span>
               </header>
               <div className={styles.list}>
@@ -351,7 +352,11 @@ export function ProfilesClient() {
                         {displayLabel(selected.status)}
                       </Badge>
                     </div>
-                    <p>登录状态仅保存在执行节点，用于后续任务验证。</p>
+                    <p>
+                      {selected.snapshotDistributionAvailable
+                        ? "各网站登录独立保存；兼容的登录快照可加密分发给执行节点，用于后续任务验证。"
+                        : "登录状态仅保存在执行节点，用于后续任务验证。"}
+                    </p>
                   </div>
                   <Button
                     className={`dp-profile-operation-button${operation === "prepare" || operation === "reauth" ? " is-loading" : ""}`}
@@ -645,15 +650,24 @@ function ProfileBrowser({
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const lastFrameAt = useRef(0);
   const lastPointerMoveAt = useRef(0);
+  const connection = useRef<{
+    profileId: string;
+    sessionId: string | undefined;
+    channel: BrowserControlConnection;
+  } | null>(null);
   const inputQueue = useMemo(
     () =>
-      new BrowserInputQueue((events) =>
-        consoleApi(`/browser-profiles/${profile.id}/browser/input`, {
-          body: JSON.stringify({ events }),
-          method: "POST",
-        }),
-      ),
-    [profile.id],
+      new BrowserInputQueue((events) => {
+        const current = connection.current;
+        if (
+          !current ||
+          current.profileId !== profile.id ||
+          current.sessionId !== profile.activeSession?.id
+        )
+          return Promise.reject(new Error("浏览器会话已切换，请重新操作。"));
+        return current.channel.input(events);
+      }),
+    [profile.id, profile.activeSession?.id],
   );
 
   const send = useCallback(
@@ -696,10 +710,20 @@ function ProfileBrowser({
     lastFrameAt.current = Date.now();
     setStreamStatus("connecting");
     const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-    const source = new EventSource(
-      `/console/api/browser-profiles/${profile.id}/browser/stream?pixelRatio=${pixelRatio}`,
-      { withCredentials: true },
-    );
+    const source = new BrowserControlConnection({
+      connectionPath: `/browser-profiles/${profile.id}/browser/connection`,
+      streamUrl: `/console/api/browser-profiles/${profile.id}/browser/stream?pixelRatio=${pixelRatio}`,
+      relayInput: (events) =>
+        consoleApi(`/browser-profiles/${profile.id}/browser/input`, {
+          method: "POST",
+          body: JSON.stringify({ events }),
+        }),
+    });
+    connection.current = {
+      profileId: profile.id,
+      sessionId: profile.activeSession?.id,
+      channel: source,
+    };
     source.onmessage = (message) => {
       let event: {
         capturedAt?: string;
@@ -753,8 +777,9 @@ function ProfileBrowser({
     return () => {
       window.clearInterval(watchdog);
       source.close();
+      if (connection.current?.channel === source) connection.current = null;
     };
-  }, [profile.id]);
+  }, [profile.id, profile.activeSession?.id]);
 
   useEffect(() => {
     const release = () => pointerController.cancel();
@@ -995,6 +1020,8 @@ function ProfileBrowser({
                 <span>
                   <strong>验证并发登录：</strong>使用 4
                   个独立会话检查兼容性。部分站点可能要求重新登录；未勾选时只保存串行登录状态。
+                  {profile.snapshotDistributionAvailable &&
+                    " 启用后会加密保存认证快照，供兼容的执行节点按需获取；每个节点在执行前再次验证登录。"}
                 </span>
               </label>
             ) : null}

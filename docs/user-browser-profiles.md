@@ -1,6 +1,6 @@
 # User Browser Profiles
 
-User Browser Profiles let a Task reuse authenticated browser state without moving cookies or a browser directory into the DevProof control plane. DevProof stores identity, authorization, state, leases, and audit records; cookies, local storage, IndexedDB, history, and browser files stay on the bound Browser Runtime host.
+User Browser Profiles let a Task reuse authenticated browser state. By default, browser data stays on the bound Runtime host. Optional protocol 1.19 distribution transfers encrypted authentication snapshots through the API into object storage; only trusted execution VMs hold the decryption key. Full browser directories remain local. See [direct browser access and distributed authentication](browser-direct-access-and-snapshots.md) for configuration and rollout.
 
 The default strategy remains `EPHEMERAL`, so an upgrade never starts reusing login state implicitly.
 
@@ -107,11 +107,11 @@ The 30-day threshold is fixed. Runtime hosts must use reliable clock synchroniza
 
 ## Security and privacy invariants
 
-- Browser state never enters PostgreSQL, Redis, object storage, prompts, or logs.
+- Plaintext authentication snapshots never enter PostgreSQL, Redis, object storage, prompts, or logs. Opt-in distribution stores ciphertext in object storage; frame/input transport uses the selected direct or relay channel.
 - The Runtime key is absent from all external responses and exported logs.
 - User, Team, issuer, stable external ID, hostname grant, and trigger source are checked together.
-- A Profile remains affine to one Runtime and is never copied between hosts.
-- Persistent Profile directories remain exclusive; isolated-auth Tasks share only an immutable local authentication snapshot and receive separate contexts.
+- The preparation directory remains affine to one Runtime. Opt-in isolated execution can load an immutable encrypted snapshot on other authorized Runtimes.
+- Persistent Profile directories remain exclusive; isolated-auth Tasks pin an immutable snapshot generation and receive separate contexts. Concurrency permits apply globally across Runtimes.
 - Disable, delete, expiry, or membership loss blocks new scheduling before physical deletion.
 - Preparation and execution sessions are distinct and auditable.
 

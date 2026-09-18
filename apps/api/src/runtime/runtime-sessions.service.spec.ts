@@ -468,3 +468,60 @@ describe("RuntimeSessionsService lifecycle cleanup", () => {
     expect(commands.execute).not.toHaveBeenCalled();
   });
 });
+
+describe("authentication snapshot rollout compatibility", () => {
+  it.each([
+    [18, false],
+    [19, true],
+    [19, false],
+  ] as const)(
+    "gates new fields on protocol 1.%s and distribution capability %s",
+    async (minor, capable) => {
+      const previous = process.env.BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED;
+      process.env.BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED = "true";
+      try {
+        const commands = {
+          execute: vi.fn().mockResolvedValue({
+            status: "SUCCEEDED",
+            result: { generation: 4 },
+          }),
+        };
+        const sessions = new RuntimeSessionsService(
+          {
+            browserRuntime: {
+              findUnique: vi.fn().mockResolvedValue({
+                capabilities: capable ? ["distributed-auth-v1"] : [],
+              }),
+            },
+          } as never,
+          {} as never,
+          commands as never,
+          {} as never,
+          {} as never,
+        );
+        vi.spyOn(sessions as never, "ownedSession" as never).mockResolvedValue({
+          profileMode: "PERSISTENT",
+          userBrowserProfileId: "profile",
+          profileKey: "site-a",
+          protocolMinor: minor,
+          status: "HUMAN_CONTROL",
+        } as never);
+        await sessions.publishProfileSnapshot({} as never, "session", 4, {
+          url: "https://example.com/dashboard",
+          exactLocation: true,
+        });
+        const payload = commands.execute.mock.calls[0]![0].payload;
+        expect(payload.verification.exactLocation).toBe(
+          minor >= 19 ? true : undefined,
+        );
+        expect(payload.publishDistributed).toBe(
+          minor >= 19 && capable ? true : undefined,
+        );
+      } finally {
+        if (previous === undefined)
+          delete process.env.BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED;
+        else process.env.BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED = previous;
+      }
+    },
+  );
+});

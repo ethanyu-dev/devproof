@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+import {
+  uploadSnapshot,
+  snapshotEncryptionKey,
+  downloadSnapshot,
+  verifyPortableSnapshot,
+} from "./distributed-auth-snapshots.js";
+import { startDirectControlServer } from "./direct-control-server.js";
+import type { DirectControlClaims } from "@devproof/runtime-protocol";
 import { fillFields } from "./fill-fields.js";
 import { comboboxClickTarget } from "./combobox-click.js";
 import { DomObservations } from "./dom-observation.js";
@@ -48,6 +56,7 @@ import {
   runtimeClientMessageSchema,
   type RuntimeSessionPermit,
   type AuthSnapshotReference,
+  type AuthSnapshotVerification,
   USER_PROFILE_INACTIVITY_TTL_SECONDS,
   runtimeCommandPayloadSchema,
   runtimeEventSchema,
@@ -147,6 +156,8 @@ interface RuntimeState {
 }
 
 interface LiveSession extends PersistedSession {
+  portableVerification?: AuthSnapshotVerification;
+  portableVerificationTask?: Promise<void>;
   networkProxy?: SsrfProxy;
   resumeState?: "OPEN" | "HUMAN_CONTROL";
   browserClosed?: boolean;
@@ -1221,6 +1232,7 @@ export class BrowserSessionManager {
   private readonly previewStreams = new Map<
     string,
     {
+      emit?: ((frame: RuntimeHumanPreviewFrame) => void) | undefined;
       capturing: boolean;
       consecutiveFailures: number;
       message: Extract<
@@ -1962,6 +1974,32 @@ export class BrowserSessionManager {
             command.ownerFencingToken ?? command.permit?.ownerFencingToken,
         });
     }
+    if (
+      command.commandType !== "session.close" &&
+      session.portableVerification
+    ) {
+      // STARTUP deliberately stays offline. Only a command with a live execution
+      // permit can verify the imported login, before any requested browser action.
+      session.portableVerificationTask ??= verifyPortableSnapshot(
+        session.page,
+        session.portableVerification,
+      );
+      // Keep rejected tasks cached: no later command may bypass a failed check.
+      await session.portableVerificationTask;
+      this.permits.assert(session, {
+        controlGeneration: command.permit?.controlGeneration,
+        ownerKind: command.permit?.ownerKind,
+        ownerTaskId: command.ownerTaskId ?? command.permit?.ownerTaskId,
+        ownerFencingToken:
+          command.ownerFencingToken ?? command.permit?.ownerFencingToken,
+      });
+      if (Date.now() >= Date.parse(command.deadlineAt))
+        throw codedError(
+          "DEADLINE_EXPIRED",
+          "Command expired during login verification.",
+        );
+      delete session.portableVerification;
+    }
     const parsed = runtimeCommandPayloadSchema.parse({
       commandType: command.commandType,
       payload: command.payload,
@@ -2012,6 +2050,24 @@ export class BrowserSessionManager {
         try {
           const snapshot = await operation;
           if (session.permit) this.permits.assert(session, undefined);
+          if (parsed.payload.publishDistributed) {
+            if (!verification)
+              throw new Error(
+                "Distributed snapshots require authentication verification.",
+              );
+            const saved = await readAuthSnapshot(this.profilesRoot, {
+              profileKey: parsed.payload.profileKey,
+              generation: parsed.payload.generation,
+            });
+            await uploadSnapshot(
+              this.store.value(),
+              session.sessionId,
+              parsed.payload,
+              { state: saved.state, verification },
+              this.profilesRoot,
+            );
+            if (session.permit) this.permits.assert(session, undefined);
+          }
           return {
             result: {
               ...snapshot,
@@ -3491,10 +3547,19 @@ export class BrowserSessionManager {
         networkProxy.setEnabled(this.permits.networkAllowed(descriptor));
       }
       const proxyServer = networkProxy?.server ?? this.proxyServer;
-      const snapshot = descriptor.authSnapshot
-        ? await readAuthSnapshot(this.profilesRoot, descriptor.authSnapshot)
+      const portable = descriptor.authSnapshot?.distributed
+        ? await downloadSnapshot(
+            this.store.value(),
+            descriptor.sessionId,
+            descriptor.authSnapshot,
+          )
         : undefined;
-      if (snapshotKey)
+      const snapshot =
+        portable ??
+        (descriptor.authSnapshot
+          ? await readAuthSnapshot(this.profilesRoot, descriptor.authSnapshot)
+          : undefined);
+      if (snapshotKey && !portable)
         await assertUserProfileCanOpen(this.profilesRoot, snapshotKey);
       const headless = process.env.DEVPROOF_HEADLESS !== "false";
       if (descriptor.profileMode === "PERSISTENT") {
@@ -3575,6 +3640,7 @@ export class BrowserSessionManager {
       const stepFrames = await this.loadStepFrames(descriptor.sessionId);
       const session: LiveSession = {
         ...descriptor,
+        ...(portable ? { portableVerification: portable.verification } : {}),
         ...(browser ? { browser } : {}),
         ...(networkProxy ? { networkProxy } : {}),
         consoleEntries: [],
@@ -3619,7 +3685,7 @@ export class BrowserSessionManager {
         );
       this.sessions.set(session.sessionId, session);
       await this.store.replaceSession(this.descriptor(session));
-      if (snapshotKey)
+      if (snapshotKey && !portable)
         await touchUserProfileMetadata(
           this.profilesRoot,
           snapshotKey,
@@ -4595,12 +4661,30 @@ export class BrowserSessionManager {
     }
   }
 
+  directSession(claims: DirectControlClaims) {
+    const session = this.sessions.get(claims.sessionId);
+    if (!session || session.fencingToken !== claims.fencingToken)
+      throw new Error("Browser control owns a stale session.");
+    const fence = {
+      sessionId: session.sessionId,
+      leaseToken: session.leaseToken,
+      fencingToken: session.fencingToken,
+      controlGeneration: claims.controlGeneration,
+    };
+    if (!session.permit)
+      throw new Error("Direct browser control requires session permits.");
+    this.ownedHumanSession(fence);
+    return fence;
+  }
+
   startPreview(
     message: Extract<RuntimeServerMessage, { type: "human.preview.subscribe" }>,
+    emit?: (frame: RuntimeHumanPreviewFrame) => void,
   ) {
     const session = this.ownedPreviewSession(message);
     this.stopPreview(message.streamId);
     const stream = {
+      emit,
       capturing: false,
       consecutiveFailures: 0,
       message,
@@ -4734,7 +4818,7 @@ export class BrowserSessionManager {
           fullPage: false,
           quality: message.quality,
         }));
-      this.emitPreview({
+      (stream.emit ?? this.emitPreview)({
         capturedAt: new Date().toISOString(),
         dataBase64: data.toString("base64"),
         fencingToken: session.fencingToken,
@@ -4874,6 +4958,7 @@ export class RuntimeClient {
     string,
     { commandType: RuntimeCommandType; controller: AbortController }
   >();
+  private directServer?: Awaited<ReturnType<typeof startDirectControlServer>>;
   private readonly manager: BrowserSessionManager;
 
   constructor(
@@ -4948,6 +5033,53 @@ export class RuntimeClient {
   }
 
   async start() {
+    if (process.env.DEVPROOF_AUTH_SNAPSHOT_KEY)
+      snapshotEncryptionKey(process.env.DEVPROOF_AUTH_SNAPSHOT_KEY);
+    if (process.env.DEVPROOF_DIRECT_CONTROL_PORT) {
+      this.directServer = await startDirectControlServer({
+        port: Number(process.env.DEVPROOF_DIRECT_CONTROL_PORT),
+        host: process.env.DEVPROOF_DIRECT_CONTROL_HOST ?? "127.0.0.1",
+        runtimeId: this.store.value().runtimeId,
+        publicKey: process.env.DEVPROOF_DIRECT_CONTROL_PUBLIC_KEY ?? "",
+        origins: (process.env.DEVPROOF_DIRECT_CONTROL_ORIGINS ?? "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+        handler: {
+          assert: (claims) => {
+            this.manager.directSession(claims);
+          },
+          preview: (claims, streamId, emit) =>
+            this.manager.startPreview(
+              {
+                ...this.manager.directSession(claims),
+                streamId,
+                type: "human.preview.subscribe",
+                intervalMs: 500,
+                quality: 85,
+              },
+              (frame) => {
+                const {
+                  leaseToken: _lease,
+                  fencingToken: _fence,
+                  streamId: _stream,
+                  sessionId: _session,
+                  ...safe
+                } = frame;
+                emit({ ...safe, type: "frame" });
+              },
+            ),
+          stopPreview: (streamId) => this.manager.stopPreview(streamId),
+          input: (claims, events) =>
+            this.manager.humanInput({
+              ...this.manager.directSession(claims),
+              events,
+              dispatchId: randomUUID(),
+              type: "human.input.dispatch",
+            }),
+        },
+      });
+    }
     await this.restoreProfileLifecycleEvents();
     this.manager.startProfileCleanup();
     while (!this.stopped) {
@@ -4981,6 +5113,7 @@ export class RuntimeClient {
 
   stop() {
     this.stopped = true;
+    void this.directServer?.close();
     this.manager.stopProfileCleanup();
     this.manager.disconnect();
     for (const session of this.manager.descriptors())
@@ -5048,7 +5181,12 @@ export class RuntimeClient {
               )
               .map((session) => ({ ...session, live: false })),
           ],
-          capabilities: [...RUNTIME_CAPABILITIES],
+          capabilities: [
+            ...RUNTIME_CAPABILITIES,
+            ...(process.env.DEVPROOF_AUTH_SNAPSHOT_KEY
+              ? ["distributed-auth-v1"]
+              : []),
+          ],
           ...identity,
           instanceNonce: randomUUID() + randomUUID(),
           protocol: RUNTIME_PROTOCOL,

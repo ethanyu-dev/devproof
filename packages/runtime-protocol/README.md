@@ -9,11 +9,22 @@ at most six native text fields from one observed form and does not submit it.
 Canonical observations preserve capture identity, frame/document identity,
 region lifecycle, relationships, state, coverage, and screenshot consistency.
 
-This draft still advertises minor 18. Allocate the next minor, update command
-minimums and negotiation tests, and publish a distinct Browser Runtime release
-before rollout. A stock v1.18/0.2.28 daemon does not contain this extension.
+The working branch now advertises minor 19 for the authentication distribution
+extension below. A stock v1.18/0.2.28 daemon does not contain these extensions.
+Publish and upgrade to the distinct Browser Runtime 0.2.32 release before rollout.
 See [Browser observation V2](../../docs/browser-observation-v2.md) for the current
 implementation, known blockers, migration, and rollback constraints.
+
+## Protocol 1.19 (Browser Runtime 0.2.32)
+
+Adds optional `distributed-auth-v1`, `authSnapshot.distributed` and
+`profile.snapshot.publishDistributed`. These fields are sent only to compatible
+Runtimes. Snapshot references contain identifiers, never credentials; transfer
+uses authenticated session-scoped HTTP routes carrying ciphertext. Optional
+`verification.exactLocation` preserves automatic URL verification for cloned contexts.
+Direct human control uses a separate ticket-authenticated WSS listener and keeps
+the existing gateway session leases and control generations. See
+[configuration and rollout](../../docs/browser-direct-access-and-snapshots.md).
 
 ## Released protocol history
 
