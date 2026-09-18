@@ -50,6 +50,19 @@ export class ExecutionRunController {
     return this.runs.detail(current, id);
   }
 
+  @Get(":id/attempts/:attemptId/evidence-catalog")
+  evidenceCatalog(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Param("attemptId") attemptId: string,
+    @Query("after") after?: string,
+  ) {
+    requireToolScope(current, "run:read");
+    if (after !== undefined && after.length > 500)
+      throw new BadRequestException("Invalid evidence cursor.");
+    return this.runs.evidenceCatalog(current, id, attemptId, after);
+  }
+
   @Get(":id/events")
   events(
     @CurrentToolAuth() current: ToolAuthContext,

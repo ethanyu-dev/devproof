@@ -8,6 +8,7 @@ export interface FailureSummary {
   detail: string;
   message: string;
   nextStep: string;
+  recoveryMessage?: string;
   occurrences: number;
   raw: string;
   signature: string;
@@ -113,6 +114,12 @@ export function summarizeTaskFailures(
       nextStep: invalidSchema
         ? "检查 Agent 工具定义与模型接口的兼容性，修复后再重试。"
         : (known?.[1] ?? "查看失败步骤和技术详情，确认原因后再重试。"),
+      ...(code === "WRITE_OUTCOME_UNKNOWN" && causeCode !== code
+        ? {
+            recoveryMessage:
+              "另需核实写入状态：系统尚不能排除业务写入，不代表已确认提交。核对业务数据后再重试。",
+          }
+        : {}),
       occurrences: 1,
       raw: JSON.stringify(task.error, null, 2),
       signature,

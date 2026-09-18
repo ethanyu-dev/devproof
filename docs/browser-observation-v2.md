@@ -1,8 +1,8 @@
 # Browser observation V2 (draft)
 
-Status: implemented behind a disabled-by-default creation flag, with known
-blocking defects. This branch is for review and follow-up fixes; it is not ready
-for production enablement.
+Status: implemented behind a disabled-by-default creation flag. The observation
+and recovery defects below have regression fixes; production enablement still
+requires mixed-version validation and a real workflow with eligible test data.
 
 ## Problem and intended behavior
 
@@ -31,13 +31,14 @@ evidence remains readable, and legacy criteria remain supported. Historical
 Specs are not automatically rewritten. The current execution defaults enable
 combined observation and focus; deltas and form sequences remain disabled.
 
-Agent protocol 2.21 carries the object contracts and evidence operations.
+Agent protocol 2.21 carries the object contracts and evidence operations;
+2.22 adds retained step contexts.
 Browser support also requires explicit structured observation, phase, and action
-observation capabilities. A stock Browser Runtime 0.2.28 installation is not
-sufficient: the local validation used a build containing this branch's changes.
-The draft still uses Browser protocol 1.18 and application version 0.2.28;
-allocate the next protocol minor and a distinct runtime release, and verify
-mixed-version negotiation before enabling the feature outside development.
+observation capabilities. Browser Runtime 0.2.29 contains the screenshot and
+label fixes below. It must be built from this branch and the installed service
+restarted; restarting `pnpm dev` does not update that service. Browser protocol
+remains 1.18 with capability negotiation. Finalize the protocol release and
+verify mixed-version negotiation before enabling the feature outside development.
 
 Migration `20260915144500_object_observation_bindings` adds an evidence table,
 foreign keys, and indexes. It does not backfill historical runs. Apply it before
@@ -49,9 +50,9 @@ Browser isolation, navigation policy, execution fencing, closure verification,
 and write auditing retain their existing responsibilities. An unknown write
 outcome cannot be relabeled as a verified absence of writes.
 
-## Known blockers from a real application run
+## Earlier real-run findings
 
-The most recent run produced two repeated-operation failures and one
+An earlier run produced two repeated-operation failures and one
 inconclusive result due to existing business data. The first two cases made
 25 and 41 successful model calls respectively. The second case selected the
 reference option and observed the enabled switch, but all 23 binding attempts
@@ -102,12 +103,53 @@ The four-turn history bound worked and reduced the final text request size,
 but this did not establish improved completion rates. The newer run split a
 previous case and changed the login strategy, so it is not a controlled A/B.
 
+## Fixes for the September 17 regression
+
+The follow-up run had 2 passed and 8 inconclusive criteria. The interface case
+made 19 explicit binding attempts: 9 unavailable observations, 8 unconfirmed
+entities, and 2 missing scopes. All 18 structured captures were drifted. Two
+other cases stopped correctly because their supplied account already had the
+records that their creation preconditions required to be absent.
+
+- Agent snapshots expose both their reading-view ID and canonical `captureId`.
+  Explicit binding converts only an exact cached ID to its own capture; old
+  IDs are never redirected to the latest page. API ownership and artifact
+  integrity checks remain in force.
+- Fallback label discovery traverses up to 16 ancestors, stops at form/dialog
+  boundaries, and requires one label and one control. A deeply wrapped Select
+  and an ambiguous multi-control fixture cover both outcomes.
+- All Playwright screenshot paths preserve the caret. The focused-input
+  Chromium regression reproduces default screenshot drift and then verifies
+  a capture with `caret: "initial"`. Actual document, text, modal, and control
+  changes still invalidate evidence. Optional `consistencyIssues` record the
+  failure category and frame/node IDs. This does not relax frame-wide mutation
+  checks for unrelated background changes.
+- Binding diagnostics include valid scope refs, candidate controls, selected
+  values, and missing label matches. Partial bindings count as unsuccessful.
+  After three failed explicit binds for one target on the same page state,
+  the Agent saves affected unresolved criteria as `INCONCLUSIVE` and is told
+  to continue independent criteria. Existing results are preserved; valid
+  later evidence can update the result. Recapturing unchanged content does
+  not reset the counter, while actual page progress does.
+- Failure cards separate the execution cause from a possible unknown write
+  outcome. No submission is inferred from the write guard alone.
+- New Spec generation separates independent creation/editing cases when their
+  data prerequisites differ. Editing requires explicit ownership and mutation
+  authorization plus restoration. Historical Specs are unchanged. For an
+  existing creation case, retry with the existing “重新填写测试账号” option and
+  provide eligible data; do not delete or alter someone else's existing record.
+
+Validation covers real Chromium capture and binding, the Runtime session path,
+Agent ID conversion and recovery/checkpoint continuation, API evidence
+integration, and failure/retry presentation. These regressions establish the
+fixes, not a real-world pass rate; the business workflow still needs a rerun.
+
 ## Merge and enablement checklist
 
-- [ ] Fix field-label association using a representative nested Select fixture.
-- [ ] Eliminate screenshot-induced false drift and retain real-drift rejection.
-- [ ] Separate view and capture IDs throughout hints, tools, and API validation.
-- [ ] Return actionable binding diagnostics and bound repeated failed binding.
+- [x] Fix field-label association using a representative nested Select fixture.
+- [x] Eliminate screenshot-induced false drift and retain real-drift rejection.
+- [x] Separate view and capture IDs throughout hints, tools, and API validation.
+- [x] Return actionable binding diagnostics and bound repeated failed binding.
 - [ ] Decouple focus from V2 evidence contracts and preserve phase progress.
 - [ ] Finalize Browser protocol/release versions and mixed-version tests.
 - [ ] Add end-to-end capture → screenshot → binding → acceptance regression tests.
@@ -115,6 +157,5 @@ previous case and changed the login strategy, so it is not a controlled A/B.
 - [ ] Run the real workflow with valid authentication and eligible test data,
       then compare fixed Spec/model/data conditions before claiming improvement.
 
-The prior component suites passed, but their fixtures did not cover these real
-integration failures. The known defects are documented here, not fixed by this
-PR preparation step.
+The original component fixtures missed these integration failures. The new
+regressions cover the reproduced defects; the unchecked rollout work remains.

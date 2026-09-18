@@ -22,6 +22,7 @@ const reason: Record<string, string> = {
   OBSERVATION_DRIFTED: "截图期间状态发生变化",
   OBSERVATION_SCOPE_INCOMPLETE: "观察范围不完整",
   STATE_UNREADABLE: "尚未读到明确状态",
+  STATE_TYPE_MISMATCH: "Spec 状态类型与控件不一致，需重新生成",
 };
 
 export function ObjectEvidence(props: {
@@ -82,31 +83,44 @@ export function ObjectEvidence(props: {
           target.bindingIds.includes(b.id),
         );
         const latest = selected.at(-1);
+        const requirement = contract.targets.find(
+          (t) => t.targetId === target.targetId,
+        )!;
+        const referenceOnly =
+          "identity" in requirement &&
+          requirement.assertions.every((a) => a.expected === undefined);
         const refs = new Set(selected.flatMap((b) => b.evidenceRefs));
         return (
           <section key={target.targetId} className="rounded-md border p-3">
             <b>{target.label}</b>
             <p>
-              {readiness[target.readiness]} · {evaluation[target.evaluation]}
+              {readiness[target.readiness]} ·{" "}
+              {referenceOnly && target.evaluation === "MATCHED"
+                ? "参照已记录"
+                : evaluation[target.evaluation]}
             </p>
-            {latest?.facts.map((f) => (
-              <p key={f.assertionId}>
-                {
-                  contract.targets
-                    .find((t) => t.targetId === target.targetId)
-                    ?.assertions.find((a) => a.assertionId === f.assertionId)
-                    ?.subject.label
-                }
-                ：
-                {f.actual === undefined
-                  ? "未知"
-                  : typeof f.actual === "boolean"
-                    ? f.actual
-                      ? "是"
-                      : "否"
-                    : f.actual}
-              </p>
-            ))}
+            {latest?.facts.map((f) => {
+              const assertion = requirement.assertions.find(
+                (a) => a.assertionId === f.assertionId,
+              );
+              return (
+                <p key={f.assertionId}>
+                  {assertion
+                    ? "label" in assertion
+                      ? assertion.label
+                      : assertion.subject.label
+                    : f.assertionId}
+                  ：
+                  {f.actual === undefined
+                    ? "未知"
+                    : typeof f.actual === "boolean"
+                      ? f.actual
+                        ? "是"
+                        : "否"
+                      : f.actual}
+                </p>
+              );
+            })}
             {target.reasons.length > 0 && (
               <p className="text-muted-foreground">
                 {target.reasons

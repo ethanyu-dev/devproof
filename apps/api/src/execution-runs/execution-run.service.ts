@@ -1,3 +1,7 @@
+import {
+  resolveAccountReplacement,
+  accountReplacementState,
+} from "./account-replacement.js";
 import { env } from "../config/env.js";
 import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -691,6 +695,60 @@ export class ExecutionRunService {
     };
   }
 
+  async evidenceCatalog(
+    current: ToolAuthContext,
+    id: string,
+    attemptId: string,
+    after?: string,
+  ) {
+    await this.requireRun(current.team.id, id);
+    const attempt = await this.prisma.runAttempt.findFirst({
+      where: { id: attemptId, runId: id, teamId: current.team.id },
+    });
+    if (!attempt) throw new NotFoundException("Attempt not found.");
+    const result = isRecord(attempt.result) ? attempt.result : {};
+    const recoveryVerification =
+      isRecord(result.error) &&
+      isRecord(result.error.details) &&
+      isRecord(result.error.details.verification)
+        ? result.error.details.verification
+        : {};
+    const catalogValue =
+      result.evidenceCatalog ?? recoveryVerification.evidenceCatalog;
+    const catalog = isRecord(catalogValue) ? catalogValue : null;
+    const where = {
+      attemptId,
+      runId: id,
+      teamId: current.team.id,
+      ...(typeof catalog?.sealedAt === "string"
+        ? { createdAt: { lte: new Date(catalog.sealedAt) } }
+        : {}),
+    };
+    const rows = await this.prisma.runEvidence.findMany({
+      where: { ...where, ...(after ? { externalId: { gt: after } } : {}) },
+      orderBy: { externalId: "asc" },
+      take: 201,
+      select: {
+        id: true,
+        externalId: true,
+        kind: true,
+        label: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+    return {
+      version: 1,
+      runId: id,
+      attemptId,
+      total: await this.prisma.runEvidence.count({ where }),
+      digest: catalog?.digest ?? null,
+      sealedAt: catalog?.sealedAt ?? null,
+      entries: rows.slice(0, 200),
+      nextCursor: rows.length > 200 ? rows[199]!.externalId : null,
+    };
+  }
+
   async events(current: ToolAuthContext, id: string, after?: bigint) {
     await this.requireRun(current.team.id, id);
     const rows = await this.prisma.runEvent.findMany({
@@ -814,7 +872,27 @@ export class ExecutionRunService {
       let response = input.response;
       let resumedAccounts:
         ReturnType<typeof testAccountBindingsSchema.parse> | undefined;
-      if (intervention.kind === "TEST_ACCOUNT") {
+      const savedPolicy =
+        isRecord(intervention.task.snapshot) &&
+        isRecord(intervention.task.snapshot.executionPolicy)
+          ? intervention.task.snapshot.executionPolicy
+          : {};
+      const replacementPolicy = {
+        ...savedPolicy,
+        ...(isRecord(intervention.run.executionPolicy)
+          ? intervention.run.executionPolicy
+          : {}),
+      };
+      const replacement = ["DATA_PRECONDITION", "TEST_ACCOUNT"].includes(
+        intervention.kind,
+      )
+        ? resolveAccountReplacement(
+            input.response,
+            replacementPolicy,
+            intervention.context,
+          )
+        : undefined;
+      if (intervention.kind === "TEST_ACCOUNT" && !replacement) {
         const slots = testAccountInputSlotsSchema.parse(
           isRecord(intervention.context)
             ? (intervention.context.accountSlots ?? [])
@@ -917,6 +995,22 @@ export class ExecutionRunService {
           }
         }
       }
+      if (replacement) {
+        response = replacement.response;
+        resumedAccounts = replacement.accounts;
+      }
+      const legacyAccount =
+        replacement?.account ??
+        (intervention.kind === "TEST_ACCOUNT" &&
+        !resumedAccounts &&
+        typeof response.account === "string"
+          ? response.account
+          : undefined);
+      const priorState = readExecutionState(replacementPolicy);
+      const accountChanged = resumedAccounts
+        ? JSON.stringify(resumedAccounts) !==
+          JSON.stringify(replacementPolicy.testAccounts ?? [])
+        : legacyAccount !== undefined && legacyAccount !== priorState.account;
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
         throw new ConflictException("The run is not waiting for human input.");
       }
@@ -985,13 +1079,17 @@ export class ExecutionRunService {
         hardDeadlineAt: resumedHardDeadlineAt.toISOString(),
         executionPolicy: {
           ...snapshot.executionPolicy,
-          ...(resumedAccounts
+          ...policyValue,
+          ...(accountChanged
             ? {
-                testAccounts: resumedAccounts,
-                executionState: {
-                  ...readExecutionState(snapshot.executionPolicy),
-                  accounts: resumedAccounts,
-                },
+                ...(resumedAccounts ? { testAccounts: resumedAccounts } : {}),
+                accountCoordinationPending: true,
+                accountRevisionStartedAt: now.toISOString(),
+                executionState: accountReplacementState(
+                  snapshot.executionPolicy,
+                  resumedAccounts,
+                  legacyAccount,
+                ),
                 verificationCheckpoint: {
                   ...(isRecord(snapshot.executionPolicy.verificationCheckpoint)
                     ? snapshot.executionPolicy.verificationCheckpoint
@@ -1008,6 +1106,18 @@ export class ExecutionRunService {
             response,
             resolvedAt: now.toISOString(),
           },
+          humanResolutions: [
+            ...(Array.isArray(policyValue.humanResolutions)
+              ? policyValue.humanResolutions
+              : []),
+            {
+              interventionId,
+              kind: intervention.kind,
+              context: intervention.context,
+              response,
+              resolvedAt: now.toISOString(),
+            },
+          ].slice(-20),
         },
       });
       if (parentTask && refreshedParentDeadlineAt) {
@@ -1028,7 +1138,7 @@ export class ExecutionRunService {
       }
       const runClaim = await tx.executionRun.updateMany({
         data: {
-          ...(resumedAccounts
+          ...(accountChanged
             ? {
                 executionPolicy: json({
                   ...policyValue,
@@ -1081,6 +1191,22 @@ export class ExecutionRunService {
           "The human intervention can no longer be resolved.",
         );
       }
+      if (accountChanged) {
+        const oldProgress = isRecord(
+          snapshot.executionPolicy.verificationCheckpoint,
+        )
+          ? snapshot.executionPolicy.verificationCheckpoint
+          : {};
+        if (Array.isArray(oldProgress.criteria) && oldProgress.criteria.length)
+          await tx.runCriterionResult.updateMany({
+            where: { attemptId: intervention.attemptId, runId },
+            data: {
+              status: "INCONCLUSIVE",
+              summary:
+                "人工已更换当前账号，需在新账号上重新核对；原结果保留在换号事件与历史上下文。",
+            },
+          });
+      }
       await tx.agentRuntimeTask.update({
         data: {
           completionId: null,
@@ -1112,6 +1238,20 @@ export class ExecutionRunService {
           kind: "human.intervention.resolved",
           payload: json({
             interventionId,
+            ...(accountChanged
+              ? {
+                  accountRevision: readExecutionState(
+                    resumedSnapshot.executionPolicy,
+                  ).accountRevision,
+                  resolution: response.resolution ?? {
+                    kind: "REPLACE_ACCOUNT",
+                    accounts: response.accounts,
+                    account: response.account,
+                  },
+                  supersededCheckpoint:
+                    snapshot.executionPolicy.verificationCheckpoint ?? null,
+                }
+              : {}),
             ...(refreshedParentDeadlineAt
               ? {
                   parentTaskDeadlineAt: refreshedParentDeadlineAt.toISOString(),

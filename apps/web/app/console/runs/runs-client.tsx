@@ -656,6 +656,14 @@ function RunDetailClient({ id }: { id: string }) {
                 {cancelling ? "取消中…" : "取消执行"}
               </Button>
             ) : null}
+            {detail && (
+              <Link
+                className="dp-back-link"
+                href={`/console/execution-contexts/${id}/${detail.currentAttemptNumber || 1}`}
+              >
+                Step Context
+              </Link>
+            )}
             <Button
               disabled={refreshing}
               onClick={() => void load("foreground").catch(() => undefined)}
@@ -1103,6 +1111,9 @@ function RunDetailClient({ id }: { id: string }) {
                           ) : null}
                         </div>
                         <p>{failure.message}</p>
+                        {failure.recoveryMessage && (
+                          <p>{failure.recoveryMessage}</p>
+                        )}
                         <details>
                           <summary>查看技术详情</summary>
                           <pre>{failure.raw}</pre>

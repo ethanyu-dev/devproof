@@ -9,6 +9,7 @@ import type {
 import {
   SpecAnalysisExecutor,
   validateFinalSpec,
+  caseDataPreconditionError,
 } from "./spec-analysis.executor.js";
 import { ControlPlaneError } from "./control-plane.client.js";
 import { LeaseLostError } from "./lease-supervisor.js";
@@ -1096,7 +1097,9 @@ describe("SpecAnalysisExecutor", () => {
       { label: "LEGACY", expectedText: "LEGACY_CORPORATE" },
       { label: "ZDR", expectedText: "LEGACY_CORPORATE" },
     ];
-    expect(validateFinalSpec(input)).toContain("必须能区分各对象");
+    expect(validateFinalSpec(input)).toContain(
+      "businessCheck.subjects + state",
+    );
     criterion.observationTargets[1]!.expectedText = "invented-enum";
     expect(validateFinalSpec(input)).toContain("必须来自已读取的来源");
     criterion.observationTargets[1]!.expectedText = "ZDR";
@@ -1695,4 +1698,126 @@ describe("SpecAnalysisExecutor", () => {
       expect(toolNames.includes("github_search_code")).toBe(!searchUnavailable);
     },
   );
+});
+
+it("negotiates concise business generation without exposing the DOM contract schema", async () => {
+  const issue = {
+    ...source,
+    excerpt: "合规模型映射与旧版对公转账白名单的列表配置值显示启用。",
+  };
+  const executeSpecTool = vi.fn().mockResolvedValue({
+    result: requiredPrResult,
+    sourceRefs: [issue, ...requiredPrSources],
+  });
+  const { outcome, create } = await executeCalls(
+    [
+      call("linear_get_issue", { analysisSummary: "读取需求与实现。" }, "read"),
+      call(
+        "define_requirements",
+        {
+          analysisSummary: "确定列表展示要求。",
+          requirements: [
+            {
+              description: "两种类型的列表显示启用",
+              sourceRef: issue.externalId,
+              quote: issue.excerpt,
+            },
+          ],
+        },
+        "requirements",
+      ),
+      call(
+        "define_checks",
+        {
+          analysisSummary: "对象与状态分别声明。",
+          expectedRevision: 0,
+          checks: [
+            {
+              requirementId: "requirement-1",
+              description: "两种类型的记录均显示启用。",
+              businessCheck: {
+                subjects: ["合规模型映射", "旧版对公转账白名单"],
+                state: { label: "配置值", equals: "启用" },
+              },
+            },
+          ],
+        },
+        "checks",
+      ),
+      call(
+        "finish_spec",
+        {
+          analysisSummary: "提交简洁规格。",
+          spec: {
+            summary: "检查两种类型的列表状态",
+            cases: [
+              {
+                name: "列表状态",
+                steps: ["分别筛选两种类型并查看记录。"],
+                accountRequirementsVersion: 2,
+                accountRequirements: [],
+                checkIds: ["check-1"],
+              },
+            ],
+          },
+        },
+        "finish",
+      ),
+    ],
+    executeSpecTool,
+    {
+      ...task,
+      snapshot: {
+        ...task.snapshot,
+        specFormat: "CHECK_REFERENCES",
+        observationContractVersion: 3,
+      },
+    },
+  );
+  expect(outcome.kind).toBe("SPEC_GENERATED");
+  if (outcome.kind !== "SPEC_GENERATED") throw new Error(outcome.summary);
+  const criterion = outcome.spec.cases[0]!.criteria[0]!;
+  expect(criterion.observationContract?.version).toBe(3);
+  expect(criterion.observationContract?.targets).toHaveLength(2);
+  const tools = create.mock.calls[2]![0].tools;
+  const definition = tools.find(
+    (t: { function: { name: string } }) => t.function.name === "define_checks",
+  )?.function;
+  const schema = JSON.stringify(definition);
+  expect(schema).toContain("businessCheck");
+  expect(schema).not.toContain("observationContract");
+  expect(schema).not.toContain("assertionId");
+  expect(criterion.description.length).toBeLessThan(80);
+});
+
+it("does not make independent editing depend on an empty account", () => {
+  const testCase = {
+    name: "编辑启用状态",
+    preconditions: ["账号尚未配置这两种类型记录"],
+    accountRequirements: [],
+    criteria: [{ description: "编辑时开关回显启用" }],
+  } as unknown as Parameters<typeof caseDataPreconditionError>[0];
+  expect(caseDataPreconditionError(testCase)).toContain("先新增");
+  testCase.preconditions = [
+    "已有指定测试记录，人工处置确认可修改并在结束时恢复",
+  ];
+  expect(caseDataPreconditionError(testCase)).toBeNull();
+});
+
+it("cannot disguise an absence prerequisite for independent editing with an extra create criterion", () => {
+  const testCase = {
+    name: "编辑启用状态",
+    preconditions: ["账号尚未配置目标类型记录"],
+    accountRequirements: [],
+    criteria: [
+      { description: "新增后列表展示启用" },
+      { description: "编辑后回显关闭" },
+    ],
+  } as unknown as Parameters<typeof caseDataPreconditionError>[0];
+  expect(caseDataPreconditionError(testCase)).toContain("先新增");
+  testCase.preconditions = ["获授权的现有记录；缺失时经人工确认准备临时记录"];
+  expect(caseDataPreconditionError(testCase)).toBeNull();
+  testCase.name = "白名单新增到编辑的生命周期";
+  testCase.preconditions = ["账号尚未配置目标类型记录"];
+  expect(caseDataPreconditionError(testCase)).toBeNull();
 });

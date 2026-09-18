@@ -1,3 +1,4 @@
+export * from "./step-context.js";
 import {
   testAccountBindingsSchema,
   executionAccountRequirementsSchema,

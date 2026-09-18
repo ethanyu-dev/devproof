@@ -606,7 +606,15 @@ describe("PostgreSQL uncertain writes after human intervention", () => {
       where: { id: run.id },
     });
     expect(resumed.lifecycle).toBe("QUEUED");
-    expect(resumed.executionPolicy).toEqual(original.executionPolicy);
+    expect(resumed.executionPolicy).toMatchObject({
+      accountCoordinationPending: true,
+      executionState: { account: "shared-subject", accountRevision: 1 },
+    });
+    expect(
+      (resumed.executionPolicy as Record<string, unknown>).hitl,
+    ).toMatchObject(
+      (original.executionPolicy as Record<string, unknown>).hitl as object,
+    );
     const reply = await db.humanIntervention.findUniqueOrThrow({
       where: { id: intervention.id },
     });

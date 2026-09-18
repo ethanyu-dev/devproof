@@ -81,11 +81,13 @@ function fixture() {
   let lease: {
     sessionId: string;
     mode: string;
+    origin: string;
     recoveryId: string | null;
     quarantined: boolean;
   } | null = {
     sessionId: session.id,
     mode: "WRITE",
+    origin: "NORMAL",
     recoveryId: null,
     quarantined: true,
   };
@@ -134,6 +136,7 @@ function fixture() {
         if (
           !lease ||
           (where.mode && where.mode !== lease.mode) ||
+          (where.origin && where.origin !== lease.origin) ||
           (where.recoveryId && where.recoveryId !== lease.recoveryId)
         )
           return { count: 0 };

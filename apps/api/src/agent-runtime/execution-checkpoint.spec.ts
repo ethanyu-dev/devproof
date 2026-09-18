@@ -1,236 +1,97 @@
-import { describe, it, expect, vi } from "vitest";
-import { BadRequestException } from "@nestjs/common";
+import { expect, it, vi } from "vitest";
+import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
 import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
-const id = "285146a8-5230-4b02-832a-5eef19e8dc8a";
-const snapshot = {
-  attemptId: id,
+const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a",
+  attemptId = "cc61de8d-cf29-4561-b2cd-c67c304668a5";
+const snapshot = runtimeTaskSnapshotSchema.parse({
+  runId,
+  attemptId,
   attemptNumber: 1,
-  runId: id,
-  teamId: id,
+  teamId: "6f090d88-8987-487f-8338-1a734beab6a6",
+  goal: "验证页面",
   traceId: "1234567890abcdef1234567890abcdef",
   deadlineAt: new Date(Date.now() + 60000).toISOString(),
-  goal: "Verify",
   environment: {},
-  executionPolicy: { resume: { kind: "TEST_ACCOUNT" } },
-  criteria: [{ id: "visible", description: "页面可见", required: true }],
-};
-function transaction() {
-  return {
+  executionPolicy: {},
+  criteria: [
+    { id: "c", description: "页面可见", requiredEvidenceKinds: ["DOM"] },
+  ],
+});
+function setup() {
+  const stored = new Map<string, unknown>();
+  const tx = {
     runEvidence: {
       findMany: vi
         .fn()
-        .mockResolvedValue([{ externalId: "artifact://proof", kind: "DOM" }]),
+        .mockResolvedValue([
+          { externalId: "proof", kind: "DOM", label: "页面", metadata: {} },
+        ]),
+    },
+    runCriterionResult: {
+      upsert: vi.fn(async (args: { create: { criterionId: string } }) => {
+        stored.set(args.create.criterionId, args.create);
+      }),
     },
     executionRun: {
-      findUniqueOrThrow: vi.fn().mockResolvedValue({
-        teamId: id,
-        environmentSnapshot: {},
-        executionPolicy: { browser: { mode: "PERSISTENT" } },
-      }),
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ executionPolicy: {} }),
       update: vi.fn(),
     },
     agentRuntimeTask: { update: vi.fn() },
   };
+  return { tx, stored };
 }
-describe("durable execution checkpoints", () => {
-  it("validates and persists deferred record evidence for a later receipt", async () => {
-    const tx = transaction();
-    const pendingRecords = [
-      {
-        id: "123",
-        type: "MAPPING",
-        resourceUrl: "https://app.test/list",
-        accountAliases: ["user"],
-        evidenceRefs: ["artifact://proof"],
-      },
-    ];
-    await saveExecutionCheckpoint(
-      tx as never,
-      { id, runId: id, snapshot },
-      { executionState: { pendingRecords } },
-    );
-    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          snapshot: expect.objectContaining({
-            executionPolicy: expect.objectContaining({
-              executionState: expect.objectContaining({ pendingRecords }),
-            }),
-          }),
-        },
-      }),
-    );
-    await expect(
-      saveExecutionCheckpoint(
-        tx as never,
-        { id, runId: id, snapshot },
-        {
-          executionState: {
-            pendingRecords: [
-              { ...pendingRecords[0], evidenceRefs: ["another-run"] },
-            ],
-          },
-        },
-      ),
-    ).rejects.toThrow("this execution");
-  });
-  it("stores progress in both execution policy and the next lease snapshot", async () => {
-    const tx = transaction();
-    await saveExecutionCheckpoint(
-      tx as never,
-      { id, runId: id, snapshot },
-      {
-        executionState: {
-          phase: "VERIFYING",
-          step: "确认创建结果",
-          records: [],
-        },
-        verificationCheckpoint: {
-          criteria: [
-            {
-              criterionId: "visible",
-              status: "PASSED",
-              summary: "页面可见",
-              evidenceRefs: ["artifact://proof"],
-            },
-          ],
-          evidence: [{ externalId: "artifact://proof", kind: "DOM" }],
-        },
-      },
-    );
-    expect(tx.executionRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          executionPolicy: expect.objectContaining({
-            browser: { mode: "PERSISTENT" },
-            executionState: expect.objectContaining({ phase: "VERIFYING" }),
-          }),
-        },
-      }),
-    );
-    expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          snapshot: expect.objectContaining({
-            executionPolicy: expect.objectContaining({
-              resume: { kind: "TEST_ACCOUNT" },
-              verificationCheckpoint: expect.objectContaining({
-                criteria: [expect.objectContaining({ status: "PASSED" })],
-              }),
-            }),
-          }),
-        },
-      }),
-    );
-  });
-  it("persists account aliases while ignoring historical conflicts and reservations", async () => {
-    const tx = transaction();
-    const accounts = [
-      {
-        slotId: "subject:1",
-        account: "shared",
-        aliases: ["shared-uuid"],
-        usage: "CREATE_OR_MODIFY",
-      },
-    ];
-    const records = [
-      {
-        id: "124",
-        account: "shared",
-        ownership: "CREATED_THIS_RUN",
-        evidenceRefs: ["artifact://proof"],
-        cleanup: { instruction: "删除本次记录", status: "PENDING" },
-      },
-    ];
-    const result = await saveExecutionCheckpoint(
-      tx as never,
-      {
-        id,
-        runId: id,
-        snapshot: {
-          ...snapshot,
-          executionPolicy: {
-            ...snapshot.executionPolicy,
-            testAccounts: accounts,
-          },
-        },
-      },
-      {
-        executionState: {
-          accounts,
-          records,
-          accountConflict: "TEST_ACCOUNT_CONFLICT",
-        },
-      },
-    );
-    expect(result).toEqual({ accountConflict: null });
-    const policy =
-      tx.executionRun.update.mock.calls[0]![0].data.executionPolicy;
-    expect(policy.executionState.accounts[0]).toMatchObject(accounts[0]!);
-    expect(policy.executionState.records[0]).toMatchObject(records[0]!);
-    expect(policy.executionState).not.toHaveProperty("accountConflict");
-    expect(policy).not.toHaveProperty("testAccountClaim");
-  });
-  it("rejects evidence from a different run before mutating either snapshot", async () => {
-    const tx = transaction();
-    await expect(
-      saveExecutionCheckpoint(
-        tx as never,
-        { id, runId: id, snapshot },
-        {
-          executionState: {},
-          verificationCheckpoint: {
-            criteria: [],
-            evidence: [{ externalId: "artifact://other", kind: "DOM" }],
-          },
-        },
-      ),
-    ).rejects.toThrow("this execution");
-    expect(tx.agentRuntimeTask.update).not.toHaveBeenCalled();
-    expect(tx.executionRun.update).not.toHaveBeenCalled();
-  });
-});
-
-describe("execution checkpoint validation", () => {
-  it.each([
-    {
-      executionState: {
-        accounts: [
-          {
-            slotId: "target:1",
-            account: "subject",
-            label: "账号",
-            usage: "CREATE_OR_MODIFY",
-            aliases: [""],
-          },
-        ],
+const criterion = {
+  criterionId: "c",
+  status: "PASSED",
+  summary: "页面可见",
+  evidenceRefs: ["proof"],
+};
+it("persists accepted criteria independently of cleanup and idempotently across repeated checkpoints", async () => {
+  const { tx, stored } = setup();
+  const input = {
+    executionState: {
+      phase: "CLEANUP",
+      cleanupReview: {
+        status: "BLOCKED",
+        note: "需要核对写入",
+        writeKeys: ["w"],
+        evidenceRefs: ["proof"],
       },
     },
-    {
+    verificationCheckpoint: {
+      criteria: [criterion],
+      evidence: [],
+      evidenceCatalog: { version: 1, runId, attemptId },
+    },
+  };
+  const task = { id: "task", runId, snapshot };
+  await saveExecutionCheckpoint(tx as never, task, input);
+  await saveExecutionCheckpoint(tx as never, task, input);
+  expect(stored.size).toBe(1);
+  expect(stored.get("c")).toMatchObject({ status: "PASSED", attemptId });
+  expect(tx.runEvidence.findMany).toHaveBeenCalledWith(
+    expect.objectContaining({ where: expect.objectContaining({ attemptId }) }),
+  );
+});
+it("rejects a catalog or criterion evidence from another attempt", async () => {
+  const { tx } = setup();
+  const task = { id: "task", runId, snapshot };
+  await expect(
+    saveExecutionCheckpoint(tx as never, task, {
       executionState: {},
       verificationCheckpoint: {
-        criteria: [],
+        criteria: [criterion],
         evidence: [],
-        observations: [{}],
+        evidenceCatalog: { version: 1, runId, attemptId: runId },
       },
-    },
-  ])(
-    "returns a structured 400 before touching stored progress",
-    async (payload) => {
-      const update = vi.fn();
-      const tx = { executionRun: { update }, agentRuntimeTask: { update } };
-      const error = await saveExecutionCheckpoint(
-        tx as never,
-        { id: "task", runId: "run", snapshot: {} },
-        payload,
-      ).catch((e) => e);
-      expect(error).toBeInstanceOf(BadRequestException);
-      expect(error.getStatus()).toBe(400);
-      expect(error.getResponse()).toMatchObject({
-        code: "INVALID_EXECUTION_CHECKPOINT",
-        issues: expect.any(Array),
-      });
-      expect(update).not.toHaveBeenCalled();
-    },
-  );
+    }),
+  ).rejects.toThrow("this attempt");
+  tx.runEvidence.findMany.mockResolvedValue([]);
+  await expect(
+    saveExecutionCheckpoint(tx as never, task, {
+      executionState: {},
+      verificationCheckpoint: { criteria: [criterion], evidence: [] },
+    }),
+  ).rejects.toThrow("saved evidence");
+  expect(tx.runCriterionResult.upsert).not.toHaveBeenCalled();
 });

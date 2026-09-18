@@ -508,3 +508,105 @@ it("resolves referenced account bindings against the Case check order", () => {
     expanded.cases[0]!.accountRequirements![0]!.subjectBinding!.criterionIds,
   ).toEqual([expanded.cases[0]!.criteria[1]!.id]);
 });
+
+it("generates concise business checks with repeated states and no generated DOM locators", () => {
+  const localSources = new Map([
+    [issue, "合规模型映射与旧版对公转账白名单的列表配置值显示启用。"],
+  ]);
+  const localRequirements = defineSpecRequirements(
+    {
+      requirements: [
+        {
+          description: "两种类型列表显示启用",
+          sourceRef: issue,
+          quote: "列表配置值显示启用",
+        },
+      ],
+    },
+    localSources,
+    new Map([[issue, { kind: "LINEAR_ISSUE" }]]),
+  );
+  const catalog = new SpecCheckCatalog();
+  const result = catalog.define(
+    {
+      expectedRevision: 0,
+      checks: [
+        {
+          requirementId: "requirement-1",
+          description: "两种类型的记录均显示启用。",
+          businessCheck: {
+            subjects: ["合规模型映射", "旧版对公转账白名单"],
+            state: { label: "配置值", equals: "启用" },
+          },
+        },
+      ],
+    },
+    localRequirements,
+    localSources,
+  );
+  expect(result.issues).toEqual([]);
+  const expanded = catalog.expand(draft(["check-1"]), localRequirements);
+  const criterion = expanded.cases[0]!.criteria[0]!;
+  expect(criterion.description).toBe("两种类型的记录均显示启用。");
+  expect(criterion.observationTargets).toBeUndefined();
+  expect(criterion.observationContract?.version).toBe(3);
+  expect(
+    criterion.observationContract?.targets.map(
+      (t) => t.assertions[0]!.expected,
+    ),
+  ).toEqual(["启用", "启用"]);
+  expect(JSON.stringify(criterion.observationContract)).not.toContain(
+    '"scope"',
+  );
+  expect(specCriterionIssues(criterion, localSources)).toEqual([]);
+  const downgrade = catalog.define(
+    {
+      expectedRevision: catalog.revision,
+      checks: [
+        {
+          checkId: "check-1",
+          requirementId: "requirement-1",
+          description: "两种类型的记录显示启用。",
+          observationTargets: [{ label: "启用", expectedText: "启用" }],
+        },
+      ],
+    },
+    localRequirements,
+    localSources,
+  );
+  expect(downgrade.issues[0]!.code).toBe("CONTRACT_DOWNGRADE");
+});
+
+it("rejects generated textual switch states and accepts their boolean correction", () => {
+  const catalog = new SpecCheckCatalog();
+  const check = {
+    requirementId: "requirement-1",
+    description: "旧版对公转账白名单的启用状态开关默认开启。",
+    supportingSourceRefs: [ui],
+    businessCheck: {
+      subjects: ["旧版对公转账白名单"],
+      state: {
+        property: "CHECKED",
+        label: "启用状态",
+        equals: "启用" as string | boolean,
+      },
+      when: "INITIAL_AFTER_OPEN",
+    },
+  };
+  const rejected = catalog.define(
+    { expectedRevision: 0, checks: [check] },
+    requirements,
+    sources,
+  );
+  expect(rejected.issues).toContainEqual(
+    expect.objectContaining({ code: "INVALID_CHECK" }),
+  );
+  check.businessCheck.state.equals = true;
+  expect(
+    catalog.define(
+      { expectedRevision: rejected.revision, checks: [check] },
+      requirements,
+      sources,
+    ).saved,
+  ).toHaveLength(1);
+});

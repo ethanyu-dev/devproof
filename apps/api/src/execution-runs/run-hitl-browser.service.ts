@@ -1,3 +1,4 @@
+import { resolveAccountReplacement } from "./account-replacement.js";
 import {
   ConflictException,
   GoneException,
@@ -271,20 +272,37 @@ export class RunHitlBrowserService {
       controlId: string;
       note: string;
       resolution: "continue" | "cancel";
+      accountReplacement?:
+        { slotId?: string | undefined; account: string } | undefined;
     },
   ) {
+    const response = {
+      approved: input.resolution === "continue",
+      browserAssistance: true,
+      note: input.note,
+      instructions: input.resolution === "continue" ? input.note : "",
+      resolution:
+        input.resolution === "continue" && input.accountReplacement
+          ? { kind: "REPLACE_ACCOUNT", ...input.accountReplacement }
+          : input.resolution,
+    };
+    // Validate ambiguous replacements before releasing the human's browser control.
+    if (input.resolution === "continue") {
+      const context = await this.context(current, runId, interventionId);
+      if (["DATA_PRECONDITION", "TEST_ACCOUNT"].includes(context.kind))
+        resolveAccountReplacement(
+          response,
+          context.run.executionPolicy as Record<string, unknown>,
+          context.context,
+        );
+    }
     await this.release(current, runId, interventionId, input.controlId);
     const intervention = await this.runs.resolveIntervention(
       asToolContext(current),
       runId,
       interventionId,
       {
-        response: {
-          approved: input.resolution === "continue",
-          browserAssistance: true,
-          note: input.note,
-          resolution: input.resolution,
-        },
+        response,
       },
     );
     return { intervention, resolution: input.resolution };

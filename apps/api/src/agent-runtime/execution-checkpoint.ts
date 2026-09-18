@@ -2,6 +2,9 @@ import { BadRequestException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import {
   executionStateSchema,
+  runtimeEvidenceCatalogSchema,
+  missingRequiredEvidenceKinds,
+  browserExecutionCriterion,
   savedCriterionObservationSchema,
   testAccountBindingsSchema,
   runtimeCriterionResultSchema,
@@ -15,6 +18,7 @@ const progressSchema = z.object({
   observations: z.array(savedCriterionObservationSchema).max(200).optional(),
   criteria: z.array(runtimeCriterionResultSchema).max(100),
   evidence: z.array(runtimeEvidenceRefSchema).max(2000),
+  evidenceCatalog: runtimeEvidenceCatalogSchema.optional(),
 });
 const object = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v)
@@ -52,19 +56,35 @@ export async function saveExecutionCheckpoint(
   const state = parsedState.data;
   const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
   const progress = parsedProgress.data;
+  if (
+    progress?.evidenceCatalog &&
+    (progress.evidenceCatalog.runId !== task.runId ||
+      progress.evidenceCatalog.attemptId !== snapshot.attemptId)
+  )
+    throw new BadRequestException(
+      "Evidence catalog must belong to this attempt.",
+    );
   const stateRefs = [
     ...state.records.flatMap((r) => r.evidenceRefs),
     ...state.pendingRecords.flatMap((r) => r.evidenceRefs),
     ...state.writes.flatMap((w) => w.evidenceRefs),
+    ...state.readReceipts.flatMap((r) => r.evidenceRefs),
+    ...state.cleanupConfirmations.flatMap((c) => c.evidenceRefs),
+    ...(state.cleanupReview?.evidenceRefs ?? []),
   ];
   if (progress || stateRefs.length) {
     const refs = [
       ...stateRefs,
       ...(progress?.evidence.map((e) => e.externalId) ?? []),
       ...(progress?.observations?.flatMap((o) => o.evidenceRefs) ?? []),
+      ...(progress?.criteria.flatMap((c) => c.evidenceRefs) ?? []),
     ];
     const stored = await tx.runEvidence.findMany({
-      where: { runId: task.runId, externalId: { in: refs } },
+      where: {
+        runId: task.runId,
+        attemptId: snapshot.attemptId,
+        externalId: { in: refs },
+      },
       select: { externalId: true, kind: true },
     });
     const known = new Map(stored.map((e) => [e.externalId, e.kind]));
@@ -88,6 +108,33 @@ export async function saveExecutionCheckpoint(
       throw new BadRequestException(
         "Checkpoint must reference this execution's saved evidence and criteria.",
       );
+  }
+  if (progress?.criteria.length) {
+    const stored = await tx.runEvidence.findMany({
+      where: { attemptId: snapshot.attemptId, runId: task.runId },
+    });
+    for (const result of progress.criteria) {
+      const criterion = snapshot.criteria.find(
+        (c) => c.id === result.criterionId,
+      )!;
+      if (
+        result.status === "PASSED" &&
+        missingRequiredEvidenceKinds(
+          browserExecutionCriterion(criterion),
+          result.evidenceRefs,
+          stored.map((e) =>
+            runtimeEvidenceRefSchema.parse({
+              ...e,
+              metadata: object(e.metadata),
+            }),
+          ),
+        ).length
+      )
+        throw new BadRequestException(
+          `Criterion ${result.criterionId} is missing required evidence.`,
+        );
+    }
+    await persistCriterionResults(tx, snapshot, progress.criteria);
   }
   const assigned = testAccountBindingsSchema.parse(
     snapshot.executionPolicy.testAccounts ?? [],
@@ -141,4 +188,37 @@ export async function saveExecutionCheckpoint(
   });
   // Clear the retired conflict flag for older Runtime clients as well.
   return { accountConflict: null };
+}
+
+/** Checkpoint and finish use the same key. Event payloads retain prior revisions. */
+export async function persistCriterionResults(
+  tx: Prisma.TransactionClient,
+  snapshot: ReturnType<typeof runtimeTaskSnapshotSchema.parse>,
+  criteria: Array<ReturnType<typeof runtimeCriterionResultSchema.parse>>,
+) {
+  for (const criterion of criteria) {
+    const data = {
+      teamId: snapshot.teamId,
+      runId: snapshot.runId,
+      attemptId: snapshot.attemptId,
+      criterionId: criterion.criterionId,
+      status: criterion.status,
+      summary: criterion.summary,
+      evidenceRefs: criterion.evidenceRefs,
+    };
+    await tx.runCriterionResult.upsert({
+      where: {
+        attemptId_criterionId: {
+          attemptId: snapshot.attemptId,
+          criterionId: criterion.criterionId,
+        },
+      },
+      create: data,
+      update: {
+        status: data.status,
+        summary: data.summary,
+        evidenceRefs: data.evidenceRefs,
+      },
+    });
+  }
 }

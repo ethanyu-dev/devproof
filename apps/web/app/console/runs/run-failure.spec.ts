@@ -18,6 +18,7 @@ describe("execution failure reason", () => {
     expect(failure.causeCode).toBe("REPEATED_OPERATIONS");
     expect(failure.message).toContain("未产生新的页面观察或验收进展");
     expect(failure.raw).toContain("WRITE_OUTCOME_UNKNOWN");
+    expect(failure.recoveryMessage).toContain("不代表已确认提交");
   });
   it("preserves the cause through nested recovery wrappers", () => {
     const failure = summarizeTaskFailures([

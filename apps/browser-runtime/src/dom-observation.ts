@@ -115,6 +115,8 @@ export class DomObservations {
   }
 
   async verifyCapture(page: Page, observation: StructuredObservation) {
+    observation.consistencyIssues = [];
+    observation.verifiedScopeNodeIds = [];
     for (const frameInfo of observation.frames) {
       let found = false;
       for (const frame of page.frames()) {
@@ -125,24 +127,58 @@ export class DomObservations {
                 key + "_structure"
               ];
               if (state?.epoch !== frameInfo.documentEpoch) return null;
-              state.mutationRevision +=
-                state.observer?.takeRecords().length ?? 0;
-              if (
-                frameInfo.mutationRevision !== undefined &&
-                state.mutationRevision !== frameInfo.mutationRevision
-              )
+              state.recordMutations(state.observer.takeRecords());
+              const revision = frameInfo.mutationRevision ?? -1;
+              const mutations = state.mutations.filter(
+                (m: any) => m.revision > revision,
+              );
+              const changed = state.mutationRevision !== revision;
+              const lostHistory =
+                changed &&
+                (!mutations.length || mutations[0].revision > revision + 1);
+              const contains = (parent: Node, child: Node) => {
+                let current: Node | null = child;
+                while (current) {
+                  if (Node.prototype.contains.call(parent, current))
+                    return true;
+                  current =
+                    (Node.prototype.getRootNode.call(current) as ShadowRoot)
+                      .host ?? null;
+                }
                 return false;
-              for (const n of nodes) {
-                const el = state.elements.get(n.nodeId) as Element | undefined;
-                if (!el?.isConnected) return false;
+              };
+              const scopeNodes = nodes.filter(
+                (n) =>
+                  n.visible &&
+                  (["form", "tr", "dialog"].includes(n.tag) ||
+                    ["form", "row", "dialog", "alertdialog"].includes(
+                      n.role ?? "",
+                    )),
+              );
+              const element = (
+                n: (typeof nodes)[number],
+              ): Element | undefined => state.elements.get(n.nodeId);
+              const checkNode = (n: (typeof nodes)[number]) => {
+                const el = element(n);
+                if (!el?.isConnected) return "NODE_DETACHED";
                 const box = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
                 if (
                   n.visible &&
                   (box.width <= 0 ||
                     box.height <= 0 ||
-                    getComputedStyle(el).display === "none")
+                    style.display === "none" ||
+                    style.visibility === "hidden")
                 )
-                  return false;
+                  return "NODE_HIDDEN";
+                if (
+                  n.visible &&
+                  n.box &&
+                  ["x", "y", "width", "height"].some(
+                    (k) => Math.abs(box[k as "x"] - n.box![k as "x"]) > 1,
+                  )
+                )
+                  return "GEOMETRY_CHANGED";
                 if (
                   n.enabled !== undefined &&
                   !(
@@ -151,20 +187,20 @@ export class DomObservations {
                     el.getAttribute("aria-disabled") === "true"
                   ) !== n.enabled
                 )
-                  return false;
+                  return "ENABLED_CHANGED";
                 if (
                   n.checked !== undefined &&
                   (["checkbox", "radio"].includes((el as HTMLInputElement).type)
                     ? (el as HTMLInputElement).checked
                     : el.getAttribute("aria-checked") === "true") !== n.checked
                 )
-                  return false;
+                  return "CHECKED_CHANGED";
                 if (
                   n.value !== undefined &&
                   !n.truncatedProperties?.includes("VALUE") &&
                   (el as HTMLInputElement).value !== n.value
                 )
-                  return false;
+                  return "VALUE_CHANGED";
                 if (n.selectedLabel !== undefined) {
                   const label =
                     el.tagName.toLowerCase() === "select"
@@ -180,34 +216,116 @@ export class DomObservations {
                           )
                           .join(" ");
                   if (label.replace(/\s+/g, " ").trim() !== n.selectedLabel)
-                    return false;
+                    return "SELECTED_LABEL_CHANGED";
+                }
+                return null;
+              };
+              const issues: Array<{ code: string; nodeId?: string }> = [];
+              if (changed) {
+                for (const m of mutations.slice(0, 10)) {
+                  const anchor = nodes.find(
+                    (n) =>
+                      element(n) === m.target ||
+                      element(n) === m.target.parentElement,
+                  );
+                  issues.push({
+                    code: "DOCUMENT_MUTATED",
+                    ...(anchor ? { nodeId: anchor.nodeId } : {}),
+                  });
+                }
+                if (lostHistory)
+                  issues.push({ code: "MUTATION_HISTORY_UNAVAILABLE" });
+              }
+              const invalidNodes = new Set<string>();
+              for (const n of nodes) {
+                const code = checkNode(n);
+                if (code) {
+                  invalidNodes.add(n.nodeId);
+                  if (issues.length < 20)
+                    issues.push({ code, nodeId: n.nodeId });
                 }
               }
-              return true;
+              const byId = new Map(nodes.map((n) => [n.nodeId, n]));
+              const withinCapture = (nodeId: string, scopeId: string) => {
+                let id: string | undefined = nodeId;
+                const seen = new Set<string>();
+                while (id && !seen.has(id)) {
+                  if (id === scopeId) return true;
+                  seen.add(id);
+                  id = byId.get(id)?.parentId;
+                }
+                return false;
+              };
+              const verified = scopeNodes
+                .filter((scope) => {
+                  const el = element(scope);
+                  if (!el?.isConnected || lostHistory) return false;
+                  if (
+                    mutations.some((m: any) => {
+                      const target = m.target as Node;
+                      const parent =
+                        target.nodeType === 1
+                          ? (target as Element)
+                          : target.parentElement;
+                      return (
+                        contains(el, target) ||
+                        contains(target, el) ||
+                        Boolean(
+                          parent?.closest("style,head,link[rel=stylesheet]"),
+                        )
+                      );
+                    })
+                  )
+                    return false;
+                  return !nodes.some(
+                    (n) =>
+                      invalidNodes.has(n.nodeId) &&
+                      (n.nodeId === scope.nodeId ||
+                        (element(n) && contains(el, element(n)!)) ||
+                        withinCapture(n.nodeId, scope.nodeId)),
+                  );
+                })
+                .map((n) => n.nodeId);
+              return { issues, verified };
             },
             {
               key: registryKey,
               frameInfo,
               nodes: observation.nodes.filter(
-                (n) =>
-                  n.frameId === frameInfo.frameId &&
-                  (n.enabled !== undefined ||
-                    n.checked !== undefined ||
-                    n.value !== undefined ||
-                    n.selectedLabel !== undefined),
+                (n) => n.frameId === frameInfo.frameId,
               ),
             },
           )
-          .catch(() => false);
+          .catch(() => ({
+            issues: [{ code: "FRAME_UNAVAILABLE" }],
+            verified: [] as string[],
+          }));
         if (result !== null) {
           found = true;
-          if (!result) return false;
+          observation.verifiedScopeNodeIds.push(...result.verified);
+          observation.consistencyIssues.push(
+            ...result.issues.map((issue) => ({
+              ...issue,
+              frameId: frameInfo.frameId,
+            })),
+          );
           break;
         }
       }
-      if (!found) return false;
+      if (!found)
+        observation.consistencyIssues.push({
+          code: "DOCUMENT_REPLACED",
+          frameId: frameInfo.frameId,
+        });
     }
-    return true;
+    observation.consistencyIssues = [
+      ...new Map(
+        observation.consistencyIssues.map(
+          (issue) => [JSON.stringify(issue), issue] as const,
+        ),
+      ).values(),
+    ].slice(0, 20);
+    return observation.consistencyIssues.length === 0;
   }
 
   async snapshot(
@@ -290,9 +408,16 @@ export class DomObservations {
             });
             if (!state.observer) {
               state.mutationRevision = 0;
-              state.observer = new MutationObserver((records) => {
-                state.mutationRevision += records.length;
-              });
+              state.mutations = [];
+              state.recordMutations = (records: MutationRecord[]) => {
+                for (const record of records)
+                  state.mutations.push({
+                    revision: ++state.mutationRevision,
+                    target: record.target,
+                  });
+                state.mutations = state.mutations.slice(-2000);
+              };
+              state.observer = new MutationObserver(state.recordMutations);
               state.observer.observe(view.document, {
                 subtree: true,
                 attributes: true,
@@ -300,7 +425,7 @@ export class DomObservations {
                 characterData: true,
               });
             }
-            state.mutationRevision += state.observer.takeRecords().length;
+            state.recordMutations(state.observer.takeRecords());
             state.elements = new Map<string, Element>();
             const nodes: ObservedNode[] = [];
             const nodeId = (el: Element) => {
@@ -668,7 +793,9 @@ export class DomObservations {
                 let parent = element.parentElement;
                 for (
                   let i = 0;
-                  parent && i < 4;
+                  parent &&
+                  i < 16 &&
+                  !["BODY", "HTML"].includes(parent.tagName);
                   i++, parent = parent.parentElement
                 ) {
                   const candidates = Array.from(
@@ -684,6 +811,12 @@ export class DomObservations {
                     break;
                   }
                   if (controls.length > 1) break;
+                  if (
+                    parent.matches(
+                      "form,dialog,[role=dialog],[role=alertdialog]",
+                    )
+                  )
+                    break;
                 }
               }
               for (const label of labels)

@@ -32,7 +32,7 @@ const proof: RuntimeClosureProof = {
   closureCompletedAt: new Date().toISOString(),
 };
 
-function fixture() {
+function fixture(origin = "NORMAL") {
   const session = {
     id: "session-1",
     teamId: "team-1",
@@ -78,7 +78,7 @@ function fixture() {
   let lease: Record<string, unknown> | null = {
     sessionId: session.id,
     mode: "WRITE",
-    origin: "NORMAL",
+    origin,
     quarantined: false,
   };
   const assignRecovery = (data: Record<string, unknown>) =>
@@ -131,7 +131,11 @@ function fixture() {
         return { count: lease ? 1 : 0 };
       }),
       deleteMany: vi.fn(async ({ where }) => {
-        if (lease && (!where.mode || where.mode === lease.mode)) {
+        if (
+          lease &&
+          (!where.mode || where.mode === lease.mode) &&
+          (!where.origin || where.origin === lease.origin)
+        ) {
           lease = null;
           return { count: 1 };
         }
@@ -275,4 +279,11 @@ describe("uncertain business results", () => {
       expect(getLease()?.quarantined).toBe(true);
     },
   );
+});
+
+it("releases verified account occupancy while preserving an unknown write assessment", async () => {
+  const { closure, recovery, getLease } = fixture("ACCOUNT_COORDINATION");
+  await closure.acceptRuntimeEvidence(context, proof);
+  expect(getLease()).toBeNull();
+  expect(recovery.writeOutcomeState).toBe("UNKNOWN");
 });

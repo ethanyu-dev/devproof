@@ -452,6 +452,12 @@ describe("SpecAnalysisRuntimeService", () => {
   it.each([
     { minor: 20, observationEnabled: true, expectedContractVersion: undefined },
     { minor: 21, observationEnabled: true, expectedContractVersion: 2 },
+    { minor: 23, observationEnabled: true, expectedContractVersion: 3 },
+    {
+      minor: 23,
+      observationEnabled: false,
+      expectedContractVersion: undefined,
+    },
     {
       minor: 21,
       observationEnabled: false,

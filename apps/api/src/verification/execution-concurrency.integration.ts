@@ -1,3 +1,5 @@
+import { coordinateResumedAccounts } from "./account-coordination.js";
+import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import "reflect-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -1363,5 +1365,148 @@ describe("unclaimed browser startup recovery with PostgreSQL", () => {
       runtimeSessionId: fixture.lease.leaseId,
       startupRecoveryCount: 0,
     });
+  });
+});
+
+describe("assigned-account admission without broad resource locking", () => {
+  async function assigned(
+    account: string,
+    type = "MAPPING",
+    usage = "CREATE_OR_MODIFY",
+    profileIndex = 0,
+  ) {
+    const work = await execution(
+      usage === "READ_EXISTING" ? "READ_ONLY" : "MUTATING",
+      profileIndex,
+    );
+    await db.executionRun.update({
+      where: { id: work.run.id },
+      data: {
+        executionPolicy: {
+          testAccounts: [
+            {
+              slotId: "subject:1",
+              account,
+              usage,
+              requiredTypes: type ? [type] : [],
+              aliases: [],
+            },
+          ],
+        },
+      },
+    });
+    return work;
+  }
+  it("atomically admits only one simultaneous account replacement and retains both old account leases", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const runs = await Promise.all([
+      assigned("old-a"),
+      assigned("old-b", "MAPPING", "CREATE_OR_MODIFY", 1),
+    ]);
+    const sessions = await Promise.all(runs.map((r) => r.acquire()));
+    const original = await db.executionResourceLease.findMany();
+    const outcomes = await Promise.all(
+      sessions.map((session) =>
+        db.$transaction(async (tx) => {
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
+          return coordinateResumedAccounts(tx, {
+            sessionId: session.leaseId,
+            targetUrl,
+            concurrencyPolicy: {},
+            executionPolicy: {
+              testAccounts: [
+                {
+                  slotId: "subject:1",
+                  account: "new-shared",
+                  usage: "CREATE_OR_MODIFY",
+                  requiredTypes: ["MAPPING"],
+                  aliases: [],
+                },
+              ],
+            },
+          });
+        }),
+      ),
+    );
+    expect(outcomes.filter((r) => r === null)).toHaveLength(1);
+    expect(outcomes.filter((r) => r !== null)).toHaveLength(1);
+    const retained = await db.executionResourceLease.findMany();
+    expect(retained).toHaveLength(original.length + 1);
+    expect(retained.map((r) => r.id)).toEqual(
+      expect.arrayContaining(original.map((r) => r.id)),
+    );
+  });
+
+  it("admits one writer and releases only after its trusted result and verified closure", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const writers = await Promise.all([
+      assigned("same-subject"),
+      assigned("same-subject", "MAPPING", "CREATE_OR_MODIFY", 1),
+    ]);
+    const results = await Promise.allSettled(writers.map((w) => w.acquire()));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((r) => r.status === "rejected")).toMatchObject({
+      reason: { reason: "DATA_LOCK" },
+    });
+    await assertAtomicInventory(1);
+    const index = results.findIndex((r) => r.status === "fulfilled");
+    const winner = results[index]!;
+    if (winner.status !== "fulfilled") throw new Error("Missing winner");
+    const [lease] = await db.executionResourceLease.findMany();
+    expect(lease!.resourceKey).not.toContain("same-subject");
+    const work = writers[index]!;
+    const owner = await db.agentRuntimeTask.create({
+      data: {
+        runId: work.run.id,
+        attemptId: work.row.attemptId,
+        capability: "BROWSER_VERIFICATION",
+        provider: "GENERIC",
+        snapshot: {},
+        deadlineAt: work.run.deadlineAt,
+        status: "SUCCEEDED",
+        fencingToken: 1n,
+        completionId: randomUUID(),
+        result: { kind: "VERIFICATION_COMPLETED", verdict: "PASSED" },
+      },
+    });
+    await db.browserRuntimeSession.update({
+      where: { id: winner.value.leaseId },
+      data: { ownerTaskId: owner.id, ownerFencingToken: 1n },
+    });
+    await verifiedClose(winner.value.leaseId);
+    await expect(writers[1 - index]!.acquire()).resolves.toBeDefined();
+  });
+  it("holds an unclosed account, then releases occupancy without pretending an unknown write was resolved", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const first = await assigned("uncertain-subject");
+    const session = await first.acquire();
+    const same = await assigned("uncertain-subject");
+    await expect(same.acquire()).rejects.toMatchObject({ reason: "DATA_LOCK" });
+    await verifiedClose(session.leaseId);
+    expect(
+      await db.runtimeSessionRecovery.findFirst({
+        where: { sessionId: session.leaseId },
+      }),
+    ).toMatchObject({ writeOutcomeState: "UNKNOWN", closureState: "VERIFIED" });
+    await expect(same.acquire()).resolves.toBeDefined();
+    const unrelated = await assigned("independent-subject");
+    await expect(unrelated.acquire()).resolves.toBeDefined();
+  });
+  it("keeps independent types and identities parallel, shares readers and excludes a matching writer", async () => {
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    const a = await assigned("subject", "MAPPING", "READ_EXISTING");
+    const b = await assigned("subject", "MAPPING", "READ_EXISTING", 1);
+    const c = await assigned("subject", "OTHER");
+    const d = await assigned("other-subject");
+    await Promise.all([a.acquire(), b.acquire(), c.acquire()]);
+    const writer = await assigned("subject");
+    await expect(writer.acquire()).rejects.toMatchObject({
+      reason: "DATA_LOCK",
+    });
+    await d.acquire();
+    await assertAtomicInventory(4);
   });
 });

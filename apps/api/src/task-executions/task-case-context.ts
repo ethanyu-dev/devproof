@@ -37,7 +37,7 @@ export function caseExecutionGoal(testCase: {
     ),
     ...(requirements.length
       ? [
-          "先只读核对全部角色的前置条件，再开始业务写入。账号不可用时将受影响项记为 INCONCLUSIVE 并说明原因，不再次索取替换账号。",
+          "先只读核对全部角色的前置条件，再开始业务写入。既有记录导致前置冲突时，触发 DATA_PRECONDITION 人工接管，用户可处理浏览器或明确授权处置指定记录后继续；无法处置时记录受影响项 INCONCLUSIVE，不再次索取替换账号。",
         ]
       : []),
     "操作步骤：",

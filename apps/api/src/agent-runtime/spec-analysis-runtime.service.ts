@@ -246,7 +246,10 @@ export class SpecAnalysisRuntimeService {
           snapshot: {
             ...(input.protocol.minor >= 21 &&
             env().BROWSER_OBSERVATION_V2_ENABLED
-              ? { observationContractVersion: 2 as const }
+              ? {
+                  observationContractVersion:
+                    input.protocol.minor >= 23 ? (3 as const) : (2 as const),
+                }
               : {}),
             specFormat:
               input.protocol.minor >= 19

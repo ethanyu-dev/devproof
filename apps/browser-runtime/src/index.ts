@@ -3,7 +3,7 @@ import { fillFields } from "./fill-fields.js";
 import { comboboxClickTarget } from "./combobox-click.js";
 import { DomObservations } from "./dom-observation.js";
 import { stepVideoPlan } from "./step-video-plan.js";
-import { observedRequestBody } from "./network-request.js";
+import { observedRequestBody, networkBodyOmission } from "./network-request.js";
 import { VisualObservations } from "./visual-observation.js";
 import { scrollElement } from "./scroll.js";
 import { captureHighDensityPreview } from "./preview-screenshot.js";
@@ -1649,7 +1649,7 @@ export class BrowserSessionManager {
     if (!STEP_SCREENSHOT_COMMANDS.has(command.commandType))
       return this.withActionFeedback(command, result);
     try {
-      const stepArtifact = await this.captureStepArtifact(
+      let stepArtifact = await this.captureStepArtifact(
         command.sessionId,
         command.commandType,
       );
@@ -1658,18 +1658,81 @@ export class BrowserSessionManager {
           command,
           this.preserveStructuredDom(result),
         );
-      const structured = structuredObservationSchema.safeParse(
+      let structured = structuredObservationSchema.safeParse(
         (result as { result?: Record<string, unknown> }).result
           ?.structuredObservation,
       );
       let canonical: RuntimeArtifactPayload | undefined;
       if (structured.success && active) {
-        structured.data.consistency = (await this.domObservations.verifyCapture(
-          active.page,
-          structured.data,
-        ))
-          ? "VERIFIED"
-          : "DRIFTED";
+        // Retry only observation, never the user's click/fill/submit. Recreate
+        // text, refs and image together so the returned capture stays coherent.
+        for (let retry = 0; ; retry++) {
+          const stable = await this.domObservations.verifyCapture(
+            active.page,
+            structured.data,
+          );
+          structured.data.consistency = stable ? "VERIFIED" : "DRIFTED";
+          const dialogs = structured.data.nodes.filter(
+            (n) =>
+              n.visible &&
+              (n.tag === "dialog" ||
+                ["dialog", "alertdialog"].includes(n.role ?? "")),
+          );
+          if (
+            stable ||
+            (dialogs.length &&
+              dialogs.every(
+                (n) =>
+                  structured.success &&
+                  structured.data.verifiedScopeNodeIds?.includes(n.nodeId),
+              )) ||
+            retry >= 2 ||
+            Date.now() + 1000 >= Date.parse(command.deadlineAt)
+          )
+            break;
+          const fresh = (await this.executeCommand({
+            ...command,
+            commandType: "page.snapshot",
+            payload: {},
+          })) as {
+            result: Record<string, unknown>;
+            artifacts?: RuntimeArtifactPayload[];
+          };
+          const parsed = structuredObservationSchema.safeParse(
+            fresh.result.structuredObservation,
+          );
+          if (!parsed.success) break;
+          const screenshot = await this.captureStepArtifact(
+            command.sessionId,
+            "page.snapshot",
+          );
+          if (!screenshot) break;
+          const previous = result as {
+            result?: Record<string, unknown>;
+            artifacts?: RuntimeArtifactPayload[];
+          };
+          result = {
+            ...previous,
+            result: {
+              ...fresh.result,
+              ...(previous.result?.actionOutcome
+                ? {
+                    actionOutcome: previous.result.actionOutcome,
+                    observationCombined: true,
+                  }
+                : {}),
+              captureRetryCount: retry + 1,
+            },
+            artifacts: [
+              ...(previous.artifacts ?? []).filter(
+                (a) => a.kind !== "DOM" && a.kind !== "SCREENSHOT",
+              ),
+              ...(fresh.artifacts ?? []),
+            ],
+          };
+          structured = parsed;
+          stepArtifact = screenshot;
+        }
         structured.data.capturedUntil = new Date().toISOString();
         stepArtifact.metadata = {
           ...stepArtifact.metadata,
@@ -3664,6 +3727,7 @@ export class BrowserSessionManager {
         /* Service-worker requests may not have a frame. */
       }
       session.actionFeedback.request(request, this.pageId(session, page), {
+        requestId: randomUUID(),
         method: request.method(),
         url: safeObservedUrl(request.url()),
         frameUrl,
@@ -3671,8 +3735,14 @@ export class BrowserSessionManager {
     });
     page.on("response", (response) => {
       const request = response.request();
+      const omission = networkBodyOmission(
+        request.url(),
+        page.url(),
+        request.resourceType(),
+        this.networkAllowlist,
+      );
       const requestBody =
-        new URL(response.url()).origin === new URL(page.url()).origin
+        omission === undefined
           ? observedRequestBody(
               request.url(),
               request.headers()["content-type"] ?? "",
@@ -3682,7 +3752,14 @@ export class BrowserSessionManager {
           : undefined;
       const entry = redactValue({
         method: request.method(),
-        ...(requestBody === undefined ? {} : { requestBody }),
+        ...(requestBody === undefined
+          ? request.postData()
+            ? {
+                requestBodyOmitted:
+                  omission ?? "content_type_size_or_invalid_json",
+              }
+            : {}
+          : { requestBody }),
         status: response.status(),
         timestamp: new Date().toISOString(),
         url: safeObservedUrl(response.url()),
@@ -3744,14 +3821,18 @@ export class BrowserSessionManager {
     entry: Record<string, unknown>,
   ) {
     try {
-      const responseUrl = new URL(response.url());
-      const pageUrl = new URL(page.url());
+      const omission = networkBodyOmission(
+        response.url(),
+        page.url(),
+        response.request().resourceType(),
+        this.networkAllowlist,
+      );
       const contentType = response.headers()["content-type"] ?? "";
       if (
-        responseUrl.origin !== pageUrl.origin ||
+        omission !== undefined ||
         !/(?:application|text)\/(?:[a-z0-9.+-]*\+)?json\b/iu.test(contentType)
       ) {
-        entry.responseBodyOmitted = "origin_or_content_type";
+        entry.responseBodyOmitted = omission ?? "content_type";
         return;
       }
       const declaredLength = Number(response.headers()["content-length"]);
@@ -4419,8 +4500,11 @@ export class BrowserSessionManager {
     page: Page,
     input: { format: "jpeg" | "png"; fullPage: boolean; quality: number },
   ): Promise<Buffer> {
+    // Hiding the caret injects temporary DOM styles and invalidates our paired
+    // DOM/screenshot evidence. Preserve it instead of weakening drift checks.
     if (input.format === "png") {
       const data = await page.screenshot({
+        caret: "initial",
         fullPage: input.fullPage,
         scale: "css",
         type: "png",
@@ -4434,6 +4518,7 @@ export class BrowserSessionManager {
       return data;
     }
     let data = await page.screenshot({
+      caret: "initial",
       fullPage: input.fullPage,
       scale: "css",
       quality: input.quality,
@@ -4441,6 +4526,7 @@ export class BrowserSessionManager {
     });
     if (data.byteLength > INLINE_SCREENSHOT_MAX_BYTES && input.quality > 45) {
       data = await page.screenshot({
+        caret: "initial",
         fullPage: input.fullPage,
         scale: "css",
         quality: 45,
@@ -4449,6 +4535,7 @@ export class BrowserSessionManager {
     }
     if (data.byteLength > INLINE_SCREENSHOT_MAX_BYTES && input.fullPage) {
       data = await page.screenshot({
+        caret: "initial",
         fullPage: false,
         scale: "css",
         quality: 45,

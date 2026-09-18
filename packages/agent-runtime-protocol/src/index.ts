@@ -1,3 +1,10 @@
+export * from "./network-check.js";
+import { networkCheckSchema } from "./network-check.js";
+export {
+  stepContextArchiveSchema,
+  type StepContextArchive,
+} from "./step-context.js";
+import { stepContextArchiveSchema } from "./step-context.js";
 export * from "./observation-contract.js";
 export * from "./observation-evaluator.js";
 import { observationContractSchema } from "./observation-contract.js";
@@ -14,6 +21,7 @@ import { z } from "zod";
 export {
   businessTestAccountSchema,
   executionRecordSchema,
+  executionRecordDeltaSchema,
   executionStateSchema,
   readExecutionState,
 } from "./execution-state.js";
@@ -33,7 +41,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 21,
+  minor: 24,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -149,6 +157,7 @@ export const runtimeProtocolVersionSchema = z.object({
 });
 
 export const runtimeObservationTargetSchema = z.object({
+  network: networkCheckSchema.optional(),
   label: z.string().trim().min(1).max(500),
   expectedText: z.string().trim().min(1).max(500),
   // Alternatives describe the same business object, not additional objects.
@@ -330,7 +339,7 @@ export const runtimeGeneratedSpecSchema = z.object({
 });
 
 export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
-  observationContractVersion: z.literal(2).optional(),
+  observationContractVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   specFormat: z.enum(["COMPACT", "CHECK_REFERENCES"]).optional(),
   attemptNumber: z.number().int().positive(),
   deadlineAt: z.string().datetime(),
@@ -555,6 +564,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.started"),
     payload: runtimeTraceStepContextSchema.extend({
+      contextSnapshot: stepContextArchiveSchema.optional(),
       progress: runtimeProgressSchema.optional(),
       modelCallId: z.string().uuid().optional(),
       inputPreview: z.unknown(),
@@ -565,6 +575,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.completed"),
     payload: runtimeTraceStepContextSchema.extend({
+      decisionOutput: z.unknown().optional(),
       modelCallId: z.string().uuid().optional(),
       durationMs: z.number().int().nonnegative(),
       inputPreview: z.unknown(),
@@ -751,11 +762,32 @@ export const runtimeVerificationTerminationReasonSchema = z.enum([
   "LOCATOR_RECOVERY_EXHAUSTED",
 ]);
 
+export const EVIDENCE_CATALOG_CAPABILITY = "attempt-evidence-catalog-v1";
+export const runtimeEvidenceCatalogSchema = z.object({
+  version: z.literal(1),
+  runId: z.string().uuid(),
+  attemptId: z.string().uuid(),
+  // The control plane seals the catalog against the complete persisted attempt.
+  sealedAt: z.string().datetime().optional(),
+  count: z.number().int().nonnegative().optional(),
+  digest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+});
+
 const verificationCompletedOutcomeSchema = z
   .object({
     termination: z
       .object({
         reason: runtimeVerificationTerminationReasonSchema,
+      })
+      .optional(),
+    evidenceCatalog: runtimeEvidenceCatalogSchema.optional(),
+    cleanup: z
+      .object({
+        status: z.enum(["PENDING", "BLOCKED"]),
+        note: z.string().min(1).max(4000),
       })
       .optional(),
     criteria: z.array(runtimeCriterionResultSchema).min(1).max(100),

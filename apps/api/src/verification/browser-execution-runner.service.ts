@@ -25,6 +25,7 @@ import {
 } from "../runtime/session-resource-cleanup.js";
 import {
   businessDataLocksEnabled,
+  executionResourceClaims,
   concurrencyPolicy,
   ExecutionAdmissionBlocked,
   executionTarget,
@@ -1688,18 +1689,27 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           }
         }
         const claims =
-          input.purpose === "PROFILE_PURGE" || !businessDataLocksEnabled()
+          input.purpose === "PROFILE_PURGE"
             ? []
-            : resourceClaims(input.targetUrl, execution?.run.concurrencyPolicy);
+            : executionResourceClaims(
+                input.targetUrl,
+                execution?.run.concurrencyPolicy,
+                execution?.run.executionPolicy,
+              );
         const existingLeases = claims.length
           ? await tx.executionResourceLease.findMany({
-              where: claims.some((claim) => claim.rootKey === "*")
-                ? {}
-                : {
-                    rootKey: {
-                      in: [...claims.map((claim) => claim.rootKey), "*"],
-                    },
-                  },
+              where: {
+                ...(!businessDataLocksEnabled()
+                  ? { origin: "ACCOUNT_COORDINATION" }
+                  : {}),
+                ...(claims.some((claim) => claim.rootKey === "*")
+                  ? {}
+                  : {
+                      rootKey: {
+                        in: [...claims.map((claim) => claim.rootKey), "*"],
+                      },
+                    }),
+              },
               include: {
                 session: {
                   select: {
@@ -1754,7 +1764,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         }
         // Pre-upgrade/direct sessions without data leases cannot bypass new
         // readers. Unknown destinations conservatively conflict with all roots.
-        if (claims.length) {
+        if (claims.length && businessDataLocksEnabled()) {
           const legacy = await tx.browserRuntimeSession.findMany({
             where: {
               purpose: "EXECUTION",
@@ -1817,6 +1827,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
               run: {
                 select: {
                   concurrencyPolicy: true,
+                  executionPolicy: true,
                   environmentSnapshot: true,
                   teamId: true,
                 },
@@ -1827,9 +1838,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             (item) =>
               (item.createdAt < execution.createdAt ||
                 item.id < execution.id) &&
-              resourceClaims(
+              executionResourceClaims(
                 executionTarget(item.input, item.run.environmentSnapshot),
                 item.run.concurrencyPolicy,
+                item.run.executionPolicy,
               ).some(
                 (claim) =>
                   claim.mode === "WRITE" &&

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserSessionManager } from "./index.js";
+import { DomObservations } from "./dom-observation.js";
 import { startSsrfProxy } from "./ssrf-proxy.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -12,8 +13,22 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
-async function fixtureServer() {
+async function fixtureServer(apiOrigin?: string) {
   const server = createServer((request, response) => {
+    response.setHeader("access-control-allow-origin", "*");
+    response.setHeader("access-control-allow-headers", "content-type");
+    response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+    if (request.method === "OPTIONS") {
+      response.end();
+      return;
+    }
+    if (request.url === "/auth/token") {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({ unknownSecret: "must-not-capture-auth-body" }),
+      );
+      return;
+    }
     if (request.url === "/virtual-list") {
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<div id="holder" style="height:256px;width:240px;overflow:hidden;position:relative">
@@ -100,6 +115,8 @@ async function fixtureServer() {
         <input name="account" value="invalid-example">
         <button id="save-account">Save account</button><span id="save-error"></span>
       </form>
+      <button id="cross-origin" onclick="fetch('${apiOrigin ?? ""}/api-json',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({account:'example-user',config:{value:true},token:'private-cross-token'})}).then(r=>r.json()).then(()=>document.querySelector('#json-status').textContent='Cross loaded')">Cross API</button>
+      <button id="auth-json" onclick="fetch('${apiOrigin ?? ""}/auth/token',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({unknownSecret:'must-not-capture-auth-body'})}).then(r=>r.json()).then(()=>document.querySelector('#json-status').textContent='Auth loaded')">Auth API</button>
       <div id="shadow-host"></div>
       <iframe src="/frame"></iframe>
       <script>
@@ -228,6 +245,12 @@ describe("BrowserSessionManager E2E", () => {
         result: { content: string };
       };
       expect(typed.result.content).toContain('value="DevProof 中文"');
+      expect(typed.result).toMatchObject({
+        structuredObservation: {
+          consistency: "VERIFIED",
+          consistencyIssues: [],
+        },
+      });
       await expect(
         execute("page.select", {
           target: { selector: "#custom-select" },
@@ -643,3 +666,177 @@ describe("BrowserSessionManager E2E", () => {
     }
   }, 45_000);
 });
+
+it("recaptures an unstable observation without replaying its business action", async () => {
+  const origin = await fixtureServer();
+  const proxy = await startSsrfProxy({ allowlist: new Set(["127.0.0.1"]) });
+  cleanups.push(() => proxy.stop());
+  const manager = new BrowserSessionManager(
+    {
+      removeSession: vi.fn(),
+      replaceSession: vi.fn(),
+      value: () => ({ sessions: [] }),
+    } as never,
+    proxy.server,
+    vi.fn(),
+    vi.fn(),
+  );
+  const sessionId = randomUUID(),
+    leaseToken = randomUUID();
+  const execute = (
+    commandType: Parameters<typeof manager.execute>[0]["commandType"],
+    payload: Record<string, unknown>,
+    after?: { observe: "VIEWPORT"; timeoutMs: number },
+  ) =>
+    manager.execute({
+      commandId: randomUUID(),
+      commandType,
+      payload,
+      sessionId,
+      leaseToken,
+      fencingToken: "1",
+      deadlineAt: new Date(Date.now() + 15000).toISOString(),
+      type: "command.execute",
+      ...(after ? { after } : {}),
+    });
+  try {
+    await execute("session.open", {
+      allowedOrigins: [origin],
+      profileKey: `retry-${randomUUID()}`,
+      profileMode: "EPHEMERAL",
+    });
+    await execute("page.navigate", { url: origin });
+    const commands = vi.spyOn(
+      manager as unknown as {
+        executeCommand: (c: { commandType: string }) => Promise<unknown>;
+      },
+      "executeCommand",
+    );
+    const verify = vi
+      .spyOn(DomObservations.prototype, "verifyCapture")
+      .mockImplementationOnce(async (_page, capture) => {
+        capture.consistencyIssues = [
+          { code: "DOCUMENT_MUTATED", frameId: capture.frames[0]!.frameId },
+        ];
+        capture.verifiedScopeNodeIds = [];
+        return false;
+      });
+    try {
+      const result = await execute(
+        "page.click",
+        { target: { selector: "button:first-child" } },
+        { observe: "VIEWPORT", timeoutMs: 1500 },
+      );
+      expect(result).toMatchObject({
+        result: {
+          captureRetryCount: 1,
+          actionOutcome: { status: "SUCCEEDED" },
+          structuredObservation: { consistency: "VERIFIED" },
+        },
+      });
+      expect(
+        commands.mock.calls.filter(([c]) => c.commandType === "page.click"),
+      ).toHaveLength(1);
+      expect(
+        commands.mock.calls.filter(([c]) => c.commandType === "page.snapshot"),
+      ).toHaveLength(2);
+    } finally {
+      verify.mockRestore();
+      commands.mockRestore();
+    }
+  } finally {
+    await execute("session.close", {});
+  }
+});
+
+it("captures redacted cross-origin business JSON and stable request IDs while excluding auth payloads", async () => {
+  const apiOrigin = await fixtureServer();
+  const pageOrigin = await fixtureServer(apiOrigin);
+  const proxy = await startSsrfProxy({ allowlist: new Set(["127.0.0.1"]) });
+  const manager = new BrowserSessionManager(
+    {
+      removeSession: vi.fn(),
+      replaceSession: vi.fn(),
+      value: () => ({ sessions: [] }),
+    } as never,
+    proxy.server,
+    vi.fn(),
+    vi.fn(),
+    undefined,
+    undefined,
+    { networkAllowlist: new Set(["127.0.0.1"]) },
+  );
+  const sessionId = randomUUID(),
+    leaseToken = randomUUID();
+  const execute = (
+    commandType: Parameters<typeof manager.execute>[0]["commandType"],
+    payload: Record<string, unknown>,
+  ) =>
+    manager.execute({
+      commandId: randomUUID(),
+      commandType,
+      deadlineAt: new Date(Date.now() + 15000).toISOString(),
+      fencingToken: "1",
+      leaseToken,
+      payload,
+      sessionId,
+      type: "command.execute",
+    });
+  try {
+    await execute("session.open", {
+      profileKey: `cross-${randomUUID()}`,
+      profileMode: "EPHEMERAL",
+    });
+    await execute("page.navigate", { url: pageOrigin });
+    await execute("page.click", { target: { selector: "#cross-origin" } });
+    await execute("page.wait", {
+      kind: "text",
+      text: "Cross loaded",
+      timeoutMs: 5000,
+    });
+    const snapshot = (await execute("page.snapshot", {})) as {
+      result: { actionFeedback: { requests: Array<{ requestId: string }> } };
+    };
+    const network = (await execute("page.network", {
+      includeResponseBodies: true,
+      urlIncludes: "/api-json",
+    })) as { result: { content: string } };
+    const entries = JSON.parse(network.result.content) as Array<
+      Record<string, unknown>
+    >;
+    const post = entries.find((e) => e.method === "POST")!;
+    expect(post).toMatchObject({
+      status: 200,
+      requestBody: { config: { value: true }, token: "[REDACTED]" },
+      responseBody: { data: [{ id: "product-1", isSale: false }] },
+    });
+    expect(post.requestId).toBe(
+      snapshot.result.actionFeedback.requests[0]!.requestId,
+    );
+    expect(network.result.content).not.toContain("private-cross-token");
+    expect(network.result.content).not.toContain("super-secret-response-token");
+    await execute("page.click", { target: { selector: "#auth-json" } });
+    await execute("page.wait", {
+      kind: "text",
+      text: "Auth loaded",
+      timeoutMs: 5000,
+    });
+    const auth = (await execute("page.network", {
+      includeResponseBodies: true,
+      urlIncludes: "/auth/token",
+    })) as { result: { content: string } };
+    expect(auth.result.content).not.toContain("must-not-capture-auth-body");
+    expect(JSON.parse(auth.result.content)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "POST",
+          requestBodyOmitted: "authentication",
+          responseBodyOmitted: "authentication",
+        }),
+      ]),
+    );
+  } finally {
+    await execute("session.close", {}).catch(() => undefined);
+    await proxy.stop();
+  }
+}, 30000);

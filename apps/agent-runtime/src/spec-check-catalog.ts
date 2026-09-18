@@ -22,6 +22,25 @@ export const defineChecksSchema = z.object({
   checks: z.array(checkUpdateSchema).min(1).max(100),
 });
 
+/** V3 generation does not see the execution contract's DOM schema. */
+export const defineBusinessChecksSchema = defineChecksSchema.extend({
+  checks: z
+    .array(
+      checkUpdateSchema.omit({ observationContract: true }).extend({
+        description: z
+          .string()
+          .trim()
+          .min(1)
+          .max(160)
+          .describe(
+            "一句业务结果，尽量 80 字以内；对象和预期另填，不复述操作。",
+          ),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+
 type Check = z.infer<typeof specCheckSchema>;
 type CatalogIssue = SpecCheckIssue & { inputIndex?: number; checkId?: string };
 
@@ -45,6 +64,7 @@ function actionableIssues(
 
 /** Attempt-local state. Failed items never replace previously accepted checks. */
 export class SpecCheckCatalog {
+  constructor(private readonly businessChecksEnabled = true) {}
   private readonly checks = new Map<string, Check>();
   revision = 0;
 
@@ -106,6 +126,17 @@ export class SpecCheckCatalog {
         );
         return;
       }
+      if (
+        !this.businessChecksEnabled &&
+        (check.businessCheck || check.observationContract?.version === 3)
+      ) {
+        fail(
+          "CONTRACT_UNSUPPORTED",
+          "businessCheck",
+          "当前控制面未启用业务验收格式，请使用本任务协商的格式。",
+        );
+        return;
+      }
       const requirement = byId.get(check.requirementId);
       if (!requirement) {
         fail(
@@ -128,13 +159,26 @@ export class SpecCheckCatalog {
       }
       if (
         checkId &&
-        this.checks.get(checkId)!.observationContract &&
-        !check.observationContract
+        (this.checks.get(checkId)!.observationContract ||
+          this.checks.get(checkId)!.businessCheck) &&
+        !check.observationContract &&
+        !check.businessCheck
       ) {
         fail(
           "CONTRACT_DOWNGRADE",
           "observationContract",
           "已保存的对象状态契约不能退回文字目标；请修正原 observationContract。",
+        );
+        return;
+      }
+      if (
+        check.businessCheck &&
+        (check.observationContract || check.observationTargets)
+      ) {
+        fail(
+          "CONFLICTING_CHECK_FORMAT",
+          "businessCheck",
+          "业务验收不能同时声明旧版观察目标或契约。",
         );
         return;
       }

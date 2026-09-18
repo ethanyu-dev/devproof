@@ -1,5 +1,7 @@
 import {
   observationContractSchema,
+  businessCheckSchema,
+  compileBusinessCheck,
   runtimeGeneratedSpecSchema,
   businessAccountRequirementsError,
   validateCaseAccountRequirements,
@@ -40,7 +42,7 @@ export type SpecRequirement = z.infer<typeof runtimeSpecRequirementSchema>;
 export const specCheckSchema = z.object({
   requirementId: z.string().trim().min(1).max(100),
   description: conciseText.describe(
-    "一句可判定的业务结果；字段值和枚举放 observationTargets，不复述步骤。",
+    "尽量 80 字以内的一句业务结果；对象与状态放 businessCheck，不复述步骤和取证方式。",
   ),
   observationTargets: z
     .array(runtimeObservationTargetSchema)
@@ -48,6 +50,7 @@ export const specCheckSchema = z.object({
     .max(20)
     .optional(),
   observationContract: observationContractSchema.optional(),
+  businessCheck: businessCheckSchema.optional(),
   supportingSourceRefs: z
     .array(z.string().trim().min(1).max(500))
     .max(99)
@@ -115,19 +118,36 @@ export function expandSpecCheck(
   requirement: SpecRequirement,
   id: string,
 ) {
-  const { supportingSourceRefs, ...criterion } = check;
+  const { supportingSourceRefs, businessCheck, ...criterion } = check;
+  if (
+    businessCheck &&
+    (criterion.observationContract || criterion.observationTargets)
+  )
+    throw new Error(
+      "businessCheck cannot be combined with legacy targets or contracts.",
+    );
+  const contract = businessCheck
+    ? compileBusinessCheck(
+        businessCheck,
+        requirement,
+        check.requiredEvidenceKinds,
+      )
+    : check.observationContract;
   return runtimeSpecCriterionSchema.parse({
     ...criterion,
+    ...(contract ? { observationContract: contract } : {}),
+    requiredEvidenceKinds: [
+      ...new Set([
+        ...check.requiredEvidenceKinds,
+        ...(contract?.targets.flatMap((t) => t.requiredEvidenceKinds) ?? []),
+      ]),
+    ],
     id,
     sourceRefs: [...new Set([requirement.sourceRef, ...supportingSourceRefs])],
     basis: {
       sourceRef: requirement.sourceRef,
       quote: requirement.quote,
-      observationTarget: (
-        check.observationContract?.targets ??
-        check.observationTargets ??
-        []
-      )
+      observationTarget: (contract?.targets ?? check.observationTargets ?? [])
         .map((target) => target.label)
         .join("、")
         .slice(0, 500),

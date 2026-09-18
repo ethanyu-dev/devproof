@@ -1,3 +1,5 @@
+import { ExecutionContextService } from "./execution-runs/execution-context.service.js";
+import { ExecutionContextController } from "./execution-runs/execution-context.controller.js";
 import { ObservationBindingService } from "./agent-runtime/observation-binding.service.js";
 import { AcceptanceReviewRuntimeController } from "./agent-runtime/acceptance-review-runtime.controller.js";
 import { TaskAcceptanceReviewService } from "./task-executions/task-acceptance-review.service.js";
@@ -115,6 +117,7 @@ import { VerificationService } from "./verification/verification.service.js";
     ToolCredentialsController,
     ExecutionRunnerController,
     ExecutionRunController,
+    ExecutionContextController,
     ExecutionRunConsoleController,
     RunBrowserPreviewController,
     RunHitlBrowserController,
@@ -147,6 +150,7 @@ import { VerificationService } from "./verification/verification.service.js";
     CredentialCipherService,
     ExecutionRunnerRegistry,
     ExecutionRunService,
+    ExecutionContextService,
     RunBrowserPreviewService,
     RunHitlBrowserService,
     GithubPullRequestClient,

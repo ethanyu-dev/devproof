@@ -1726,6 +1726,26 @@ model GeneratedTestCase {
   @@map("generated_test_cases")
 }
 
+model RunStepContext {
+  id            String     @id @db.Uuid
+  teamId        String     @map("team_id") @db.Uuid
+  runId         String     @map("run_id") @db.Uuid
+  attemptId     String     @map("attempt_id") @db.Uuid
+  taskId        String     @map("task_id") @db.Uuid
+  segmentId     String     @map("segment_id")
+  step          Int
+  model         String
+  sequence      BigInt
+  requestGzip   Bytes      @map("request_gzip")
+  requestSha256 String     @map("request_sha256")
+  requestBytes  Int        @map("request_bytes")
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  attempt       RunAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, runId, attemptId, sequence])
+  @@map("run_step_contexts")
+}
+
 model RunAttempt {
   id                  String                  @id @default(uuid()) @db.Uuid
   runId               String                  @map("run_id") @db.Uuid
@@ -1741,6 +1761,7 @@ model RunAttempt {
   updatedAt           DateTime                @updatedAt @map("updated_at") @db.Timestamptz
   run                 ExecutionRun            @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                AgentRuntimeTask?
+  stepContexts        RunStepContext[]
   events              RunEvent[]
   evidences           RunEvidence[]
   criterionResults    RunCriterionResult[]

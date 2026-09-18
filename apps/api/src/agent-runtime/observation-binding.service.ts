@@ -34,7 +34,16 @@ const record = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : {};
+export function currentAccountEvidenceFilter(snapshot: unknown) {
+  const since = record(
+    record(snapshot).executionPolicy,
+  ).accountRevisionStartedAt;
+  return typeof since === "string" && Number.isFinite(Date.parse(since))
+    ? { createdAt: { gte: new Date(since) } }
+    : {};
+}
 type CaptureCommand = {
+  createdAt?: Date | string;
   id: string;
   status: string;
   artifacts: Array<{
@@ -118,6 +127,16 @@ export class ObservationBindingService {
     const observation = structuredObservationSchema.parse(
       JSON.parse(stored.body.toString("utf8")),
     );
+    const since = snapshot.executionPolicy.accountRevisionStartedAt;
+    if (
+      typeof since === "string" &&
+      (command.createdAt
+        ? new Date(command.createdAt).getTime()
+        : Date.parse(observation.capturedFrom)) < Date.parse(since)
+    )
+      throw new BadRequestException(
+        "OBSERVATION_ACCOUNT_REVISION_STALE: capture the current account before verifying.",
+      );
     if (selection && selection.observationId !== observation.captureId)
       throw new BadRequestException("OBSERVATION_NOT_AVAILABLE");
     const artifacts = command.artifacts.filter(
@@ -146,6 +165,17 @@ export class ObservationBindingService {
           });
           continue;
         }
+        if (evaluated.binding.readiness !== "READY")
+          diagnostics.push({
+            criterionId: criterion.id,
+            targetId: target.targetId,
+            observationId: observation.captureId,
+            error: "OBSERVATION_INCOMPLETE",
+            details: {
+              reasons: evaluated.binding.reasons,
+              consistencyIssues: observation.consistencyIssues ?? [],
+            },
+          });
         const binding = observationBindingSchema.parse({
           ...evaluated.binding,
           id: randomUUID(),
@@ -264,6 +294,7 @@ export class ObservationBindingService {
         where: {
           runId: task.runId,
           attemptId: task.attemptId,
+          ...currentAccountEvidenceFilter(task.snapshot),
           kind: "observation.visual.reviewed",
           ...(after ? { id: { gt: after } } : {}),
         },
@@ -303,6 +334,7 @@ export class ObservationBindingService {
       where: {
         runId: task.runId,
         attemptId: task.attemptId,
+        ...currentAccountEvidenceFilter(task.snapshot),
         ...(input.bindingIds
           ? { id: { in: input.bindingIds } }
           : after
@@ -370,11 +402,17 @@ export class ObservationBindingService {
   }
 
   async all(
-    task: Pick<AgentRuntimeTask, "runId" | "attemptId">,
+    task: Pick<AgentRuntimeTask, "runId" | "attemptId"> & {
+      snapshot?: unknown;
+    },
     tx: Prisma.TransactionClient = this.prisma,
   ) {
     const rows = await tx.runObservationBinding.findMany({
-      where: { runId: task.runId, attemptId: task.attemptId },
+      where: {
+        runId: task.runId,
+        attemptId: task.attemptId,
+        ...currentAccountEvidenceFilter(task.snapshot),
+      },
       orderBy: { createdAt: "asc" },
     });
     return rows.map((r) =>

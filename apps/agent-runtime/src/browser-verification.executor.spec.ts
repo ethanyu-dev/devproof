@@ -1,3 +1,4 @@
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskLease } from "@devproof/agent-runtime-protocol";
@@ -145,6 +146,207 @@ function operationOutput(
   }
   return output;
 }
+
+it.each([
+  { unavailable: false, business: false },
+  { unavailable: true, business: false },
+  { unavailable: false, business: true },
+  { unavailable: true, business: true },
+])(
+  "resolves cached observation IDs and isolates binding exhaustion from independent criteria (%j)",
+  async ({ unavailable, business }) => {
+    const captureId = "41b749ff-60c6-48f1-b837-550b062dacce";
+    let calls = 0;
+    const create = vi.fn().mockImplementation(async (request) => {
+      const snapshot = contextData(request, "current_browser_page").data
+        .snapshot;
+      const index = calls++;
+      if (index > 3) throw new Error("Binding recovery did not converge");
+      return {
+        id: `reply-${index}`,
+        message: {
+          role: "assistant",
+          tool_calls: [
+            index < 3
+              ? functionCall(
+                  business ? "observe_subject" : "bind_observation",
+                  business
+                    ? {
+                        criterionId: "default-state",
+                        subject: "A",
+                        observationId: snapshot.observationId,
+                        scopeRef: "f1e1",
+                        identityRef: `f1e${2 + index}`,
+                        stateRef: "f1e5",
+                      }
+                    : {
+                        observationId: snapshot.observationId,
+                        targetId: "default",
+                        scopeRef: "f1e1",
+                        entityRef: `f1e${2 + index}`,
+                        assertionRefs: { enabled: "f1e5" },
+                      },
+                  index,
+                )
+              : functionCall(
+                  "finish_verification",
+                  {
+                    verdict: "INCONCLUSIVE",
+                    summary: "默认状态证据绑定受阻，独立的页面检查已完成。",
+                    criteria: [
+                      {
+                        criterionId: "page-visible",
+                        status: "PASSED",
+                        summary: "独立页面检查通过。",
+                        evidenceRefs: [],
+                      },
+                    ],
+                  },
+                  index,
+                ),
+          ],
+        },
+      };
+    });
+    const harness = convergenceHarness(create);
+    const bindingCriterion = {
+      id: "default-state",
+      description: "默认开启",
+      required: true,
+      requiredEvidenceKinds: ["DOM"] as const,
+      observationContract: {
+        version: 2 as const,
+        comparisons: [],
+        targets: [
+          {
+            targetId: "default",
+            label: "默认启用状态",
+            scope: { kind: "DIALOG" as const, names: ["Settings"] },
+            entity: {
+              controlKind: "SELECT" as const,
+              label: "Type",
+              property: "SELECTED_LABEL" as const,
+              oneOf: ["A"],
+            },
+            phase: "INITIAL_AFTER_OPEN" as const,
+            temporal: "SAME_OBSERVATION" as const,
+            requiredEvidenceKinds: ["DOM" as const],
+            assertions: [
+              {
+                assertionId: "enabled",
+                subject: { kind: "SWITCH" as const, label: "Enabled" },
+                property: "CHECKED" as const,
+                operator: "EQ" as const,
+                expected: true,
+              },
+            ],
+          },
+        ],
+      },
+    };
+    harness.runTask.snapshot.criteria.push({
+      ...bindingCriterion,
+      ...(business
+        ? {
+            observationContract: {
+              version: 3 as const,
+              comparisons: [],
+              targets: [
+                {
+                  targetId: "default",
+                  label: "A",
+                  identity: { text: "A" },
+                  phase: "INITIAL_AFTER_OPEN" as const,
+                  assertions: [
+                    {
+                      assertionId: "enabled",
+                      label: "Enabled",
+                      expected: true,
+                    },
+                  ],
+                  requiredEvidenceKinds: ["DOM" as const],
+                },
+              ],
+            },
+          }
+        : {}),
+      requiredEvidenceKinds: ["DOM"],
+    });
+    harness.controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      result: {
+        content: '- <div role="dialog"> "Settings" [ref=f1e1]',
+        structuredObservation: {
+          version: 2,
+          captureId,
+          capturedFrom: new Date().toISOString(),
+          capturedUntil: new Date().toISOString(),
+          pageIdentity: "fixture",
+          frames: [],
+          nodes: [],
+          regions: [],
+          renderedText: "Settings",
+          consistency: "VERIFIED",
+          coverage: {
+            scope: "VIEWPORT",
+            completeWithinScope: true,
+            truncated: false,
+            unavailableFrames: [],
+          },
+        },
+      },
+    } as never);
+    const observationOperation = vi
+      .fn()
+      .mockImplementation(async (_lease, _op, selection) => {
+        if (_op === "read") return { bindings: [] };
+        if (_op === "deliver") return { accepted: true };
+        expect(selection.observationId).toBe(captureId);
+        if (unavailable) throw new Error("HTTP 400 OBSERVATION_NOT_AVAILABLE");
+        return {
+          bindings: [],
+          coverage: [
+            {
+              criterionId: "default-state",
+              targetId: "default",
+              observationId: captureId,
+              error: "ENTITY_NOT_CONFIRMED",
+            },
+          ],
+        };
+      });
+    Object.assign(harness.controlPlane, { observationOperation });
+    const outcome = await harness.executor.execute(
+      harness.runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      criteria: expect.arrayContaining([
+        expect.objectContaining({
+          criterionId: "default-state",
+          status: "INCONCLUSIVE",
+          summary: expect.stringContaining("三次绑定"),
+        }),
+        expect.objectContaining({
+          criterionId: "page-visible",
+          status: "PASSED",
+        }),
+      ]),
+    });
+    expect(
+      observationOperation.mock.calls.filter((c) => c[1] === "bind"),
+    ).toHaveLength(3);
+    expect(
+      harness.controlPlane.appendEvent.mock.calls.some(
+        (c) =>
+          c[1] === "execution.checkpoint" &&
+          JSON.stringify(c[2]).includes("三次绑定"),
+      ),
+    ).toBe(true);
+  },
+);
 
 describe("criterion evidence submission", () => {
   const content =
@@ -1746,7 +1948,7 @@ describe("runtime navigation and combined finalization", () => {
     expect(create).toHaveBeenCalledTimes(3);
   });
 
-  it("does not partially accept an invalid combined submission", async () => {
+  it("retains valid criteria when another combined submission is rejected", async () => {
     const create = vi
       .fn()
       .mockResolvedValueOnce({
@@ -1786,14 +1988,31 @@ describe("runtime navigation and combined finalization", () => {
       status: "SUCCEEDED",
       artifacts: [{ id: "proof", kind: "DOM" }],
     });
-    await executor.execute(runTask, lease, new AbortController().signal);
-    const rejection = {
-      content: JSON.stringify(
-        operationOutput(create.mock.calls[3]![0], "call-3"),
+    const result = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "PASSED",
+      criteria: [
+        expect.objectContaining({
+          criterionId: "page-visible",
+          status: "PASSED",
+        }),
+      ],
+    });
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(
+      controlPlane.appendEvent.mock.calls.some(
+        (c) =>
+          c[1] === "execution.checkpoint" &&
+          c[2].verificationCheckpoint.criteria.some(
+            (r: { criterionId: string }) => r.criterionId === "page-visible",
+          ),
       ),
-    };
-    expect(JSON.parse(rejection.content)).toMatchObject({ accepted: false });
-    expect(rejection.content).toContain("page-visible");
+    ).toBe(true);
   });
 
   it("retains the locator-recovery guard in combined finalization", async () => {
@@ -5388,5 +5607,416 @@ describe("structured account requests", () => {
       },
     });
     expect(create).toHaveBeenCalledOnce();
+  });
+});
+
+it("archives the prepared model request before invocation and accepts stepIntent metadata", async () => {
+  const create = vi.fn(async (request: Record<string, unknown>) => {
+    const started = controlPlane.appendEvent.mock.calls.find(
+      (call) => call[1] === "agent.model.started",
+    );
+    expect(started).toBeDefined();
+    const archive = (started![2] as { contextSnapshot: { data: string } })
+      .contextSnapshot;
+    const decoded = JSON.parse(
+      gunzipSync(Buffer.from(archive.data, "base64")).toString(),
+    );
+    expect(decoded.request).toEqual(request);
+    expect(JSON.stringify(request)).not.toContain("sk-test-model-secret");
+    return {
+      id: "response-context",
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            {
+              kind: "BROWSER_HITL",
+              prompt: "请完成登录。",
+              summary: "需要登录。",
+              stepIntent: "请求人工完成当前页面登录",
+            },
+            1,
+          ),
+        ],
+      },
+    };
+  });
+  const { executor, controlPlane, runTask } = convergenceHarness(create);
+  expect(
+    await executor.execute(runTask, lease, new AbortController().signal),
+  ).toMatchObject({ kind: "WAITING_HUMAN" });
+  const completed = controlPlane.appendEvent.mock.calls.find(
+    (call) => call[1] === "agent.model.completed",
+  );
+  expect(JSON.stringify(completed![2])).toContain("请求人工完成当前页面登录");
+});
+
+it("persists existing-record progress from node citations without model-authored artifact IDs", async () => {
+  let step = 0;
+  const reply = (name: string, args: Record<string, unknown>) => ({
+    id: `response-${step}`,
+    message: {
+      role: "assistant",
+      content: null,
+      tool_calls: [functionCall(name, args, step)],
+    },
+  });
+  const create = vi.fn(async (request: Parameters<typeof contextData>[0]) => {
+    const state = contextData(request, "browser_working_state").data
+      .executionState;
+    if (++step === 1)
+      return reply("record_progress", {
+        phase: "PREFLIGHT",
+        citations: [{ ref: "e1" }],
+        nextAction: "请求人工处置已存在的记录。",
+        executionState: {
+          ...state,
+          records: [
+            {
+              id: "133",
+              type: "MAPPING",
+              account: "test-user",
+              ownership: "EXISTING",
+            },
+          ],
+        },
+      });
+    expect(state.prerequisiteFacts.existingRecordCount).toBe(1);
+    expect(state.records[0].evidenceRefs).toEqual([
+      "artifact://f54a9f76-a247-4dc1-9c44-25fba0888674",
+    ]);
+    return reply("request_human_input", {
+      kind: "DATA_PRECONDITION",
+      prompt: "目标记录已存在，请处理后继续。",
+      summary: "请求指定记录的人工处置。",
+      context: {
+        criterionIds: ["page-visible"],
+        records: [
+          {
+            id: "133",
+            type: "MAPPING",
+            account: "test-user",
+            evidenceRefs: state.records[0].evidenceRefs,
+          },
+        ],
+      },
+    });
+  });
+  const { executor, controlPlane, runTask } = convergenceHarness(create);
+  runTask.snapshot.executionPolicy.executionState = { account: "test-user" };
+  controlPlane.browserCommand.mockResolvedValue({
+    status: "SUCCEEDED",
+    result: { content: '- tr "133 test-user MAPPING 启用" [ref=e1]' },
+    artifacts: [{ id: "f54a9f76-a247-4dc1-9c44-25fba0888674", kind: "DOM" }],
+  });
+  const outcome = await executor.execute(
+    runTask,
+    lease,
+    new AbortController().signal,
+  );
+  expect(outcome).toMatchObject({
+    kind: "WAITING_HUMAN",
+    intervention: {
+      kind: "DATA_PRECONDITION",
+      context: { records: [{ id: "133", account: "test-user" }] },
+    },
+  });
+  expect(JSON.stringify(outcome)).toContain("直接交还不代表授权删除");
+});
+
+it("opens data-precondition HITL from a node citation with supplemental screenshot evidence", async () => {
+  const create = vi.fn(async () => ({
+    id: "hitl-node",
+    message: {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        functionCall(
+          "request_human_input",
+          {
+            kind: "DATA_PRECONDITION",
+            prompt: "已有记录，请人工处置后继续。",
+            summary: "请求数据处置。",
+            context: {
+              criterionIds: ["page-visible"],
+              records: [
+                {
+                  id: "133",
+                  type: "MAPPING",
+                  account: "test-user",
+                  citations: [{ ref: "e1" }],
+                  evidenceRefs: [
+                    "artifact://11111111-1111-4111-8111-111111111111",
+                  ],
+                },
+              ],
+            },
+          },
+          1,
+        ),
+      ],
+    },
+  }));
+  const { executor, controlPlane, runTask } = convergenceHarness(create);
+  runTask.snapshot.executionPolicy.testAccounts = [
+    {
+      slotId: "subject:1",
+      account: "test-user",
+      usage: "CREATE_OR_MODIFY",
+      requiredTypes: ["MAPPING"],
+    },
+  ];
+  controlPlane.browserCommand.mockResolvedValue({
+    status: "SUCCEEDED",
+    result: { content: '- row "133 test-user MAPPING" [ref=e1]' },
+    artifacts: [
+      { id: "f54a9f76-a247-4dc1-9c44-25fba0888674", kind: "DOM" },
+      { id: "11111111-1111-4111-8111-111111111111", kind: "SCREENSHOT" },
+    ],
+  });
+  const outcome = await executor.execute(
+    runTask,
+    lease,
+    new AbortController().signal,
+  );
+  expect(outcome).toMatchObject({
+    kind: "WAITING_HUMAN",
+    intervention: {
+      kind: "DATA_PRECONDITION",
+      context: {
+        records: [
+          {
+            id: "133",
+            evidenceRefs: expect.arrayContaining([
+              "artifact://f54a9f76-a247-4dc1-9c44-25fba0888674",
+              "artifact://11111111-1111-4111-8111-111111111111",
+            ]),
+          },
+        ],
+      },
+    },
+  });
+  expect(controlPlane.releaseBrowser).not.toHaveBeenCalled();
+});
+
+it("reserves cleanup by call count with ample time left and permits its final write action", async () => {
+  let step = 0;
+  const create = vi.fn(async (request: Parameters<typeof contextData>[0]) => {
+    const state = contextData(request, "browser_working_state").data
+      .executionState;
+    expect(state.phase).toBe("CLEANUP");
+    ++step;
+    return {
+      id: `cleanup-${step}`,
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            {
+              commandType: "page.click",
+              payload: { target: { selector: "#restore" } },
+            },
+            step,
+          ),
+        ],
+      },
+    };
+  });
+  const { controlPlane, runTask } = convergenceHarness(create);
+  runTask.snapshot.deadlineAt = new Date(Date.now() + 1200000).toISOString();
+  runTask.snapshot.executionPolicy.executionState = {
+    phase: "VERIFYING",
+    records: [
+      {
+        id: "133",
+        type: "MAPPING",
+        ownership: "EXISTING",
+        initialState: "true",
+        evidenceRefs: ["artifact://f54a9f76-a247-4dc1-9c44-25fba0888674"],
+        cleanup: { status: "PENDING", instruction: "恢复原状态并核对" },
+      },
+    ],
+  };
+  const executor = new BrowserVerificationExecutor(
+    modelFactory(create),
+    controlPlane as never,
+    3,
+  );
+  const outcome = await executor.execute(
+    runTask,
+    lease,
+    new AbortController().signal,
+  );
+  expect(
+    controlPlane.browserCommand.mock.calls.some(
+      (call) => call[1].commandType === "page.click",
+    ),
+  ).toBe(true);
+  expect(outcome.summary).toContain("清理未完成");
+  expect(outcome.summary).toContain("133");
+});
+
+describe("durable finalization regressions", () => {
+  it.each([199, 200, 201, 226, 2000, 2001])(
+    "finalizes %i saved artifacts without dropping a referenced late artifact",
+    async (count) => {
+      const proof = `artifact://proof-${count - 1}`;
+      const create = vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: "read",
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              functionCall(
+                "browser_command",
+                { commandType: "page.dom", payload: {} },
+                1,
+              ),
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          id: "finish",
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              functionCall(
+                "finish_verification",
+                {
+                  summary: "已验证页面。",
+                  verdict: "PASSED",
+                  criteria: [
+                    {
+                      criterionId: "page-visible",
+                      status: "PASSED",
+                      summary: "页面可见。",
+                      evidenceRefs: [proof],
+                    },
+                  ],
+                },
+                2,
+              ),
+            ],
+          },
+        });
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      runTask.snapshot.executionPolicy.evidenceCatalog = true;
+      runTask.snapshot.executionPolicy.verificationCheckpoint = {
+        attemptId: runTask.snapshot.attemptId,
+        evidence: Array.from({ length: count }, (_, i) => ({
+          externalId: `artifact://proof-${i}`,
+          kind: "DOM",
+          label: "页面",
+          metadata: {},
+        })),
+      };
+      const outcome = await executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      expect(outcome).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+        verdict: "PASSED",
+        criteria: [expect.objectContaining({ evidenceRefs: [proof] })],
+        evidenceCatalog: { attemptId: runTask.snapshot.attemptId },
+      });
+      const checkpoints = controlPlane.appendEvent.mock.calls.filter(
+        (c) => c[1] === "execution.checkpoint",
+      );
+      expect(
+        checkpoints.at(-1)![2].verificationCheckpoint.evidence.length,
+      ).toBeLessThanOrEqual(200);
+    },
+  );
+  it("keeps a valid criterion through cleanup rejection and forced budget finalization", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "read",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            functionCall(
+              "browser_command",
+              { commandType: "page.dom", payload: {} },
+              1,
+            ),
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        id: "finish",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            functionCall(
+              "finish_verification",
+              {
+                summary: "页面验证完成。",
+                verdict: "PASSED",
+                criteria: [
+                  {
+                    criterionId: "page-visible",
+                    status: "PASSED",
+                    summary: "页面可见。",
+                    evidenceRefs: ["artifact://proof"],
+                  },
+                ],
+              },
+              2,
+            ),
+          ],
+        },
+      });
+    const { controlPlane, runTask } = convergenceHarness(create);
+    controlPlane.browserCommand.mockResolvedValue({
+      status: "SUCCEEDED",
+      artifacts: [{ id: "proof", kind: "DOM" }],
+    });
+    runTask.snapshot.executionPolicy.executionState = {
+      writes: [
+        {
+          key: "w",
+          method: "POST",
+          url: "https://app.test/records",
+          status: 200,
+          confirmed: true,
+          evidenceRefs: ["artifact://proof"],
+        },
+      ],
+    };
+    const executor = new BrowserVerificationExecutor(
+      modelFactory(create),
+      controlPlane as never,
+      2,
+    );
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      cleanup: { status: "BLOCKED" },
+      termination: { reason: "TOOL_LIMIT_REACHED" },
+      criteria: [expect.objectContaining({ status: "PASSED" })],
+    });
+    expect(
+      controlPlane.appendEvent.mock.calls.some(
+        (c) =>
+          c[1] === "execution.checkpoint" &&
+          c[2].verificationCheckpoint.criteria[0]?.status === "PASSED",
+      ),
+    ).toBe(true);
   });
 });

@@ -1,4 +1,9 @@
-import { BOUND_EVIDENCE_CAPABILITIES } from "@devproof/agent-runtime-protocol";
+import {
+  BOUND_EVIDENCE_CAPABILITIES,
+  BUSINESS_CHECK_CAPABILITY,
+  EVIDENCE_CATALOG_CAPABILITY,
+  TYPED_CHECKS_CAPABILITY,
+} from "@devproof/agent-runtime-protocol";
 import {
   acceptanceReviewClaimOutputSchema,
   type AcceptanceReviewResult,
@@ -53,7 +58,12 @@ export class ControlPlaneClient {
     const result = await this.request("/internal/v2/runtime/tasks/claim", {
       body: {
         capabilities: ["BROWSER_VERIFICATION"],
-        features: [...BOUND_EVIDENCE_CAPABILITIES],
+        features: [
+          ...BOUND_EVIDENCE_CAPABILITIES,
+          BUSINESS_CHECK_CAPABILITY,
+          EVIDENCE_CATALOG_CAPABILITY,
+          TYPED_CHECKS_CAPABILITY,
+        ],
         protocol: AGENT_RUNTIME_PROTOCOL,
         workerId,
       },

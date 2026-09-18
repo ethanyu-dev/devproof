@@ -36,6 +36,57 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("maps cached IDs to their own canonical captures even with focus disabled", () => {
+    const cache = new BrowserObservations(undefined, false, undefined, {
+      focus: false,
+      delta: false,
+      combined: false,
+    });
+    const captureId = "10000000-0000-4000-8000-000000000001";
+    const raw = {
+      status: "SUCCEEDED",
+      result: {
+        content: "Observed page",
+        structuredObservation: {
+          version: 2,
+          captureId,
+          capturedFrom: new Date().toISOString(),
+          capturedUntil: new Date().toISOString(),
+          pageIdentity: "fixture",
+          frames: [],
+          nodes: [],
+          renderedText: "Observed page",
+          regions: [],
+          consistency: "VERIFIED",
+          coverage: {
+            scope: "VIEWPORT",
+            completeWithinScope: true,
+            truncated: false,
+            unavailableFrames: [],
+          },
+        },
+      },
+    };
+    cache.capture(command("page.snapshot"), raw);
+    const oldId = String(cache.currentPage().snapshot!.observationId);
+    expect(oldId).not.toBe(captureId);
+    expect(cache.currentPage().snapshot).toMatchObject({ captureId });
+    expect(cache.bindingObservationId(oldId)).toBe(captureId);
+    const nextCapture = "10000000-0000-4000-8000-000000000002";
+    raw.result.structuredObservation.captureId = nextCapture;
+    cache.capture(command("page.snapshot"), structuredClone(raw));
+    expect(cache.bindingObservationId(oldId)).toBe(captureId);
+    expect(
+      cache.bindingObservationId(
+        String(cache.currentPage().snapshot!.observationId),
+      ),
+    ).toBe(nextCapture);
+    expect(cache.bindingObservationId(captureId)).toBe(captureId);
+    expect(cache.bindingObservationId("unknown")).toBe("unknown");
+    expect(cache.bindingStateKey(oldId)).toBe(
+      cache.bindingStateKey(nextCapture),
+    );
+  });
   const modalContent =
     '- <span> "Navigation background" [ref=f9e1] [box=0,0,80,20]\n'.repeat(
       260,

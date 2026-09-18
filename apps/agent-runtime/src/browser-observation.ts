@@ -594,13 +594,14 @@ export class BrowserObservations {
     const structured = structuredObservationSchema.safeParse(
       result.structuredObservation,
     );
+    if (snapshot && structured.success)
+      entry.captureId = structured.data.captureId;
     if (
       snapshot &&
       structured.success &&
       this.bound?.enabled &&
       this.viewFeatures.focus
     ) {
-      entry.captureId = structured.data.captureId;
       const view = focusedObservation(
         structured.data,
         this.viewFeatures.delta ? this.deliveredView : undefined,
@@ -760,7 +761,7 @@ export class BrowserObservations {
     ]);
   }
 
-  /** Select one complete, delivered network request, preserving its URL/method
+  /** Select one delivered network entry, preserving body-omission flags and URL/method
    * and artifact. A DOM string that happens to look like JSON is not a request.
    */
   networkCitation(id: string, cursor: number, requestIndex: number) {
@@ -777,15 +778,7 @@ export class BrowserObservations {
       const requests: unknown = JSON.parse(entry.content);
       if (!Array.isArray(requests)) return;
       const request = record(requests[requestIndex]);
-      if (
-        typeof request.url !== "string" ||
-        typeof request.method !== "string" ||
-        request.bodyPending === true ||
-        request.requestBodyTruncated === true ||
-        request.requestBodyOmitted !== undefined ||
-        request.responseBodyTruncated === true ||
-        request.responseBodyOmitted !== undefined
-      )
+      if (typeof request.url !== "string" || typeof request.method !== "string")
         return;
       const quote = JSON.stringify(request);
       if (quote.length > 4000 || !this.hasDeliveredQuote(id, cursor, quote))
@@ -910,7 +903,7 @@ export class BrowserObservations {
             Array<{ id: string }> | undefined
         )?.map((b) => b.id),
         nextAction:
-          "Use the object coverage in working state. Read omitted bindings with read_observation_bindings. For ambiguous candidates, inspect the current snapshot and use bind_observation with its observationId and refs.",
+          "Use the object coverage in working state. Read omitted bindings with read_observation_bindings. For ambiguous candidates, use bind_observation with this canonical observationId or the matching snapshot observationId. Select the actual form control ref, not a display label or wrapper.",
       };
     const result = source.result;
     if (result && typeof result === "object") {
@@ -1142,6 +1135,7 @@ export class BrowserObservations {
   private descriptor(entry: Observation) {
     return {
       observationId: entry.id,
+      captureId: entry.captureId,
       order: entry.order,
       commandType: entry.commandType,
       contentKey: entry.contentKey,
@@ -1168,6 +1162,18 @@ export class BrowserObservations {
       captureTruncated: entry.captureTruncated,
       sourceTruncated: entry.sourceTruncated,
     };
+  }
+
+  /** Resolve only an exact cached observation, never a newer capture. */
+  bindingObservationId(id: string) {
+    return this.entries.get(id)?.captureId ?? id;
+  }
+
+  bindingStateKey(id: string) {
+    const entry =
+      this.entries.get(id) ??
+      [...this.entries.values()].find((e) => e.captureId === id);
+    return entry?.contentKey ?? id;
   }
 
   private page(

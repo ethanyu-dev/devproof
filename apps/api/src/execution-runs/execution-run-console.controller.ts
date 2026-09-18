@@ -35,6 +35,23 @@ export class ExecutionRunConsoleController {
     return this.runs.consoleDetail(asToolContext(current), id);
   }
 
+  @Get(":id/attempts/:attemptId/evidence-catalog")
+  evidenceCatalog(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Param("attemptId") attemptId: string,
+    @Query("after") after?: string,
+  ) {
+    if (after !== undefined && after.length > 500)
+      throw new BadRequestException("Invalid evidence cursor.");
+    return this.runs.evidenceCatalog(
+      asToolContext(current),
+      id,
+      attemptId,
+      after,
+    );
+  }
+
   @Get(":id/evidences/:evidenceId/download")
   async downloadEvidence(
     @CurrentAuth() current: AuthContext,

@@ -82,6 +82,18 @@ export const structuredObservationSchema = z.object({
     .max(200),
   sourceCommandId: z.string().uuid().optional(),
   consistency: z.enum(["DOM_ONLY", "VERIFIED", "DRIFTED"]),
+  // The overall page may change while a specific business region stays stable.
+  verifiedScopeNodeIds: z.array(id).max(4000).optional(),
+  consistencyIssues: z
+    .array(
+      z.object({
+        code: z.string().max(80),
+        frameId: id,
+        nodeId: id.optional(),
+      }),
+    )
+    .max(20)
+    .optional(),
   coverage: z.object({
     scope: z.enum(["VIEWPORT", "REGION"]),
     completeWithinScope: z.boolean(),

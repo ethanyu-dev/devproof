@@ -6,6 +6,11 @@ import {
 } from "@devproof/agent-runtime-protocol";
 import { observationDigest } from "@devproof/agent-runtime-protocol/observation-digest";
 import { BoundEvidence } from "./bound-evidence.js";
+import { BrowserObservations } from "./browser-observation.js";
+import {
+  criterionSubmissionSchema,
+  resolveCriterionEvidence,
+} from "./criterion-evidence.js";
 
 function fixture() {
   const contract = observationContractSchema.parse({
@@ -104,6 +109,51 @@ it("requires full facts in the actual model request, not IDs or a truncated prev
   });
 });
 
+it("limits failed bindings per object and unchanged page, and resets on real progress", () => {
+  const { binding, memory } = fixture();
+  const failure = {
+    bindings: [],
+    coverage: [
+      {
+        criterionId: "check",
+        targetId: "type",
+        observationId: binding.observationId,
+        error: "ENTITY_NOT_CONFIRMED",
+      },
+    ],
+  };
+  expect(memory.bindingResult("type", "same-page", failure)).toMatchObject({
+    accepted: false,
+    retryable: true,
+    attempts: 1,
+  });
+  memory.bindingResult("other", "same-page", failure);
+  memory.bindingResult("type", "same-page", failure);
+  expect(memory.bindingResult("type", "same-page", failure)).toMatchObject({
+    accepted: false,
+    retryable: false,
+    code: "OBSERVATION_BINDING_EXHAUSTED",
+    error: "ENTITY_NOT_CONFIRMED",
+  });
+  expect(memory.bindingResult("type", "changed-page", failure)).toMatchObject({
+    retryable: true,
+    attempts: 1,
+  });
+  expect(
+    memory.bindingResult("type", "changed-page", { bindings: [binding] }),
+  ).toMatchObject({ accepted: true });
+  expect(memory.bindingResult("type", "changed-page", failure)).toMatchObject({
+    attempts: 1,
+  });
+  expect(
+    memory.bindingResult("type", "changed-page", {
+      bindings: [
+        { ...binding, readiness: "PARTIAL", reasons: ["OBSERVATION_DRIFTED"] },
+      ],
+    }),
+  ).toMatchObject({ accepted: false, error: "OBSERVATION_DRIFTED" });
+});
+
 it("retains missing-region guidance without treating diagnostics as accepted evidence", () => {
   const { memory, binding } = fixture();
   const observationId = randomUUID();
@@ -172,4 +222,103 @@ it("keeps bounded coverage and preserves the counterexample when later observati
   expect(Buffer.byteLength(JSON.stringify(memory.view()))).toBeLessThanOrEqual(
     12 * 1024,
   );
+});
+
+it("auto-selects only delivered business evidence and still rejects incomplete coverage", () => {
+  const { binding } = fixture();
+  const contract = observationContractSchema.parse({
+    version: 3,
+    targets: ["Mapping", "Legacy"].map((label, i) => ({
+      targetId: `type-${i}`,
+      label,
+      identity: { text: label },
+      phase: "CURRENT",
+      assertions: [
+        { assertionId: "enabled", label: "Enabled", expected: true },
+      ],
+      requiredEvidenceKinds: ["DOM"],
+    })),
+  });
+  const memory = new BoundEvidence(
+    [{ id: "check", observationContract: contract }],
+    binding.runId,
+    binding.attemptId,
+  );
+  const first = {
+    ...binding,
+    contractDigest: observationDigest(contract),
+    targetId: "type-0",
+    phase: "CURRENT" as const,
+  };
+  const second = {
+    ...first,
+    id: randomUUID(),
+    targetId: "type-1",
+    entityKey: "Legacy",
+    scopeIdentity: "other-row",
+  };
+  memory.ingest({ bindings: [first, second] });
+  expect(memory.submissionRefs("check").bindingIds).toEqual([]);
+  memory.deliveredRequest(
+    [{ content: JSON.stringify({ bindings: [first] }) }],
+    undefined,
+  );
+  const partial = memory.submissionRefs("check");
+  expect(partial.bindingIds).toEqual([first.id]);
+  expect(
+    memory.resolve("check", "PASSED", partial.bindingIds!, []).error,
+  ).toContain("TARGET_NOT_CONFIRMED");
+  memory.deliveredRequest(
+    [{ content: JSON.stringify(memory.view()) }],
+    undefined,
+  );
+  const complete = memory.submissionRefs("check");
+  expect(complete.bindingIds).toEqual([first.id, second.id]);
+  expect(
+    memory.resolve("check", "PASSED", complete.bindingIds!, []).error,
+  ).toBeUndefined();
+  const cache = new BrowserObservations(undefined, true, memory);
+  const result = resolveCriterionEvidence(
+    criterionSubmissionSchema.parse({
+      criterionId: "check",
+      status: "PASSED",
+      summary: "两个对象的状态均已验证。",
+    }),
+    {
+      id: "check",
+      description: "两个对象均启用",
+      required: true,
+      requiredEvidenceKinds: ["DOM"],
+      observationContract: contract,
+    },
+    cache,
+    new Map(
+      binding.evidenceRefs.map((externalId) => [
+        externalId,
+        { externalId, kind: "DOM" as const, label: "状态", metadata: {} },
+      ]),
+    ),
+  );
+  expect(result.error).toBeUndefined();
+  if (result.error) throw new Error(result.error.error);
+  expect(result.result.bindingIds).toEqual([first.id, second.id]);
+});
+
+it("stops recapturing malformed state contracts after the first type diagnostic", () => {
+  const { memory, binding } = fixture();
+  binding.readiness = "PARTIAL";
+  binding.evaluation = "UNKNOWN";
+  binding.facts = [];
+  binding.reasons = ["STATE_TYPE_MISMATCH:enabled"];
+  expect(
+    memory.bindingResult(binding.targetId, "page", {
+      bindings: [binding],
+      coverage: [],
+    }),
+  ).toMatchObject({
+    code: "OBSERVATION_BINDING_EXHAUSTED",
+    error: "STATE_TYPE_MISMATCH",
+    attempts: 1,
+    retryable: false,
+  });
 });

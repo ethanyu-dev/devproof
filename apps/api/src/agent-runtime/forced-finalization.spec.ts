@@ -77,7 +77,7 @@ function fixture(potentialWrites: number) {
     },
     executionResourceLease: { updateMany: vi.fn() },
     runAttempt: { update: vi.fn() },
-    runCriterionResult: { createMany: vi.fn() },
+    runCriterionResult: { upsert: vi.fn() },
     runEvidence: {
       findMany: vi.fn().mockResolvedValue([]),
       createMany: vi.fn(),
@@ -163,8 +163,8 @@ describe("forced finalization write audit", () => {
         }),
       );
       expect(
-        tx.runCriterionResult.createMany.mock.calls[0]?.[0].data.map(
-          (entry: { status: string }) => entry.status,
+        tx.runCriterionResult.upsert.mock.calls.map(
+          ([args]) => args.create.status,
         ),
       ).toEqual(["PASSED", "INCONCLUSIVE"]);
       expect(tx.executionRun.update).toHaveBeenCalledWith(
@@ -246,4 +246,58 @@ describe("forced finalization write audit", () => {
       }),
     );
   });
+});
+
+it("keeps verified criteria but marks the execution blocked when cleanup remains unresolved", async () => {
+  const { tx, outcome, submit } = fixture(0);
+  await submit(
+    runtimeOutcomeSchema.parse({
+      ...outcome,
+      termination: undefined,
+      cleanup: { status: "BLOCKED", note: "删除后尚未完成只读核对。" },
+    }),
+  );
+  expect(tx.runCriterionResult.upsert).toHaveBeenCalledTimes(2);
+  expect(tx.executionRun.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({
+        executionDisposition: "BLOCKED",
+        verdict: null,
+      }),
+    }),
+  );
+});
+
+it("seals the entire persisted evidence catalog rather than only inline metadata", async () => {
+  const { tx, outcome, submit } = fixture(0);
+  const entries = Array.from({ length: 226 }, (_, i) => ({
+    externalId: `artifact://${i}`,
+    kind: "DOM",
+    label: "页面",
+    metadata: {},
+  }));
+  tx.runEvidence.findMany.mockResolvedValue(entries as never);
+  await submit(
+    runtimeOutcomeSchema.parse({
+      ...outcome,
+      evidence: [],
+      evidenceCatalog: {
+        version: 1,
+        runId: "285146a8-5230-4b02-832a-5eef19e8dc8a",
+        attemptId: "cc61de8d-cf29-4561-b2cd-c67c304668a5",
+      },
+    }),
+  );
+  expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({
+        result: expect.objectContaining({
+          evidenceCatalog: expect.objectContaining({
+            count: 226,
+            digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          }),
+        }),
+      }),
+    }),
+  );
 });

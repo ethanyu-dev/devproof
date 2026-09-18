@@ -2,6 +2,7 @@ import {
   validateCaseAccountRequirements,
   accountRequirementIssuesMessage,
   OBSERVATION_CONTRACT_GUIDANCE,
+  BUSINESS_CHECK_GUIDANCE,
 } from "@devproof/agent-runtime-protocol";
 import { randomUUID } from "node:crypto";
 
@@ -34,7 +35,11 @@ import {
   requirementPlanSchema,
   type SpecRequirement,
 } from "./spec-draft.js";
-import { defineChecksSchema, SpecCheckCatalog } from "./spec-check-catalog.js";
+import {
+  defineChecksSchema,
+  defineBusinessChecksSchema,
+  SpecCheckCatalog,
+} from "./spec-check-catalog.js";
 import { specCriterionIssues } from "./spec-criterion-validation.js";
 
 import {
@@ -102,14 +107,20 @@ export class SpecAnalysisExecutor {
     const segmentStartedAt = Date.now();
     const checkReferences = task.snapshot.specFormat === "CHECK_REFERENCES";
     const compact = checkReferences || task.snapshot.specFormat === "COMPACT";
-    const checkCatalog = new SpecCheckCatalog();
+    const checkCatalog = new SpecCheckCatalog(
+      task.snapshot.observationContractVersion === 3,
+    );
     let requirements: SpecRequirement[] | null = null;
     const issueTexts = new Map<string, string>();
     const history: ModelMessage[] = [
       {
         role: "system",
         content:
-          systemPrompt(compact, checkReferences) +
+          systemPrompt(
+            compact,
+            checkReferences,
+            task.snapshot.observationContractVersion === 3,
+          ) +
           (task.snapshot.observationContractVersion === 2
             ? "\n\n" + OBSERVATION_CONTRACT_GUIDANCE
             : ""),
@@ -206,6 +217,7 @@ export class SpecAnalysisExecutor {
                   compact,
                   requirements,
                   checkReferences ? checkCatalog : undefined,
+                  task.snapshot.observationContractVersion === 3,
                 ),
               },
               { signal },
@@ -535,15 +547,24 @@ export class SpecAnalysisExecutor {
               continue;
             }
             parsed.data.spec.scopePolicy = "CHANGE_FOCUSED";
-            const validationError = validateFinalSpec({
-              issueTexts,
-              calledTools,
-              linkedPullRequests,
-              sources,
-              sourceContents,
-              spec: parsed.data.spec,
-              unavailableTools,
-            });
+            const unsupportedBusiness =
+              task.snapshot.observationContractVersion !== 3 &&
+              parsed.data.spec.cases.some((c) =>
+                c.criteria.some(
+                  (check) => check.observationContract?.version === 3,
+                ),
+              );
+            const validationError = unsupportedBusiness
+              ? "当前任务未协商业务验收格式，请使用任务支持的旧格式。"
+              : validateFinalSpec({
+                  issueTexts,
+                  calledTools,
+                  linkedPullRequests,
+                  sources,
+                  sourceContents,
+                  spec: parsed.data.spec,
+                  unavailableTools,
+                });
             if (validationError) {
               await this.validationFailed(
                 lease,
@@ -943,6 +964,7 @@ function toolDefinitions(
   compact = false,
   requirements: readonly SpecRequirement[] | null = null,
   checkCatalog?: SpecCheckCatalog,
+  businessChecks = false,
 ) {
   const observedSourceIds = [...sourceIds];
   const analysisSummary = {
@@ -1055,7 +1077,10 @@ function toolDefinitions(
             parameters: constrainSourceRefs(
               stripFormats(
                 z.toJSONSchema(
-                  defineChecksSchema.extend({
+                  (businessChecks
+                    ? defineBusinessChecksSchema
+                    : defineChecksSchema
+                  ).extend({
                     analysisSummary: analysisSummarySchema,
                     expectedRevision: z.literal(checkCatalog.revision),
                   }),
@@ -1131,8 +1156,32 @@ function toolDefinitions(
     )
     .map(({ type: _type, ...definition }) => ({
       type: "function" as const,
-      function: definition,
+      function: {
+        ...definition,
+        parameters: generationSchema(
+          definition.parameters,
+          businessChecks,
+        ) as Record<string, unknown>,
+      },
     }));
+}
+
+/** Do not advertise a contract the claiming API did not negotiate. */
+function generationSchema(value: unknown, businessChecks: boolean): unknown {
+  if (Array.isArray(value))
+    return value
+      .filter(
+        (item) =>
+          businessChecks ||
+          record(record(record(item).properties).version).const !== 3,
+      )
+      .map((item) => generationSchema(item, businessChecks));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => businessChecks || key !== "businessCheck")
+      .map(([key, child]) => [key, generationSchema(child, businessChecks)]),
+  );
 }
 
 function constrainSourceRefs(
@@ -1207,8 +1256,12 @@ function stripFormats(value: unknown): unknown {
   return result;
 }
 
-function systemPrompt(compact = false, checkReferences = false) {
-  return `你是 DevProof 的 Spec 分析 Agent。
+function systemPrompt(
+  compact = false,
+  checkReferences = false,
+  businessChecks = false,
+) {
+  const prompt = `你是 DevProof 的 Spec 分析 Agent。
 ${SPEC_EXECUTION_SCOPE_GUIDANCE}
 ${SPEC_NECESSITY_GUIDANCE}
 请基于权威的 Linear Issue、关联的 GitHub Pull Request、变更代码和相关代码，生成覆盖必要业务结果的可执行验证 Spec。
@@ -1228,10 +1281,11 @@ Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；�
 账号字段各司其职：label 只写用途，rationale 一句话解释数量或隔离必要性，constraints 只写此业务对象特有的前置条件。通用登录、禁用随机账号、禁止修改他人记录、账号不可用时无法判定等平台规则由执行器统一提供，不在各 Case 中反复抄写。后台登录身份仅填 authRole，不能放进 accountRequirements；后台权限不能填 requiredTypes（它只表示业务类型）。
 每个 Case 必须填写 accountRequirementsVersion: 2。非空账号需求必须提供 subjectBinding：kind 为 BUSINESS_INPUT（账号填入业务字段）、BUSINESS_RECORD（按指定账号检查业务记录）或 AUTH_SUBJECT（该账号登录/权限本身是验收对象）；target 为实际业务字段或被测账号对象；stepOrders 引用当前步骤；basis 引用已读来源的 sourceRef 和准确 quote，说明业务确实需要这个账号。AUTH_SUBJECT 还必须填 criterionIds，${checkReferences ? "使用当前 Case 的 checkIds" : compact ? "使用当前 Case 验收标准的一基序号字符串，如 1" : "使用当前 Case 的 criterion id"}。真实来源原文必须支持账号用途，不能仅引用存在权限判断的代码。
 创建、编辑、克隆模型或产品配置不等于需要业务账号：模型名称、ID、时间属于普通测试资源，使用 testData 和清理台账。仅需模型编辑权限、列表查看或导出权限的操作账号放 authRole，accountRequirements 为 []。添加用户白名单、指定用户查询、双账号转账需要实际账号；验证账号登录权限时保留 AUTH_SUBJECT，不与执行身份混淆。
-每个 Case 必须填写 accountRequirements 数组：不需要业务测试对象时为 []；需要时填写 role（稳定英文标识）、label（中文用途）、count、usage（CREATE_OR_MODIFY 或 READ_EXISTING）、requiredTypes、constraints、rationale。按独立业务测试对象计算最少账号数，不按验收点或类型累加；同一账号能安全验证多个类型时合并为一个角色并列出类型。只有不同身份/数据隔离确有必要才增加数量，并写明原因。账号 A/B 是角色占位符，禁止当作账号值。平台会在执行前统一收集并按角色分配，不检查账号跨 Case 占用。步骤引用对应角色；用户已提供但不可用时按账号前置问题记录无法判定，不让浏览器 Agent 自行换号或再次 HITL。纯界面只读 Case 不需要账号；无效账号负向输入不索取有效账号。
+每个 Case 必须填写 accountRequirements 数组：不需要业务测试对象时为 []；需要时填写 role（稳定英文标识）、label（中文用途）、count、usage（CREATE_OR_MODIFY 或 READ_EXISTING）、requiredTypes、constraints、rationale。按独立业务测试对象计算最少账号数，不按验收点或类型累加；同一账号能安全验证多个类型时合并为一个角色并列出类型。只有不同身份/数据隔离确有必要才增加数量，并写明原因。账号 A/B 是角色占位符，禁止当作账号值。平台在执行前统一收集并按角色分配；同环境同账号同类型的写操作按执行会话串行，账号可以复用。步骤引用对应角色；账号前置冲突由执行器通过 DATA_PRECONDITION 人工接管获取处置意见；Spec 不预先规定冲突即结束，也不自行换号。纯界面只读 Case 不需要账号；无效账号负向输入不索取有效账号。
 每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。必要的权限、数据和控件定位检查放在本 Case 的步骤；仅在对应业务结果属于本次范围时才设为验收标准。不能把假设当作已经观察的事实。
+按数据前置条件拆分新增与编辑：新增要求账号下不存在目标记录，编辑要求已有目标记录，不能仅为合并步骤把独立编辑验收绑死在新增成功之后。只有来源明确要求同一记录的完整生命周期时才合并。独立编辑用例不得添加“新增成功”验收来绕过前置检查；数据不足时可在准备步骤说明经授权创建临时记录，准备动作不能充当编辑验收。独立编辑用例必须说明测试记录归属、可修改授权、初始值记录与恢复步骤；仅提供账号不代表授权修改该账号的全部既有数据。无法确认授权时请求 DATA_PRECONDITION，不自动删除既有记录来满足新增条件。账号 constraints 只声明真实业务约束；不同类型的唯一键互不冲突时，不自行增加跨 Case 必须不同账号的要求。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
-账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，确有隔离需要时在账号约束中说明独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，已存在且不满足场景前置条件时记录受影响项为 INCONCLUSIVE（无法判定），说明账号问题，不再次索取新账号或删除既有记录来满足前置条件。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
+账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，确有隔离需要时在账号约束中说明独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，已存在且不满足场景前置条件时，可由 DATA_PRECONDITION 人工接管处理或明确授权删除指定记录后继续；未授权不得自行删除，不反复索取新账号。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
 只有完成所有可用来源的调查后才能调用 finish_spec；Issue 或 PR 内容不可用时不得提交规格；代码来源不可用时应报告明确的数据源错误，不能以部分规格跳过必需来源。绝不能泄露凭据。
 ${
   compact
@@ -1241,6 +1295,29 @@ ${checkReferences ? `先调用 define_checks 分批定义验收标准，每项�
 criteria.description 描述产品应满足的条件，不把“截图、记录差异、观察页面”等测试动作当作通过条件。样式比较须写明被比较的目标、参照对象和要比较的结构/交互，requiredEvidenceKinds 包含 SCREENSHOT；来源没有明确比较范围时，在 uncoveredRequirements 中说明待确认内容，不擅自把像素、颜色或字段当作硬性要求。`
     : ""
 }`;
+  if (!businessChecks) return prompt;
+  return (
+    prompt
+      .split("\n")
+      .map((line) => {
+        if (line.startsWith("每条验收标准还必须提供 observationTargets"))
+          return "对象状态使用 businessCheck；普通文字发现与接口字段使用 observationTargets。每条标准引用 requirementId，来源原文必须直接支持断言。来源是需求依据，不是待匹配的页面文字；创建表单的选项不能证明列表筛选结果。";
+        if (line.startsWith("同一个业务对象的同义显示方式"))
+          return "businessCheck.subjects 分别声明必须覆盖的对象，state 只声明共同的预期；不同对象允许具有相同状态。单纯文字目标的 alternatives 仅表示同一对象的等价名称，启用/禁用不能互为 alternatives。";
+        return line
+          .replaceAll(
+            "description、observationTargets",
+            "description、businessCheck 或 observationTargets",
+          )
+          .replace(
+            "每个描述或步骤最多 300 字",
+            "描述尽量不超过 80 字，单步尽量不超过 100 字（保留必要业务条件）",
+          );
+      })
+      .join("\n") +
+    "\n\n" +
+    BUSINESS_CHECK_GUIDANCE
+  );
 }
 
 export function validateFinalSpec(input: {
@@ -1289,6 +1366,8 @@ export function validateFinalSpec(input: {
   const necessityError = specNecessityError(input.spec, input);
   if (necessityError) return necessityError;
   for (const testCase of input.spec.cases) {
+    const dataError = caseDataPreconditionError(testCase);
+    if (dataError) return dataError;
     if (testCase.preconditions.some(hasExternalCaseDependency))
       return `用例「${testCase.name}」依赖其他 Case 或未交付的操作知识。每例独立并发执行，请将必要检查和参照观察展开为本 Case 的步骤，不得假定其他用例已完成。`;
     for (const criterion of testCase.criteria) {
@@ -1299,6 +1378,27 @@ export function validateFinalSpec(input: {
           .join("\n");
     }
   }
+  return null;
+}
+
+/** Editing an existing object must not acquire a fabricated absence requirement. */
+export function caseDataPreconditionError(
+  testCase: z.infer<typeof runtimeGeneratedSpecSchema>["cases"][number],
+) {
+  const editing =
+    /编辑|修改|更新|禁用|重新启用/u.test(testCase.name) &&
+    !/新增|创建|新建|生命周期/u.test(testCase.name);
+  const constraints = [
+    ...testCase.preconditions,
+    ...(testCase.accountRequirements ?? []).flatMap((r) => r.constraints),
+  ];
+  if (
+    editing &&
+    constraints.some((c) =>
+      /尚不存在|尚未配置|尚未创建|不存在.{0,20}记录|未配置.{0,20}类型/u.test(c),
+    )
+  )
+    return `用例「${testCase.name}」只验收编辑结果，却要求账号不存在目标记录。请改为使用已观察、获授权的既有记录，记录初始状态并恢复；授权或数据冲突交给 DATA_PRECONDITION 人工处置。不要把独立编辑绑定到先新增。`;
   return null;
 }
 

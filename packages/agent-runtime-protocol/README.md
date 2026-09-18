@@ -187,3 +187,15 @@ Protocol v2.21 adds object observation contracts. Spec snapshots advertise
 account requirements without the observation contract. Browser tasks with object
 observation contracts additionally require the bound-evidence capabilities;
 the protocol version alone does not qualify a browser worker.
+
+Protocol v2.22 adds optional gzip/SHA-256 `contextSnapshot` archives to browser `agent.model.started` events and `decisionOutput` to completed events. Archives retain complete model inputs (with explicit credential redactions); normal trajectory previews stay bounded. Browser Agent tool schemas request a public `stepIntent` action plan, which is stripped before execution. Deploy the additive context-history migration and API before the Agent. Old events remain readable as historical previews.
+
+Protocol v2.23 adds `business-checks-v3`. Spec generation accepts compact subjects/state/timing checks, compiled into immutable version-3 contracts without DOM locators. Version-2 contracts remain readable. The API negotiates generation and gates execution claims by version and feature capability. See [business Spec design](../../docs/business-spec.md).
+
+## Protocol v2.24
+
+- `attempt-evidence-catalog-v1`: outcomes carry an attempt-scoped catalog reference; inline evidence metadata stays bounded at 200 while stored artifacts and criterion references remain complete. The API seals the catalog with count, digest and timestamp, and exposes cursor-based reads.
+- `typed-checks-v1`: explicit TEXT/CHECKED/VALUE properties and structured network field assertions, gated during browser-worker claims. Historical contracts remain readable.
+- Additive execution state fields provide account revisions, stable `recordRef`, request/read ordering and cleanup confirmations. Record progress accepts partial updates without losing immutable ownership and identity facts.
+
+See [runtime reliability implementation](../../docs/runtime-reliability-first-four.md) for behavior, compatibility and validation.

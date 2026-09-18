@@ -13,6 +13,7 @@ import {
   type VisualComparisonReview,
 } from "@devproof/agent-runtime-protocol";
 import { observationDigest } from "@devproof/agent-runtime-protocol/observation-digest";
+import { compactValue } from "./operation-summary.js";
 
 export const referenceImageSchema = visualObservationSchema.extend({
   bindingId: z.string().uuid(),
@@ -27,10 +28,16 @@ const diagnosticSchema = z.object({
   targetId: z.string(),
   observationId: z.string().uuid(),
   error: z.string().max(100),
+  candidates: z.array(z.string()).optional(),
+  details: z.unknown().optional(),
 });
 
 /** Durable facts are distinct from current, actionable DOM references. */
 export class BoundEvidence {
+  private readonly bindingFailures = new Map<
+    string,
+    { stateKey: string; count: number }
+  >();
   private readonly bindings = new Map<string, ObservationBinding>();
   private readonly reviews = new Map<string, VisualComparisonReview>();
   private readonly delivered = new Set<string>();
@@ -51,6 +58,50 @@ export class BoundEvidence {
   ) {}
   get enabled() {
     return this.criteria.some((c) => c.observationContract);
+  }
+
+  /** Binding failures are target-local; they must not consume the whole case. */
+  bindingResult(targetId: string, stateKey: string, value: unknown) {
+    const response = value as Record<string, unknown>;
+    const bindings = envelopeSchema
+      .parse(response)
+      .bindings.filter((b) => b.targetId === targetId);
+    if (bindings.some((b) => b.readiness === "READY")) {
+      this.bindingFailures.delete(targetId);
+      return { ...response, accepted: true };
+    }
+    const previous = this.bindingFailures.get(targetId);
+    const count = previous?.stateKey === stateKey ? previous.count + 1 : 1;
+    this.bindingFailures.set(targetId, { stateKey, count });
+    const invalidStateType = bindings.some((b) =>
+      b.reasons.some((r) => r.startsWith("STATE_TYPE_MISMATCH")),
+    );
+    const exhausted = invalidStateType || count >= 3;
+    const diagnostic = (
+      Array.isArray(response.coverage) ? response.coverage : []
+    )
+      .map((value) => diagnosticSchema.safeParse(value))
+      .find((result) => result.success && result.data.targetId === targetId);
+    return {
+      ...response,
+      accepted: false,
+      code: exhausted
+        ? "OBSERVATION_BINDING_EXHAUSTED"
+        : "OBSERVATION_BINDING_FAILED",
+      targetId,
+      error: invalidStateType
+        ? "STATE_TYPE_MISMATCH"
+        : ((diagnostic?.success ? diagnostic.data.error : undefined) ??
+          bindings[0]?.reasons.join(", ") ??
+          "OBSERVATION_NOT_AVAILABLE"),
+      retryable: !exhausted,
+      attempts: count,
+      nextAction: invalidStateType
+        ? "Spec 的文本预期与实际开关类型不一致，重新截图不能修正契约。该项记录为 INCONCLUSIVE，继续独立项；重新生成 Spec 时使用布尔预期。"
+        : exhausted
+          ? "同一页面的对象绑定已失败三次，受影响标准将保存为 INCONCLUSIVE。继续独立验收项，不再反复截图或更换 ref；若后续得到有效证据，可更新该标准。"
+          : "检查 coverage 中的候选控件与缺失关系；entityRef 必须指向真实控件。标签关联缺失时重新观察其完整表单区域；一致性失败时读取具体原因。不要重复相同绑定。",
+    };
   }
   ingest(value: unknown) {
     const parsed = envelopeSchema.safeParse(value);
@@ -179,15 +230,19 @@ export class BoundEvidence {
           return {
             criterionId: c.id,
             ...t,
-            ...(t.readiness === "MISSING" && last
+            ...(t.readiness !== "READY" && last
               ? {
                   lastObservation: {
                     observationId: last.observationId,
                     error: last.error,
+                    candidates: last.candidates,
+                    details: compactValue(last.details, 1000),
                   },
                   nextAction:
                     last.error === "SCOPE_NOT_OBSERVED"
-                      ? `尚未观察到区域 ${target.scope.names.join(" / ")}；先进入该区域。当前筛选或背景列表不能证明该区域的状态。`
+                      ? last.candidates?.length
+                        ? "目标区域已存在，请使用 candidates 中的区域 ref，不使用其内部普通容器。"
+                        : `尚未观察到区域 ${"identity" in target ? target.identity.text : target.scope.names.join(" / ")}；先进入该区域。当前筛选或背景列表不能证明该区域的状态。`
                       : last.error === "SCOPE_AMBIGUOUS"
                         ? "存在多个候选区域，需根据当前观察确认唯一目标区域。"
                         : "核对目标对象的实际选中值、阶段和控件关系；保留名称或状态差异，不重复搜索已观察到的选项。",
@@ -293,6 +348,34 @@ export class BoundEvidence {
     );
     return { bindingIds, ...(imageDeliveryId ? { imageDeliveryId } : {}) };
   }
+  /** Choose only facts already delivered to the Agent; keep conflict checks in resolve. */
+  submissionRefs(criterionId: string) {
+    const criterion = this.criteria.find((c) => c.id === criterionId);
+    if (criterion?.observationContract?.version !== 3) return {};
+    const bindingIds = [...this.bindings.values()]
+      .filter(
+        (b) =>
+          b.criterionId === criterionId &&
+          b.readiness === "READY" &&
+          this.delivered.has(b.id),
+      )
+      .map((b) => b.id);
+    const superseded = new Set(
+      [...this.reviews.values()].flatMap((r) =>
+        r.supersedesReviewId ? [r.supersedesReviewId] : [],
+      ),
+    );
+    const comparisonReviewIds = [...this.reviews.values()]
+      .filter(
+        (r) =>
+          r.criterionId === criterionId &&
+          !superseded.has(r.id) &&
+          r.bindingIds.every((id) => bindingIds.includes(id)),
+      )
+      .map((r) => r.id);
+    return { bindingIds, comparisonReviewIds };
+  }
+
   resolve(
     criterionId: string,
     status: string,

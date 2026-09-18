@@ -6,6 +6,7 @@ import type {
   ObservationBinding,
   ObservationContract,
   ObservationTargetV2,
+  ObservationTargetV3,
   VisualComparisonReview,
 } from "./observation-contract.js";
 
@@ -33,11 +34,17 @@ export type BindingEvaluation = Omit<
 
 /** The evaluator only resolves nodes already present in one canonical capture. */
 export function evaluateObservationTarget(
-  target: ObservationTargetV2,
+  target: ObservationTargetV2 | ObservationTargetV3,
   observation: StructuredObservation,
   evidenceKinds: readonly string[],
   selection?: Selection,
-): { binding?: BindingEvaluation; error?: string; candidates?: string[] } {
+): {
+  binding?: BindingEvaluation;
+  error?: string;
+  candidates?: string[];
+  details?: unknown;
+} {
+  const business = "identity" in target;
   const nodes = observation.nodes;
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   function within(node: ObservedNode, root: ObservedNode) {
@@ -71,13 +78,39 @@ export function evaluateObservationTarget(
         directlyNamed(byId.get(r.targetNodeId), label),
     );
   const isEntity = (n: ObservedNode) =>
-    target.entity.controlKind === "SELECT"
-      ? n.tag === "select" || n.role === "combobox"
-      : target.entity.controlKind === "ROW"
-        ? n.tag === "tr" || n.role === "row"
-        : ["input", "textarea"].includes(n.tag) || n.role === "textbox";
-  const entityValue = (n: ObservedNode) =>
-    n.truncatedProperties?.includes(target.entity.property)
+    business
+      ? ![
+          "option",
+          "menuitem",
+          "listbox",
+          "menu",
+          "textbox",
+          "searchbox",
+        ].includes(n.role ?? "") &&
+        (n.role === "combobox" ||
+          !["option", "input", "textarea"].includes(n.tag)) &&
+        !nodes.some(
+          (parent) =>
+            parent !== n &&
+            (parent.tag === "select" || parent.role === "combobox") &&
+            within(n, parent),
+        )
+      : target.entity.controlKind === "SELECT"
+        ? n.tag === "select" || n.role === "combobox"
+        : target.entity.controlKind === "ROW"
+          ? n.tag === "tr" || n.role === "row"
+          : ["input", "textarea"].includes(n.tag) || n.role === "textbox";
+  const entityValue = (n: ObservedNode) => {
+    if (business) {
+      // A selected value is authoritative; a combobox's search text is not.
+      if (n.tag === "select" || n.role === "combobox")
+        return n.selectedLabelSource &&
+          !n.truncatedProperties?.includes("SELECTED_LABEL")
+          ? n.selectedLabel
+          : undefined;
+      return !n.truncatedProperties?.includes("TEXT") ? n.text : undefined;
+    }
+    return n.truncatedProperties?.includes(target.entity.property)
       ? undefined
       : target.entity.property === "SELECTED_LABEL"
         ? n.selectedLabelSource
@@ -86,18 +119,32 @@ export function evaluateObservationTarget(
         : target.entity.property === "VALUE"
           ? n.value
           : n.text;
+  };
   const entityCandidates = nodes.filter(
     (n) =>
       n.visible &&
       isEntity(n) &&
-      named(n, target.entity.label) &&
-      target.entity.oneOf.some((v) =>
-        target.entity.property === "VALUE"
-          ? entityValue(n) === v
-          : same(entityValue(n), v),
-      ),
+      (business
+        ? same(entityValue(n), target.identity.text)
+        : named(n, target.entity.label) &&
+          target.entity.oneOf.some((v) =>
+            target.entity.property === "VALUE"
+              ? entityValue(n) === v
+              : same(entityValue(n), v),
+          )) &&
+      // Options, even inside a selected popup, are not the form's current object.
+      (!business ||
+        !nodes.some(
+          (parent) =>
+            ["listbox", "menu"].includes(parent.role ?? "") &&
+            within(n, parent),
+        )),
   );
+  const businessScope = (n: ObservedNode) =>
+    ["tr", "form", "dialog"].includes(n.tag) ||
+    ["row", "form", "dialog", "alertdialog"].includes(n.role ?? "");
   const scopeKind = (n: ObservedNode) => {
+    if (business) return businessScope(n);
     switch (target.scope.kind) {
       case "PAGE":
         return n.tag === "body";
@@ -114,26 +161,28 @@ export function evaluateObservationTarget(
     }
   };
   const hasTitle = (n: ObservedNode) =>
-    target.scope.names.some(
-      (label) =>
-        named(n, label) ||
-        nodes.some(
-          (c) =>
-            c.visible &&
-            within(c, n) &&
-            (/^h[1-6]$/u.test(c.tag) ||
-              c.role === "heading" ||
-              c.nameSource === "TITLE" ||
-              c.text === label) &&
-            named(c, label),
-        ),
-    );
+    business
+      ? entityCandidates.some((e) => within(e, n))
+      : target.scope.names.some(
+          (label) =>
+            named(n, label) ||
+            nodes.some(
+              (c) =>
+                c.visible &&
+                within(c, n) &&
+                (/^h[1-6]$/u.test(c.tag) ||
+                  c.role === "heading" ||
+                  c.nameSource === "TITLE" ||
+                  c.text === label) &&
+                named(c, label),
+            ),
+        );
   let scopes = nodes.filter((n) => n.visible && scopeKind(n) && hasTitle(n));
   if (
+    !business &&
     !scopes.length &&
     ["DIALOG", "FORM", "POPOVER"].includes(target.scope.kind)
   ) {
-    // Minimal titled container is a fallback for sites without accessibility roles.
     scopes = nodes.filter(
       (n) =>
         n.visible &&
@@ -143,36 +192,137 @@ export function evaluateObservationTarget(
     );
     scopes = scopes.filter((n) => !scopes.some((c) => c !== n && within(c, n)));
   }
-  if (selection) scopes = scopes.filter((n) => n.ref === selection.scopeRef);
+  if (business && !scopes.length) {
+    // Field wrappers also have phase metadata. They are not independent business
+    // objects: prefer semantic rows/forms/dialogs; fall back to a titled region.
+    scopes = nodes.filter(
+      (n) =>
+        n.visible &&
+        !["body", "html"].includes(n.tag) &&
+        observation.regions.some((r) => r.nodeId === n.nodeId) &&
+        hasTitle(n) &&
+        nodes.some(
+          (title) =>
+            title.visible &&
+            (title.role === "heading" || /^h[1-6]$/u.test(title.tag)) &&
+            within(title, n),
+        ),
+    );
+  }
+  if (business) {
+    // A page/table/dialog containing several rows cannot join identity in one row
+    // to state in another. Bind the smallest business scope around the identity.
+    scopes = scopes.filter((n) => !scopes.some((c) => c !== n && within(c, n)));
+  }
+  const scopeRefs = scopes.flatMap((n) => (n.ref ? [n.ref] : []));
+  if (selection) {
+    const requested = nodes.find((n) => n.ref === selection.scopeRef);
+    scopes = scopes.filter(
+      (n) =>
+        n.ref === selection.scopeRef ||
+        (business &&
+          requested?.visible &&
+          businessScope(requested) &&
+          within(n, requested) &&
+          entityCandidates.some(
+            (e) => e.ref === selection.entityRef && within(e, n),
+          ) &&
+          Object.values(selection.assertionRefs).every((ref) =>
+            nodes.some((state) => state.ref === ref && within(state, n)),
+          )),
+    );
+  }
   if (scopes.length !== 1)
     return {
       error: scopes.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_OBSERVED",
-      candidates: scopes.flatMap((n) => (n.ref ? [n.ref] : [])),
+      candidates: scopeRefs,
     };
   const scope = scopes[0]!;
   const entities = entityCandidates.filter(
     (n) => within(n, scope) && (!selection || n.ref === selection.entityRef),
   );
-  if (entities.length !== 1) return { error: "ENTITY_NOT_CONFIRMED" };
+  if (entities.length !== 1)
+    return {
+      error: "ENTITY_NOT_CONFIRMED",
+      candidates: entityCandidates
+        .filter((n) => within(n, scope))
+        .flatMap((n) => (n.ref ? [n.ref] : [])),
+      details: {
+        expectedLabel: business ? target.identity.text : target.entity.label,
+        expectedValues: business ? [target.identity.text] : target.entity.oneOf,
+        controls: nodes
+          .filter((n) => n.visible && isEntity(n) && within(n, scope))
+          .slice(0, 10)
+          .map((n) => ({
+            ref: n.ref,
+            name: n.name ?? null,
+            selectedValue: entityValue(n) ?? null,
+            labelMatched: business
+              ? same(entityValue(n), target.identity.text)
+              : named(n, target.entity.label),
+          })),
+      },
+    };
   const entity = entities[0]!;
   const facts: BindingEvaluation["facts"] = [];
   const reasons: string[] = [];
   for (const assertion of target.assertions) {
+    const modern = "label" in assertion;
+    const labeledStateExists =
+      modern &&
+      nodes.some(
+        (n) =>
+          n.visible &&
+          within(n, scope) &&
+          named(n, assertion.label) &&
+          (typeof assertion.expected !== "boolean" ||
+            typeof n.checked === "boolean"),
+      );
+    const namedControlExists =
+      modern &&
+      nodes.some(
+        (n) =>
+          n.visible &&
+          within(n, scope) &&
+          named(n, assertion.label) &&
+          (n.checked !== undefined ||
+            n.value !== undefined ||
+            n.selectedLabelSource !== undefined),
+      );
     const candidates = nodes.filter(
       (n) =>
         n.visible &&
         within(n, scope) &&
-        named(n, assertion.subject.label) &&
-        (assertion.subject.kind === "SWITCH"
-          ? n.role === "switch" ||
-            n.role === "checkbox" ||
-            n.attributes.type === "checkbox"
-          : assertion.subject.kind === "FIELD"
-            ? ["input", "textarea", "select"].includes(n.tag) ||
-              n.role === "textbox"
-            : Boolean(n.ref)) &&
+        (modern
+          ? (selection && !labeledStateExists
+              ? Boolean(n.ref)
+              : named(n, assertion.label)) &&
+            (typeof assertion.expected === "boolean"
+              ? typeof n.checked === "boolean"
+              : assertion.expected === undefined && namedControlExists
+                ? n.checked !== undefined ||
+                  n.value !== undefined ||
+                  n.selectedLabelSource !== undefined
+                : true)
+          : named(n, assertion.subject.label) &&
+            (assertion.subject.kind === "SWITCH"
+              ? n.role === "switch" ||
+                n.role === "checkbox" ||
+                n.attributes.type === "checkbox"
+              : assertion.subject.kind === "FIELD"
+                ? ["input", "textarea", "select"].includes(n.tag) ||
+                  n.role === "textbox"
+                : Boolean(n.ref))) &&
         (!selection ||
-          n.ref === selection.assertionRefs[assertion.assertionId]),
+          n.ref === selection.assertionRefs[assertion.assertionId]) &&
+        (!business ||
+          !nodes.some(
+            (parent) =>
+              parent !== scope &&
+              businessScope(parent) &&
+              within(parent, scope) &&
+              within(n, parent),
+          )),
     );
     if (candidates.length > 1)
       return {
@@ -184,40 +334,92 @@ export function evaluateObservationTarget(
       continue;
     }
     const node = candidates[0]!;
+    // A text expectation cannot silently turn an observed switch into an empty
+    // text assertion. Historical malformed specs need correction, not a FAIL.
+    if (
+      modern &&
+      typeof assertion.expected === "string" &&
+      typeof node.checked === "boolean"
+    ) {
+      reasons.push(`STATE_TYPE_MISMATCH:${assertion.assertionId}`);
+      continue;
+    }
+    const property = modern
+      ? (assertion.property ??
+        (typeof assertion.expected === "boolean" ||
+        (assertion.expected === undefined && typeof node.checked === "boolean")
+          ? "CHECKED"
+          : node.tag === "select" || node.role === "combobox"
+            ? "SELECTED_LABEL"
+            : ["input", "textarea"].includes(node.tag) ||
+                node.role === "textbox"
+              ? "VALUE"
+              : "TEXT"))
+      : assertion.property;
     const actual =
-      (assertion.property === "VALUE" || assertion.property === "TEXT") &&
-      node.truncatedProperties?.includes(assertion.property)
+      (property === "VALUE" ||
+        property === "TEXT" ||
+        property === "SELECTED_LABEL") &&
+      node.truncatedProperties?.includes(property)
         ? undefined
-        : assertion.property === "CHECKED"
+        : property === "CHECKED"
           ? node.checked
-          : assertion.property === "VALUE"
+          : property === "VALUE"
             ? node.value
-            : assertion.property === "TEXT"
+            : property === "TEXT"
               ? node.text
-              : assertion.property === "VISIBLE"
-                ? node.visible
-                : node.enabled;
+              : property === "SELECTED_LABEL"
+                ? node.selectedLabelSource
+                  ? node.selectedLabel
+                  : undefined
+                : property === "VISIBLE"
+                  ? node.visible
+                  : node.enabled;
     const matched =
-      typeof actual === "string"
-        ? (Array.isArray(assertion.expected)
-            ? assertion.expected
-            : [assertion.expected]
-          ).some(
-            (v) =>
-              typeof v === "string" &&
-              (assertion.property === "VALUE" ? actual === v : same(actual, v)),
-          )
-        : actual === assertion.expected;
+      modern && assertion.expected === undefined
+        ? actual !== undefined
+        : typeof actual === "string"
+          ? (Array.isArray(assertion.expected)
+              ? assertion.expected
+              : [assertion.expected]
+            ).some(
+              (v) =>
+                typeof v === "string" &&
+                (property === "VALUE" ? actual === v : same(actual, v)),
+            )
+          : actual === assertion.expected;
     facts.push({
       assertionId: assertion.assertionId,
       nodeId: node.nodeId,
-      property: assertion.property,
+      property,
       ...(actual !== undefined ? { actual } : {}),
       evaluation:
         actual === undefined ? "UNKNOWN" : matched ? "MATCHED" : "MISMATCHED",
     });
   }
-  const region = observation.regions.find((r) => r.nodeId === scope.nodeId);
+  const region =
+    observation.regions.find((r) => r.nodeId === scope.nodeId) ??
+    (business
+      ? observation.regions
+          .filter((r) => {
+            const n = byId.get(r.nodeId);
+            return n && within(scope, n);
+          })
+          .find(
+            (r) =>
+              !observation.regions.some((other) => {
+                const n = byId.get(other.nodeId);
+                const root = byId.get(r.nodeId);
+                return (
+                  other !== r &&
+                  n &&
+                  root &&
+                  within(scope, n) &&
+                  within(n, root)
+                );
+              }),
+          )
+      : undefined);
   const mutated = region?.modifiedNodeIds.some((id) => {
     const actionNode = byId.get(id);
     // An edited node may have been replaced or omitted from this capture. Its
@@ -262,7 +464,11 @@ export function evaluateObservationTarget(
     reasons.push("EVIDENCE_UNAVAILABLE");
   if (
     target.requiredEvidenceKinds.includes("SCREENSHOT") &&
-    observation.consistency !== "VERIFIED"
+    observation.consistency !== "VERIFIED" &&
+    !(
+      observation.consistency === "DRIFTED" &&
+      observation.verifiedScopeNodeIds?.includes(scope.nodeId)
+    )
   )
     reasons.push("OBSERVATION_DRIFTED");
   if (facts.some((f) => f.evaluation === "UNKNOWN"))

@@ -120,6 +120,12 @@ export async function releaseVerifiedSessionResources(
         include: { run: true },
       })
     : null;
+  // Account claims prevent concurrent actors. A verified closed browser no longer
+  // occupies the account, even if product verification was inconclusive. Keep the
+  // recovery record and separately enabled business-data guards unchanged.
+  await tx.executionResourceLease.deleteMany({
+    where: { sessionId, origin: "ACCOUNT_COORDINATION" },
+  });
   const settled = writeSettled(recovery.writeOutcomeState);
   if (settled) {
     await tx.executionResourceLease.deleteMany({ where: { sessionId } });

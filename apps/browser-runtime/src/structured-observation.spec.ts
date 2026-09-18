@@ -65,6 +65,75 @@ const defaultTarget: ObservationTargetV2 = {
   temporal: "SAME_OBSERVATION",
 };
 
+it("pairs focused deeply nested form controls with their labels and screenshot", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const dom = new DomObservations();
+    await page.setContent(`<button id="open">Open</button>`);
+    const initial = (await dom.snapshot(page)).structured;
+    await dom.markAction(
+      page,
+      randomUUID(),
+      initial.nodes.find((n) => n.tag === "button")!.ref,
+    );
+    await page.locator("body").evaluate((el) => {
+      el.insertAdjacentHTML(
+        "beforeend",
+        `<div role="dialog" aria-label="Settings">
+        <div><div><label>Type</label></div><div><div><div><div><div>
+          <span><span><input type="search" role="combobox"></span></span><span title="A">A</span>
+        </div></div></div></div></div></div>
+        <div><label>Enabled</label><button role="switch" aria-checked="true">On</button></div>
+      </div>`,
+      );
+    });
+    await page.locator("input").focus();
+    await dom.snapshot(page);
+    let capture = (await dom.snapshot(page, page.locator("[role=dialog]")))
+      .structured;
+    const control = capture.nodes.find((n) => n.role === "combobox")!;
+    expect(control).toMatchObject({ name: "Type", selectedLabel: "A" });
+    await page.screenshot();
+    expect(await dom.verifyCapture(page, capture)).toBe(false);
+    expect(capture.consistencyIssues).toEqual([
+      expect.objectContaining({ code: "DOCUMENT_MUTATED" }),
+    ]);
+    capture = (await dom.snapshot(page, page.locator("[role=dialog]")))
+      .structured;
+    await page.screenshot({ caret: "initial" });
+    expect(
+      await dom.verifyCapture(page, capture),
+      JSON.stringify(capture.consistencyIssues),
+    ).toBe(true);
+    capture.consistency = "VERIFIED";
+    expect(
+      evaluateObservationTarget(defaultTarget, capture, ["DOM", "SCREENSHOT"])
+        .binding,
+    ).toMatchObject({ readiness: "READY", evaluation: "MATCHED" });
+  } finally {
+    await browser.close();
+  }
+});
+
+it("does not infer a label across multiple form controls", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(
+      '<div><label>Type</label><div><input role="combobox"><input role="combobox"></div></div>',
+    );
+    const capture = (await new DomObservations().snapshot(page)).structured;
+    expect(
+      capture.nodes
+        .filter((n) => n.role === "combobox")
+        .every((n) => !n.name && !n.relations.length),
+    ).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
 it.each(["replacement", "region replacement", "scroll"])(
   "does not regain default-state proof after %s",
   async (mode) => {
@@ -373,6 +442,49 @@ it("never treats the search input value as the selected option", async () => {
     expect(node.relations.some((r) => r.kind === "SELECTED_DISPLAY")).toBe(
       true,
     );
+  } finally {
+    await browser.close();
+  }
+});
+
+it("keeps stable form evidence when a background row mutates, but rejects changed or replaced controls", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<p id="background">old</p><div role="dialog"><form>
+      <label>Type<select><option>A</option></select></label>
+      <button type="button" role="switch" aria-label="Enabled" aria-checked="true">On</button>
+    </form></div>`);
+    const dom = new DomObservations();
+    let capture = (await dom.snapshot(page)).structured;
+    const formId = capture.nodes.find((n) => n.tag === "form")!.nodeId;
+    await page.locator("#background").evaluate((el) => {
+      el.textContent = "new";
+    });
+    await page.screenshot({ caret: "initial" });
+    expect(await dom.verifyCapture(page, capture)).toBe(false);
+    expect(capture.verifiedScopeNodeIds).toContain(formId);
+    expect(capture.consistencyIssues).toContainEqual(
+      expect.objectContaining({
+        code: "DOCUMENT_MUTATED",
+        nodeId: expect.any(String),
+      }),
+    );
+    capture = (await dom.snapshot(page)).structured;
+    await page
+      .locator("[role=switch]")
+      .evaluate((el) => el.setAttribute("aria-checked", "false"));
+    expect(await dom.verifyCapture(page, capture)).toBe(false);
+    expect(capture.verifiedScopeNodeIds).not.toContain(formId);
+    expect(capture.consistencyIssues).toContainEqual(
+      expect.objectContaining({ code: "CHECKED_CHANGED" }),
+    );
+    capture = (await dom.snapshot(page)).structured;
+    await page
+      .locator("[role=switch]")
+      .evaluate((el) => el.replaceWith(el.cloneNode(true)));
+    expect(await dom.verifyCapture(page, capture)).toBe(false);
+    expect(capture.verifiedScopeNodeIds).not.toContain(formId);
   } finally {
     await browser.close();
   }
