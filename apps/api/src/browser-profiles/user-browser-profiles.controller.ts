@@ -105,6 +105,11 @@ export class UserBrowserProfilesController {
     return this.profiles.approve(current, id);
   }
 
+  @Post(":id/browser/connection")
+  connection(@CurrentAuth() current: AuthContext, @Param("id") id: string) {
+    return this.profiles.connection(current, id);
+  }
+
   @Post(":id/browser/input")
   input(
     @CurrentAuth() current: AuthContext,

@@ -53,7 +53,7 @@ export async function probeAuthSnapshot(input: {
             (input.verification.loginUrlPatterns ?? []).some((pattern) =>
               matches(actual, pattern),
             ) ||
-            (success.length
+            (success.length && !input.verification.exactLocation
               ? !success.some((pattern) => matches(actual, pattern))
               : location.origin !== target.origin ||
                 location.pathname.replace(/\/$/u, "") !==

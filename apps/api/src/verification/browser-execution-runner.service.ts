@@ -1,3 +1,4 @@
+import { snapshotDistributionEnabled } from "../browser-profiles/auth-snapshot-transfer.service.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -536,11 +537,27 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         "AUTH_REQUIRED",
         "Prepare and verify a compatible authentication snapshot first.",
       );
+    const distributed = Boolean(
+      isolated &&
+      snapshotDistributionEnabled() &&
+      userProfile.authSnapshotGeneration &&
+      (await this.prisma.browserAuthSnapshot.findUnique({
+        where: {
+          uploadedAt: { not: null },
+          deletedAt: null,
+          profileId_generation: {
+            profileId: userProfile.id,
+            generation: userProfile.authSnapshotGeneration,
+          },
+        },
+      })),
+    );
     const authSnapshot =
       isolated && userProfile.authSnapshotGeneration
         ? {
             profileKey: userProfile.runtimeProfileKey,
             generation: userProfile.authSnapshotGeneration,
+            ...(distributed ? { distributed: true } : {}),
           }
         : undefined;
     if (isolated) {
@@ -558,7 +575,9 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     const selection = await this.selectRuntimes(
       teamId,
       request,
-      userProfile?.assignedRuntimeId ?? historicalAffinity?.runtimeId,
+      distributed
+        ? undefined
+        : (userProfile?.assignedRuntimeId ?? historicalAffinity?.runtimeId),
     );
     let unavailableReason:
       "NO_MATCHING_RUNNER" | "NO_AVAILABLE_SLOT" | "SESSION_OPEN_FAILED" =
@@ -566,6 +585,14 @@ export class BrowserExecutionRunner implements ExecutionRunner {
 
     for (const runtime of selection.runtimes) {
       if (userProfile && (runtime.protocolMinor ?? 0) < (isolated ? 13 : 9))
+        continue;
+      if (
+        distributed &&
+        ((runtime.protocolMinor ?? 0) < 19 ||
+          !this.capabilities(runtime.capabilities).includes(
+            "distributed-auth-v1",
+          ))
+      )
         continue;
       await this.expireSlots(runtime.id);
       const leaseToken = randomUUID();
@@ -591,7 +618,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             allocationToken: execution.allocationToken,
             targetUrl: request.execution.targetUrl,
             ...(authSnapshot
-              ? { authSnapshotGeneration: authSnapshot.generation }
+              ? {
+                  authSnapshotGeneration: authSnapshot.generation,
+                  distributedAuth: distributed,
+                }
               : {}),
             ...(userProfile ? { userBrowserProfileId: userProfile.id } : {}),
           });
@@ -715,7 +745,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         if (userProfile)
           await tx.userBrowserProfile.update({
             data: {
-              assignedRuntimeId: runtime.id,
+              ...(!isolated ? { assignedRuntimeId: runtime.id } : {}),
               inactivityExpiresAt: new Date(
                 now.getTime() + 30 * 24 * 60 * 60 * 1_000,
               ),
@@ -1505,6 +1535,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
     browserExecutionId?: string;
     allocationToken?: string | null;
     authSnapshotGeneration?: number;
+    distributedAuth?: boolean;
     targetUrl?: string | undefined;
   }) {
     return this.prisma.$transaction(
@@ -1645,7 +1676,21 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             if (
               profile.executionMode !== "ISOLATED_AUTH" ||
               profile.authSnapshotGeneration !== input.authSnapshotGeneration ||
-              profile.assignedRuntimeId !== input.runtimeId
+              ((input.distributedAuth ||
+                profile.assignedRuntimeId !== input.runtimeId) &&
+                !(
+                  snapshotDistributionEnabled() &&
+                  (await tx.browserAuthSnapshot.findUnique({
+                    where: {
+                      uploadedAt: { not: null },
+                      deletedAt: null,
+                      profileId_generation: {
+                        profileId: profile.id,
+                        generation: input.authSnapshotGeneration,
+                      },
+                    },
+                  }))
+                ))
             )
               throw new ExecutionAdmissionBlocked(
                 "AUTH_REFRESH",
@@ -1865,6 +1910,17 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         const runtime = await tx.browserRuntime.findUniqueOrThrow({
           where: { id: input.runtimeId },
         });
+        if (
+          input.distributedAuth &&
+          ((runtime.protocolMinor ?? 0) < 19 ||
+            !this.capabilities(runtime.capabilities).includes(
+              "distributed-auth-v1",
+            ))
+        )
+          throw new ExecutionAdmissionBlocked(
+            "AUTH_REFRESH",
+            "The Runtime no longer supports distributed authentication.",
+          );
         const occupied = await tx.browserRuntimeSlot.count({
           where: {
             runtimeId: input.runtimeId,

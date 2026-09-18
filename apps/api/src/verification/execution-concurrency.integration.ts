@@ -1,3 +1,4 @@
+import { AuthSnapshotTransferService } from "../browser-profiles/auth-snapshot-transfer.service.js";
 import { coordinateResumedAccounts } from "./account-coordination.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import "reflect-metadata";
@@ -95,7 +96,7 @@ afterAll(async () => {
 beforeEach(async () => {
   process.env.RUNTIME_SESSION_RECOVERY_ENABLED = "true";
   await db.$executeRawUnsafe(
-    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations", "teams", "users" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "runtime_recovery_permits", "runtime_recovery_outbox", "session_closure_evidence", "runtime_session_recoveries", "runtime_drain_attestations", "browser_auth_snapshots", "teams", "users" RESTART IDENTITY CASCADE',
   );
   sequence = 0;
   commands.execute.mockReset().mockImplementation(verifiedCommand);
@@ -362,6 +363,263 @@ async function recordTimedOutCommand(
 }
 
 describe("PostgreSQL browser admission transactions", () => {
+  it("atomically publishes one encrypted generation and rejects competing and stale login writers", async () => {
+    vi.stubEnv("BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED", "true");
+    const profile = profiles[0]!;
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: {
+        tokenHash: createHash("sha256").update("transfer-token").digest("hex"),
+      },
+    });
+    await db.userBrowserProfile.update({
+      where: { id: profile.id },
+      data: { status: "VERIFYING", version: 2 },
+    });
+    const session = await db.browserRuntimeSession.create({
+      data: {
+        teamId,
+        runtimeId,
+        userBrowserProfileId: profile.id,
+        purpose: "PROFILE_PREPARATION",
+        slotNumber: 0,
+        status: "HUMAN_CONTROL",
+        profileKey: profile.runtimeProfileKey,
+        profileMode: "PERSISTENT",
+        protocolMajor: 1,
+        protocolMinor: 19,
+        fencingToken: 1n,
+        leaseToken: randomUUID(),
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+        humanControllerUserId: profile.ownerUserId,
+        humanControlExpiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    const objects = new Map<string, Buffer>();
+    const transfer = new AuthSnapshotTransferService(
+      db as never,
+      {
+        put: async (key: string, _type: string, body: Buffer) => {
+          objects.set(key, body);
+        },
+      } as never,
+    );
+    const results = await Promise.allSettled(
+      ["ciphertext-a", "ciphertext-b"].map((envelope) =>
+        transfer.upload(
+          runtimeId,
+          "Bearer transfer-token",
+          session.id,
+          2,
+          envelope,
+        ),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    const versions = await db.browserAuthSnapshot.findMany({
+      where: { profileId: profile.id },
+    });
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.uploadedAt).not.toBeNull();
+    expect(
+      createHash("sha256")
+        .update(objects.get(versions[0]!.storageKey)!)
+        .digest("hex"),
+    ).toBe(versions[0]!.checksum);
+    await db.userBrowserProfile.update({
+      where: { id: profile.id },
+      data: { version: 3 },
+    });
+    await expect(
+      transfer.upload(
+        runtimeId,
+        "Bearer transfer-token",
+        session.id,
+        2,
+        "stale",
+      ),
+    ).rejects.toThrow("superseded");
+  });
+
+  it("retains a durable deletion tombstone while an upload finishes after profile deletion", async () => {
+    vi.stubEnv("BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED", "true");
+    const profile = profiles[0]!;
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: {
+        tokenHash: createHash("sha256").update("transfer-token").digest("hex"),
+      },
+    });
+    await db.userBrowserProfile.update({
+      where: { id: profile.id },
+      data: { status: "VERIFYING", version: 2 },
+    });
+    const session = await db.browserRuntimeSession.create({
+      data: {
+        teamId,
+        runtimeId,
+        userBrowserProfileId: profile.id,
+        purpose: "PROFILE_PREPARATION",
+        slotNumber: 0,
+        status: "HUMAN_CONTROL",
+        profileKey: profile.runtimeProfileKey,
+        profileMode: "PERSISTENT",
+        protocolMajor: 1,
+        protocolMinor: 19,
+        fencingToken: 1n,
+        leaseToken: randomUUID(),
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+        humanControllerUserId: profile.ownerUserId,
+        humanControlExpiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    const objects = new Map<string, Buffer>();
+    let resume!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const storage = {
+      put: async (key: string, _type: string, body: Buffer) => {
+        entered();
+        await gate;
+        objects.set(key, body);
+      },
+      delete: vi.fn(async (key: string) => {
+        objects.delete(key);
+      }),
+    };
+    const transfer = new AuthSnapshotTransferService(
+      db as never,
+      storage as never,
+    );
+    const upload = transfer.upload(
+      runtimeId,
+      "Bearer transfer-token",
+      session.id,
+      2,
+      "ciphertext",
+    );
+    const rejected = expect(upload).rejects.toThrow();
+    await started;
+    try {
+      await db.browserRuntimeSession.update({
+        where: { id: session.id },
+        data: { status: "CLOSED", closureVerifiedAt: new Date() },
+      });
+      await db.userBrowserProfile.update({
+        where: { id: profile.id },
+        data: { status: "DISABLED" },
+      });
+      await transfer.purgeProfile(profile.id);
+      await db.userBrowserProfile.delete({ where: { id: profile.id } });
+      const tombstone = await db.browserAuthSnapshot.findUniqueOrThrow({
+        where: {
+          profileId_generation: { profileId: profile.id, generation: 2 },
+        },
+      });
+      expect(tombstone.deletedAt).not.toBeNull();
+      // Exercise failed compensation, then recovery by another API process.
+      storage.delete.mockRejectedValueOnce(new Error("temporary S3 outage"));
+      resume();
+      await rejected;
+      expect(objects.size).toBe(1);
+      const restarted = new AuthSnapshotTransferService(
+        db as never,
+        storage as never,
+      );
+      await restarted.collect();
+      expect(objects.size).toBe(0);
+      expect(
+        await db.browserAuthSnapshot.count({ where: { id: tombstone.id } }),
+      ).toBe(1);
+    } finally {
+      resume();
+      await upload.catch(() => undefined);
+    }
+  });
+
+  it("shares a published identity across two nodes while preserving its global limit and preparation owner", async () => {
+    vi.stubEnv("BROWSER_AUTH_SNAPSHOT_DISTRIBUTION_ENABLED", "true");
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
+    const capabilities = [
+      "browser",
+      "auth-snapshot-v1",
+      "distributed-auth-v1",
+      "session-permits-v1",
+      "closure-evidence-v1",
+    ];
+    await db.browserRuntime.update({
+      where: { id: runtimeId },
+      data: { capabilities, maxConcurrency: 2 },
+    });
+    const second = await db.browserRuntime.create({
+      data: {
+        teamId,
+        instanceKey: randomUUID(),
+        name: "Second snapshot node",
+        tokenHash: randomUUID(),
+        tokenHint: "test",
+        status: "ONLINE",
+        protocolMajor: 1,
+        protocolMinor: 19,
+        maxConcurrency: 2,
+        capabilities,
+      },
+    });
+    const profile = profiles[0]!;
+    await db.browserAuthSnapshot.create({
+      data: {
+        teamId,
+        profileId: profile.id,
+        generation: 1,
+        storageKey: randomUUID(),
+        checksum: "test",
+        uploadedAt: new Date(),
+      },
+    });
+    const work = await Promise.all(
+      Array.from({ length: 6 }, () => execution("READ_ONLY")),
+    );
+    const results = await Promise.allSettled(
+      work.map((item) => item.acquire()),
+    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(4);
+    const sessions = await db.browserRuntimeSession.findMany({
+      where: { userBrowserProfileId: profile.id },
+    });
+    expect(new Set(sessions.map((session) => session.runtimeId))).toEqual(
+      new Set([runtimeId, second.id]),
+    );
+    expect(
+      new Set(sessions.map((session) => session.identityPermit)).size,
+    ).toBe(4);
+    expect(
+      sessions.every((session) => session.authSnapshotGeneration === 1),
+    ).toBe(true);
+    expect(
+      await db.userBrowserProfile.findUniqueOrThrow({
+        where: { id: profile.id },
+      }),
+    ).toMatchObject({ assignedRuntimeId: runtimeId });
+    const opens = commands.execute.mock.calls.filter(
+      ([command]) => command.commandType === "session.open",
+    );
+    expect(opens).toHaveLength(4);
+    for (const [command] of opens)
+      expect(command).toMatchObject({
+        payload: { authSnapshot: { generation: 1, distributed: true } },
+      });
+  });
+
   it("allows manual and automatic executions to share capacity without classifying active sessions as quarantined", async () => {
     const first = await execution("UNKNOWN");
     await first.acquire();

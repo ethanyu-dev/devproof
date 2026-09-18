@@ -223,3 +223,10 @@ The Browser Runtime protocol remains v1.16. Upgrade each Runtime host to receive
 this fix; deploying the API or Agent alone does not update the installed browser
 package. The companion Agent change that stops exhausted locator recovery ships
 separately in PR #62. See [browser reference recovery](../../docs/browser-reference-recovery.md).
+
+## Direct control and distributed login state
+
+Version 0.2.32 adds optional direct WSS human control and encrypted login snapshots
+for multiple execution nodes. Both are disabled until configured. See the
+[rollout guide](../../docs/browser-direct-access-and-snapshots.md) for VM-local TLS,
+API signing keys, node snapshot keys, supported sites and rollback.

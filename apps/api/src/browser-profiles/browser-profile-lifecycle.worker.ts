@@ -1,4 +1,5 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { AuthSnapshotTransferService } from "./auth-snapshot-transfer.service.js";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
@@ -30,6 +31,7 @@ export class BrowserProfileLifecycleWorker
     private readonly browser: BrowserExecutionRunner,
     private readonly metrics: MetricsService,
     private readonly sessions: RuntimeSessionsService,
+    @Optional() private readonly snapshots?: AuthSnapshotTransferService,
   ) {}
 
   onModuleInit() {
@@ -47,6 +49,13 @@ export class BrowserProfileLifecycleWorker
     if (this.running) return { purged: 0 };
     this.running = true;
     try {
+      await this.snapshots
+        ?.collect()
+        .catch(() =>
+          this.logger.warn(
+            "Encrypted authentication snapshot cleanup will retry.",
+          ),
+        );
       const now = new Date();
       const profiles = await this.prisma.userBrowserProfile.findMany({
         include: lifecycleProfileInclude,

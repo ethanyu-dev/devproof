@@ -1,9 +1,15 @@
+import {
+  AuthSnapshotTransferService,
+  snapshotDistributionEnabled,
+} from "./auth-snapshot-transfer.service.js";
+import { browserConnection } from "../runtime/direct-control-ticket.js";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
@@ -83,6 +89,7 @@ export class UserBrowserProfilesService {
     private readonly humanRelay: RuntimeHumanControlRelay,
     private readonly browser: BrowserExecutionRunner,
     private readonly audit: AuditService,
+    @Optional() private readonly snapshots?: AuthSnapshotTransferService,
   ) {}
 
   async list(current: AuthContext) {
@@ -962,6 +969,7 @@ export class UserBrowserProfilesService {
             claimedVersion,
             {
               url: profile.verificationUrl,
+              exactLocation: rules.automatic,
               ...(rules.authenticatedSelector
                 ? { authenticatedSelector: rules.authenticatedSelector }
                 : {}),
@@ -1222,6 +1230,13 @@ export class UserBrowserProfilesService {
     return this.prepareProfile(current, profile, input);
   }
 
+  async connection(current: AuthContext, id: string) {
+    return browserConnection(
+      current,
+      await this.controlledSession(current, id),
+    );
+  }
+
   async stream(
     current: AuthContext,
     id: string,
@@ -1343,6 +1358,7 @@ export class UserBrowserProfilesService {
       await this.restoreLifecycleClaim(profile, "DISABLED", claimedVersion);
       throw error;
     }
+    await this.snapshots?.purgeProfile(id);
     await this.detachProfileFromTasks(
       id,
       "PROFILE_OWNER_DELETED",
@@ -1564,6 +1580,7 @@ export class UserBrowserProfilesService {
       );
     }
     return {
+      humanControlExpiresAt: session.humanControlExpiresAt,
       controlGeneration: session.controlGeneration,
       fencingToken: session.fencingToken,
       id: session.id,
@@ -1619,6 +1636,7 @@ export class UserBrowserProfilesService {
         "TASK_TARGET"
           ? "TASK"
           : "MANUAL",
+      snapshotDistributionAvailable: snapshotDistributionEnabled(),
       isolatedExecutionAvailable:
         process.env.BROWSER_ISOLATED_AUTH_ENABLED === "true",
       grants: profile.grants.filter((grant) => !grant.revokedAt),

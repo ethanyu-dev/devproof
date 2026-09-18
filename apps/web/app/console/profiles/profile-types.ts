@@ -22,6 +22,7 @@ export interface Profile {
   executionConcurrency?: number;
   authSnapshotGeneration?: number | null;
   isolatedExecutionAvailable?: boolean;
+  snapshotDistributionAvailable?: boolean;
   grants: Array<{ hostnamePattern: string; triggerSource: TriggerSource }>;
   id: string;
   inactivityExpiresAt: string | null;
