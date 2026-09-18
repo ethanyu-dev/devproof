@@ -1,3 +1,9 @@
+import {
+  resolveAccountReplacement,
+  accountReplacementState,
+} from "./account-replacement.js";
+import { env } from "../config/env.js";
+import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import {
@@ -151,6 +157,34 @@ export class ExecutionRunService {
     taskExecutionId: string | null,
     browserProfileId: string | null = null,
   ) {
+    input = {
+      ...input,
+      criteria: input.criteria.map((c) =>
+        c.observationContract
+          ? {
+              ...c,
+              observationContract: freezeObservationContract(
+                c.observationContract,
+                c.id,
+              ),
+            }
+          : c,
+      ),
+    };
+    if (
+      new Set(input.criteria.map((c) => c.id)).size !== input.criteria.length ||
+      input.criteria.reduce(
+        (n, c) => n + (c.observationContract?.targets.length ?? 0),
+        0,
+      ) > 200 ||
+      input.criteria.reduce(
+        (n, c) => n + (c.observationContract?.comparisons.length ?? 0),
+        0,
+      ) > 100
+    )
+      throw new BadRequestException(
+        "OBSERVATION_CONTRACT_LIMIT: criterion IDs must be unique, with at most 200 targets and 100 comparisons per execution.",
+      );
     const deadlinePolicy = runDeadlinePolicySchema.parse(
       input.deadlinePolicy ?? { mode: "FIXED" },
     );
@@ -200,6 +234,19 @@ export class ExecutionRunService {
       throw new ConflictException("The parent task deadline has elapsed.");
     }
     const hardDeadlineAt = deadlineAt;
+    if (
+      !env().BROWSER_OBSERVATION_V2_ENABLED &&
+      input.criteria.some((c) => c.observationContract)
+    )
+      throw new BadRequestException(
+        "OBSERVATION_V2_DISABLED: new v2 executions are paused.",
+      );
+    const observationPolicy = input.observationPolicy ?? {
+      combinedObservation: true,
+      observationFocus: true,
+      observationDelta: false,
+      formSequences: false,
+    };
     const runId = randomUUID();
     const attemptId = randomUUID();
     const taskId = randomUUID();
@@ -219,6 +266,7 @@ export class ExecutionRunService {
             version: 2,
             requirements: [],
           },
+          ...observationPolicy,
           testAccounts: input.testAccounts,
           browser: input.browserPolicy,
           concurrency: input.concurrencyPolicy,
@@ -259,6 +307,7 @@ export class ExecutionRunService {
                 version: 2,
                 requirements: [],
               },
+              ...observationPolicy,
               initialTestAccounts: input.testAccounts ?? [],
               testAccounts: input.testAccounts,
               browser: input.browserPolicy,
@@ -365,6 +414,12 @@ export class ExecutionRunService {
         attempts: { orderBy: { number: "asc" } },
         browserExecutions: { orderBy: { createdAt: "asc" } },
         criterionResults: { orderBy: { criterionId: "asc" } },
+        events: {
+          where: { kind: "observation.visual.reviewed" },
+          select: { id: true, attemptId: true, payload: true },
+          orderBy: { occurredAt: "asc" },
+          take: 1000,
+        },
         evidences: { orderBy: { createdAt: "asc" } },
         interventions: { orderBy: { requestedAt: "asc" } },
         tasks: {
@@ -439,6 +494,13 @@ export class ExecutionRunService {
           orderBy: { createdAt: "asc" },
         },
         criterionResults: { orderBy: { criterionId: "asc" } },
+        observationBindings: { orderBy: { createdAt: "desc" }, take: 1001 },
+        events: {
+          where: { kind: "observation.visual.reviewed" },
+          select: { id: true, attemptId: true, payload: true },
+          orderBy: { occurredAt: "desc" },
+          take: 1001,
+        },
         evidences: {
           include: { runtimeArtifact: true },
           orderBy: { createdAt: "asc" },
@@ -500,6 +562,10 @@ export class ExecutionRunService {
     return {
       ...run,
       recoveries,
+      observationHistoryTruncated:
+        run.observationBindings.length > 1000 || run.events.length > 1000,
+      observationBindings: run.observationBindings.slice(0, 1000),
+      events: run.events.slice(0, 1000).reverse(),
       executionPolicy: safeExecutionPolicy(
         run.executionPolicy,
         run.browserProfileId,
@@ -629,6 +695,60 @@ export class ExecutionRunService {
     };
   }
 
+  async evidenceCatalog(
+    current: ToolAuthContext,
+    id: string,
+    attemptId: string,
+    after?: string,
+  ) {
+    await this.requireRun(current.team.id, id);
+    const attempt = await this.prisma.runAttempt.findFirst({
+      where: { id: attemptId, runId: id, teamId: current.team.id },
+    });
+    if (!attempt) throw new NotFoundException("Attempt not found.");
+    const result = isRecord(attempt.result) ? attempt.result : {};
+    const recoveryVerification =
+      isRecord(result.error) &&
+      isRecord(result.error.details) &&
+      isRecord(result.error.details.verification)
+        ? result.error.details.verification
+        : {};
+    const catalogValue =
+      result.evidenceCatalog ?? recoveryVerification.evidenceCatalog;
+    const catalog = isRecord(catalogValue) ? catalogValue : null;
+    const where = {
+      attemptId,
+      runId: id,
+      teamId: current.team.id,
+      ...(typeof catalog?.sealedAt === "string"
+        ? { createdAt: { lte: new Date(catalog.sealedAt) } }
+        : {}),
+    };
+    const rows = await this.prisma.runEvidence.findMany({
+      where: { ...where, ...(after ? { externalId: { gt: after } } : {}) },
+      orderBy: { externalId: "asc" },
+      take: 201,
+      select: {
+        id: true,
+        externalId: true,
+        kind: true,
+        label: true,
+        metadata: true,
+        createdAt: true,
+      },
+    });
+    return {
+      version: 1,
+      runId: id,
+      attemptId,
+      total: await this.prisma.runEvidence.count({ where }),
+      digest: catalog?.digest ?? null,
+      sealedAt: catalog?.sealedAt ?? null,
+      entries: rows.slice(0, 200),
+      nextCursor: rows.length > 200 ? rows[199]!.externalId : null,
+    };
+  }
+
   async events(current: ToolAuthContext, id: string, after?: bigint) {
     await this.requireRun(current.team.id, id);
     const rows = await this.prisma.runEvent.findMany({
@@ -752,7 +872,27 @@ export class ExecutionRunService {
       let response = input.response;
       let resumedAccounts:
         ReturnType<typeof testAccountBindingsSchema.parse> | undefined;
-      if (intervention.kind === "TEST_ACCOUNT") {
+      const savedPolicy =
+        isRecord(intervention.task.snapshot) &&
+        isRecord(intervention.task.snapshot.executionPolicy)
+          ? intervention.task.snapshot.executionPolicy
+          : {};
+      const replacementPolicy = {
+        ...savedPolicy,
+        ...(isRecord(intervention.run.executionPolicy)
+          ? intervention.run.executionPolicy
+          : {}),
+      };
+      const replacement = ["DATA_PRECONDITION", "TEST_ACCOUNT"].includes(
+        intervention.kind,
+      )
+        ? resolveAccountReplacement(
+            input.response,
+            replacementPolicy,
+            intervention.context,
+          )
+        : undefined;
+      if (intervention.kind === "TEST_ACCOUNT" && !replacement) {
         const slots = testAccountInputSlotsSchema.parse(
           isRecord(intervention.context)
             ? (intervention.context.accountSlots ?? [])
@@ -855,6 +995,22 @@ export class ExecutionRunService {
           }
         }
       }
+      if (replacement) {
+        response = replacement.response;
+        resumedAccounts = replacement.accounts;
+      }
+      const legacyAccount =
+        replacement?.account ??
+        (intervention.kind === "TEST_ACCOUNT" &&
+        !resumedAccounts &&
+        typeof response.account === "string"
+          ? response.account
+          : undefined);
+      const priorState = readExecutionState(replacementPolicy);
+      const accountChanged = resumedAccounts
+        ? JSON.stringify(resumedAccounts) !==
+          JSON.stringify(replacementPolicy.testAccounts ?? [])
+        : legacyAccount !== undefined && legacyAccount !== priorState.account;
       if (intervention.run.lifecycle !== "WAITING_HUMAN") {
         throw new ConflictException("The run is not waiting for human input.");
       }
@@ -923,13 +1079,17 @@ export class ExecutionRunService {
         hardDeadlineAt: resumedHardDeadlineAt.toISOString(),
         executionPolicy: {
           ...snapshot.executionPolicy,
-          ...(resumedAccounts
+          ...policyValue,
+          ...(accountChanged
             ? {
-                testAccounts: resumedAccounts,
-                executionState: {
-                  ...readExecutionState(snapshot.executionPolicy),
-                  accounts: resumedAccounts,
-                },
+                ...(resumedAccounts ? { testAccounts: resumedAccounts } : {}),
+                accountCoordinationPending: true,
+                accountRevisionStartedAt: now.toISOString(),
+                executionState: accountReplacementState(
+                  snapshot.executionPolicy,
+                  resumedAccounts,
+                  legacyAccount,
+                ),
                 verificationCheckpoint: {
                   ...(isRecord(snapshot.executionPolicy.verificationCheckpoint)
                     ? snapshot.executionPolicy.verificationCheckpoint
@@ -946,6 +1106,18 @@ export class ExecutionRunService {
             response,
             resolvedAt: now.toISOString(),
           },
+          humanResolutions: [
+            ...(Array.isArray(policyValue.humanResolutions)
+              ? policyValue.humanResolutions
+              : []),
+            {
+              interventionId,
+              kind: intervention.kind,
+              context: intervention.context,
+              response,
+              resolvedAt: now.toISOString(),
+            },
+          ].slice(-20),
         },
       });
       if (parentTask && refreshedParentDeadlineAt) {
@@ -966,7 +1138,7 @@ export class ExecutionRunService {
       }
       const runClaim = await tx.executionRun.updateMany({
         data: {
-          ...(resumedAccounts
+          ...(accountChanged
             ? {
                 executionPolicy: json({
                   ...policyValue,
@@ -1019,6 +1191,22 @@ export class ExecutionRunService {
           "The human intervention can no longer be resolved.",
         );
       }
+      if (accountChanged) {
+        const oldProgress = isRecord(
+          snapshot.executionPolicy.verificationCheckpoint,
+        )
+          ? snapshot.executionPolicy.verificationCheckpoint
+          : {};
+        if (Array.isArray(oldProgress.criteria) && oldProgress.criteria.length)
+          await tx.runCriterionResult.updateMany({
+            where: { attemptId: intervention.attemptId, runId },
+            data: {
+              status: "INCONCLUSIVE",
+              summary:
+                "人工已更换当前账号，需在新账号上重新核对；原结果保留在换号事件与历史上下文。",
+            },
+          });
+      }
       await tx.agentRuntimeTask.update({
         data: {
           completionId: null,
@@ -1050,6 +1238,20 @@ export class ExecutionRunService {
           kind: "human.intervention.resolved",
           payload: json({
             interventionId,
+            ...(accountChanged
+              ? {
+                  accountRevision: readExecutionState(
+                    resumedSnapshot.executionPolicy,
+                  ).accountRevision,
+                  resolution: response.resolution ?? {
+                    kind: "REPLACE_ACCOUNT",
+                    accounts: response.accounts,
+                    account: response.account,
+                  },
+                  supersededCheckpoint:
+                    snapshot.executionPolicy.verificationCheckpoint ?? null,
+                }
+              : {}),
             ...(refreshedParentDeadlineAt
               ? {
                   parentTaskDeadlineAt: refreshedParentDeadlineAt.toISOString(),
@@ -1577,6 +1779,12 @@ function assertCompatibleRunRequest(
     },
     initialTestAccounts: input.testAccounts ?? [],
     concurrency: input.concurrencyPolicy,
+    ...(input.observationPolicy ?? {
+      combinedObservation: true,
+      observationFocus: true,
+      observationDelta: false,
+      formSequences: false,
+    }),
     browser: input.browserPolicy,
     businessReferences: input.businessReferences,
     deadline: runDeadlinePolicySchema.parse(
@@ -1603,6 +1811,10 @@ function assertCompatibleRunRequest(
         },
         initialTestAccounts:
           storedPolicy.initialTestAccounts ?? storedPolicy.testAccounts ?? [],
+        combinedObservation: storedPolicy.combinedObservation ?? true,
+        observationFocus: storedPolicy.observationFocus ?? true,
+        observationDelta: storedPolicy.observationDelta ?? false,
+        formSequences: storedPolicy.formSequences ?? false,
         businessReferences:
           storedPolicy.businessReferences ?? input.businessReferences,
         deadline:

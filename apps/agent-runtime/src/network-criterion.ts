@@ -1,5 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 
+const queryTarget =
+  /请求.*参数|查询请求|列表查询|query\s*(?:param|parameter)/iu;
+const requestBodyTarget = /请求体|request\s*body/iu;
+const responseBodyTarget = /响应体|response\s*body/iu;
+export const requiresStructuredNetworkTarget = (label: string) =>
+  queryTarget.test(label) ||
+  requestBodyTarget.test(label) ||
+  responseBodyTarget.test(label);
+
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const parse = (value: string): unknown => {
@@ -21,6 +30,8 @@ export function networkRequestMatches(
 ) {
   const request = parse(quote);
   if (!object(request)) return false;
+  const explicitQuery = /^([A-Za-z_][\w.-]*)=([^\r\n]*)$/u.exec(expected);
+  const query = queryTarget.test(target);
   // Do not use a creation receipt to prove a later update's request contract.
   if (/新增|创建/.test(target) && request.method !== "POST") return false;
   if (
@@ -28,10 +39,35 @@ export function networkRequestMatches(
     !["PUT", "PATCH"].includes(String(request.method))
   )
     return false;
-  const requestBody = /请求体|request\s*body/i.test(target);
-  const query = /请求.*参数|query\s*(?:param|parameter)/i.test(target);
-  const responseBody = /响应体|response\s*body/i.test(target);
+  if (query && explicitQuery) {
+    try {
+      const params = new URL(String(request.url)).searchParams;
+      return (
+        params.getAll(explicitQuery[1]!).length === 1 &&
+        params.get(explicitQuery[1]!) === explicitQuery[2]
+      );
+    } catch {
+      return false;
+    }
+  }
+  const requestBody = requestBodyTarget.test(target);
+
+  const responseBody = responseBodyTarget.test(target);
   if (!requestBody && !query && !responseBody) return false;
+  // Missing response data must not invalidate an independently captured request body.
+  if (
+    requestBody &&
+    (request.requestBodyTruncated === true ||
+      request.requestBodyOmitted !== undefined)
+  )
+    return false;
+  if (
+    responseBody &&
+    (request.bodyPending === true ||
+      request.responseBodyTruncated === true ||
+      request.responseBodyOmitted !== undefined)
+  )
+    return false;
   let value: unknown;
   if (query) {
     try {

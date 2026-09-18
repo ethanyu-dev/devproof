@@ -171,6 +171,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@devproof/agent-runtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime-protocol
       '@devproof/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

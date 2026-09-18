@@ -118,7 +118,7 @@ Protocol v1.11 adds structured locator recovery diagnostics. When a selector mat
 
 Protocol v1.12 reports acknowledged `VIDEO_FINALIZATION_FAILED` events with the Runtime version, close command correlation, frame count, total duration, and bounded encoding-attempt summaries. Pending failure events are kept in a permission-restricted, 64-entry, 7-day local spool and replayed after reconnect or process restart until the control plane acknowledges them. Raw Runtime logs, screenshots, page content, and URLs are never included in these diagnostic events.
 
-Protocol v1.7 also supports open Shadow DOM capture and bounded, recursively redacted same-origin JSON response bodies when network evidence is narrowed by `urlIncludes`.
+Protocol v1.7 also supports open Shadow DOM capture and bounded, recursively redacted business JSON response bodies from the page origin or explicitly allowlisted API hosts when network evidence is narrowed by `urlIncludes`.
 
 See [`docs/runtime-protocol.md`](../../docs/runtime-protocol.md) for compatibility rules and [`packages/runtime-protocol/README.md`](../../packages/runtime-protocol/README.md) for the canonical protocol changelog.
 
@@ -131,6 +131,23 @@ Lifecycle events persist locally and replay until acknowledged by the control pl
 This cleanup runs inside `devproof-browser-runtime start`. It needs no cron job, and its 30-day limit cannot be increased through configuration. Restart Browser Runtime after upgrading so it can negotiate the latest supported protocol.
 
 ## Upgrade
+
+Version 0.2.31 captures fetch/XHR request and response JSON from explicitly allowlisted cross-origin business APIs. Authentication paths remain excluded; size limits and redaction apply to both bodies. Each omitted body reports a reason. Stable request IDs connect action feedback to later `page.network` reads without counting the same write twice.
+
+Version 0.2.30 records bounded mutation locations and independently verifies
+stable forms/dialogs/rows when the surrounding page changes. It checks captured
+control values and geometry, rejects replaced nodes, and recaptures unstable
+DOM/screenshot pairs at most twice without replaying the business action.
+The optional `verifiedScopeNodeIds` field is backward compatible with structured
+observation version 2. Upgrade and restart the installed Runtime for this fix.
+
+Version 0.2.29 preserves the caret in screenshots so screenshot capture does
+not itself invalidate paired DOM evidence. Structured observations report
+bounded consistency diagnostics, and fallback field-label discovery supports
+deeply wrapped controls while rejecting ambiguous multi-control containers.
+Real document/state changes still invalidate a capture. Restart the installed
+Runtime to load these changes; restarting the web/API development server alone
+does not update it.
 
 Run the same release command again. Existing credentials, Browser Profiles,
 configuration, and service state are retained:

@@ -1,5 +1,7 @@
 "use client";
 
+import { ObjectEvidence } from "./object-evidence";
+
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -65,6 +67,9 @@ interface RunSummary {
 }
 
 interface RunDetail extends RunSummary {
+  observationBindings?: Array<{ id: string; facts: unknown }>;
+  observationHistoryTruncated?: boolean;
+  events?: Array<{ id: string; attemptId: string | null; payload: unknown }>;
   executionPolicy?: {
     executionState?: {
       records: Array<{
@@ -651,6 +656,14 @@ function RunDetailClient({ id }: { id: string }) {
                 {cancelling ? "取消中…" : "取消执行"}
               </Button>
             ) : null}
+            {detail && (
+              <Link
+                className="dp-back-link"
+                href={`/console/execution-contexts/${id}/${detail.currentAttemptNumber || 1}`}
+              >
+                Step Context
+              </Link>
+            )}
             <Button
               disabled={refreshing}
               onClick={() => void load("foreground").catch(() => undefined)}
@@ -810,9 +823,7 @@ function RunDetailClient({ id }: { id: string }) {
                       <TriangleAlert aria-hidden="true" />
                       <div>
                         <b>{notice.title}</b>
-                        {failure && failure.message !== outcome.description && (
-                          <p>中断原因：{failure.message}</p>
-                        )}
+                        {failure && <p>执行停止原因：{failure.message}</p>}
                         <p>
                           {recoveryClosureLabel(recovery.closureState)} ·{" "}
                           {recoveryWriteLabel(recovery.writeOutcomeState)}
@@ -986,6 +997,17 @@ function RunDetailClient({ id }: { id: string }) {
                             ) : null}
                           </div>
                           <p>{criterion.description}</p>
+                          <ObjectEvidence
+                            criterionId={criterion.id}
+                            criteria={detail.criteriaSnapshot}
+                            rows={detail.observationBindings ?? []}
+                            historyTruncated={
+                              detail.observationHistoryTruncated
+                            }
+                            attemptId={detail.attempts.at(-1)?.id}
+                            evidence={detail.evidences}
+                            events={detail.events ?? []}
+                          />
                           {criterion.summary ? (
                             <small>{criterion.summary}</small>
                           ) : null}
@@ -1089,6 +1111,9 @@ function RunDetailClient({ id }: { id: string }) {
                           ) : null}
                         </div>
                         <p>{failure.message}</p>
+                        {failure.recoveryMessage && (
+                          <p>{failure.recoveryMessage}</p>
+                        )}
                         <details>
                           <summary>查看技术详情</summary>
                           <pre>{failure.raw}</pre>

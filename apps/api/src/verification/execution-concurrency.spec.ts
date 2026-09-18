@@ -78,3 +78,49 @@ describe("shared backend execution locks", () => {
     expect(resourcesConflict(writer[0]!, reader[0]!)).toBe(true);
   });
 });
+
+it("serializes assigned account mutations without enabling broad locks, while unrelated accounts and types stay parallel", async () => {
+  const { executionResourceClaims } =
+    await import("./execution-concurrency.js");
+  const policy = (
+    account: string,
+    type: string,
+    usage = "CREATE_OR_MODIFY",
+    aliases: string[] = [],
+  ) => ({
+    testAccounts: [
+      {
+        slotId: "subject:1",
+        account,
+        aliases,
+        usage,
+        requiredTypes: type ? [type] : [],
+      },
+    ],
+  });
+  const claims = (
+    account: string,
+    type: string,
+    usage?: string,
+    aliases?: string[],
+  ) =>
+    executionResourceClaims(
+      "https://app.test",
+      { accessMode: "MUTATING" },
+      policy(account, type, usage, aliases),
+    ).filter((c) => c.resourceKey.startsWith("accounts/"));
+  const a = claims("subject-a", "MAPPING")[0]!;
+  expect(a.resourceKey).not.toContain("subject-a");
+  expect(resourcesConflict(a, claims("subject-a", "MAPPING")[0]!)).toBe(true);
+  expect(resourcesConflict(a, claims("subject-b", "MAPPING")[0]!)).toBe(false);
+  expect(resourcesConflict(a, claims("subject-a", "OTHER")[0]!)).toBe(false);
+  expect(resourcesConflict(a, claims("subject-a", "")[0]!)).toBe(true);
+  const read = claims("subject-a", "MAPPING", "READ_EXISTING")[0]!;
+  expect(resourcesConflict(read, read)).toBe(false);
+  expect(resourcesConflict(a, read)).toBe(true);
+  expect(
+    claims("uuid-a", "MAPPING", "CREATE_OR_MODIFY", ["subject-a"]).some((c) =>
+      resourcesConflict(a, c),
+    ),
+  ).toBe(true);
+});

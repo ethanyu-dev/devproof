@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { TaskExecutionService } from "./task-execution.service.js";
 import { TaskExecutionConsoleController } from "./task-execution-console.controller.js";
 import { TaskExecutionController } from "./task-execution.controller.js";
+import {
+  unassignedTestAccountPlan,
+  accountsReady,
+} from "./task-test-accounts.js";
 
 const current = {
   team: { id: "team", name: "Team" },
@@ -9,7 +13,7 @@ const current = {
 } as never;
 const request = { idempotencyKey: "in-place-request" };
 
-function fixture() {
+function fixture(kind: "ISSUE_SPEC" | "SPEC_TASK" = "ISSUE_SPEC") {
   const original = {
     id: "old-execution",
     caseId: "case",
@@ -22,13 +26,13 @@ function fixture() {
   };
   const task = {
     id: "task",
-    kind: "ISSUE_SPEC",
+    kind,
     lifecycle: "TIMED_OUT",
     cancelRequestedAt: null,
     deadlineAt: new Date("2020-01-01"),
     finishedAt: new Date("2020-01-01"),
     inputSnapshot: {
-      kind: "ISSUE_SPEC",
+      kind,
       issueRef: "ENG-123",
       idempotencyKey: "original-task",
       deadlineSeconds: 3600,
@@ -98,6 +102,59 @@ function fixture() {
 }
 
 describe("Case reruns within the original task", () => {
+  it.each(["ISSUE_SPEC", "SPEC_TASK"] as const)(
+    "starts account preparation with empty assignments only when explicitly requested for %s",
+    async (kind) => {
+      const { service, task, original, tx, events } = fixture(kind);
+      const definition = {
+        authRole: "operator",
+        accountRequirementsVersion: 2,
+        accountRequirements: [
+          {
+            role: "subject",
+            label: "新增账号",
+            count: 1,
+            usage: "CREATE_OR_MODIFY",
+            requiredTypes: ["TYPE_A"],
+            constraints: ["目标记录不存在"],
+            rationale: "验证新增",
+          },
+        ],
+      };
+      const previous = unassignedTestAccountPlan(definition, 3600, new Date());
+      Object.assign(previous, {
+        bindings: [
+          {
+            slotId: "subject:1",
+            role: "subject",
+            account: "original@example.test",
+            usage: "CREATE_OR_MODIFY",
+            requiredTypes: ["TYPE_A"],
+          },
+        ],
+      });
+      Object.assign(original.testCase, { definition });
+      Object.assign(original, { testAccountPlan: previous });
+      const saved = structuredClone(previous);
+      const retry = { ...request, reuseTestAccounts: false };
+      await service.rerunCase(current, "task", "case", undefined, retry);
+      const data = tx.taskCaseExecution.create.mock.calls[0]![0].data;
+      expect(data.testAccountPlan).toMatchObject({
+        version: 2,
+        bindings: [],
+        requirements: previous.requirements,
+      });
+      expect(data.testAccountPlan.revision).not.toBe(previous.revision);
+      expect(accountsReady(data.testAccountPlan, definition)).toBe(false);
+      expect(previous).toEqual(saved);
+      expect(events[0]!.payload.reuseTestAccounts).toBe(false);
+      await service.rerunCase(current, "task", "case", undefined, retry);
+      expect(task.caseExecutions).toHaveLength(2);
+      await expect(
+        service.rerunCase(current, "task", "case", undefined, request),
+      ).rejects.toThrow("账号准备方式已确定");
+    },
+  );
   it("renews an expired deadline and appends an execution without recreating the task or Spec", async () => {
     const { service, task, tx, original, events } = fixture();
     const before = Date.now();
@@ -116,6 +173,9 @@ describe("Case reruns within the original task", () => {
     });
     expect(tx.taskExecution.create).not.toHaveBeenCalled();
     expect(tx.taskSpecificationSnapshot.create).not.toHaveBeenCalled();
+    expect(
+      tx.taskCaseExecution.create.mock.calls[0]![0].data,
+    ).not.toHaveProperty("testAccountPlan");
     expect(events[0]!.payload).toMatchObject({
       previousCaseExecutionId: "old-execution",
       idempotencyKey: request.idempotencyKey,

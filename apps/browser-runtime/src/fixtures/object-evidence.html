@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Object evidence fixture</title>
+<style>
+  body {
+    font: 16px sans-serif;
+  }
+  dialog {
+    width: 420px;
+    padding: 24px;
+  }
+  label {
+    display: block;
+    margin: 12px;
+  }
+  button[role="switch"] {
+    background: #1677ff;
+    color: white;
+    padding: 5px 14px;
+  }
+</style>
+<table>
+  <tr>
+    <td>Existing synthetic record</td>
+    <td>启用</td>
+  </tr>
+</table>
+<button id="open" onclick="document.querySelector('dialog').showModal()">
+  新增
+</button>
+<dialog aria-labelledby="title">
+  <h2 id="title">新增用户白名单</h2>
+  <label
+    >白名单类型<select id="type">
+      <option>合规模型映射</option>
+      <option>旧版对公转账白名单</option>
+      <option>零数据留存 (ZDR)</option>
+    </select></label
+  >
+  <p>配置说明与状态控件之间可以有任意数量的节点。</p>
+  <label for="enabled">启用状态</label
+  ><button
+    id="enabled"
+    role="switch"
+    aria-checked="true"
+    onclick="
+      this.setAttribute(
+        'aria-checked',
+        this.getAttribute('aria-checked') === 'true' ? 'false' : 'true',
+      )
+    "
+  >
+    启用
+  </button>
+  <button id="close" onclick="document.querySelector('dialog').close()">
+    关闭
+  </button>
+</dialog>

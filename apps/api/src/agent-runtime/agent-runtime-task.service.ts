@@ -1,4 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { coordinateResumedAccounts } from "../verification/account-coordination.js";
+import { decodeStepContext } from "../execution-runs/step-context-archive.js";
+import { runtimeCriterionResultSchema } from "@devproof/agent-runtime-protocol";
+import { ObservationBindingService } from "./observation-binding.service.js";
+import {
+  BOUND_EVIDENCE_CAPABILITIES,
+  BUSINESS_CHECK_CAPABILITY,
+  EVIDENCE_CATALOG_CAPABILITY,
+  TYPED_CHECKS_CAPABILITY,
+} from "@devproof/agent-runtime-protocol";
+import { randomUUID, createHash } from "node:crypto";
 
 import {
   BadRequestException,
@@ -20,6 +30,7 @@ import {
   runtimeTaskSnapshotSchema,
   runtimeVerificationTerminationReasonSchema,
   businessAccountRequestSchema,
+  testAccountBindingsSchema,
   resolveBusinessAccountRequest,
   accountInputResponseSchema,
   accountRequestKindError,
@@ -53,7 +64,10 @@ import { writeSettled } from "../runtime/session-recovery.state.js";
 import { SessionRecoveryService } from "../runtime/session-recovery.service.js";
 import { recoveryEnabled } from "../runtime/session-recovery.enabled.js";
 
-import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
+import {
+  saveExecutionCheckpoint,
+  persistCriterionResults,
+} from "./execution-checkpoint.js";
 import { initializeExecutionBudget } from "../execution-runs/execution-budget.js";
 
 export { initializeExecutionBudget } from "../execution-runs/execution-budget.js";
@@ -255,6 +269,8 @@ export class AgentRuntimeTaskService {
     @Optional() private readonly commands?: RuntimeCommandDispatcher,
     @Optional() private readonly sessionRecovery?: SessionRecoveryService,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional()
+    private readonly observationBindings?: ObservationBindingService,
   ) {}
 
   onModuleInit() {
@@ -792,6 +808,24 @@ export class AgentRuntimeTaskService {
               where: {
                 id: { notIn: [...skipped] },
                 capability: { in: input.capabilities },
+                NOT: [2, 3]
+                  .filter(
+                    (version) =>
+                      BOUND_EVIDENCE_CAPABILITIES.some(
+                        (capability) => !input.features?.includes(capability),
+                      ) ||
+                      (version === 3 &&
+                        (input.protocol.minor < 23 ||
+                          !input.features?.includes(
+                            BUSINESS_CHECK_CAPABILITY,
+                          ))),
+                  )
+                  .map((version) => ({
+                    snapshot: {
+                      path: ["criteria"],
+                      array_contains: [{ observationContract: { version } }],
+                    },
+                  })),
                 deadlineAt: { gt: now },
                 OR: [
                   { recoveryStatus: null },
@@ -824,14 +858,99 @@ export class AgentRuntimeTaskService {
             });
             if (!candidate) return null;
             if (
-              input.protocol.minor < 20 &&
-              runtimeTaskSnapshotSchema.parse(candidate.snapshot)
-                .executionPolicy.accountRequirements
+              (runtimeTaskSnapshotSchema
+                .parse(candidate.snapshot)
+                .criteria.some((c) => c.observationContract?.version === 3) &&
+                (input.protocol.minor < 23 ||
+                  !input.features?.includes(BUSINESS_CHECK_CAPABILITY))) ||
+              (input.protocol.minor < 20 &&
+                runtimeTaskSnapshotSchema.parse(candidate.snapshot)
+                  .executionPolicy.accountRequirements) ||
+              (runtimeTaskSnapshotSchema
+                .parse(candidate.snapshot)
+                .criteria.some((c) => c.observationContract) &&
+                BOUND_EVIDENCE_CAPABILITIES.some(
+                  (c) => !input.features?.includes(c),
+                ))
             ) {
               skipped.add(candidate.id);
               return undefined;
             }
 
+            const resumeSnapshot = runtimeTaskSnapshotSchema.parse(
+              candidate.snapshot,
+            );
+            if (
+              !input.features?.includes(TYPED_CHECKS_CAPABILITY) &&
+              resumeSnapshot.criteria.some(
+                (c) =>
+                  c.observationTargets?.some((t) => t.network) ||
+                  (c.observationContract?.version === 3 &&
+                    c.observationContract.targets.some((t) =>
+                      t.assertions.some((a) => a.property),
+                    )),
+              )
+            ) {
+              skipped.add(candidate.id);
+              return undefined;
+            }
+
+            if (
+              resumeSnapshot.executionPolicy.accountCoordinationPending === true
+            ) {
+              const execution = await tx.browserExecution.findUnique({
+                where: { attemptId: candidate.attemptId },
+                include: { run: true },
+              });
+              if (!execution?.runtimeSessionId) return null;
+              const targetUrl =
+                typeof resumeSnapshot.environment.targetUrl === "string"
+                  ? resumeSnapshot.environment.targetUrl
+                  : undefined;
+              const blocked = await coordinateResumedAccounts(tx, {
+                sessionId: execution.runtimeSessionId,
+                targetUrl,
+                executionPolicy: resumeSnapshot.executionPolicy,
+                concurrencyPolicy: execution.run.concurrencyPolicy,
+              });
+              if (blocked) {
+                // Waiting for a data lock is controlled idleness, not a lost agent.
+                await tx.browserRuntimeSession.updateMany({
+                  where: {
+                    id: execution.runtimeSessionId,
+                    status: "ACTIVE",
+                    quarantinedAt: null,
+                  },
+                  data: {
+                    executionPermitExpiresAt: new Date(
+                      Math.min(
+                        Date.parse(resumeSnapshot.deadlineAt),
+                        now.getTime() + 120000,
+                      ),
+                    ),
+                  },
+                });
+                await tx.taskCaseExecution.updateMany({
+                  where: { runId: candidate.runId },
+                  data: {
+                    scheduling: {
+                      state: "WAITING",
+                      reason: "DATA_LOCK",
+                      waitingSince: now.toISOString(),
+                      evaluatedAt: now.toISOString(),
+                      blockedBy: {
+                        resourceType: "ACCOUNT",
+                        sessionId: blocked.sessionId,
+                      },
+                      queue: null,
+                      nextRetryAt: new Date(now.getTime() + 2000).toISOString(),
+                    },
+                  },
+                });
+                skipped.add(candidate.id);
+                return undefined;
+              }
+            }
             const leaseToken = randomUUID();
             const leaseExpiresAt = leaseExpiry(now);
             const acquired = await tx.agentRuntimeTask.updateMany({
@@ -999,6 +1118,28 @@ export class AgentRuntimeTaskService {
       if (claimed === null) return { task: null };
 
       const snapshot = runtimeTaskSnapshotSchema.parse(claimed.snapshot);
+      if (input.features?.includes(EVIDENCE_CATALOG_CAPABILITY)) {
+        snapshot.executionPolicy.evidenceCatalog = true;
+        const checkpoint = snapshot.executionPolicy.verificationCheckpoint;
+        if (
+          checkpoint &&
+          typeof checkpoint === "object" &&
+          !Array.isArray(checkpoint)
+        ) {
+          const persisted = await this.prisma.runEvidence.findMany({
+            where: { runId: claimed.runId, attemptId: claimed.attemptId },
+          });
+          (checkpoint as Record<string, unknown>).evidence = persisted.map(
+            (e) => ({
+              externalId: e.externalId,
+              kind: e.kind,
+              label: e.label,
+              metadata: e.metadata,
+            }),
+          );
+        }
+      }
+
       return {
         task: {
           fencingToken: claimed.fencingToken.toString(),
@@ -1215,6 +1356,25 @@ export class AgentRuntimeTaskService {
       const now = await databaseNow(tx);
       this.requireLease(task, input, now);
       await this.lockCurrentLease(tx, taskId, input, now);
+      const contextArchive =
+        input.event.kind === "agent.model.started" &&
+        input.event.payload.contextSnapshot
+          ? decodeStepContext(input.event.payload.contextSnapshot)
+          : null;
+      if (
+        contextArchive &&
+        (!z.string().uuid().safeParse(input.event.payload.modelCallId)
+          .success ||
+          !runtimeTraceEventSchema.safeParse({
+            kind: input.event.kind,
+            payload: input.event.payload,
+          }).success)
+      )
+        throw new BadRequestException(
+          "Step context requires a valid model call identity.",
+        );
+      const { contextSnapshot: _archive, ...eventPayload } =
+        input.event.payload;
       try {
         const event = await tx.runEvent.create({
           data: {
@@ -1223,12 +1383,41 @@ export class AgentRuntimeTaskService {
             id: input.event.eventId,
             kind: input.event.kind,
             occurredAt: new Date(input.event.occurredAt),
-            payload: json(input.event.payload),
+            payload: json({
+              ...eventPayload,
+              ...(contextArchive
+                ? {
+                    contextArchive: {
+                      version: 1,
+                      sha256: contextArchive.archive.sha256,
+                      byteLength: contextArchive.archive.byteLength,
+                    },
+                  }
+                : {}),
+            }),
             runId: task.runId,
             taskId,
             teamId,
           },
         });
+        if (contextArchive) {
+          await tx.runStepContext.create({
+            data: {
+              id: String(input.event.payload.modelCallId),
+              teamId,
+              runId: task.runId,
+              attemptId: task.attemptId,
+              taskId,
+              segmentId: String(input.event.payload.segmentId),
+              step: Number(input.event.payload.step),
+              model: String(input.event.payload.model),
+              sequence: event.sequence,
+              requestGzip: contextArchive.compressed,
+              requestSha256: contextArchive.archive.sha256,
+              requestBytes: contextArchive.archive.byteLength,
+            },
+          });
+        }
         // Legacy execution.account.claim events remain audit-only.
         if (input.event.kind === "executor.accounts.request_rejected")
           this.metrics?.increment(
@@ -1287,6 +1476,35 @@ export class AgentRuntimeTaskService {
                 }),
               },
             });
+          }
+        }
+        if (input.event.kind === "execution.checkpoint") {
+          const snapshot = runtimeTaskSnapshotSchema.parse(task.snapshot);
+          if (snapshot.criteria.some((c) => c.observationContract)) {
+            if (!this.observationBindings)
+              throw new ConflictException("CONTRACT_UNSUPPORTED");
+            const progress = input.event.payload.verificationCheckpoint as
+              | {
+                  criteria?: unknown[];
+                  bindingIds?: string[];
+                  comparisonReviewIds?: string[];
+                }
+              | undefined;
+            if (progress)
+              await this.observationBindings.validateReferences(
+                task,
+                progress.bindingIds ?? [],
+                progress.comparisonReviewIds ?? [],
+                tx,
+              );
+            if (progress?.criteria)
+              await this.observationBindings.validate(
+                task,
+                progress.criteria.map((c) =>
+                  runtimeCriterionResultSchema.parse(c),
+                ),
+                tx,
+              );
           }
         }
         const checkpointResult =
@@ -1443,6 +1661,8 @@ export class AgentRuntimeTaskService {
                         verification: {
                           criteria: completedVerification.criteria,
                           verdict: completedVerification.verdict,
+                          evidenceCatalog:
+                            completedVerification.evidenceCatalog,
                         },
                       }
                     : {}),
@@ -1481,12 +1701,29 @@ export class AgentRuntimeTaskService {
             },
             where: { attemptId: task.attemptId },
           });
+          if (snapshot.criteria.some((c) => c.observationContract)) {
+            if (!this.observationBindings)
+              throw new ConflictException("CONTRACT_UNSUPPORTED");
+            await this.observationBindings.validate(
+              task,
+              completedVerification.criteria,
+              tx,
+            );
+          }
           const validationError = completedOutcomeEvidenceError(
             snapshot,
             completedVerification,
             persisted,
           );
           if (validationError) throw new ConflictException(validationError);
+          if (completedVerification.evidenceCatalog) {
+            const refs = persisted.map((e) => e.externalId).sort();
+            completedVerification.evidenceCatalog.sealedAt = now.toISOString();
+            completedVerification.evidenceCatalog.count = refs.length;
+            completedVerification.evidenceCatalog.digest = createHash("sha256")
+              .update(JSON.stringify(refs))
+              .digest("hex");
+          }
         }
 
         if (
@@ -1587,6 +1824,22 @@ export class AgentRuntimeTaskService {
             }
           }
         }
+        if (
+          outcome.kind === "WAITING_HUMAN" &&
+          outcome.intervention.kind === "DATA_PRECONDITION"
+        ) {
+          const currentPolicy = runtimeTaskSnapshotSchema.parse(
+            task.snapshot,
+          ).executionPolicy;
+          outcome.intervention.context.accountSlots = testAccountBindingsSchema
+            .parse(currentPolicy.testAccounts ?? [])
+            .map(({ slotId, label, usage, requiredTypes }) => ({
+              slotId,
+              label,
+              usage,
+              requiredTypes,
+            }));
+        }
         const policy = retryPolicySchema.parse(task.run.executionPolicy);
         const projection = projectRuntimeOutcome({
           attemptNumber: task.attempt.number,
@@ -1601,6 +1854,10 @@ export class AgentRuntimeTaskService {
             retryPolicy: policy.retryPolicy,
           }),
         });
+        if (completedVerification?.cleanup) {
+          projection.executionDisposition = "BLOCKED";
+          projection.verdict = null;
+        }
         const completedAt = new Date(input.completedAt);
         const isWaiting = outcome.kind === "WAITING_HUMAN";
         let pausedDeadlineAt: Date | null = null;
@@ -1641,17 +1898,11 @@ export class AgentRuntimeTaskService {
         });
 
         if (completedVerification) {
-          await tx.runCriterionResult.createMany({
-            data: completedVerification.criteria.map((criterion) => ({
-              attemptId: task.attemptId,
-              criterionId: criterion.criterionId,
-              evidenceRefs: criterion.evidenceRefs,
-              runId: task.runId,
-              status: criterion.status,
-              summary: criterion.summary,
-              teamId,
-            })),
-          });
+          await persistCriterionResults(
+            tx,
+            runtimeTaskSnapshotSchema.parse(task.snapshot),
+            completedVerification.criteria,
+          );
           if (completedVerification.evidence.length > 0) {
             await tx.runEvidence.createMany({
               data: completedVerification.evidence.map((evidence) => ({
@@ -2213,6 +2464,12 @@ export function completedOutcomeEvidenceError(
     metadata: unknown;
   }>,
 ) {
+  if (
+    outcome.evidenceCatalog &&
+    (outcome.evidenceCatalog.runId !== snapshot.runId ||
+      outcome.evidenceCatalog.attemptId !== snapshot.attemptId)
+  )
+    return "Evidence catalog must belong to this attempt.";
   const criteria = new Map(
     snapshot.criteria.map((item) => [item.id, browserExecutionCriterion(item)]),
   );

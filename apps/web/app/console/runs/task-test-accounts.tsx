@@ -156,6 +156,19 @@ export function TaskTestAccountsCard({
                     />
                   </Field>
                 )}
+                {s.constraints.length > 0 && (
+                  <div className="my-2 text-sm">
+                    <b>执行前需满足</b>
+                    <ul className="list-disc pl-5">
+                      {s.constraints.map((constraint, i) => (
+                        <li key={i}>{constraint}</li>
+                      ))}
+                    </ul>
+                    <p className="text-muted-foreground">
+                      Agent 将在写入前核查；已分配账号不表示这些条件已经满足。
+                    </p>
+                  </div>
+                )}
                 <details className={styles.details} open={!s.account}>
                   <summary>
                     <ChevronRight size={14} aria-hidden="true" />
@@ -185,18 +198,6 @@ export function TaskTestAccountsCard({
                           {s.requiredTypes.map((type, i) => (
                             <code key={`${type}/${i}`}>{type}</code>
                           ))}
-                        </dd>
-                      </div>
-                    )}
-                    {s.constraints.length > 0 && (
-                      <div>
-                        <dt>前置条件</dt>
-                        <dd>
-                          <ul>
-                            {s.constraints.map((constraint, i) => (
-                              <li key={i}>{constraint}</li>
-                            ))}
-                          </ul>
                         </dd>
                       </div>
                     )}

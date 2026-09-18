@@ -49,6 +49,12 @@ async function bootstrap() {
     trustProxy: true,
   });
   const rawFastify = adapter.getInstance();
+  // Full context archives include the exact model images; only the leased event
+  // ingestion route accepts these larger payloads. Other routes retain 1 MiB.
+  rawFastify.addHook("onRoute", (route) => {
+    if (route.url === "/internal/v2/runtime/tasks/:id/events")
+      route.bodyLimit = 26 * 1024 * 1024;
+  });
   await rawFastify.register(
     websocket as unknown as Parameters<typeof rawFastify.register>[0],
     { options: { maxPayload: RUNTIME_MAX_FRAME_BYTES } },

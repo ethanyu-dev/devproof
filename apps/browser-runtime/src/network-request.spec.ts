@@ -57,3 +57,27 @@ describe("bounded overview video", () => {
     expect(stepVideoPlan([1, 2, 3]).frames).toEqual([1, 2, 3]);
   });
 });
+
+describe("business API capture boundaries", () => {
+  it("captures explicit cross-origin APIs, but not arbitrary destinations or auth endpoints", async () => {
+    const { networkBodyOmission } = await import("./network-request.js");
+    const allowed = new Set(["*.example.test"]);
+    const check = (url: string, type = "fetch") =>
+      networkBodyOmission(url, "https://console.example.test", type, allowed);
+    expect(check("https://api.example.test/whitelist")).toBeUndefined();
+    expect(check("https://console.example.test/config")).toBeUndefined();
+    expect(check("https://other.test/whitelist")).toBe(
+      "origin_not_allowlisted",
+    );
+    expect(check("https://api.example.test/oauth/token")).toBe(
+      "authentication",
+    );
+    expect(check("https://console.example.test/session")).toBe(
+      "authentication",
+    );
+    expect(check("https://api.example.test/config", "document")).toBe(
+      "not_fetch_xhr",
+    );
+    expect(check("https://example.test/config")).toBe("origin_not_allowlisted");
+  });
+});

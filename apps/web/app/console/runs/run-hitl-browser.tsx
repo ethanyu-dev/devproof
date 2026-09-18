@@ -83,7 +83,13 @@ interface RunBrowserHitlProps {
 
 interface SharedBrowserHitlProps {
   base: string;
-  checkpoint: { expiresAt: string; id: string; prompt: string };
+  checkpoint: {
+    expiresAt: string;
+    id: string;
+    prompt: string;
+    kind?: string;
+    context?: RunBrowserHitlProps["intervention"]["context"];
+  };
   floating?: boolean;
   onComplete: () => Promise<void>;
 }
@@ -356,7 +362,11 @@ function TestAccountInput({
             <Button
               disabled={
                 busy ||
-                !(mode === "account" ? account.trim() : instructions.trim())
+                !(mode === "account"
+                  ? slots.length
+                    ? slots.every((slot) => accounts[slot.slotId]?.trim())
+                    : account.trim()
+                  : instructions.trim())
               }
               type="submit"
             >
@@ -382,7 +392,16 @@ function BrowserHitl({
     "idle" | "connecting" | "live" | "interrupted"
   >("idle");
   const [streamAttempt, setStreamAttempt] = useState(0);
-  const [note, setNote] = useState("已在浏览器中完成所需操作。");
+  const dataPrecondition = checkpoint.kind === "DATA_PRECONDITION";
+  const accountSlots = checkpoint.context?.accountSlots ?? [];
+  const [replaceAccount, setReplaceAccount] = useState(false);
+  const [replacementAccount, setReplacementAccount] = useState("");
+  const [replacementSlot, setReplacementSlot] = useState(
+    accountSlots.length === 1 ? accountSlots[0]!.slotId : "",
+  );
+  const [note, setNote] = useState(
+    dataPrecondition ? "" : "已在浏览器中完成所需操作。",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -562,7 +581,19 @@ function BrowserHitl({
     setError(null);
     try {
       await consoleApi(`${base}/complete`, {
-        body: JSON.stringify({ controlId, note, resolution }),
+        body: JSON.stringify({
+          controlId,
+          note,
+          resolution,
+          ...(dataPrecondition && replaceAccount && resolution === "continue"
+            ? {
+                accountReplacement: {
+                  account: replacementAccount.trim(),
+                  ...(replacementSlot ? { slotId: replacementSlot } : {}),
+                },
+              }
+            : {}),
+        }),
         method: "POST",
       });
       setControlId(null);
@@ -749,11 +780,56 @@ function BrowserHitl({
           <div className="dp-browser-handoff-controls">
             <div className="dp-browser-handoff-guide">
               <Keyboard />
-              点击画面定位输入焦点，可使用键盘、粘贴和滚轮完成登录、MFA
-              或验证码。
+              {dataPrecondition
+                ? "可以在浏览器中处理冲突，也可以填写处置意见，让 Agent 按授权处理后继续测试。"
+                : "点击画面定位输入焦点，可使用键盘、粘贴和滚轮完成登录、MFA 或验证码。"}
             </div>
-            <Field label="交还说明">
+            {dataPrecondition ? (
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={replaceAccount}
+                    onChange={(e) => setReplaceAccount(e.target.checked)}
+                  />
+                  更换测试账号后继续
+                </label>
+                {replaceAccount ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {accountSlots.length > 1 ? (
+                      <Field label="账号角色">
+                        <select
+                          className="h-10 w-full rounded border px-3"
+                          value={replacementSlot}
+                          onChange={(e) => setReplacementSlot(e.target.value)}
+                        >
+                          <option value="">请选择需要更换的角色</option>
+                          {accountSlots.map((slot) => (
+                            <option key={slot.slotId} value={slot.slotId}>
+                              {slot.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    ) : null}
+                    <Field label="新账号">
+                      <Input
+                        value={replacementAccount}
+                        onChange={(e) => setReplacementAccount(e.target.value)}
+                        placeholder="UUID、邮箱、手机号或用户 ID"
+                      />
+                    </Field>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <Field label={dataPrecondition ? "处置意见" : "交还说明"}>
               <Input
+                placeholder={
+                  dataPrecondition
+                    ? "例如：可以先删除上述记录开展后续测试"
+                    : undefined
+                }
                 onChange={(event) => setNote(event.target.value)}
                 value={note}
               />
@@ -767,11 +843,19 @@ function BrowserHitl({
                 无法完成，返回 Agent
               </Button>
               <Button
-                disabled={busy || streamStatus !== "live"}
+                disabled={
+                  busy ||
+                  streamStatus !== "live" ||
+                  (replaceAccount &&
+                    (!replacementAccount.trim() ||
+                      (accountSlots.length > 1 && !replacementSlot)))
+                }
                 onClick={() => void complete("continue")}
               >
                 {busy ? <LoaderCircle /> : <ShieldCheck />}
-                我已完成，交还 Agent
+                {dataPrecondition
+                  ? "提交意见，交还 Agent"
+                  : "我已完成，交还 Agent"}
               </Button>
             </div>
           </div>

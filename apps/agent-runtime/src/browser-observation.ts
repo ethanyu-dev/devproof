@@ -1,4 +1,10 @@
 import {
+  focusedObservation,
+  type ObservationView,
+} from "./observation-view.js";
+import { structuredObservationSchema } from "@devproof/runtime-protocol";
+import type { BoundEvidence } from "./bound-evidence.js";
+import {
   observedValueMatches,
   savedCriterionObservationSchema,
   type SavedCriterionObservation,
@@ -17,6 +23,9 @@ import { observationContentKey } from "./observation-content.js";
 type Command = z.infer<typeof runtimeActionCommandInputSchema>;
 interface Observation {
   id: string;
+  captureId?: string;
+  fullObservationId?: string;
+  derivedView?: ObservationView;
   order: number;
   commandType: string;
   capturedAt: string;
@@ -200,6 +209,7 @@ export class BrowserObservations {
     return changed;
   }
 
+  private deliveredView: ObservationView | undefined;
   private readonly entries = new Map<string, Observation>();
   private readonly capturedResults = new WeakMap<object, Observation>();
   private currentSnapshot: string | null = null;
@@ -274,6 +284,12 @@ export class BrowserObservations {
   constructor(
     private readonly cacheBytes = 4 * 1_024 * 1_024,
     private readonly deferRefDelivery = false,
+    readonly bound?: BoundEvidence,
+    readonly viewFeatures: {
+      focus: boolean;
+      delta: boolean;
+      combined: boolean;
+    } = { focus: false, delta: false, combined: false },
   ) {}
 
   invalidate() {
@@ -288,7 +304,12 @@ export class BrowserObservations {
 
   staleRef(command: Command): boolean {
     const payload = command.payload as Record<string, unknown>;
-    return [payload.target, payload.source, payload.frame].some((target) => {
+    return [
+      payload.target,
+      payload.source,
+      payload.frame,
+      ...(Array.isArray(payload.fields) ? payload.fields : []),
+    ].some((target) => {
       const ref = record(target).ref;
       return (
         typeof ref === "string" &&
@@ -302,7 +323,12 @@ export class BrowserObservations {
       ? this.entries.get(this.currentSnapshot)?.content
       : undefined;
     const payload = command.payload as Record<string, unknown>;
-    return [payload.target, payload.source, payload.frame].some((target) => {
+    return [
+      payload.target,
+      payload.source,
+      payload.frame,
+      ...(Array.isArray(payload.fields) ? payload.fields : []),
+    ].some((target) => {
       const ref = record(target).ref;
       return (
         typeof ref === "string" &&
@@ -316,7 +342,12 @@ export class BrowserObservations {
     if (!this.unreadRef(command) || !this.currentSnapshot) return;
     const entry = this.entries.get(this.currentSnapshot)!;
     const payload = command.payload as Record<string, unknown>;
-    const refs = [payload.target, payload.source, payload.frame]
+    const refs = [
+      payload.target,
+      payload.source,
+      payload.frame,
+      ...(Array.isArray(payload.fields) ? payload.fields : []),
+    ]
       .map((target) => record(target).ref)
       .filter(
         (ref): ref is string =>
@@ -424,7 +455,13 @@ export class BrowserObservations {
   /** Commit only after the final request fits its budget, never a discarded preview. */
   deliverCurrentPage(view: ReturnType<BrowserObservations["currentPage"]>) {
     this.exposedRefs.clear();
-    if (view.snapshot) this.deliverPage(view.snapshot, true);
+    if (view.snapshot) {
+      this.deliverPage(view.snapshot, true);
+      this.deliveredView = this.entries.get(
+        String(view.snapshot.observationId),
+      )?.derivedView;
+    }
+    if (view.latestObservation) this.deliverPage(view.latestObservation, true);
   }
 
   /** An automatic page refresh must not erase the data the agent just requested. */
@@ -449,6 +486,7 @@ export class BrowserObservations {
     const scrollKey = this.scrollKey(command);
     this.latestRead = undefined;
     const response = record(raw);
+    this.bound?.ingest(response.boundEvidence);
     const scroll = record(record(response.result).scrollFeedback);
     if (
       !READ_COMMANDS.has(command.commandType) &&
@@ -467,9 +505,11 @@ export class BrowserObservations {
       } else if (scroll.status === "MOVED")
         this.scrollFailures.delete(scrollKey);
     }
-    const stage = READ_COMMANDS.has(command.commandType)
-      ? "OBSERVATION"
-      : "AFTER_ACTION";
+    const stage =
+      READ_COMMANDS.has(command.commandType) ||
+      record(response.result).observationCombined === true
+        ? "OBSERVATION"
+        : "AFTER_ACTION";
     this.responseStages.set(response, stage);
     for (const artifact of Array.isArray(response.artifacts)
       ? response.artifacts
@@ -494,9 +534,9 @@ export class BrowserObservations {
         "browser.action_feedback",
         2_048,
       );
-    const snapshot = ["page.snapshot", "frame.snapshot"].includes(
-      command.commandType,
-    );
+    const snapshot =
+      ["page.snapshot", "frame.snapshot"].includes(command.commandType) ||
+      result.observationCombined === true;
     if (
       typeof result.url === "string" &&
       this.currentSnapshot &&
@@ -524,7 +564,7 @@ export class BrowserObservations {
     )
       this.visual = visual.data;
     if (!response.result || typeof response.result !== "object") return;
-    const entry = this.save(
+    let entry = this.save(
       typeof result.content === "string"
         ? result.content
         : JSON.stringify(result),
@@ -551,6 +591,38 @@ export class BrowserObservations {
         ? [`artifact://${item.id}`]
         : [];
     });
+    const structured = structuredObservationSchema.safeParse(
+      result.structuredObservation,
+    );
+    if (snapshot && structured.success)
+      entry.captureId = structured.data.captureId;
+    if (
+      snapshot &&
+      structured.success &&
+      this.bound?.enabled &&
+      this.viewFeatures.focus
+    ) {
+      const view = focusedObservation(
+        structured.data,
+        this.viewFeatures.delta ? this.deliveredView : undefined,
+      );
+      if (view) {
+        const full = entry;
+        entry = this.save(
+          view.content,
+          command.commandType,
+          "text",
+          true,
+          result,
+        );
+        entry.captureId = structured.data.captureId;
+        entry.fullObservationId = full.id;
+        entry.derivedView = view;
+        entry.evidenceRefs = full.evidenceRefs;
+        entry.networkEvidenceRefs = full.networkEvidenceRefs;
+        this.capturedResults.set(response.result as object, entry);
+      }
+    }
     if (snapshot && typeof result.content === "string") {
       if (response.status === "SUCCEEDED" || response.ok === true) {
         this.currentSnapshot = entry.id;
@@ -689,7 +761,7 @@ export class BrowserObservations {
     ]);
   }
 
-  /** Select one complete, delivered network request, preserving its URL/method
+  /** Select one delivered network entry, preserving body-omission flags and URL/method
    * and artifact. A DOM string that happens to look like JSON is not a request.
    */
   networkCitation(id: string, cursor: number, requestIndex: number) {
@@ -706,15 +778,7 @@ export class BrowserObservations {
       const requests: unknown = JSON.parse(entry.content);
       if (!Array.isArray(requests)) return;
       const request = record(requests[requestIndex]);
-      if (
-        typeof request.url !== "string" ||
-        typeof request.method !== "string" ||
-        request.bodyPending === true ||
-        request.requestBodyTruncated === true ||
-        request.requestBodyOmitted !== undefined ||
-        request.responseBodyTruncated === true ||
-        request.responseBodyOmitted !== undefined
-      )
+      if (typeof request.url !== "string" || typeof request.method !== "string")
         return;
       const quote = JSON.stringify(request);
       if (quote.length > 4000 || !this.hasDeliveredQuote(id, cursor, quote))
@@ -782,6 +846,13 @@ export class BrowserObservations {
       const recovery = record(source.locatorRecovery);
       return {
         ...source,
+        result: source.result
+          ? Object.fromEntries(
+              Object.entries(record(source.result)).filter(
+                ([key]) => key !== "structuredObservation",
+              ),
+            )
+          : source.result,
         ...(observationNotice ? { observationStage, observationNotice } : {}),
         ...(source.visualObservation ? { visualObservation: metadata } : {}),
         ...(source.locatorRecovery
@@ -811,6 +882,7 @@ export class BrowserObservations {
       "nextAction",
       "retryable",
       "visualObservationError",
+      "boundEvidence",
     ]) {
       if (key in source) projected[key] = source[key];
     }
@@ -819,6 +891,20 @@ export class BrowserObservations {
       const { dataBase64: _bytes, ...metadata } = visual.data;
       projected.visualObservation = metadata;
     }
+    if (source.boundEvidence && this.bound)
+      projected.boundEvidence = {
+        observationId: record(source.boundEvidence).observationId,
+        observationError: record(source.boundEvidence).observationError,
+        diagnostics: (
+          record(source.boundEvidence).coverage as unknown[] | undefined
+        )?.slice(0, 20),
+        bindingIds: (
+          record(source.boundEvidence).bindings as
+            Array<{ id: string }> | undefined
+        )?.map((b) => b.id),
+        nextAction:
+          "Use the object coverage in working state. Read omitted bindings with read_observation_bindings. For ambiguous candidates, use bind_observation with this canonical observationId or the matching snapshot observationId. Select the actual form control ref, not a display label or wrapper.",
+      };
     const result = source.result;
     if (result && typeof result === "object") {
       const entry = this.capturedResults.get(result);
@@ -1049,6 +1135,7 @@ export class BrowserObservations {
   private descriptor(entry: Observation) {
     return {
       observationId: entry.id,
+      captureId: entry.captureId,
       order: entry.order,
       commandType: entry.commandType,
       contentKey: entry.contentKey,
@@ -1075,6 +1162,18 @@ export class BrowserObservations {
       captureTruncated: entry.captureTruncated,
       sourceTruncated: entry.sourceTruncated,
     };
+  }
+
+  /** Resolve only an exact cached observation, never a newer capture. */
+  bindingObservationId(id: string) {
+    return this.entries.get(id)?.captureId ?? id;
+  }
+
+  bindingStateKey(id: string) {
+    const entry =
+      this.entries.get(id) ??
+      [...this.entries.values()].find((e) => e.captureId === id);
+    return entry?.contentKey ?? id;
   }
 
   private page(
@@ -1137,6 +1236,16 @@ export class BrowserObservations {
   private completePage(entry: Observation): Record<string, unknown> {
     return {
       ...this.descriptor(entry),
+      ...(entry.fullObservationId
+        ? {
+            fullObservationId: entry.fullObservationId,
+            fullViewAction: this.entries.has(entry.fullObservationId)
+              ? this.readAction(this.entries.get(entry.fullObservationId)!, 0)
+              : { commandType: "page.snapshot", payload: {} },
+            viewMode: entry.derivedView?.mode,
+            baselineCaptureId: entry.derivedView?.baselineCaptureId,
+          }
+        : {}),
       content: entry.content,
       cursor: 0,
       nextCursor: null,
@@ -1223,7 +1332,16 @@ export class BrowserObservations {
     delete page.nextAction;
     const unread = this.nextUnreadCursor(entry);
     if (unread !== null) page.nextAction = this.readAction(entry, unread);
-    if (exposeRefs && entry.id === this.currentSnapshot && !page.omittedLine)
+    if (
+      exposeRefs &&
+      (entry.id === this.currentSnapshot ||
+        Boolean(
+          entry.captureId &&
+          entry.captureId ===
+            this.entries.get(this.currentSnapshot ?? "")?.captureId,
+        )) &&
+      !page.omittedLine
+    )
       for (const match of page.content.matchAll(/\[ref=((?:f\d+)?e\d+)\]/gu))
         this.exposedRefs.add(match[1]!);
   }

@@ -333,17 +333,25 @@ export class RuntimeGatewayService {
     );
     const connectionId = randomUUID();
     const capabilities = (hello.capabilities ?? []).filter((value) =>
-      value === "scroll-feedback-v1"
-        ? selectedMinor >= 17
-        : ["dom-vision-v1", "action-feedback-v1"].includes(value)
-          ? selectedMinor >= 16
-          : value === "no-launch-evidence-v1"
-            ? selectedMinor >= 15 &&
-              hello.capabilities?.includes("closure-evidence-v1")
-            : value === "closure-evidence-v1"
-              ? selectedMinor >= 14
-              : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
-                selectedMinor >= 13,
+      [
+        "structured-observation-v1",
+        "scope-phase-v1",
+        "action-observation-v1",
+        "form-sequence-v1",
+        "observation-delta-v1",
+      ].includes(value)
+        ? selectedMinor >= 18
+        : value === "scroll-feedback-v1"
+          ? selectedMinor >= 17
+          : ["dom-vision-v1", "action-feedback-v1"].includes(value)
+            ? selectedMinor >= 16
+            : value === "no-launch-evidence-v1"
+              ? selectedMinor >= 15 &&
+                hello.capabilities?.includes("closure-evidence-v1")
+              : value === "closure-evidence-v1"
+                ? selectedMinor >= 14
+                : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
+                  selectedMinor >= 13,
     );
     const connected = await this.prisma.$transaction(async (tx) => {
       if (runtime.drainState === "RESUMING")
@@ -460,6 +468,11 @@ export class RuntimeGatewayService {
                 (capability): capability is string =>
                   typeof capability === "string" &&
                   ![
+                    "structured-observation-v1",
+                    "scope-phase-v1",
+                    "action-observation-v1",
+                    "form-sequence-v1",
+                    "observation-delta-v1",
                     "dom-vision-v1",
                     "action-feedback-v1",
                     "scroll-feedback-v1",

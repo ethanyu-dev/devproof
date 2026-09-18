@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import {
+  testAccountBindingsSchema,
+  readExecutionState,
+} from "@devproof/agent-runtime-protocol";
 import { executionConcurrencyPolicySchema } from "@devproof/contracts";
 import type { ExecutionConcurrencyPolicy } from "@devproof/contracts";
 import { ExecutionRunnerUnavailableError } from "./runtime-adapters.js";
@@ -7,9 +12,10 @@ export interface ResourceClaim {
   rootKey: string;
   resourceKey: string;
   mode: "READ" | "WRITE";
+  origin?: string;
 }
 
-/** Business-data serialization is opt-in; Runtime and identity capacity always apply. */
+/** Broad resource locks are opt-in. Explicitly assigned accounts always coordinate. */
 export function businessDataLocksEnabled(): boolean {
   return process.env.BROWSER_EXECUTION_DATA_LOCKS_ENABLED === "true";
 }
@@ -96,6 +102,62 @@ export function resourceClaims(
     resourceKey,
     mode: policy.accessMode === "READ_ONLY" ? "READ" : "WRITE",
   }));
+}
+
+/** Reusing an assigned account is allowed; conflicting use waits for verified closure.
+ * Hash identities before persisting lock keys. An unspecified type covers all types.
+ */
+export function executionResourceClaims(
+  targetUrl: string | undefined,
+  concurrency: unknown,
+  executionPolicy: unknown,
+): ResourceClaim[] {
+  const claims = businessDataLocksEnabled()
+    ? resourceClaims(targetUrl, concurrency)
+    : [];
+  const policy =
+    executionPolicy && typeof executionPolicy === "object"
+      ? (executionPolicy as Record<string, unknown>)
+      : {};
+  const parsed = testAccountBindingsSchema.safeParse(policy.testAccounts);
+  if (!parsed.success) return claims;
+  const hash = (s: string) =>
+    createHash("sha256").update(s.trim().toLowerCase()).digest("hex");
+  const rootKey = businessEnvironmentKey(targetUrl);
+  const state = readExecutionState(policy);
+  const bindings = parsed.data.length
+    ? parsed.data
+    : state.account
+      ? [
+          {
+            account: state.account,
+            aliases: state.accountAliases,
+            requiredTypes: [],
+            usage: "CREATE_OR_MODIFY",
+          },
+        ]
+      : [];
+  for (const binding of bindings) {
+    for (const account of new Set([binding.account, ...binding.aliases])) {
+      for (const type of binding.requiredTypes.length
+        ? binding.requiredTypes
+        : [""]) {
+        claims.push({
+          rootKey,
+          origin: "ACCOUNT_COORDINATION",
+          resourceKey: `accounts/${hash(account)}${type ? `/${hash(type)}` : ""}`,
+          mode: binding.usage === "READ_EXISTING" ? "READ" : "WRITE",
+        });
+      }
+    }
+  }
+  // Duplicate roles may name the same identity; WRITE subsumes READ for that key.
+  const unique = new Map<string, ResourceClaim>();
+  for (const claim of claims) {
+    const key = JSON.stringify([claim.rootKey, claim.resourceKey]);
+    if (unique.get(key)?.mode !== "WRITE") unique.set(key, claim);
+  }
+  return [...unique.values()];
 }
 
 /** Root, collection and record scopes overlap; readers alone are compatible. */

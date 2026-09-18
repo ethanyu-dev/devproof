@@ -1070,6 +1070,7 @@ describe("AgentRuntimeTaskService Runtime model configuration", () => {
         findFirst: vi.fn().mockResolvedValue({
           snapshot,
           id: task.id,
+          snapshot,
           startedAt: null,
         }),
         findUniqueOrThrow: vi.fn().mockResolvedValue(task),

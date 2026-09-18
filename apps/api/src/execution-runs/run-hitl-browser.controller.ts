@@ -1,3 +1,4 @@
+import { businessTestAccountSchema } from "@devproof/agent-runtime-protocol";
 import {
   Body,
   Controller,
@@ -24,6 +25,12 @@ const inputSchema = controlSchema.extend({
   events: browserHumanInputEventsSchema,
 });
 const completeSchema = controlSchema.extend({
+  accountReplacement: z
+    .object({
+      slotId: z.string().min(1).max(160).optional(),
+      account: businessTestAccountSchema,
+    })
+    .optional(),
   note: z.string().trim().max(4000).default(""),
   resolution: z.enum(["continue", "cancel"]),
 });

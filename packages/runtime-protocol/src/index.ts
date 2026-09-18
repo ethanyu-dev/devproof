@@ -1,3 +1,10 @@
+export * from "./structured-observation.js";
+import {
+  actionObservationSchema,
+  STRUCTURED_OBSERVATION_CAPABILITY,
+  SCOPE_PHASE_CAPABILITY,
+  ACTION_OBSERVATION_CAPABILITY,
+} from "./structured-observation.js";
 import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
@@ -16,6 +23,11 @@ export const RUNTIME_TELEMETRY_MINOR = 18;
 export const RUNTIME_TELEMETRY_STALE_MS = 45_000;
 export const RUNTIME_CAPABILITIES = [
   "browser",
+  "form-sequence-v1",
+  "observation-delta-v1",
+  STRUCTURED_OBSERVATION_CAPABILITY,
+  SCOPE_PHASE_CAPABILITY,
+  ACTION_OBSERVATION_CAPABILITY,
   "dom-vision-v1",
   "action-feedback-v1",
   RUNTIME_SCROLL_FEEDBACK_CAPABILITY,
@@ -526,6 +538,7 @@ export const runtimeCommandTypeSchema = z.enum([
   "page.network",
   "page.click",
   "page.fill",
+  "page.fill_fields",
   "page.type",
   "page.press",
   "page.check",
@@ -556,6 +569,7 @@ export const runtimeCommandTypeSchema = z.enum([
 export function runtimeCommandMinimumMinor(
   commandType: z.infer<typeof runtimeCommandTypeSchema>,
 ): number {
+  if (commandType === "page.fill_fields") return 18;
   if (["page.snapshot", "page.dom", "page.network"].includes(commandType)) {
     return 7;
   }
@@ -750,6 +764,26 @@ const sessionCommandPayloadVariants = [
 ] as const;
 
 const runtimeActionCommandPayloadVariants = [
+  z
+    .object({
+      commandType: z.literal("page.fill_fields"),
+      payload: z
+        .object({
+          fields: z
+            .array(
+              z
+                .object({ ref: elementRefSchema, text: z.string().max(4096) })
+                .strict(),
+            )
+            .min(1)
+            .max(6),
+        })
+        .strict(),
+    })
+    .describe(
+      "Fill at most six already-observed native text fields in one form. No custom selects, passwords, clicks or submission. Partial results identify completed fields; never replay them.",
+    ),
+
   ...(["page.open", "page.navigate"] as const).map((commandType) =>
     z.object({
       commandType: z.literal(commandType),
@@ -1159,12 +1193,14 @@ const commandInputVariants = commandPayloadVariants.map((variant) =>
   variant
     .extend({
       timeoutSeconds: z.coerce.number().int().min(1).max(300).optional(),
+      after: actionObservationSchema.optional(),
     })
     .strict(),
 ) as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]];
 
 type RuntimeCommandInputValue = z.infer<typeof runtimeCommandPayloadSchema> & {
   timeoutSeconds?: number;
+  after?: z.infer<typeof actionObservationSchema>;
 };
 
 export const runtimeCommandInputSchema = z.union(
@@ -1176,6 +1212,7 @@ const runtimeActionCommandInputVariants =
     const extended = variant
       .extend({
         timeoutSeconds: z.coerce.number().int().min(1).max(300).optional(),
+        after: actionObservationSchema.optional(),
       })
       .strict();
     return variant.description
@@ -1228,6 +1265,7 @@ export const runtimeCommandSchema = z
     deadlineAt: z.string().datetime(),
     fencingToken: z.string().regex(/^\d+$/u),
     leaseToken: z.string().uuid(),
+    after: actionObservationSchema.optional(),
     payload: z.record(z.string(), z.unknown()).default({}),
     sessionId: z.string().uuid(),
     type: z.literal("command.execute"),

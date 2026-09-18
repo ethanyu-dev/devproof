@@ -1,6 +1,14 @@
 "use client";
 
-import { Activity, Cable, LogOut, Menu, UserRoundCheck, X } from "lucide-react";
+import {
+  Activity,
+  ListTree,
+  Cable,
+  LogOut,
+  Menu,
+  UserRoundCheck,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -31,6 +39,12 @@ const adminSections = [
     icon: UserRoundCheck,
     label: "浏览器身份",
     group: "工作区",
+  },
+  {
+    href: "/console/execution-contexts",
+    icon: ListTree,
+    label: "执行上下文",
+    group: "日志排查",
   },
   {
     href: "/console/access",
@@ -138,7 +152,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
   }
 
   const name = session.user.name ?? session.user.email ?? "公司成员";
-  const groupedSections = ["工作区", "管理"] as const;
+  const groupedSections = ["工作区", "日志排查", "管理"] as const;
 
   return (
     <div
@@ -254,14 +268,25 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               type="button"
             />
             <nav className="absolute bottom-0 left-0 top-14 grid w-[min(84vw,280px)] auto-rows-max gap-1 overflow-y-auto border-r bg-sidebar p-3 shadow-xl">
-              {adminSections.map((section) => (
-                <ConsoleNavLink
-                  active={sectionIsActive(section.href, pathname)}
-                  href={section.href}
-                  icon={section.icon}
-                  key={section.href}
-                  label={section.label}
-                />
+              {groupedSections.map((group) => (
+                <div className="mb-4" key={group}>
+                  <p className="mb-2 px-3 text-xs font-medium text-muted-foreground">
+                    {group}
+                  </p>
+                  <div className="grid gap-1">
+                    {adminSections
+                      .filter((section) => section.group === group)
+                      .map((section) => (
+                        <ConsoleNavLink
+                          active={sectionIsActive(section.href, pathname)}
+                          href={section.href}
+                          icon={section.icon}
+                          key={section.href}
+                          label={section.label}
+                        />
+                      ))}
+                  </div>
+                </div>
               ))}
             </nav>
           </div>

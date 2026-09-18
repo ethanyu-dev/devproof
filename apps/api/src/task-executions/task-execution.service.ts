@@ -10,6 +10,7 @@ import {
   provideTaskTestAccounts,
   readAccountPlan,
   taskAccountPreparation,
+  unassignedTestAccountPlan,
 } from "./task-test-accounts.js";
 import type { TaskTestAccountsInput } from "@devproof/contracts";
 import {
@@ -1118,7 +1119,7 @@ export class TaskExecutionService {
     id: string,
     caseId: string,
     deploymentId?: string,
-    input?: { idempotencyKey: string },
+    input?: { idempotencyKey: string; reuseTestAccounts?: boolean | undefined },
   ) {
     const now = new Date();
     try {
@@ -1145,6 +1146,13 @@ export class TaskExecutionService {
             )
               throw new ConflictException(
                 "该重跑请求标识已用于其他用例或环境，请刷新后重试。",
+              );
+            if (
+              (previous.reuseTestAccounts ?? true) !==
+              (input.reuseTestAccounts ?? true)
+            )
+              throw new ConflictException(
+                "该重跑请求的账号准备方式已确定，请刷新后核对执行记录。",
               );
             return;
           }
@@ -1290,14 +1298,34 @@ export class TaskExecutionService {
           }
         }
         const nextExecutions = await Promise.all(
-          latestExecutions.map((latest) =>
-            tx.taskCaseExecution.create({
+          latestExecutions.map((latest) => {
+            let accountPlan;
+            if (input?.reuseTestAccounts === false) {
+              const policy = taskExecutionCreateInputSchema.parse(
+                task.inputSnapshot,
+              );
+              const hitl = isSpecTask(policy)
+                ? policy.hitlPolicy
+                : policy.run.hitlPolicy;
+              accountPlan = unassignedTestAccountPlan(
+                latest.testCase.definition,
+                hitl.timeoutSeconds,
+                now,
+                latest.testAccountPlan,
+              );
+              if (accountPlan.requirements.length && !hitl.enabled)
+                throw new ConflictException(
+                  "当前任务未启用人工输入，无法重新填写测试账号。",
+                );
+            }
+            return tx.taskCaseExecution.create({
               data: {
                 caseId,
                 deploymentId: latest.deploymentId,
                 executionOrdinal: latest.executionOrdinal + 1,
                 dispatchOrder: latest.dispatchOrder ?? latest.testCase.position,
                 executionPolicy: latest.executionPolicy ?? Prisma.JsonNull,
+                ...(accountPlan ? { testAccountPlan: json(accountPlan) } : {}),
                 taskExecutionId: task.id,
               },
               select: {
@@ -1305,8 +1333,8 @@ export class TaskExecutionService {
                 executionOrdinal: true,
                 id: true,
               },
-            }),
-          ),
+            });
+          }),
         );
         await tx.taskExecutionStage.update({
           data: {
@@ -1359,6 +1387,7 @@ export class TaskExecutionService {
                   executionOrdinal: nextExecution.executionOrdinal,
                   previousCaseExecutionId: previous.id,
                   idempotencyKey: input?.idempotencyKey,
+                  reuseTestAccounts: input?.reuseTestAccounts ?? true,
                   requestedDeploymentId: deploymentId ?? null,
                   previousDeadlineAt: task.deadlineAt.toISOString(),
                   deadlineAt: deadlineAt.toISOString(),
@@ -3475,6 +3504,7 @@ function taskCaseRunRequest(
           requiredEvidenceKinds: criterion.requiredEvidenceKinds,
           requireObservedEvidence: true,
           observationTargets: criterion.observationTargets,
+          observationContract: criterion.observationContract,
         }))
       : legacyDefinition!.expected.map((expected, index) => ({
           description: expected,

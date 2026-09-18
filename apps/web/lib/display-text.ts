@@ -47,6 +47,8 @@ const displayLabels: Record<string, string> = {
   TEST_ACCOUNTS_TIMEOUT: "等待测试账号已超时",
   TEST_ACCOUNTS_HITL_DISABLED: "缺少测试账号，人工输入已关闭",
   TEST_ACCOUNTS_REQUIRED: "等待测试账号",
+  DATA_PRECONDITION: "等待数据处置",
+  DATA_PRECONDITION_CONFLICT: "测试数据前置条件冲突",
   POLICY_REVIEW: "等待核对执行策略",
   CASE_DEPENDENCY_INVALID: "前置 Case 配置无效",
   CASE_DEPENDENCY_FAILED: "前置 Case 未成功",

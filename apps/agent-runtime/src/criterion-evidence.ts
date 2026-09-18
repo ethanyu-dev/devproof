@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   browserExecutionCriterion,
+  structuredNetworkMatches,
   missingRequiredEvidenceKinds,
   observedValueMatches,
   runtimeCriterionResultSchema,
@@ -8,7 +9,10 @@ import {
   type RuntimeTaskLease,
 } from "@devproof/agent-runtime-protocol";
 import type { BrowserObservations } from "./browser-observation.js";
-import { networkRequestMatches } from "./network-criterion.js";
+import {
+  networkRequestMatches,
+  requiresStructuredNetworkTarget,
+} from "./network-criterion.js";
 import {
   schemaCorrection,
   toolCorrection,
@@ -49,6 +53,7 @@ export function resolveCriterionEvidence(
   criterion: RuntimeTaskLease["snapshot"]["criteria"][number],
   observations: BrowserObservations | undefined,
   evidence: Map<string, RuntimeEvidenceRef>,
+  accountRevisionStartedAt?: string,
 ):
   | { result: z.infer<typeof runtimeCriterionResultSchema>; error?: undefined }
   | { error: ToolCorrection } {
@@ -57,9 +62,50 @@ export function resolveCriterionEvidence(
     path: string;
     expected: string;
   }[] = [];
+  const automaticRefs = observations?.bound?.submissionRefs(criterion.id);
+  submitted = {
+    ...submitted,
+    ...(submitted.bindingIds?.length
+      ? {}
+      : automaticRefs?.bindingIds
+        ? { bindingIds: automaticRefs.bindingIds }
+        : {}),
+    ...(submitted.comparisonReviewIds?.length
+      ? {}
+      : automaticRefs?.comparisonReviewIds
+        ? { comparisonReviewIds: automaticRefs.comparisonReviewIds }
+        : {}),
+  };
+  const bound = criterion.observationContract
+    ? observations?.bound?.resolve(
+        criterion.id,
+        submitted.status,
+        submitted.bindingIds ?? [],
+        submitted.comparisonReviewIds ?? [],
+      )
+    : undefined;
+  if (criterion.observationContract && (!bound || bound.error))
+    return {
+      error: toolCorrection(bound?.error ?? "CONTRACT_UNSUPPORTED", {
+        criterionId: criterion.id,
+        nextAction:
+          "Read saved bindings, resolve missing scope/entity/phase evidence, and review the required images before submitting.",
+      }),
+    };
   const quotes = [...(submitted.observations ?? [])];
   const networkQuotes = new Set<string>();
-  const refs = new Set(submitted.evidenceRefs);
+  const refs = new Set([
+    ...submitted.evidenceRefs,
+    ...(bound?.evidenceRefs ?? []),
+  ]);
+  // Exact delivered quotations already identify their artifacts; do not make the
+  // model copy a second, unrelated UUID just to retain the same evidence.
+  for (const quote of submitted.observations ?? []) {
+    for (const ref of observations
+      ?.accountRequestEvidence(quote.observationId, quote.cursor, quote.quote)
+      .keys() ?? [])
+      if (evidence.has(ref)) refs.add(ref);
+  }
   for (const [index, citation] of (
     submitted.networkCitations ?? []
   ).entries()) {
@@ -73,7 +119,7 @@ export function resolveCriterionEvidence(
         code: "CITATION_NOT_AVAILABLE",
         path: `networkCitations.${index}`,
         expected:
-          "引用 page.network 已读取的完整请求（requestIndex 从 0 开始）；缺失、截断或未读取的请求不能作为证据。",
+          "引用 page.network 已读取的请求条目（requestIndex 从 0 开始）；请求体和响应体分别校验，缺失部分不能用于证明该部分字段。",
       });
       continue;
     }
@@ -146,7 +192,7 @@ export function resolveCriterionEvidence(
       expected:
         "验收标准引用了尚未观察到的证据；使用 citations 绑定当前节点的真实证据，不要手写或修补 artifact ID。",
     });
-  if (result.status !== "INCONCLUSIVE") {
+  if (result.status !== "INCONCLUSIVE" && !criterion.observationContract) {
     const stageError = observations?.verdictEvidenceError(result.evidenceRefs);
     if (stageError)
       issues.push({
@@ -157,8 +203,9 @@ export function resolveCriterionEvidence(
   }
   if (result.status === "PASSED") {
     if (
-      criterion.requireObservedEvidence ||
-      criterion.observationTargets?.length
+      !criterion.observationContract &&
+      (criterion.requireObservedEvidence ||
+        criterion.observationTargets?.length)
     ) {
       if (!criterion.observationTargets?.length)
         issues.push({
@@ -169,28 +216,55 @@ export function resolveCriterionEvidence(
         });
       for (const target of criterion.observationTargets ?? []) {
         if (
-          !quotes.some(
-            (item) =>
-              item.target === target.label &&
-              [target.expectedText, ...(target.alternatives ?? [])].some(
-                (text) =>
-                  networkQuotes.has(
-                    JSON.stringify([
-                      item.target,
-                      item.observationId,
-                      item.cursor,
-                      item.quote,
-                    ]),
+          !quotes.some((item) => {
+            if (item.target !== target.label) return false;
+            const networkQuote = networkQuotes.has(
+              JSON.stringify([
+                item.target,
+                item.observationId,
+                item.cursor,
+                item.quote,
+              ]),
+            );
+            if (networkQuote && accountRevisionStartedAt) {
+              try {
+                const request = JSON.parse(item.quote);
+                if (
+                  typeof request.timestamp !== "string" ||
+                  !(
+                    Date.parse(request.timestamp) >=
+                    Date.parse(accountRevisionStartedAt)
                   )
-                    ? networkRequestMatches(item.quote, target.label, text)
-                    : observedValueMatches(item.quote, text),
-              ) &&
+                )
+                  return false;
+              } catch {
+                return false;
+              }
+            }
+            const needsNetwork =
+              Boolean(target.network) ||
+              networkQuote ||
+              requiresStructuredNetworkTarget(target.label);
+            const matched = [
+              target.expectedText,
+              ...(target.alternatives ?? []),
+            ].some((text) =>
+              needsNetwork
+                ? networkQuote &&
+                  (target.network
+                    ? structuredNetworkMatches(item.quote, target.network)
+                    : networkRequestMatches(item.quote, target.label, text))
+                : observedValueMatches(item.quote, text),
+            );
+            return (
+              matched &&
               observations?.hasDeliveredQuote(
                 item.observationId,
                 item.cursor,
                 item.quote,
-              ),
-          )
+              )
+            );
+          })
         )
           issues.push({
             code: "QUOTE_NOT_EXACT",

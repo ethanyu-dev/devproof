@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as config from "../config/env.js";
 
 import {
   ExecutionRunService,
@@ -44,6 +45,79 @@ const current = {
 } as never;
 
 describe("ExecutionRunService events", () => {
+  it("pauses new v2 runs during rollback while retaining existing evidence reads", async () => {
+    const contract = {
+      version: 2,
+      targets: [
+        {
+          targetId: "type",
+          label: "类型默认状态",
+          scope: { kind: "DIALOG", names: ["新增"] },
+          entity: {
+            controlKind: "SELECT",
+            label: "类型",
+            property: "SELECTED_LABEL",
+            oneOf: ["合规模型映射"],
+          },
+          phase: "INITIAL_AFTER_OPEN",
+          assertions: [
+            {
+              assertionId: "checked",
+              subject: { kind: "SWITCH", label: "启用状态" },
+              property: "CHECKED",
+              operator: "EQ",
+              expected: true,
+            },
+          ],
+          requiredEvidenceKinds: ["DOM"],
+          temporal: "SAME_OBSERVATION",
+        },
+      ],
+      comparisons: [],
+    };
+    const existing = {
+      id: runId,
+      criteriaSnapshot: [{ id: "default", observationContract: contract }],
+      executionPolicy: snapshot.executionPolicy,
+      browserProfileId: null,
+      browserExecutions: [],
+      evidences: [],
+      observationBindings: Array.from({ length: 1001 }, (_, i) => ({
+        id: String(i),
+        facts: {},
+      })),
+      events: [],
+    };
+    const prisma = {
+      executionRun: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findFirst: vi.fn().mockResolvedValue(existing),
+      },
+      $transaction: vi.fn(),
+    };
+    const env = vi.spyOn(config, "env").mockReturnValue({
+      ...config.env(),
+      BROWSER_OBSERVATION_V2_ENABLED: false,
+    });
+    try {
+      const service = new ExecutionRunService(prisma as never, {} as never);
+      await expect(
+        service.create(current, {
+          criteria: [{ id: "default", observationContract: contract }],
+          idempotencyKey: "v2-paused",
+          deadlineSeconds: 600,
+        } as never),
+      ).rejects.toThrow("OBSERVATION_V2_DISABLED");
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      const detail = await service.consoleDetail(current, runId);
+      expect(detail.criteriaSnapshot).toEqual(existing.criteriaSnapshot);
+      expect(detail.observationHistoryTruncated).toBe(true);
+      expect(detail.observationBindings).toHaveLength(1000);
+    } finally {
+      env.mockRestore();
+    }
+  });
+
   it("includes team-scoped recovery links in execution details without exposing recovery credentials", async () => {
     const recovery = {
       id: "recovery",
@@ -60,6 +134,8 @@ describe("ExecutionRunService events", () => {
             { runtimeSessionId: "session", runtimeSession: null },
           ],
           evidences: [],
+          observationBindings: [],
+          events: [],
         }),
       },
       runtimeSessionRecovery: {
@@ -113,6 +189,60 @@ describe("ExecutionRunService events", () => {
 });
 
 describe("ExecutionRunService HITL resume", () => {
+  it("resumes DATA_PRECONDITION with a normalized account replacement and preserved prior cleanup", async () => {
+    const tx = transactionClient();
+    const binding = {
+      slotId: "subject:1",
+      label: "目标",
+      account: "old-user",
+      aliases: ["old-alias"],
+      usage: "CREATE_OR_MODIFY",
+      requiredTypes: ["MAPPING"],
+    };
+    const original = intervention({ kind: "DATA_PRECONDITION" });
+    const policy = {
+      ...snapshot.executionPolicy,
+      testAccounts: [binding],
+      executionState: { accounts: [binding], preflightAbsences: ["old"] },
+    };
+    tx.humanIntervention.findFirst.mockResolvedValue({
+      ...original,
+      run: { ...original.run, executionPolicy: policy },
+      task: {
+        ...original.task,
+        snapshot: { ...snapshot, executionPolicy: policy },
+      },
+    });
+    const service = new ExecutionRunService(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn(tx),
+        executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+      } as never,
+      {} as never,
+    );
+    const account = "025d306c-0748-448a-94f0-fc18dc8008da";
+    await service.resolveIntervention(current, runId, interventionId, {
+      response: { instructions: `换另一个账号吧 ${account}` },
+    });
+    const updated =
+      tx.agentRuntimeTask.update.mock.calls[0]![0].data.snapshot
+        .executionPolicy;
+    expect(updated.testAccounts).toEqual([
+      { ...binding, account, aliases: [] },
+    ]);
+    expect(updated.executionState).toMatchObject({
+      accounts: updated.testAccounts,
+      accountRevision: 1,
+      preflightAbsences: [],
+    });
+    expect(updated.resume.response.resolution).toEqual({
+      kind: "REPLACE_ACCOUNT",
+      slotId: "subject:1",
+      account,
+    });
+    expect(updated.accountCoordinationPending).toBe(true);
+  });
+
   it("replaces one requested role and retains other accounts, writes and cleanup evidence", async () => {
     const tx = transactionClient();
     const bindings = ["first", "second"].map((role) => ({
@@ -1328,4 +1458,90 @@ describe("fallback trajectory identity", () => {
       error: "Deployment interrupted execution",
     });
   });
+});
+
+it("retains data-disposition instructions across a later login handoff", async () => {
+  const tx = transactionClient();
+  const prior = {
+    interventionId: "previous",
+    kind: "DATA_PRECONDITION",
+    context: {
+      records: [{ id: "133", account: "test-user", type: "MAPPING" }],
+    },
+    response: {
+      approved: true,
+      instructions: "可以先删除上述记录开展后续测试",
+    },
+  };
+  const value = intervention({
+    kind: "BROWSER_HITL",
+    browserControlLease: null,
+  });
+  value.run.executionPolicy = {
+    ...snapshot.executionPolicy,
+    humanResolutions: [prior],
+  };
+  tx.humanIntervention.findFirst.mockResolvedValue(value);
+  const prisma = {
+    $transaction: (callback: (tx: unknown) => unknown) => callback(tx),
+    executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+  };
+  await new ExecutionRunService(
+    prisma as never,
+    {} as never,
+  ).resolveIntervention(current, runId, interventionId, {
+    response: { approved: true, note: "已完成重新登录" },
+  });
+  const policy =
+    tx.agentRuntimeTask.update.mock.calls[0]![0].data.snapshot.executionPolicy;
+  expect(policy.humanResolutions).toEqual([
+    prior,
+    expect.objectContaining({ kind: "BROWSER_HITL" }),
+  ]);
+  expect(policy.resume.kind).toBe("BROWSER_HITL");
+});
+
+it("paginates the full evidence catalog with team/run/attempt scope and a stable cursor", async () => {
+  const entries = Array.from({ length: 201 }, (_, i) => ({
+    id: `e-${i}`,
+    externalId: `artifact://${String(i).padStart(4, "0")}`,
+  }));
+  const db = {
+    executionRun: { findFirst: vi.fn().mockResolvedValue({ id: runId }) },
+    runAttempt: {
+      findFirst: vi.fn().mockResolvedValue({
+        result: {
+          evidenceCatalog: {
+            digest: "a".repeat(64),
+            sealedAt: "2026-09-18T02:00:00.000Z",
+          },
+        },
+      }),
+    },
+    runEvidence: {
+      findMany: vi.fn().mockResolvedValue(entries),
+      count: vi.fn().mockResolvedValue(226),
+    },
+  };
+  const result = await new ExecutionRunService(
+    db as never,
+    {} as never,
+  ).evidenceCatalog(current, runId, attemptId, "artifact://0000");
+  expect(result.entries).toHaveLength(200);
+  expect(result).toMatchObject({
+    total: 226,
+    nextCursor: "artifact://0199",
+    digest: "a".repeat(64),
+  });
+  expect(db.runEvidence.findMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: {
+        teamId: snapshot.teamId,
+        runId,
+        attemptId,
+        externalId: { gt: "artifact://0000" },
+        createdAt: { lte: new Date("2026-09-18T02:00:00.000Z") },
+      },
+    }),
+  );
 });

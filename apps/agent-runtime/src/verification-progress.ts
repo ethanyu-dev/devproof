@@ -62,10 +62,8 @@ export class VerificationProgress {
   private readonly semanticObservations = new Set<string>();
   private readonly rejectedSubmissions = new Map<string, number>();
   private readonly observedRejections = new Set<string>();
-  private readonly evidenceCorrections = new Map<
-    string,
-    { sequence: number; count: number }
-  >();
+  private readonly evidenceCorrections = new Map<string, number>();
+  evidenceSubmissionCriterionId: string | undefined;
   evidenceSubmissionFailed = false;
   evidenceSubmissionError: string | undefined;
   private readonly interactions = new Map<string, Record<string, unknown>>();
@@ -126,6 +124,8 @@ export class VerificationProgress {
     }>;
   }) {
     this.textOnlySteps = 0;
+    this.evidenceSubmissionFailed = false;
+    this.evidenceSubmissionCriterionId = undefined;
     this.semanticProgress = false;
     let progress = false;
     for (const criterion of input.criteria) {
@@ -164,17 +164,14 @@ export class VerificationProgress {
       typeof rejection.criterionId === "string" &&
       ["record_criterion", "finish_verification"].includes(input.name)
     ) {
-      const prior = this.evidenceCorrections.get(rejection.criterionId);
       const count =
-        prior?.sequence === this.progressSequence ? prior.count + 1 : 1;
-      this.evidenceCorrections.set(rejection.criterionId, {
-        sequence: this.progressSequence,
-        count,
-      });
+        (this.evidenceCorrections.get(rejection.criterionId) ?? 0) + 1;
+      this.evidenceCorrections.set(rejection.criterionId, count);
       // Initial submission plus two corrections; unrelated error wording and
       // recapturing the same DOM cannot buy more model calls.
       if (count >= 3) {
         this.evidenceSubmissionFailed = true;
+        this.evidenceSubmissionCriterionId = rejection.criterionId;
         this.evidenceSubmissionError =
           typeof rejection.error === "string" ? rejection.error : undefined;
         return true;
@@ -184,6 +181,12 @@ export class VerificationProgress {
       argumentsValue !== null && typeof argumentsValue === "object"
         ? (argumentsValue as Record<string, unknown>).criterionId
         : undefined;
+    if (
+      !rejected &&
+      typeof criterionId === "string" &&
+      input.name === "record_criterion"
+    )
+      this.evidenceCorrections.delete(criterionId);
     const result = record(record(input.output).result);
     const interaction = record(result.interaction);
     const feedback = record(result.actionFeedback);

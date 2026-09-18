@@ -25,6 +25,7 @@ import {
 } from "../runtime/session-resource-cleanup.js";
 import {
   businessDataLocksEnabled,
+  executionResourceClaims,
   concurrencyPolicy,
   ExecutionAdmissionBlocked,
   executionTarget,
@@ -813,7 +814,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         code: "LEASE_LOST",
         message: "Browser execution ownership is stale.",
       });
-    const requiredMinor = runtimeCommandMinimumMinor(input.commandType);
+    const requiredMinor = Math.max(
+      runtimeCommandMinimumMinor(input.commandType),
+      input.after ? 18 : 0,
+    );
     if (session.protocolMinor < requiredMinor) {
       throw new ConflictException({
         code: "PROTOCOL_UNSUPPORTED",
@@ -838,6 +842,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       commandId,
       commandType: input.commandType,
       payload: input.payload,
+      ...(input.after ? { after: input.after } : {}),
       sessionId: session.id,
       ...(signal ? { signal } : {}),
       source: "AGENT",
@@ -1026,7 +1031,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           : "Browser execution session is not active.",
       );
     }
-    const requiredMinor = runtimeCommandMinimumMinor(input.commandType);
+    const requiredMinor = Math.max(
+      runtimeCommandMinimumMinor(input.commandType),
+      input.after ? 18 : 0,
+    );
     if (session.protocolMinor < requiredMinor) {
       throw new ConflictException({
         code: "PROTOCOL_UNSUPPORTED",
@@ -1053,6 +1061,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         commandId,
         commandType: input.commandType,
         payload: input.payload,
+        ...(input.after ? { after: input.after } : {}),
         sessionId: session.id,
         ...(signal ? { signal } : {}),
         source: "AGENT",
@@ -1680,18 +1689,27 @@ export class BrowserExecutionRunner implements ExecutionRunner {
           }
         }
         const claims =
-          input.purpose === "PROFILE_PURGE" || !businessDataLocksEnabled()
+          input.purpose === "PROFILE_PURGE"
             ? []
-            : resourceClaims(input.targetUrl, execution?.run.concurrencyPolicy);
+            : executionResourceClaims(
+                input.targetUrl,
+                execution?.run.concurrencyPolicy,
+                execution?.run.executionPolicy,
+              );
         const existingLeases = claims.length
           ? await tx.executionResourceLease.findMany({
-              where: claims.some((claim) => claim.rootKey === "*")
-                ? {}
-                : {
-                    rootKey: {
-                      in: [...claims.map((claim) => claim.rootKey), "*"],
-                    },
-                  },
+              where: {
+                ...(!businessDataLocksEnabled()
+                  ? { origin: "ACCOUNT_COORDINATION" }
+                  : {}),
+                ...(claims.some((claim) => claim.rootKey === "*")
+                  ? {}
+                  : {
+                      rootKey: {
+                        in: [...claims.map((claim) => claim.rootKey), "*"],
+                      },
+                    }),
+              },
               include: {
                 session: {
                   select: {
@@ -1746,7 +1764,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         }
         // Pre-upgrade/direct sessions without data leases cannot bypass new
         // readers. Unknown destinations conservatively conflict with all roots.
-        if (claims.length) {
+        if (claims.length && businessDataLocksEnabled()) {
           const legacy = await tx.browserRuntimeSession.findMany({
             where: {
               purpose: "EXECUTION",
@@ -1809,6 +1827,7 @@ export class BrowserExecutionRunner implements ExecutionRunner {
               run: {
                 select: {
                   concurrencyPolicy: true,
+                  executionPolicy: true,
                   environmentSnapshot: true,
                   teamId: true,
                 },
@@ -1819,9 +1838,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
             (item) =>
               (item.createdAt < execution.createdAt ||
                 item.id < execution.id) &&
-              resourceClaims(
+              executionResourceClaims(
                 executionTarget(item.input, item.run.environmentSnapshot),
                 item.run.concurrencyPolicy,
+                item.run.executionPolicy,
               ).some(
                 (claim) =>
                   claim.mode === "WRITE" &&

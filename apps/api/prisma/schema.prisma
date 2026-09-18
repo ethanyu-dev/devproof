@@ -517,6 +517,7 @@ model Team {
   taskDeploymentProfileBindings TaskDeploymentProfileBinding[]
   taskProfileRecoveryEvents     TaskProfileRecoveryEvent[]
   inboundIntegrationEvents      InboundIntegrationEvent[]
+  observationBindings           RunObservationBinding[]
 
   @@map("teams")
 }
@@ -1133,43 +1134,43 @@ model VerificationRun {
 /// The v2 aggregate root shared by manual, CI, MCP, and agent-driven tests.
 /// Browser resource lifecycle and product verdict deliberately remain separate.
 model ExecutionRun {
-  id                           String                @id @default(uuid()) @db.Uuid
-  teamId                       String                @map("team_id") @db.Uuid
-  taskExecutionId              String?               @map("task_execution_id") @db.Uuid
-  browserProfileId             String?               @map("browser_profile_id") @db.Uuid
-  sourceKind                   String                @default("API") @map("source_kind")
-  sourceId                     String?               @map("source_id")
-  idempotencyKey               String                @map("idempotency_key")
+  id                           String                  @id @default(uuid()) @db.Uuid
+  teamId                       String                  @map("team_id") @db.Uuid
+  taskExecutionId              String?                 @map("task_execution_id") @db.Uuid
+  browserProfileId             String?                 @map("browser_profile_id") @db.Uuid
+  sourceKind                   String                  @default("API") @map("source_kind")
+  sourceId                     String?                 @map("source_id")
+  idempotencyKey               String                  @map("idempotency_key")
   goal                         String
-  lifecycle                    RunLifecycle          @default(QUEUED)
-  executionDisposition         ExecutionDisposition? @map("execution_disposition")
+  lifecycle                    RunLifecycle            @default(QUEUED)
+  executionDisposition         ExecutionDisposition?   @map("execution_disposition")
   verdict                      RunProductVerdict?
-  criteriaSnapshot             Json                  @map("criteria_snapshot")
-  environmentSnapshot          Json                  @default("{}") @map("environment_snapshot")
-  executionPolicy              Json                  @default("{}") @map("execution_policy")
-  concurrencyPolicy            Json?                 @map("concurrency_policy")
-  infrastructureRecoveryCount  Int                   @default(0) @map("infrastructure_recovery_count")
-  queueDeadlineAt              DateTime?             @map("queue_deadline_at") @db.Timestamptz
-  executionBudgetStartedAt     DateTime?             @map("execution_budget_started_at") @db.Timestamptz
-  executionBudgetSeconds       Int?                  @map("execution_budget_seconds")
-  executionMaxExtensionSeconds Int?                  @map("execution_max_extension_seconds")
-  currentAttemptNumber         Int                   @default(0) @map("current_attempt_number")
-  maxAttempts                  Int                   @default(3) @map("max_attempts")
-  traceId                      String                @map("trace_id") @db.VarChar(32)
-  initialDeadlineAt            DateTime              @map("initial_deadline_at") @db.Timestamptz
-  deadlineAt                   DateTime              @map("deadline_at") @db.Timestamptz
-  hardDeadlineAt               DateTime              @map("hard_deadline_at") @db.Timestamptz
-  deadlineExtensionCount       Int                   @default(0) @map("deadline_extension_count")
-  deadlineExtendedMs           Int                   @default(0) @map("deadline_extended_ms")
-  cancelRequestedAt            DateTime?             @map("cancel_requested_at") @db.Timestamptz
-  queuedAt                     DateTime              @default(now()) @map("queued_at") @db.Timestamptz
-  startedAt                    DateTime?             @map("started_at") @db.Timestamptz
-  finishedAt                   DateTime?             @map("finished_at") @db.Timestamptz
-  createdAt                    DateTime              @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt                    DateTime              @updatedAt @map("updated_at") @db.Timestamptz
-  team                         Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  taskExecution                TaskExecution?        @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
-  browserProfile               UserBrowserProfile?   @relation(fields: [browserProfileId], references: [id], onDelete: SetNull)
+  criteriaSnapshot             Json                    @map("criteria_snapshot")
+  environmentSnapshot          Json                    @default("{}") @map("environment_snapshot")
+  executionPolicy              Json                    @default("{}") @map("execution_policy")
+  concurrencyPolicy            Json?                   @map("concurrency_policy")
+  infrastructureRecoveryCount  Int                     @default(0) @map("infrastructure_recovery_count")
+  queueDeadlineAt              DateTime?               @map("queue_deadline_at") @db.Timestamptz
+  executionBudgetStartedAt     DateTime?               @map("execution_budget_started_at") @db.Timestamptz
+  executionBudgetSeconds       Int?                    @map("execution_budget_seconds")
+  executionMaxExtensionSeconds Int?                    @map("execution_max_extension_seconds")
+  currentAttemptNumber         Int                     @default(0) @map("current_attempt_number")
+  maxAttempts                  Int                     @default(3) @map("max_attempts")
+  traceId                      String                  @map("trace_id") @db.VarChar(32)
+  initialDeadlineAt            DateTime                @map("initial_deadline_at") @db.Timestamptz
+  deadlineAt                   DateTime                @map("deadline_at") @db.Timestamptz
+  hardDeadlineAt               DateTime                @map("hard_deadline_at") @db.Timestamptz
+  deadlineExtensionCount       Int                     @default(0) @map("deadline_extension_count")
+  deadlineExtendedMs           Int                     @default(0) @map("deadline_extended_ms")
+  cancelRequestedAt            DateTime?               @map("cancel_requested_at") @db.Timestamptz
+  queuedAt                     DateTime                @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt                    DateTime?               @map("started_at") @db.Timestamptz
+  finishedAt                   DateTime?               @map("finished_at") @db.Timestamptz
+  createdAt                    DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                    DateTime                @updatedAt @map("updated_at") @db.Timestamptz
+  team                         Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution                TaskExecution?          @relation(fields: [taskExecutionId], references: [id], onDelete: SetNull)
+  browserProfile               UserBrowserProfile?     @relation(fields: [browserProfileId], references: [id], onDelete: SetNull)
   attempts                     RunAttempt[]
   tasks                        AgentRuntimeTask[]
   events                       RunEvent[]
@@ -1179,8 +1180,9 @@ model ExecutionRun {
   browserExecutions            BrowserExecution[]
   notificationOutbox           NotificationOutbox[]
   browserProfileUsages         BrowserProfileUsage[]
-  generatedTestCase            GeneratedTestCase?    @relation("GeneratedCaseExecutionRun")
-  taskCaseExecution            TaskCaseExecution?    @relation("TaskCaseExecutionRun")
+  generatedTestCase            GeneratedTestCase?      @relation("GeneratedCaseExecutionRun")
+  taskCaseExecution            TaskCaseExecution?      @relation("TaskCaseExecutionRun")
+  observationBindings          RunObservationBinding[]
 
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
@@ -1727,26 +1729,48 @@ model GeneratedTestCase {
   @@map("generated_test_cases")
 }
 
+model RunStepContext {
+  id            String     @id @db.Uuid
+  teamId        String     @map("team_id") @db.Uuid
+  runId         String     @map("run_id") @db.Uuid
+  attemptId     String     @map("attempt_id") @db.Uuid
+  taskId        String     @map("task_id") @db.Uuid
+  segmentId     String     @map("segment_id")
+  step          Int
+  model         String
+  sequence      BigInt
+  requestGzip   Bytes      @map("request_gzip")
+  requestSha256 String     @map("request_sha256")
+  requestBytes  Int        @map("request_bytes")
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  attempt       RunAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, runId, attemptId, sequence])
+  @@map("run_step_contexts")
+}
+
 model RunAttempt {
-  id               String               @id @default(uuid()) @db.Uuid
-  runId            String               @map("run_id") @db.Uuid
-  number           Int
-  status           RunAttemptStatus     @default(PENDING)
-  inputSnapshot    Json                 @map("input_snapshot")
-  result           Json?
-  error            Json?
-  failureClass     String?              @map("failure_class")
-  startedAt        DateTime?            @map("started_at") @db.Timestamptz
-  finishedAt       DateTime?            @map("finished_at") @db.Timestamptz
-  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz
-  run              ExecutionRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
-  task             AgentRuntimeTask?
-  events           RunEvent[]
-  evidences        RunEvidence[]
-  criterionResults RunCriterionResult[]
-  interventions    HumanIntervention[]
-  browserExecution BrowserExecution?
+  id                  String                  @id @default(uuid()) @db.Uuid
+  runId               String                  @map("run_id") @db.Uuid
+  number              Int
+  status              RunAttemptStatus        @default(PENDING)
+  inputSnapshot       Json                    @map("input_snapshot")
+  result              Json?
+  error               Json?
+  failureClass        String?                 @map("failure_class")
+  startedAt           DateTime?               @map("started_at") @db.Timestamptz
+  finishedAt          DateTime?               @map("finished_at") @db.Timestamptz
+  createdAt           DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime                @updatedAt @map("updated_at") @db.Timestamptz
+  run                 ExecutionRun            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task                AgentRuntimeTask?
+  stepContexts        RunStepContext[]
+  events              RunEvent[]
+  evidences           RunEvidence[]
+  criterionResults    RunCriterionResult[]
+  interventions       HumanIntervention[]
+  browserExecution    BrowserExecution?
+  observationBindings RunObservationBinding[]
 
   @@unique([runId, number])
   @@index([status, createdAt])
@@ -2314,7 +2338,31 @@ model TaskAcceptanceReview {
   createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz
   taskExecution   TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
   @@unique([taskExecutionId, revision])
   @@index([status, createdAt])
   @@map("task_acceptance_reviews")
+}
+
+model RunObservationBinding {
+  id                 String       @id @default(uuid()) @db.Uuid
+  teamId             String       @map("team_id") @db.Uuid
+  runId              String       @map("run_id") @db.Uuid
+  attemptId          String       @map("attempt_id") @db.Uuid
+  criterionId        String       @map("criterion_id")
+  targetId           String       @map("target_id")
+  contractDigest     String       @map("contract_digest")
+  observationId      String       @map("observation_id") @db.Uuid
+  sourceCommandId    String       @map("source_command_id") @db.Uuid
+  snapshotArtifactId String       @map("snapshot_artifact_id") @db.Uuid
+  bindingDigest      String       @map("binding_digest")
+  facts              Json
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  team               Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  run                ExecutionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempt            RunAttempt   @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, targetId, contractDigest, observationId])
+  @@index([runId, attemptId, criterionId, targetId])
+  @@map("run_observation_bindings")
 }

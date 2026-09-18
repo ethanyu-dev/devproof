@@ -7,6 +7,7 @@ export const FEEDBACK_ACTIONS = new Set([
   "frame.click",
   "page.press",
   "page.fill",
+  "page.fill_fields",
   "frame.fill",
   "page.type",
   "page.select",
@@ -59,7 +60,10 @@ export class ActionFeedbackTracker {
 
   response(request: object, response: Record<string, unknown>) {
     const entry = this.requests.get(request);
-    if (entry) entry.response = response;
+    if (entry) {
+      response.requestId = entry.details.requestId ?? entry.sequence;
+      entry.response = response;
+    }
   }
 
   snapshot(pageId: string) {
@@ -75,7 +79,7 @@ export class ActionFeedbackTracker {
       const body = response?.responseBody;
       const serialized = body === undefined ? undefined : JSON.stringify(body);
       return {
-        requestId: entry.sequence,
+        requestId: entry.details.requestId ?? entry.sequence,
         method: String(entry.details.method ?? "").slice(0, 16),
         url: String(entry.details.url ?? "").slice(0, 512),
         frameUrl:
@@ -100,6 +104,7 @@ export class ActionFeedbackTracker {
           Boolean(serialized && serialized.length > 1800) ||
           response?.responseBodyTruncated === true,
         responseBodyOmitted: response?.responseBodyOmitted,
+        requestBodyOmitted: response?.requestBodyOmitted,
       };
     });
     const feedback = {
@@ -109,7 +114,8 @@ export class ActionFeedbackTracker {
       startedAt: action.startedAt,
       inputCompleted: action.inputCompleted,
       association: "temporal",
-      coverage: "page-fetch-xhr; same-origin JSON bodies only",
+      coverage:
+        "page-fetch-xhr; same-origin or allowlisted business JSON; authentication omitted",
       coverageIncomplete:
         entries.length === 0 ||
         entries.length > 8 ||
@@ -120,7 +126,8 @@ export class ActionFeedbackTracker {
             entry.bodyPending ||
             entry.metadataTruncated ||
             entry.responseTruncated ||
-            entry.responseBodyOmitted,
+            entry.responseBodyOmitted ||
+            entry.requestBodyOmitted,
         ),
       pending: requests.some((entry) => entry.pending || entry.bodyPending),
       requests,

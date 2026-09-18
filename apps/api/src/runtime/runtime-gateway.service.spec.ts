@@ -209,7 +209,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
       capabilities: ["browser", "persistent-profile"],
     } as never);
     const greeting = runtimeClientMessageSchema.parse({
-      ...hello("0.2.24", 17),
+      ...hello("0.2.27", 18),
       capabilities: [...RUNTIME_CAPABILITIES],
     });
 
@@ -221,7 +221,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
     expect(accepted?.capabilities).toEqual(new Set(negotiated));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
       type: "runtime.hello.accepted",
-      protocol: { major: 1, minor: 17 },
+      protocol: { major: 1, minor: 18 },
       capabilities: negotiated,
     });
     expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
@@ -239,6 +239,15 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
     { protocolMinor: 16, advertised: undefined },
     { protocolMinor: 16, advertised: ["scroll-feedback-v1"] },
     { protocolMinor: 17, advertised: undefined },
+    {
+      protocolMinor: 17,
+      advertised: [
+        "structured-observation-v1",
+        "scope-phase-v1",
+        "action-observation-v1",
+        "form-sequence-v1",
+      ],
+    },
   ])(
     "clears stale DOM + vision on reconnect with minor $protocolMinor and capabilities $advertised",
     async ({ protocolMinor, advertised }) => {
@@ -253,6 +262,11 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
           "dom-vision-v1",
           "action-feedback-v1",
           "scroll-feedback-v1",
+          "structured-observation-v1",
+          "scope-phase-v1",
+          "action-observation-v1",
+          "form-sequence-v1",
+          "observation-delta-v1",
         ],
       } as never);
       const greeting = runtimeClientMessageSchema.parse({

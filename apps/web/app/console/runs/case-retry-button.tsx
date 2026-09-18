@@ -29,6 +29,7 @@ export function CaseRetryButton({
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState<CaseRetryPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [prepareAccounts, setPrepareAccounts] = useState(false);
 
   useEffect(() => {
     if (open) dialog.current?.showModal();
@@ -52,7 +53,11 @@ export function CaseRetryButton({
   }
 
   async function submit(prepared: CaseRetryPlan, confirmed = false) {
-    const task = await request.current.submit(prepared, confirmed);
+    const task = await request.current.submit(
+      prepared,
+      confirmed,
+      !prepareAccounts,
+    );
     setOpen(false);
     if (onRetried) onRetried(task);
     else router.push(taskDetailHref(task.id));
@@ -63,7 +68,11 @@ export function CaseRetryButton({
     void act(async () => {
       const prepared = await request.current.prepare(taskId, runId);
       setPlan(prepared);
-      if (!prepared.blockedReason && !prepared.recoveries.length)
+      if (
+        !prepared.blockedReason &&
+        !prepared.recoveries.length &&
+        !prepared.hasTestAccounts
+      )
         await submit(prepared);
       else setOpen(true);
     });
@@ -88,9 +97,9 @@ export function CaseRetryButton({
           else setOpen(false);
         }}
         aria-labelledby={`retry-title-${runId}`}
-        className="m-auto max-h-[85vh] w-[min(640px,calc(100vw_-_32px))] overflow-hidden rounded-xl border bg-card p-6 text-foreground shadow-xl backdrop:bg-black/40"
+        className="m-auto max-h-[85vh] w-[min(640px,calc(100vw_-_32px))] overflow-y-auto rounded-xl border bg-card p-6 text-foreground shadow-xl backdrop:bg-black/40"
       >
-        <div className="flex max-h-[calc(85vh_-_48px)] flex-col gap-4">
+        <div className="flex flex-col gap-4">
           <h2 id={`retry-title-${runId}`} className="text-lg font-semibold">
             重试用例
           </h2>
@@ -117,6 +126,36 @@ export function CaseRetryButton({
             <p className="text-sm">
               旧浏览器已确认关闭。上次写入结果尚未核实，重试可能重复执行已完成的操作。确认后即可重试，无需填写核实说明或证据。
             </p>
+          )}
+          {!!plan?.preparationConditions?.length && (
+            <section className="text-sm" aria-label="重试前的数据条件">
+              <b>重试前的数据条件</b>
+              <ul className="my-2 list-disc space-y-1 pl-5">
+                {plan.preparationConditions.map((condition) => (
+                  <li key={condition}>{condition}</li>
+                ))}
+              </ul>
+              <p className="text-muted-foreground">
+                分配账号不代表业务数据已就绪；原有记录不会被自动删除或重置。
+              </p>
+            </section>
+          )}
+          {plan?.hasTestAccounts && (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                aria-label="重新填写测试账号"
+                checked={prepareAccounts}
+                disabled={busy}
+                onChange={(event) => setPrepareAccounts(event.target.checked)}
+              />
+              <span>
+                重新填写测试账号
+                <span className="block text-muted-foreground">
+                  默认复用上次账号。勾选后，新一轮将在账号准备处等待填写；适用于上次账号不存在或不满足数据前置条件。
+                </span>
+              </span>
+            </label>
           )}
           <form
             className="flex min-h-0 flex-col gap-4"

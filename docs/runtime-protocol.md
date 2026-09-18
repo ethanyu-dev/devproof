@@ -14,13 +14,23 @@ The package README is the canonical field-level changelog: [`packages/runtime-pr
 
 The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. Browser Runtime has its own release version and is compatible based on protocol negotiation, not matching application version numbers.
 
-The separate Agent protocol is currently v2.20. It carries Spec source grounding,
+The separate Agent protocol is currently v2.24. It carries Spec source grounding,
 diagnostic finalization checkpoints, locator recovery exhaustion reasons, and
 optional meaningful tool-progress telemetry for adaptive deadlines, and
 per-object observation targets and delivered quotations for criterion results,
 negotiated Spec generation using validated check references, and versioned
 business account subject declarations and observed account requests;
 see its [changelog](../packages/agent-runtime-protocol/README.md).
+
+## Unreleased object-observation extension
+
+The draft [Browser observation V2](browser-observation-v2.md) adds structured
+captures, phase proofs, action observation, optional deltas, and bounded form
+sequences behind capability and creation gates. Its development implementation
+still advertises Browser protocol 1.18. Assign the next minor and a distinct
+Browser Runtime release before rollout; stock v1.18 nodes must not be treated as
+supporting these capabilities. The design document tracks known blocking defects
+and enablement criteria.
 
 ## Current capability milestones
 
@@ -44,3 +54,9 @@ The source of truth for the currently implemented version is `RUNTIME_PROTOCOL` 
 ## Deployment rule
 
 Upgrade and restart Browser Runtime whenever a required minor capability changes. Deploying API code alone does not upgrade independently installed Runtime daemons. During a rolling upgrade, route tasks that require a newer capability only to compatible nodes.
+
+Agent v2.22 adds complete per-model-call context archives and public `stepIntent` action plans. See [Runtime step context history](runtime-step-context.md) for storage, migration, attempt identity and historical-preview compatibility.
+
+Agent v2.23 adds concise business checks, runtime subject binding and criterion-local evidence correction. See [Business Spec and runtime binding](business-spec.md). Observation payloads remain v2; existing Specs retain their original contracts.
+
+Agent v2.24 adds `attempt-evidence-catalog-v1` for complete attempt evidence catalogs and `typed-checks-v1` for explicit UI state properties and structured network assertions. Checkpoint criteria are persisted independently of final cleanup. See [the first four runtime reliability changes](runtime-reliability-first-four.md) for account replacement, record references, compatibility and regression coverage.

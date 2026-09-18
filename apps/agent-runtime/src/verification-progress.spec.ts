@@ -402,3 +402,20 @@ describe("verification progress", () => {
     expect(observe("hash-a", 9)).toBe(true);
   });
 });
+
+it("does not let unrelated page progress reset another criterion's correction budget", () => {
+  const progress = new VerificationProgress();
+  const reject = () =>
+    progress.tool({
+      name: "record_criterion",
+      arguments: '{"criterionId":"blocked"}',
+      criteria: [],
+      output: { accepted: false, criterionId: "blocked", error: "对象缺失" },
+    });
+  expect(reject()).toBe(false);
+  progress.observe(snapshot("Other row updated", 1).output);
+  expect(reject()).toBe(false);
+  progress.observe(snapshot("Another independent page", 2).output);
+  expect(reject()).toBe(true);
+  expect(progress.evidenceSubmissionCriterionId).toBe("blocked");
+});

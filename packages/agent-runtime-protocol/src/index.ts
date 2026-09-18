@@ -1,3 +1,13 @@
+export * from "./network-check.js";
+import { networkCheckSchema } from "./network-check.js";
+export {
+  stepContextArchiveSchema,
+  type StepContextArchive,
+} from "./step-context.js";
+import { stepContextArchiveSchema } from "./step-context.js";
+export * from "./observation-contract.js";
+export * from "./observation-evaluator.js";
+import { observationContractSchema } from "./observation-contract.js";
 export * from "./criterion-observation.js";
 import {
   testAccountRequirementsSchema,
@@ -11,6 +21,7 @@ import { z } from "zod";
 export {
   businessTestAccountSchema,
   executionRecordSchema,
+  executionRecordDeltaSchema,
   executionStateSchema,
   readExecutionState,
 } from "./execution-state.js";
@@ -30,7 +41,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 21,
+  minor: 24,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -146,35 +157,46 @@ export const runtimeProtocolVersionSchema = z.object({
 });
 
 export const runtimeObservationTargetSchema = z.object({
+  network: networkCheckSchema.optional(),
   label: z.string().trim().min(1).max(500),
   expectedText: z.string().trim().min(1).max(500),
   // Alternatives describe the same business object, not additional objects.
   alternatives: z.array(z.string().trim().min(1).max(500)).max(10).optional(),
 });
 
-export const runtimeCriterionSchema = z.object({
-  description: z.string().trim().min(1).max(4_000),
-  basis: z
-    .object({
-      observationTarget: z.string().trim().min(1).max(500).optional(),
-      quote: z.string().trim().min(1).max(2_000).optional(),
-      sourceRefs: z.array(z.string().trim().min(1).max(500)).max(100),
-    })
-    .optional(),
-  id: z.string().trim().min(1).max(160),
-  required: z.boolean().default(true),
-  requireObservedEvidence: z.boolean().optional(),
-  observationTargets: z
-    .array(runtimeObservationTargetSchema)
-    .min(1)
-    .max(20)
-    .optional(),
-  requiredEvidenceKinds: z
-    .array(runtimeEvidenceKindSchema)
-    .max(6)
-    .default([])
-    .transform((values) => Array.from(new Set(values))),
-});
+export const runtimeCriterionSchema = z
+  .object({
+    observationContract: observationContractSchema.optional(),
+    description: z.string().trim().min(1).max(4_000),
+    basis: z
+      .object({
+        observationTarget: z.string().trim().min(1).max(500).optional(),
+        quote: z.string().trim().min(1).max(2_000).optional(),
+        sourceRefs: z.array(z.string().trim().min(1).max(500)).max(100),
+      })
+      .optional(),
+    id: z.string().trim().min(1).max(160),
+    required: z.boolean().default(true),
+    requireObservedEvidence: z.boolean().optional(),
+    observationTargets: z
+      .array(runtimeObservationTargetSchema)
+      .min(1)
+      .max(20)
+      .optional(),
+    requiredEvidenceKinds: z
+      .array(runtimeEvidenceKindSchema)
+      .max(6)
+      .default([])
+      .transform((values) => Array.from(new Set(values))),
+  })
+  .superRefine((criterion, context) => {
+    if (criterion.observationContract && criterion.observationTargets?.length)
+      context.addIssue({
+        code: "custom",
+        message: "v2 criteria cannot also use legacy observationTargets.",
+        path: ["observationTargets"],
+      });
+  });
 
 export const runtimeModelCandidateSchema = z.object({
   apiKey: z.string().min(1).max(4_096),
@@ -206,27 +228,37 @@ export const runtimeSpecSourceRefSchema = z.object({
   uri: z.string().trim().min(1).max(2_000),
 });
 
-export const runtimeSpecCriterionSchema = z.object({
-  requirementId: z.string().trim().min(1).max(100).optional(),
-  observationTargets: z
-    .array(runtimeObservationTargetSchema)
-    .min(1)
-    .max(20)
-    .optional(),
-  // Optional for persisted Specs from older runtimes; new generation requires it.
-  basis: z
-    .object({
-      sourceRef: z.string().trim().min(1).max(500),
-      quote: z.string().trim().min(1).max(2_000),
-      observationTarget: z.string().trim().min(1).max(500),
-    })
-    .optional(),
-  description: z.string().trim().min(1).max(5_000),
-  id: z.string().trim().min(1).max(160),
-  required: z.boolean().default(true),
-  requiredEvidenceKinds: z.array(runtimeEvidenceKindSchema).min(1).max(6),
-  sourceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
-});
+export const runtimeSpecCriterionSchema = z
+  .object({
+    observationContract: observationContractSchema.optional(),
+    requirementId: z.string().trim().min(1).max(100).optional(),
+    observationTargets: z
+      .array(runtimeObservationTargetSchema)
+      .min(1)
+      .max(20)
+      .optional(),
+    // Optional for persisted Specs from older runtimes; new generation requires it.
+    basis: z
+      .object({
+        sourceRef: z.string().trim().min(1).max(500),
+        quote: z.string().trim().min(1).max(2_000),
+        observationTarget: z.string().trim().min(1).max(500),
+      })
+      .optional(),
+    description: z.string().trim().min(1).max(5_000),
+    id: z.string().trim().min(1).max(160),
+    required: z.boolean().default(true),
+    requiredEvidenceKinds: z.array(runtimeEvidenceKindSchema).min(1).max(6),
+    sourceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
+  })
+  .superRefine((criterion, context) => {
+    if (criterion.observationContract && criterion.observationTargets?.length)
+      context.addIssue({
+        code: "custom",
+        message: "v2 criteria cannot also use legacy observationTargets.",
+        path: ["observationTargets"],
+      });
+  });
 
 export const runtimeGeneratedSpecCaseSchema = z.object({
   accountRequirementsVersion: z.literal(2).optional(),
@@ -314,6 +346,7 @@ export const runtimeGeneratedSpecSchema = z.object({
 });
 
 export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
+  observationContractVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   specFormat: z.enum(["COMPACT", "CHECK_REFERENCES"]).optional(),
   attemptNumber: z.number().int().positive(),
   deadlineAt: z.string().datetime(),
@@ -458,6 +491,7 @@ export const runtimeTaskLeaseSchema = z.object({
 });
 
 export const runtimeTaskClaimInputSchema = z.object({
+  features: z.array(z.string().max(100)).max(30).optional(),
   capabilities: z.array(runtimeCapabilitySchema).min(1).max(8),
   protocol: runtimeProtocolVersionSchema,
   workerId: z.string().trim().min(1).max(200),
@@ -544,6 +578,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.started"),
     payload: runtimeTraceStepContextSchema.extend({
+      contextSnapshot: stepContextArchiveSchema.optional(),
       progress: runtimeProgressSchema.optional(),
       modelCallId: z.string().uuid().optional(),
       inputPreview: z.unknown(),
@@ -554,6 +589,7 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("agent.model.completed"),
     payload: runtimeTraceStepContextSchema.extend({
+      decisionOutput: z.unknown().optional(),
       modelCallId: z.string().uuid().optional(),
       durationMs: z.number().int().nonnegative(),
       inputPreview: z.unknown(),
@@ -712,6 +748,8 @@ export const runtimeBrowserCommandInputSchema = leasedTaskInputSchema.extend({
 export const runtimeBrowserReleaseInputSchema = leasedTaskInputSchema;
 
 export const runtimeCriterionResultSchema = z.object({
+  bindingIds: z.array(z.string().uuid()).max(160).optional(),
+  comparisonReviewIds: z.array(z.string().uuid()).max(100).optional(),
   criterionId: z.string().trim().min(1).max(160),
   evidenceRefs: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
   observations: z
@@ -738,11 +776,32 @@ export const runtimeVerificationTerminationReasonSchema = z.enum([
   "LOCATOR_RECOVERY_EXHAUSTED",
 ]);
 
+export const EVIDENCE_CATALOG_CAPABILITY = "attempt-evidence-catalog-v1";
+export const runtimeEvidenceCatalogSchema = z.object({
+  version: z.literal(1),
+  runId: z.string().uuid(),
+  attemptId: z.string().uuid(),
+  // The control plane seals the catalog against the complete persisted attempt.
+  sealedAt: z.string().datetime().optional(),
+  count: z.number().int().nonnegative().optional(),
+  digest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+});
+
 const verificationCompletedOutcomeSchema = z
   .object({
     termination: z
       .object({
         reason: runtimeVerificationTerminationReasonSchema,
+      })
+      .optional(),
+    evidenceCatalog: runtimeEvidenceCatalogSchema.optional(),
+    cleanup: z
+      .object({
+        status: z.enum(["PENDING", "BLOCKED"]),
+        note: z.string().min(1).max(4000),
       })
       .optional(),
     criteria: z.array(runtimeCriterionResultSchema).min(1).max(100),
