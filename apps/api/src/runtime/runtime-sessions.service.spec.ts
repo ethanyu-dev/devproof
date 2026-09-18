@@ -489,11 +489,9 @@ describe("authentication snapshot rollout compatibility", () => {
         const sessions = new RuntimeSessionsService(
           {
             browserRuntime: {
-              findUnique: vi
-                .fn()
-                .mockResolvedValue({
-                  capabilities: capable ? ["distributed-auth-v1"] : [],
-                }),
+              findUnique: vi.fn().mockResolvedValue({
+                capabilities: capable ? ["distributed-auth-v1"] : [],
+              }),
             },
           } as never,
           {} as never,
