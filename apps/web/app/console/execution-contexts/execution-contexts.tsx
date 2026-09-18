@@ -47,7 +47,7 @@ export function ExecutionContexts() {
   return (
     <div className={styles.page}>
       <PageHeader
-        title="执行上下文"
+        title="browser runtime 上下文"
         description="逐轮查看 Agent 看到了什么、准备做什么。每次执行尝试独立留存，重试保留历史。"
         actions={
           <Button

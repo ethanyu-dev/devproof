@@ -114,9 +114,10 @@ CONSOLE evidence enable diagnostics initially. The local read tool is available
 in bounded mode, and human-input tools follow the task's HITL policy.
 
 Text context limits are measured as serialized JSON bytes, not model tokens.
-The 96 KiB budget includes tool schemas and text input. Compaction drops whole
-old response groups, retaining at most four and never leaving a function call
-without its output. If fixed requirements, state, tools and the last remaining
+The default 512 KiB budget includes tool schemas, text input and image metadata.
+Two recent turns retain detailed tool facts; up to twelve older turns retain
+compact summaries. Budget trimming removes whole old groups from the current
+request projection without leaving a function call without its output. If fixed requirements, state, tools and the last remaining
 group still exceed the limit, the executor reports `AGENT_CONTEXT_BUDGET_EXCEEDED`.
 It does not summarize away accepted evidence or silently truncate tool pairs.
 
@@ -124,8 +125,9 @@ The observation cache holds up to 4 MiB and 256 descriptors. Each captured body
 is capped at 256 KiB; local reads expose at most 12 KiB of escaped content per
 page, while projected browser tool envelopes are limited to 16 KiB. Pagination
 exposes refs only after their complete lines are delivered. Cache availability
-does not make an old ref current. Images use a separate limit and are appended
-after the text-budget check, so the complete request is larger than 96 KiB.
+does not make an old ref current. Image pixels use a separate allowance, so the complete transport request can
+exceed the text budget. Configured model windows reserve output and image space;
+unknown windows are reported explicitly. See [decision context](agent-context-budget-design.md).
 
 Within a segment, successful form input can preserve existing DOM refs if the
 nodes remain attached, while its previous image is replaced or invalidated.

@@ -11,7 +11,6 @@ import {
   FileJson,
 } from "lucide-react";
 import {
-  STEP_CONTEXT_SECTIONS,
   type ExecutionContextDetail,
   type StepContextCall,
   type StepContextContent,
@@ -28,6 +27,8 @@ import {
 import styles from "./step-context.module.css";
 import { ContextBlocks, ContextContentView } from "./context-blocks";
 import { ValueView } from "./context-value";
+import { RequestUsage } from "./request-usage";
+import { ContextBudget } from "./context-budget";
 
 export function ExecutionContextTimeline({
   runId,
@@ -83,7 +84,9 @@ export function ExecutionContextTimeline({
       </Link>
       <PageHeader
         title="Step Context"
-        description={data?.attempt.goal.split("\n")[0] ?? "执行上下文详情"}
+        description={
+          data?.attempt.goal.split("\n")[0] ?? "browser runtime 上下文详情"
+        }
         actions={
           <>
             <Link
@@ -277,11 +280,6 @@ function StepCard({
           <div>
             <strong>Step {step.number}</strong>
             <CallStatus call={call} />
-            <span
-              className={call.hasFullContext ? styles.complete : styles.muted}
-            >
-              {call.hasFullContext ? "完整上下文" : "历史预览"}
-            </span>
           </div>
           <p>{call.intent ?? "未记录行动计划"}</p>
           <small>
@@ -291,15 +289,9 @@ function StepCard({
             {step.calls.length > 1 && ` · ${step.calls.length} 次模型请求`}
           </small>
         </div>
+        <RequestUsage call={call} />
         <ChevronDown size={18} className={open ? styles.rotated : ""} />
       </button>
-      {!open && (
-        <div className={styles.collapsedSections}>
-          {STEP_CONTEXT_SECTIONS.map(([key, label]) => (
-            <span key={key}>{label}</span>
-          ))}
-        </div>
-      )}
       {open && (
         <div className={styles.stepBody}>
           <div className={styles.callBar}>
@@ -344,11 +336,6 @@ function StepCard({
                   模型调用失败：{content.modelError}
                 </div>
               )}
-              <div className={styles.intent}>
-                <span>AGENT 行动计划 · 模型输出</span>
-                <p>{call.intent ?? "这次模型调用没有输出 stepIntent。"}</p>
-                <small>表示执行前准备做的事，不代表操作成功或验收通过。</small>
-              </div>
               {content.completeness === "LEGACY_PREVIEW" && (
                 <div className={styles.notice}>
                   以下为历史日志预览，可能包含截断或深度限制。分区无法还原时，请展开底部「原始请求与模型输出」查看已有记录。
@@ -364,6 +351,7 @@ function StepCard({
                   </details>
                 </div>
               )}
+              <ContextBudget metrics={content.metrics} />
               <ContextBlocks
                 key={call.id}
                 sections={content.sections}
@@ -377,7 +365,7 @@ function StepCard({
                 </summary>
                 <p className={styles.muted}>
                   完整请求含模型实际收到的
-                  messages、tools、参数及图片。可切换原文与结构化查看，下载保留所有字段。工具执行结果来自运行日志预览。
+                  messages、tools、参数及图片。有图片时可切换至「图片内容」，下载保留所有字段。工具执行结果来自运行日志预览。
                 </p>
                 <ContextContentView
                   label="原始请求与模型输出"

@@ -37,12 +37,12 @@ reverse scrolling, and actual input/search allow recovery; changing ref or delta
 magnitude alone does not. Legacy responses without feedback are not assumed to
 prove motion. Search and complete-list traversal remain distinct coverage claims.
 
-Observation descriptors in model requests are limited to 8 KiB, prioritizing the
+Observation descriptors in model requests are limited to 16 KiB by default, prioritizing the
 current DOM and the last requested observation, then recent entries. The complete
 segment cache and its read cursors are retained. `observationIndexOmitted` reports
 omissions; an omitted index entry is still readable by an existing ID until normal
 cache eviction. This prevents long read/snapshot sequences from exhausting the
-96 KiB text request budget just through historical descriptors. Context metrics
+512 KiB default text request budget just through historical descriptors. Context metrics
 and budget failures report component byte counts without logging their content.
 
 ## Verification and rollout

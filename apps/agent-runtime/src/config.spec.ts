@@ -9,6 +9,8 @@ const managedKeys = [
   "DEVPROOF_AGENT_MODEL_HOST_ALLOWLIST",
   "DEVPROOF_AGENT_CONTEXT_MODE",
   "DEVPROOF_AGENT_CONTEXT_MAX_BYTES",
+  "DEVPROOF_AGENT_CONTEXT_RETENTION",
+  "DEVPROOF_AGENT_CONTEXT_MODEL_LIMITS",
   "DEVPROOF_AGENT_TOOL_SURFACE_MODE",
   "DEVPROOF_AGENT_POLL_INTERVAL_MS",
   "DEVPROOF_AGENT_TOOL_LIMIT",
@@ -37,6 +39,24 @@ afterEach(() => {
 });
 
 describe("Agent Runtime configuration", () => {
+  it("parses retention overrides and model windows without guessing capabilities", () => {
+    process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
+    process.env.DEVPROOF_AGENT_CONTEXT_RETENTION = '{"summaryTurns":2}';
+    process.env.DEVPROOF_AGENT_CONTEXT_MODEL_LIMITS =
+      '{"vision":{"contextWindowTokens":131072}}';
+    expect(runtimeConfig()).toMatchObject({
+      DEVPROOF_AGENT_CONTEXT_RETENTION: {
+        detailedTurns: 2,
+        summaryTurns: 2,
+        savedObservationBytes: 49152,
+      },
+      DEVPROOF_AGENT_CONTEXT_MODEL_LIMITS: {
+        vision: { contextWindowTokens: 131072, outputReserveTokens: 8192 },
+      },
+    });
+    process.env.DEVPROOF_AGENT_CONTEXT_RETENTION = "broken-json";
+    expect(() => runtimeConfig()).toThrow(/DEVPROOF_AGENT_CONTEXT_RETENTION/u);
+  });
   it("groups browser tools independently of the context rollback", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
     expect(runtimeConfig().DEVPROOF_AGENT_TOOL_SURFACE_MODE).toBe("GROUPED");
@@ -52,7 +72,8 @@ describe("Agent Runtime configuration", () => {
     process.env.DEVPROOF_AGENT_RUNTIME_TOKEN = "agent-runtime-token";
     expect(runtimeConfig()).toMatchObject({
       DEVPROOF_AGENT_CONTEXT_MODE: "BOUNDED",
-      DEVPROOF_AGENT_CONTEXT_MAX_BYTES: 98_304,
+      DEVPROOF_AGENT_CONTEXT_MAX_BYTES: 524_288,
+      DEVPROOF_AGENT_TOOL_LIMIT: 120,
     });
     process.env.DEVPROOF_AGENT_CONTEXT_MODE = "LEGACY";
     expect(runtimeConfig().DEVPROOF_AGENT_CONTEXT_MODE).toBe("LEGACY");

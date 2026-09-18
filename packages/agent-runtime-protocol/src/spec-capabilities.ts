@@ -6,7 +6,30 @@ export function testsLocalization(value: string) {
 }
 
 export const SPEC_EXECUTION_SCOPE_GUIDANCE =
-  "测试范围由任务说明、Issue 或 PR 中的明确需求决定。默认不生成语言切换、翻译一致性或跨语言品牌环境测试；PR 的 i18n 文件、英文枚举和 Route Spec 的多语言标签不能扩展测试范围。普通英文界面的功能测试仍保留。多语言需求必须在对应 requirement 中声明 testScope=LOCALIZATION，并通过 intentEvidence 引用任务说明、Issue 或 PR 验收要求中的明确原文。混合用例只移除无依据的语言步骤与验收，保留普通功能覆盖。同类型的创建、修改和清理优先组织为一个生命周期用例，分别记录验收。不同写入用例不能把文档示例账号当作已分配资源；缺少独立账号时明确声明需提供测试数据。浏览器验收优先使用用户可见结果；需要请求方法、参数、请求体或响应数据时 requiredEvidenceKinds 必须包含 NETWORK，JSON 按结构核对。";
+  "测试范围由任务说明、Issue 或 PR 中的明确需求决定。默认不生成语言切换、翻译一致性或跨语言品牌环境测试；PR 的 i18n 文件、英文枚举和 Route Spec 的多语言标签不能扩展测试范围。普通英文界面的功能测试仍保留。多语言需求必须在对应 requirement 中声明 testScope=LOCALIZATION，并通过 intentEvidence 引用任务说明、Issue 或 PR 验收要求中的明确原文。混合用例只移除无依据的语言步骤与验收，保留普通功能覆盖。同类型的创建、修改和清理优先组织为一个生命周期用例，分别记录验收。同一结果的内部请求方法、路径、参数、请求体、响应字段及状态码不单列需求或验收标准，也不要求 NETWORK 证据。网络请求仅供执行 Agent 辅助理解、排查与核对业务写入，验收以用户可见的业务结果为准。接口细节按需保留在 testData 或说明中；只有接口契约而无法确定用户可见结果时，请求澄清测试目标。不同写入用例不能把文档示例账号当作已分配资源；缺少独立账号时明确声明需提供测试数据。";
+
+type AcceptanceCriterion = {
+  description?: string | undefined;
+  requiredEvidenceKinds?: readonly string[] | undefined;
+  observationTargets?:
+    readonly { label: string; network?: unknown }[] | undefined;
+};
+
+/** New browser acceptance contracts describe product behavior, never wire format.
+ * Kept separate from persisted schemas so historical Specs remain readable.
+ */
+export function networkAcceptanceError(criterion: AcceptanceCriterion) {
+  if (
+    requiresNetworkEvidence(criterion.description ?? "") ||
+    criterion.requiredEvidenceKinds?.includes("NETWORK") ||
+    criterion.observationTargets?.some(
+      (target) =>
+        target.network !== undefined || requiresNetworkEvidence(target.label),
+    )
+  )
+    return "网络请求仅作 Agent 参考，不进入验收标准。请将该项改为用户可见的业务结果，移除 observationTargets[].network 和 requiredEvidenceKinds 中的 NETWORK；方法、路径、参数、请求体和响应细节按需放在测试说明或 testData 中。已有网络验收 Spec 请重新生成，不将旧标准自动视为通过。";
+  return null;
+}
 
 type Requirement = {
   id: string;
@@ -44,18 +67,22 @@ export function specCapabilityError(
       name: string;
       preconditions: string[];
       steps: Array<{ action: string }>;
-      criteria: Array<{
-        id: string;
-        description: string;
-        requirementId?: string | undefined;
-        requiredEvidenceKinds: string[];
-      }>;
+      criteria: Array<
+        AcceptanceCriterion & {
+          id: string;
+          description: string;
+          requirementId?: string | undefined;
+          requiredEvidenceKinds: string[];
+        }
+      >;
     }>;
   },
   issueTexts: ReadonlyMap<string, string>,
 ) {
   const requirements = new Map((spec.requirements ?? []).map((r) => [r.id, r]));
   for (const requirement of requirements.values()) {
+    if (requiresNetworkEvidence(requirement.description))
+      return `需求 ${requirement.id} 的网络请求细节仅作参考，请保留对应的用户可见业务需求，接口细节放入测试说明。`;
     const error = localizationRequirementError(requirement, issueTexts);
     if (error) return error;
   }
@@ -80,18 +107,15 @@ export function specCapabilityError(
     )
       return `用例「${testCase.name}」包含无明确需求依据的多语言步骤或验收，请移除额外范围并保留普通功能检查。`;
     for (const criterion of testCase.criteria) {
-      if (
-        requiresNetworkEvidence(criterion.description) &&
-        !criterion.requiredEvidenceKinds.includes("NETWORK")
-      )
-        return `验收 ${criterion.id} 检查接口请求或响应，必须使用 NETWORK 证据；不能用 DOM 证明请求参数。可改为独立的用户可见功能验收。`;
+      const error = networkAcceptanceError(criterion);
+      if (error) return `验收 ${criterion.id}：${error}`;
     }
   }
   return null;
 }
 
 export function requiresNetworkEvidence(description: string) {
-  return /请求体|请求参数|请求.{0,12}(?:携带|包含|参数|POST|PUT|PATCH|DELETE)|响应(?:体|数据|JSON)|request (?:body|payload|parameters)|response (?:body|json)/iu.test(
+  return /请求体|请求参数|查询参数|请求(?:方法|路径|头)|请求.{0,12}(?:携带|包含|参数|POST|PUT|PATCH|DELETE)|响应(?:体|数据|JSON|字段|状态码)|(?:HTTP|接口).{0,8}状态码|(?:GET|POST|PUT|PATCH|DELETE)\s+\/|request (?:body|payload|parameters|headers|method|path)|response (?:body|json|status|fields)|query parameters/iu.test(
     description,
   );
 }

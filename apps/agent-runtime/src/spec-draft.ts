@@ -13,6 +13,7 @@ import {
   runtimeUncoveredRequirementSchema,
   localizationRequirementError,
   requirementNecessityError,
+  requiresNetworkEvidence,
 } from "@devproof/agent-runtime-protocol";
 import { z } from "zod";
 
@@ -45,7 +46,7 @@ export const specCheckSchema = z.object({
     "尽量 80 字以内的一句业务结果；对象与状态放 businessCheck，不复述步骤和取证方式。",
   ),
   observationTargets: z
-    .array(runtimeObservationTargetSchema)
+    .array(runtimeObservationTargetSchema.omit({ network: true }).strict())
     .min(1)
     .max(20)
     .optional(),
@@ -55,8 +56,16 @@ export const specCheckSchema = z.object({
     .array(z.string().trim().min(1).max(500))
     .max(99)
     .default([]),
-  requiredEvidenceKinds:
-    runtimeSpecCriterionSchema.shape.requiredEvidenceKinds.default(["DOM"]),
+  requiredEvidenceKinds: z
+    .array(
+      runtimeSpecCriterionSchema.shape.requiredEvidenceKinds.element.exclude([
+        "NETWORK",
+      ]),
+    )
+    .min(1)
+    .max(6)
+    .default(["DOM"])
+    .describe("用户可见业务结果的证据；网络请求仅供参考，不要求 NETWORK。"),
 });
 
 /** Model-facing input; repeated audit fields are filled by the runtime. */
@@ -256,6 +265,10 @@ export function defineSpecRequirements(
   return plan.requirements.map((item, index) => {
     if (!/[\u3400-\u4dbf\u4e00-\u9fff]/u.test(item.description))
       throw new Error("需求描述必须使用中文；来源原文保持原样。");
+    if (requiresNetworkEvidence(item.description))
+      throw new Error(
+        "网络请求仅供 Agent 参考，不单列验收需求。请保留对应的用户可见业务结果，接口细节放入测试说明；来源引用原文保持不变。",
+      );
     const content = sourceContents.get(item.sourceRef);
     if (!content?.includes(item.quote))
       throw new Error(

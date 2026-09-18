@@ -101,9 +101,18 @@ export class BrowserObservations {
   retainedCriterionFacts() {
     return [...this.criterionFacts.values()];
   }
-  criterionFactView(unresolvedIds: string[], maxBytes = 12 * 1024) {
+  criterionFactView(unresolvedIds: string[], maxBytes = 48 * 1024) {
     const selected: SavedCriterionObservation[] = [];
-    for (const fact of this.criterionFacts.values()) {
+    // Unfinished criteria first, newest observation within each criterion first.
+    const priority = new Map(unresolvedIds.map((id, index) => [id, index]));
+    const facts = [...this.criterionFacts.values()]
+      .reverse()
+      .sort(
+        (a, b) =>
+          (priority.get(a.criterionId) ?? Infinity) -
+          (priority.get(b.criterionId) ?? Infinity),
+      );
+    for (const fact of facts) {
       if (
         unresolvedIds.includes(fact.criterionId) &&
         jsonBytes([...selected, fact]) <= maxBytes

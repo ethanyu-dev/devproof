@@ -4,6 +4,7 @@ import {
   compactSpecSchema,
   defineSpecRequirements,
   normalizeCompactSpec,
+  specCheckSchema,
 } from "./spec-draft.js";
 
 const sourceRef = "analysis-source://attempt/issue";
@@ -47,6 +48,43 @@ const draft = {
 };
 
 describe("compact Spec", () => {
+  it("does not expose network assertions or mandatory network evidence to generation", () => {
+    const check = draft.cases[0]!.criteria[0]!;
+    expect(
+      specCheckSchema.safeParse({
+        ...check,
+        requiredEvidenceKinds: ["NETWORK"],
+      }).success,
+    ).toBe(false);
+    expect(
+      specCheckSchema.safeParse({
+        ...check,
+        observationTargets: [
+          {
+            ...check.observationTargets[0],
+            network: {
+              method: "POST",
+              path: "/whitelist",
+              part: "REQUEST_BODY",
+              field: "type",
+              equals: "LEGACY_CORPORATE",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+  it("rejects standalone network requirements while allowing network details in source quotes", () => {
+    const quote = "保存后列表显示启用；请求体 config 为 true。";
+    const define = (description: string) =>
+      defineSpecRequirements(
+        { requirements: [{ description, sourceRef, quote }] },
+        new Map([[sourceRef, quote]]),
+        new Map([[sourceRef, { kind: "TASK_BRIEF" }]]),
+      );
+    expect(() => define("请求体 config 为 true。")).toThrow("不单列验收需求");
+    expect(define("保存后列表显示启用。")[0]?.quote).toBe(quote);
+  });
   it("fills execution fields while preserving the separately defined scope", () => {
     expect(
       compactSpecSchema.shape.cases.element.safeParse(draft.cases[0]).success,

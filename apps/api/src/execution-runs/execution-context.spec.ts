@@ -294,4 +294,43 @@ describe("execution context history", () => {
       decodeStepContext({ ...archive, byteLength: bytes.length - 1 }),
     ).toThrow("Invalid");
   });
+  it("returns request metrics without loading archives and uses input tokens only", () => {
+    const start = event("agent.model.started", 1, {
+      modelCallId: callId,
+      inputPreview: { context: { requestBytes: 2_000_000 } },
+      contextArchive: { byteLength: 2_100_000 },
+    });
+    const end = event("agent.model.completed", 2, {
+      modelCallId: callId,
+      usage: {
+        prompt_tokens: 125_000,
+        completion_tokens: 500,
+        total_tokens: 125_500,
+      },
+    });
+    expect(
+      presentCall(start, [start, end], new Set([callId]), true),
+    ).toMatchObject({
+      requestBytes: 2_000_000,
+      inputTokens: 125_000,
+    });
+    expect(presentCall(start, [start], new Set(), false)).toMatchObject({
+      requestBytes: 2_000_000,
+      inputTokens: null,
+    });
+  });
+  it("preserves zero usage and leaves missing or invalid metrics unknown", () => {
+    const start = event("agent.model.started", 1, {
+      modelCallId: callId,
+      inputPreview: { context: { requestBytes: -1 } },
+    });
+    const end = event("agent.model.completed", 2, {
+      modelCallId: callId,
+      usage: { input_tokens: 0 },
+    });
+    expect(presentCall(start, [start, end], new Set(), true)).toMatchObject({
+      requestBytes: null,
+      inputTokens: 0,
+    });
+  });
 });

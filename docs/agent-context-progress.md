@@ -26,7 +26,7 @@ summary claimed the content was still in the current page.
 ## Memory and convergence
 
 `record_progress` optionally saves a phase, exact quotes from delivered pages,
-and the planned next action beyond the four-turn summary window. Unknown or
+and the planned next action beyond the rolling operation window (two detailed turns plus twelve summaries by default). Unknown or
 undelivered quotes are rejected. Quotes are observations, while the phase/next
 action remain plans: they neither accept criteria nor reactivate historical refs.
 Recording a plan does not earn an adaptive deadline extension.

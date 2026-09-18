@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import {
   ChevronDown,
   FileText,
@@ -16,7 +16,7 @@ import {
   type StepContextContent,
   type StepContextSection,
 } from "@devproof/contracts";
-import { ValueView } from "./context-value";
+import { contextImages } from "./context-images";
 import { bytesLabel } from "./context-display";
 import styles from "./step-context.module.css";
 
@@ -167,7 +167,10 @@ export function ContextContentView({
   value: unknown;
   label: string;
 }) {
-  const [structured, setStructured] = useState(false);
+  const [view, setView] = useState("raw");
+  const id = useId();
+  const images = useMemo(() => contextImages(value), [value]);
+  const showImages = view === "images" && images.length > 0;
   const raw = useMemo(
     () =>
       typeof value === "string"
@@ -178,36 +181,90 @@ export function ContextContentView({
   return (
     <div>
       <div className={styles.contentToolbar}>
-        <div
-          role="group"
-          aria-label={`${label}查看方式`}
-          className={styles.viewSwitch}
-        >
-          <button
-            type="button"
-            aria-pressed={!structured}
-            onClick={() => setStructured(false)}
+        {images.length > 0 ? (
+          <div
+            role="tablist"
+            aria-label={`${label}查看方式`}
+            className={styles.viewSwitch}
+            onKeyDown={(event) => {
+              if (
+                !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+              )
+                return;
+              event.preventDefault();
+              const next =
+                event.key === "Home"
+                  ? "raw"
+                  : event.key === "End"
+                    ? "images"
+                    : showImages
+                      ? "raw"
+                      : "images";
+              setView(next);
+              event.currentTarget
+                .querySelector<HTMLButtonElement>(`[data-view="${next}"]`)
+                ?.focus();
+            }}
           >
-            完整原文
-          </button>
-          <button
-            type="button"
-            aria-pressed={structured}
-            onClick={() => setStructured(true)}
-          >
-            结构化查看
-          </button>
-        </div>
-        <span>{raw.length.toLocaleString()} 字符 · 全部内容</span>
+            <button
+              type="button"
+              role="tab"
+              id={`${id}-raw`}
+              aria-controls={`${id}-panel`}
+              aria-selected={!showImages}
+              tabIndex={showImages ? -1 : 0}
+              data-view="raw"
+              onClick={() => setView("raw")}
+            >
+              完整原文
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id={`${id}-images`}
+              aria-controls={`${id}-panel`}
+              aria-selected={showImages}
+              tabIndex={showImages ? 0 : -1}
+              data-view="images"
+              onClick={() => setView("images")}
+            >
+              图片内容 · {images.length}
+            </button>
+          </div>
+        ) : (
+          <span>完整原文</span>
+        )}
+        <span>
+          {showImages
+            ? `${images.length} 张图片`
+            : `${raw.length.toLocaleString()} 字符`}
+        </span>
       </div>
       <div
         className={styles.contentViewport}
-        role="region"
-        aria-label={`${label}详情`}
+        id={`${id}-panel`}
+        role={images.length ? "tabpanel" : "region"}
+        aria-labelledby={
+          images.length ? `${id}-${showImages ? "images" : "raw"}` : undefined
+        }
+        aria-label={images.length ? undefined : `${label}详情`}
         tabIndex={0}
       >
-        {structured ? (
-          <ValueView value={value} />
+        {showImages ? (
+          <div className={styles.imageGallery}>
+            {images.map((source, index) => (
+              <figure key={index}>
+                <img
+                  className={styles.contextImage}
+                  src={source}
+                  alt={`${label} · 图片 ${index + 1}`}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+                <figcaption>图片 {index + 1}</figcaption>
+              </figure>
+            ))}
+          </div>
         ) : (
           <pre className={styles.fullText}>{raw}</pre>
         )}

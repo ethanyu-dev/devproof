@@ -27,7 +27,7 @@ Spec 分析同时输出每个 Case 的 `accountRequirements`。按独立业务�
 
 浏览器点击对被自身展示标签覆盖的关闭态 combobox 定位到同一控件的外层，不强制穿透其他浮层。上下文按实际字节预算裁剪完整工具轮次，最多保留 32 组。已交付的稳定页面观察可保存为带来源的验收事实，随 checkpoint 恢复；它们不自动产生通过结论，也不恢复过期的元素引用。模型须引用证据完成判定。
 
-网络字段验收可使用 `networkCitations: [{target, observationId, cursor, requestIndex}]` 引用 `page.network` 中已读取的完整请求，序号从 0 开始。平台绑定原始请求和 NETWORK 证据，并对现有 Spec 中的请求体字段集合、明确命名的 JSON 字段和查询参数做结构化比较；不会用页面文字或截断数据替代网络证据。业务记录台账支持 `/list` 查询路径和 `whitelists` 列表字段，仍要求创建前的完整空结果、同资源成功提交及后续记录才能确认创建归属。
+网络仅供执行 Agent 参考，新 Spec 不生成网络字段验收。历史 Spec 可使用 `networkCitations: [{target, observationId, cursor, requestIndex}]` 引用 `page.network` 中已读取的完整请求，序号从 0 开始。平台绑定原始请求和 NETWORK 证据，并对现有 Spec 中的请求体字段集合、明确命名的 JSON 字段和查询参数做结构化比较；不会用页面文字或截断数据替代网络证据。业务记录台账支持 `/list` 查询路径和 `whitelists` 列表字段，仍要求创建前的完整空结果、同资源成功提交及后续记录才能确认创建归属。
 
 ## 部署与验证
 

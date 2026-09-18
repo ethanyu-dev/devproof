@@ -215,8 +215,12 @@ export class BoundEvidence {
     return this.bindings.get(id);
   }
 
-  view(maxBytes = 12 * 1024) {
-    const coverage = this.criteria
+  view(maxBytes = 32 * 1024, unresolvedIds?: readonly string[]) {
+    const priority = (id: string) => (unresolvedIds?.includes(id) ? 0 : 1);
+    const criteria = [...this.criteria].sort(
+      (a, b) => priority(a.id) - priority(b.id),
+    );
+    const coverage = criteria
       .filter((c) => c.observationContract)
       .flatMap((c) =>
         observationCoverage(
@@ -253,12 +257,15 @@ export class BoundEvidence {
       );
     const selected: ObservationBinding[] = [];
     const ids = new Set(coverage.flatMap((c) => c.bindingIds));
-    for (const binding of this.bindings.values()) {
+    const bindings = [...this.bindings.values()]
+      .reverse()
+      .sort((a, b) => priority(a.criterionId) - priority(b.criterionId));
+    for (const binding of bindings) {
       if (
         ids.has(binding.id) &&
         Buffer.byteLength(JSON.stringify(selected)) +
           Buffer.byteLength(JSON.stringify(binding)) <=
-          8 * 1024
+          Math.floor((maxBytes * 2) / 3)
       )
         selected.push(binding);
     }
@@ -266,12 +273,12 @@ export class BoundEvidence {
     for (const row of coverage) {
       if (
         Buffer.byteLength(JSON.stringify([...visibleCoverage, row])) >
-        4 * 1024
+        Math.floor(maxBytes / 3)
       )
-        break;
+        continue;
       visibleCoverage.push(row);
     }
-    const comparisons = this.criteria.flatMap(
+    const comparisons = criteria.flatMap(
       (c) =>
         c.observationContract?.comparisons.map((requirement) => ({
           criterionId: c.id,
@@ -287,6 +294,7 @@ export class BoundEvidence {
       comparisons,
       omittedBindings: this.bindings.size - selected.length,
       omittedTargets: coverage.length - visibleCoverage.length,
+      omittedComparisons: 0,
       nextAction:
         coverage.length && coverage.every((c) => c.readiness === "READY")
           ? "REVIEW: compare required images, then submit bindingIds and comparisonReviewIds."
@@ -294,11 +302,19 @@ export class BoundEvidence {
       guidance:
         "Historical bindings are evidence, never current click references. read_observation_bindings can retrieve omitted facts.",
     };
-    while (
-      Buffer.byteLength(JSON.stringify(view)) > maxBytes &&
-      view.comparisons.length
-    )
-      view.comparisons.pop();
+    for (const [items, omitted] of [
+      [view.comparisons, "omittedComparisons"],
+      [view.bindings, "omittedBindings"],
+      [view.coverage, "omittedTargets"],
+    ] as const) {
+      while (
+        Buffer.byteLength(JSON.stringify(view)) > maxBytes &&
+        items.length
+      ) {
+        items.pop();
+        view[omitted]++;
+      }
+    }
     return view;
   }
   /** Called only after a model request completed; budget-discarded views never count. */

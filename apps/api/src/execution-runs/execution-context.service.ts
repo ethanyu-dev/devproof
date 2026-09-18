@@ -317,6 +317,8 @@ export function presentCall(
       return [];
     }
   });
+  const metrics = obj(obj(p.inputPreview).context);
+  const usage = obj(obj(end?.payload).usage);
   return {
     id: modelId(start),
     model: String(p.model ?? "unknown"),
@@ -334,6 +336,16 @@ export function presentCall(
         : null,
     intent: intents.length ? intents.join("；") : null,
     hasFullContext: fullIds.has(modelId(start)),
+    requestBytes: nonnegativeNumber(metrics.requestBytes),
+    inputTokens:
+      nonnegativeNumber(usage.prompt_tokens) ??
+      nonnegativeNumber(usage.input_tokens),
     toolNames: calls.map((c) => String(obj(obj(c).function).name)),
   };
+}
+
+function nonnegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
 }

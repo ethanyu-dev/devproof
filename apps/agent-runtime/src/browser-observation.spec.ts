@@ -1,4 +1,5 @@
 import { runtimeActionCommandInputSchema } from "@devproof/runtime-protocol";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserObservations } from "./browser-observation.js";
 import { ModelContext, jsonBytes } from "./model-context.js";
@@ -199,6 +200,30 @@ describe("browser observations", () => {
     expect(cache.currentPage().snapshot?.nextUnreadCursor).toBe(0);
   });
 
+  it("keeps more saved facts and prioritizes unfinished criteria without deleting omitted observations", () => {
+    const cache = new BrowserObservations();
+    const facts = Array.from({ length: 20 }, (_, i) => ({
+      id: randomUUID(),
+      criterionId: i < 10 ? "completed" : "pending",
+      target: `type-${i}`,
+      observationId: randomUUID(),
+      cursor: 0,
+      quote: "x".repeat(2000),
+      contextQuotes: [],
+      evidenceRefs: [],
+    }));
+    cache.restoreCriterionFacts(facts);
+    const expanded = cache.criterionFactView(["pending"]);
+    const small = cache.criterionFactView(["pending"], 12 * 1024);
+    expect(expanded.observations).toHaveLength(10);
+    expect(expanded.observations[0]!.id).toBe(facts.at(-1)!.id);
+    expect(small.observations.length).toBeLessThan(
+      expanded.observations.length,
+    );
+    expect(cache.retainedCriterionFacts()).toHaveLength(20);
+    expect(cache.savedCitation(facts[10]!.id, "pending")).toEqual(facts[10]);
+  });
+
   it("bounds the request index while preserving pinned observations and historical reads", () => {
     const cache = new BrowserObservations();
     const first = capture(cache, "历史选项").page;
@@ -214,9 +239,10 @@ describe("browser observations", () => {
       expect.arrayContaining([first.observationId, current.observationId]),
     );
     expect(bounded.length).toBeLessThan(cache.index().length);
-    const context = new ModelContext([
-      { role: "system", content: "指令".repeat(1500) },
-    ]);
+    const context = new ModelContext(
+      [{ role: "system", content: "指令".repeat(1500) }],
+      { maxBytes: 96 * 1024 },
+    );
     const base = { tools: [{ description: "schema".repeat(4000) }] };
     expect(() =>
       context.build(

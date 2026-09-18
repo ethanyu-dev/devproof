@@ -43,7 +43,7 @@ const adminSections = [
   {
     href: "/console/execution-contexts",
     icon: ListTree,
-    label: "执行上下文",
+    label: "browser runtime 上下文",
     group: "日志排查",
   },
   {

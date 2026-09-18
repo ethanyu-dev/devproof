@@ -1,5 +1,5 @@
 import {
-  requiresNetworkEvidence,
+  networkAcceptanceError,
   type RuntimeGeneratedSpec,
 } from "@devproof/agent-runtime-protocol";
 
@@ -40,6 +40,11 @@ export function specCriterionIssues(
       boundSourceRefs: criterion.sourceRefs,
     });
   };
+  const networkError = networkAcceptanceError(criterion);
+  if (networkError) {
+    add("NETWORK_REFERENCE_ONLY", "description", networkError);
+    return issues;
+  }
   if (!/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u.test(criterion.description))
     add(
       "CHINESE_REQUIRED",
@@ -71,12 +76,6 @@ export function specCriterionIssues(
             `observationContract.targets[${ti}].assertions[${ai}].expected`,
             "状态值类型必须与目标属性一致：CHECKED 为布尔值，TEXT/VALUE 为字符串。",
           );
-    if (requiresNetworkEvidence(criterion.description))
-      add(
-        "EVIDENCE_CHANNEL_MISMATCH",
-        "observationContract",
-        "网络字段必须使用 observationTargets[].network；businessCheck 只验证界面状态。请保留原业务义务并分别声明网络字段与界面检查。",
-      );
   }
   if (!basis || !criterion.sourceRefs.includes(basis.sourceRef))
     add(
@@ -92,20 +91,11 @@ export function specCriterionIssues(
       basis.quote,
     );
   const targets = criterion.observationTargets ?? [];
-  if (
-    requiresNetworkEvidence(criterion.description) &&
-    !criterion.requiredEvidenceKinds.includes("NETWORK")
-  )
-    add(
-      "EVIDENCE_CAPABILITY_MISMATCH",
-      "requiredEvidenceKinds",
-      "检查接口参数或载荷时必须包含 NETWORK；DOM 只能证明页面状态。",
-    );
   if (!targets.length && !criterion.observationContract)
     add(
       "MISSING_TARGETS",
       "observationTargets",
-      "缺少 observationTargets；请为每个待验证对象声明 label 和可在页面或接口中核对的 expectedText。",
+      "缺少 observationTargets；请为每个待验证对象声明 label 和可在页面中核对的 expectedText。",
     );
   if (
     criterion.observationContract?.version === 3 &&
@@ -170,7 +160,6 @@ export function specCriterionIssues(
   }
   const labels = new Set<string>();
   const texts = new Set<string>();
-  const networkChecks = new Set<string>();
   for (const [index, target] of targets.entries()) {
     const path = `observationTargets[${index}]`;
     if (labels.has(target.label))
@@ -180,45 +169,13 @@ export function specCriterionIssues(
         "的 observationTargets.label 必须唯一。",
         target.label,
       );
-    if (texts.has(target.expectedText) && !target.network)
+    if (texts.has(target.expectedText))
       add(
         "AMBIGUOUS_TARGET",
         `${path}.expectedText`,
         "用相同状态验证多个对象时，请改用 businessCheck.subjects + state，分别绑定各对象；不要为区分对象把需求句子拼进 expectedText。",
         target.expectedText,
       );
-    if (target.network && !criterion.requiredEvidenceKinds.includes("NETWORK"))
-      add(
-        "EVIDENCE_CAPABILITY_MISMATCH",
-        `${path}.network`,
-        "结构化请求检查必须包含 NETWORK 证据。",
-      );
-    if (target.network) {
-      const signature = JSON.stringify(target.network);
-      if (networkChecks.has(signature))
-        add(
-          "AMBIGUOUS_TARGET",
-          `${path}.network`,
-          "多个对象必须有各自的请求筛选条件，不能重复同一检查冒充分别覆盖。",
-        );
-      networkChecks.add(signature);
-      const values = [
-        target.network.equals,
-        ...target.network.where.map((w) => w.equals),
-      ].filter((v): v is string => typeof v === "string");
-      for (const value of values)
-        if (
-          !criterion.sourceRefs.some((ref) =>
-            (sourceContents.get(ref) ?? "").includes(value),
-          )
-        )
-          add(
-            "TARGET_TEXT_UNSUPPORTED",
-            `${path}.network`,
-            "网络字段预期和对象筛选值必须有来源依据。",
-            value,
-          );
-    }
     labels.add(target.label);
     texts.add(target.expectedText);
     const values: Array<[string, string]> = [

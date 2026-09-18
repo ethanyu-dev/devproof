@@ -20,6 +20,7 @@ import {
   testAccountBindingsSchema,
   testAccountInputSlotsSchema,
   readExecutionState,
+  networkAcceptanceError,
   runtimeTaskSnapshotSchema,
 } from "@devproof/agent-runtime-protocol";
 import type {
@@ -157,6 +158,10 @@ export class ExecutionRunService {
     taskExecutionId: string | null,
     browserProfileId: string | null = null,
   ) {
+    for (const criterion of input.criteria) {
+      const error = networkAcceptanceError(criterion);
+      if (error) throw new BadRequestException(error);
+    }
     input = {
       ...input,
       criteria: input.criteria.map((c) =>

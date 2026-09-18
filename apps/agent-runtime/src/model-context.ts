@@ -14,9 +14,19 @@ import {
   summarizeTurn,
   type OperationSummary,
 } from "./operation-summary.js";
+import {
+  contextRetentionSchema,
+  contextWindowBudget,
+  DEFAULT_CONTEXT_MAX_BYTES,
+  type ContextRetention,
+  type ModelContextLimits,
+} from "./context-policy.js";
 export interface ModelContextOptions {
   mode?: "BOUNDED" | "LEGACY";
   maxBytes?: number;
+  retention?: Partial<ContextRetention>;
+  modelLimits?: ModelContextLimits;
+  modelIds?: readonly string[];
 }
 
 export class ContextBudgetExceeded extends Error {
@@ -33,18 +43,21 @@ export class ContextBudgetExceeded extends Error {
 export class ModelContext {
   private readonly turns: ModelMessage[][] = [];
   private readonly summaries: OperationSummary[][] = [];
+  private readonly detailed = new Map<OperationSummary[], OperationSummary[]>();
   private readonly memory = new OperationMemory();
   private compactedTurns = 0;
   readonly bounded: boolean;
   private readonly maxBytes: number;
+  readonly retention: ContextRetention;
 
   constructor(
     private readonly initial: ModelMessage[],
-    options: ModelContextOptions = {},
+    private readonly options: ModelContextOptions = {},
   ) {
     this.initial = structuredClone(initial);
     this.bounded = options.mode !== "LEGACY";
-    this.maxBytes = options.maxBytes ?? 96 * 1_024;
+    this.maxBytes = options.maxBytes ?? DEFAULT_CONTEXT_MAX_BYTES;
+    this.retention = contextRetentionSchema.parse(options.retention ?? {});
   }
 
   completeTurn(message: ModelAssistantMessage | null, results: ModelMessage[]) {
@@ -65,7 +78,16 @@ export class ModelContext {
       const summary = summarizeTurn(message, results);
       this.memory.record(summary);
       this.summaries.push(summary);
-      while (this.summaries.length > 4) {
+      this.detailed.set(
+        summary,
+        summarizeTurn(message, results, this.retention),
+      );
+      for (const old of this.summaries.slice(0, -this.retention.detailedTurns))
+        this.detailed.delete(old);
+      while (
+        this.summaries.length >
+        this.retention.detailedTurns + this.retention.summaryTurns
+      ) {
         this.summaries.shift();
         this.compactedTurns += 1;
       }
@@ -79,7 +101,7 @@ export class ModelContext {
   compactForRecovery() {
     if (!this.bounded) return;
     while (this.summaries.length > 1) {
-      this.summaries.shift();
+      this.detailed.delete(this.summaries.shift()!);
       this.compactedTurns += 1;
     }
   }
@@ -94,106 +116,47 @@ export class ModelContext {
   ) {
     let workingState = state as Record<string, unknown>;
     let selectedPage = currentPage;
-    const messages = (): ModelMessage[] => [
-      ...this.initial,
-      ...(this.bounded
-        ? [
-            {
-              role: "user" as const,
-              content: JSON.stringify({
-                kind: "browser_working_state",
-                data: {
-                  ...workingState,
-                  executionMemory: this.memory.state(),
-                },
-              }),
-            },
-          ]
-        : []),
-      ...(this.bounded
-        ? [
-            {
-              role: "user" as const,
-              content: JSON.stringify({
-                kind: "recent_operations",
-                turns: presentOperationSummaries(this.summaries, selectedPage),
-              }),
-            },
-            {
-              role: "user" as const,
-              content: JSON.stringify({
-                kind: "current_browser_page",
-                data: selectedPage ?? null,
-              }),
-            },
-          ]
-        : this.turns.flat()),
-    ];
-    let view = messages();
-    let bytes = jsonBytes({ ...baseRequest, messages: view });
-    // Try the complete DOM against the actual serialized request, including tools,
-    // state, summaries and JSON escaping. Only paginate when that request cannot fit.
-    if (this.bounded && bytes > this.maxBytes && fallbackPage !== undefined) {
-      selectedPage = fallbackPage;
-      view = messages();
-      bytes = jsonBytes({ ...baseRequest, messages: view });
-    }
-    while (this.bounded && bytes > this.maxBytes && this.summaries.length > 1) {
-      this.summaries.shift();
-      this.compactedTurns += 1;
-      view = messages();
-      bytes = jsonBytes({ ...baseRequest, messages: view });
-    }
-    // Saved observations remain durable outside the prompt. Trim only their
-    // presentation when necessary; requirements, account bindings and writes stay pinned.
-    const saved = workingState.savedCriterionObservations as
-      { observations?: unknown[]; omitted?: number } | undefined;
-    if (this.bounded && bytes > this.maxBytes && saved?.observations?.length) {
-      const visible = [...saved.observations];
-      let omitted = saved.omitted ?? 0;
-      while (bytes > this.maxBytes && visible.length) {
-        visible.pop();
-        omitted++;
-        workingState = {
-          ...workingState,
-          savedCriterionObservations: {
-            ...saved,
-            observations: visible,
-            omitted,
-          },
-        };
-        view = messages();
-        bytes = jsonBytes({ ...baseRequest, messages: view });
-      }
-    }
-    const components = {
-      initial: jsonBytes(this.initial),
-      tools: jsonBytes(baseRequest.tools ?? []),
-      state: jsonBytes({
-        ...workingState,
-        executionMemory: this.memory.state(),
-      }),
-      operations: jsonBytes(
-        presentOperationSummaries(this.summaries, selectedPage),
-      ),
-      page: jsonBytes(selectedPage ?? null),
-    };
-    if (this.bounded && bytes > this.maxBytes)
-      throw new ContextBudgetExceeded(bytes, this.maxBytes, components);
-    const textRequestBytes = bytes;
+    const history = [...this.summaries];
+    const detailed = new Map(this.detailed);
+    const presentedHistory = () =>
+      presentOperationSummaries(
+        history.map((turn) => detailed.get(turn) ?? turn),
+        selectedPage,
+      );
     if ((referenceImages?.length ?? 0) > 2)
       throw new Error("At most two reference evidence images are allowed.");
-    for (const imageItem of referenceImages?.length
+    const images = referenceImages?.length
       ? referenceImages
       : image
         ? [image]
-        : []) {
+        : [];
+    const windowBudget = contextWindowBudget(
+      this.options.modelIds ??
+        (typeof baseRequest.model === "string" ? [baseRequest.model] : []),
+      this.options.modelLimits ?? {},
+      images.length,
+    );
+    const maxBytes = Math.min(
+      this.maxBytes,
+      windowBudget.maxTextBytes ?? Infinity,
+    );
+    const truncations: { component: string; reason: string; count: number }[] =
+      [];
+    const trimmed = (component: string, reason: string, count = 1) => {
+      const previous = truncations.find(
+        (t) => t.component === component && t.reason === reason,
+      );
+      if (previous) previous.count += count;
+      else truncations.push({ component, reason, count });
+    };
+    const imageMessages: ModelMessage[] = [];
+    for (const imageItem of images) {
       const image = imageItem;
       const reference =
         "bindingId" in imageItem ? (imageItem as ReferenceImage) : undefined;
       const { dataBase64, contentType, ...metadata } =
         visualObservationSchema.parse(image);
-      view.push({
+      imageMessages.push({
         role: "user",
         content: [
           {
@@ -223,20 +186,213 @@ export class ModelContext {
           },
         ],
       });
-      bytes = jsonBytes({ ...baseRequest, messages: view });
     }
+    const messages = (): ModelMessage[] => [
+      ...this.initial,
+      ...(this.bounded
+        ? [
+            {
+              role: "user" as const,
+              content: JSON.stringify({
+                kind: "browser_working_state",
+                data: {
+                  ...workingState,
+                  executionMemory: this.memory.state(),
+                },
+              }),
+            },
+          ]
+        : []),
+      ...(this.bounded
+        ? [
+            {
+              role: "user" as const,
+              content: JSON.stringify({
+                kind: "recent_operations",
+                turns: presentedHistory(),
+              }),
+            },
+            {
+              role: "user" as const,
+              content: JSON.stringify({
+                kind: "current_browser_page",
+                data: selectedPage ?? null,
+              }),
+            },
+          ]
+        : this.turns.flat()),
+      ...imageMessages,
+    ];
+    let view = messages();
+    let bytes = requestTextBytes(baseRequest, view);
+    const refresh = () => {
+      view = messages();
+      bytes = requestTextBytes(baseRequest, view);
+    };
+    // Trim the request projection, never the stored history: a small fallback
+    // model or a large page must not erase facts from later decisions.
+    while (
+      this.bounded &&
+      bytes > maxBytes &&
+      history.length > this.retention.detailedTurns
+    ) {
+      history.shift();
+      trimmed("operations", "OLDER_SUMMARY_BUDGET");
+      refresh();
+    }
+    for (const turn of history.slice(0, -1)) {
+      if (!this.bounded || bytes <= maxBytes) break;
+      if (detailed.delete(turn)) {
+        trimmed("operations", "DETAIL_TO_SUMMARY");
+        refresh();
+      }
+    }
+    if (this.bounded && bytes > maxBytes && fallbackPage !== undefined) {
+      selectedPage = fallbackPage;
+      trimmed("page", "PAGINATED_FOR_BUDGET");
+      refresh();
+    }
+    while (this.bounded && bytes > maxBytes && history.length > 1) {
+      history.shift();
+      trimmed("operations", "OLDER_SUMMARY_BUDGET");
+      refresh();
+    }
+    // Saved observations remain durable outside the prompt. Trim only their
+    // presentation when necessary; requirements, account bindings and writes stay pinned.
+    const saved = workingState.savedCriterionObservations as
+      { observations?: unknown[]; omitted?: number } | undefined;
+    if (this.bounded && bytes > maxBytes && saved?.observations?.length) {
+      const visible = [...saved.observations];
+      let omitted = saved.omitted ?? 0;
+      while (bytes > maxBytes && visible.length) {
+        visible.pop();
+        omitted++;
+        workingState = {
+          ...workingState,
+          savedCriterionObservations: {
+            ...saved,
+            observations: visible,
+            omitted,
+          },
+        };
+        trimmed("savedObservations", "LOWER_PRIORITY_OBSERVATION_BUDGET");
+        refresh();
+      }
+    }
+    const objects = workingState.objectEvidence as
+      Record<string, unknown> | undefined;
+    if (this.bounded && bytes > maxBytes && objects) {
+      const projected = structuredClone(objects);
+      for (const [key, omittedKey] of [
+        ["comparisons", "omittedComparisons"],
+        ["bindings", "omittedBindings"],
+        ["coverage", "omittedTargets"],
+      ] as const) {
+        const values = projected[key];
+        if (!Array.isArray(values)) continue;
+        while (bytes > maxBytes && values.length) {
+          values.pop();
+          projected[omittedKey] = Number(projected[omittedKey] ?? 0) + 1;
+          workingState = { ...workingState, objectEvidence: projected };
+          trimmed("objectEvidence", "LOWER_PRIORITY_OBJECT_BUDGET");
+          refresh();
+        }
+      }
+    }
+    if (
+      this.bounded &&
+      bytes > maxBytes &&
+      history[0] &&
+      detailed.delete(history[0])
+    ) {
+      trimmed("operations", "DETAIL_TO_SUMMARY");
+      refresh();
+    }
+    const components = {
+      initial: jsonBytes(this.initial),
+      tools: jsonBytes(baseRequest.tools ?? []),
+      state: jsonBytes({
+        ...workingState,
+        executionMemory: this.memory.state(),
+      }),
+      operations: jsonBytes(presentedHistory()),
+      page: jsonBytes(selectedPage ?? null),
+      savedObservations: jsonBytes(
+        workingState.savedCriterionObservations ?? null,
+      ),
+      objectEvidence: jsonBytes(workingState.objectEvidence ?? null),
+      observationIndex: jsonBytes(workingState.observations ?? []),
+      imageMetadata: jsonBytes(
+        imageMessages.map((message) =>
+          Array.isArray(message.content)
+            ? message.content.filter((part) => part.type === "text")
+            : [],
+        ),
+      ),
+    };
+    if (this.bounded && bytes > maxBytes)
+      throw new ContextBudgetExceeded(bytes, maxBytes, components);
+    const textRequestBytes = bytes;
     return {
       currentPage: selectedPage,
       messages: structuredClone(view),
       metrics: {
-        requestBytes: bytes,
+        requestBytes: jsonBytes({ ...baseRequest, messages: view }),
         textRequestBytes,
+        maxTextBytes: maxBytes,
+        configuredMaxTextBytes: this.maxBytes,
+        retention: this.retention,
+        windowBudget: {
+          ...windowBudget,
+          estimates: windowBudget.configured.map((limit) => ({
+            modelId: limit.modelId,
+            estimatedInputTokens:
+              textRequestBytes +
+              images.length * limit.imageTokensPerImage +
+              windowBudget.framingReserveTokens,
+            outputReserveTokens: limit.outputReserveTokens,
+            contextWindowTokens: limit.contextWindowTokens,
+          })),
+        },
+        truncations,
+        detailedTurns: history.filter((turn) => detailed.has(turn)).length,
+        summaryTurns: history.filter((turn) => !detailed.has(turn)).length,
+        resultsWithOmissions: history
+          .flatMap((turn) => detailed.get(turn) ?? turn)
+          .filter((operation) => hasOmission(operation.result)).length,
+        omitted: {
+          savedObservations:
+            (
+              workingState.savedCriterionObservations as
+                { omitted?: number } | undefined
+            )?.omitted ?? 0,
+          objectBindings:
+            (
+              workingState.objectEvidence as
+                { omittedBindings?: number } | undefined
+            )?.omittedBindings ?? 0,
+          objectTargets:
+            (
+              workingState.objectEvidence as
+                { omittedTargets?: number } | undefined
+            )?.omittedTargets ?? 0,
+          objectComparisons:
+            (
+              workingState.objectEvidence as
+                { omittedComparisons?: number } | undefined
+            )?.omittedComparisons ?? 0,
+          observationIndex: workingState.observationIndexOmitted ?? 0,
+        },
         usedPageFallback: selectedPage !== currentPage,
         componentBytes: components,
-        imageCount: image ? 1 : 0,
-        imageBytes: image ? Buffer.byteLength(image.dataBase64, "base64") : 0,
+        imageCount: images.length,
+        imageBytes: images.reduce(
+          (sum, item) => sum + Buffer.byteLength(item.dataBase64, "base64"),
+          0,
+        ),
         toolSchemaBytes: jsonBytes(baseRequest.tools ?? []),
-        retainedTurns: this.bounded ? this.summaries.length : this.turns.length,
+        retainedTurns: this.bounded ? history.length : this.turns.length,
+        droppedTurns: this.summaries.length - history.length,
         compactedTurns: this.compactedTurns,
         historyMode: this.bounded ? "OPERATION_SUMMARIES" : "FULL_HISTORY",
       },
@@ -244,6 +400,33 @@ export class ModelContext {
   }
 }
 
+function hasOmission(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if ("truncated" in value && value.truncated === true) return true;
+  if ("omittedItems" in value && Number(value.omittedItems) > 0) return true;
+  return Object.values(value).some(hasOmission);
+}
+
 export function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value));
+}
+
+/** Count text and tool schemas including image metadata, excluding pixel payloads. */
+function requestTextBytes(
+  base: Record<string, unknown>,
+  messages: ModelMessage[],
+) {
+  return jsonBytes({
+    ...base,
+    messages: messages.map((message) =>
+      Array.isArray(message.content)
+        ? {
+            ...message,
+            content: message.content.filter(
+              (part) => part.type !== "image_url",
+            ),
+          }
+        : message,
+    ),
+  });
 }

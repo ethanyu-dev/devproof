@@ -6,7 +6,7 @@ export const BOUND_EVIDENCE_CAPABILITIES = [
   "reference-evidence-images-v1",
 ] as const;
 export const BUSINESS_CHECK_CAPABILITY = "business-checks-v3";
-export const OBSERVATION_CONTRACT_GUIDANCE = `针对具体对象的控件状态、默认值以及样式参照比较，使用 observationContract.version=2，并省略 observationTargets。单纯文字、选项发现和网络验收继续使用 observationTargets；下述契约规则替代这些状态验收原有的文字目标规则。
+export const OBSERVATION_CONTRACT_GUIDANCE = `针对具体对象的控件状态、默认值以及样式参照比较，使用 observationContract.version=2，并省略 observationTargets。单纯文字和选项发现继续使用 observationTargets；网络请求仅作参考，不进入验收标准；下述契约规则替代这些状态验收原有的文字目标规则。
 契约分别声明 scope 区域、entity 身份、phase 阶段、assertions 属性断言、requiredEvidenceKinds 和 temporal=SAME_OBSERVATION。SELECTED_LABEL 是实际选中项，不是搜索词；区域、对象、阶段和全部断言必须同时成立，oneOf 只表示同一对象的等价名称。scope.names、entity.label 和 subject.label 使用来源明确的界面名称，不追加“开关”“选择器”等解释性词语；控件种类已由 kind 表达。
 targetId/assertionId/comparisonId 先用本标准内唯一的短标识，API 固化时分配正式编号。默认状态用 INITIAL_AFTER_OPEN，步骤明确每个类型新开弹窗、选择类型、观察后关闭，不能手动打开开关来证明默认开启。普通当前状态用 CURRENT。
 样式比较在 comparisons 中声明 subjectTargetId/referenceTargetId、需求支持的 dimensions、sourceRef 和原文 quote；两侧目标都要求 DOM 和 SCREENSHOT。不要增加来源未要求的像素、字体或精确颜色条件。所有对象名称和断言必须有来源依据。
@@ -316,8 +316,8 @@ export function compileBusinessCheck(
 export const BUSINESS_CHECK_GUIDANCE = `对象状态验收只填写 businessCheck：subjects（必须分别覆盖的业务对象）、state（label 与 equals）、when（仅默认值、操作后、重新打开时需要指定）。不同对象可以有相同状态值。不要填写 DOM 区域、控件类型、定位器、引用 ID 或 observationContract，执行阶段根据实际页面选择取证位置。
 示例：{"subjects":["合规模型映射","旧版对公转账白名单"],"state":{"label":"配置值","equals":"启用"}}。默认启用使用 equals=true、when="INITIAL_AFTER_OPEN"，不得手动开启来证明默认值。视觉对比才填写 compareWith 和 dimensions，参照对象不是新增测试需求。
 列表显示文字使用 state.property=TEXT；开关选中状态使用 CHECKED；输入值使用 VALUE。操作提到“开关”不代表列表断言是布尔值。
-网络字段使用 observationTargets[].network，声明 method、path、part（REQUEST_BODY/RESPONSE_BODY/QUERY）、field、equals；JSON 字符串字段加 encoding=JSON_STRING；不同对象使用 where 的字段和值分别限定请求，label 仅展示。不要用 businessCheck 验证网络字段。请求正确与保存后的界面状态分别保留验收义务。
-普通文字发现继续使用 observationTargets；expectedText 只能是实际界面文字或接口值，不能填“列表展示目标记录”等需求句子。description 尽量一句话、80 字以内，步骤只保留业务动作及必要顺序，不规定点击路线。不要把每个字段或取证动作生成独立标准。`;
+网络请求只供 Agent 参考，不生成 observationTargets[].network、不要求 NETWORK 证据，也不把请求方法、路径、参数或响应字段改写为 businessCheck。验收保留用户可见的业务结果；接口细节按需放在 testData。
+普通文字发现继续使用 observationTargets；expectedText 只能是实际界面文字，不能填“列表展示目标记录”等需求句子。description 尽量一句话、80 字以内，步骤只保留业务动作及必要顺序，不规定点击路线。不要把每个字段或取证动作生成独立标准。`;
 export type ObservationContract = z.infer<typeof observationContractSchema>;
 export type ObservationTargetV2 = z.infer<typeof observationTargetV2Schema>;
 
