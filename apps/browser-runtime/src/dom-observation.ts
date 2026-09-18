@@ -428,6 +428,7 @@ export class DomObservations {
             state.recordMutations(state.observer.takeRecords());
             state.elements = new Map<string, Element>();
             const nodes: ObservedNode[] = [];
+            const capturedNodes = new Map<Element, ObservedNode>();
             const nodeId = (el: Element) => {
               let id = state.ids.get(el);
               if (!id) {
@@ -602,6 +603,7 @@ export class DomObservations {
                   element.getAttribute("aria-disabled") === "true"
                 );
               nodes.push(observed);
+              capturedNodes.set(element, observed);
               if (
                 visible &&
                 (ownText ||
@@ -609,6 +611,8 @@ export class DomObservations {
                   scrollY ||
                   scrollX ||
                   /^h[1-6]$/.test(tag) ||
+                  ["tr", "form", "dialog"].includes(tag) ||
+                  ["row", "form", "dialog", "alertdialog"].includes(rawRole) ||
                   tag === "img")
               ) {
                 const ref = input.prefix + (refs.length + 1);
@@ -617,6 +621,22 @@ export class DomObservations {
                 store.set(ref, element);
                 if (element === focus) focusRef = ref;
                 const attributes: string[] = [];
+                // Explicit scope links survive deep, flattened DOM indentation.
+                let ancestor = element.parentElement;
+                while (ancestor) {
+                  const parent = capturedNodes.get(ancestor);
+                  if (
+                    parent?.ref &&
+                    (["tr", "form", "dialog"].includes(parent.tag) ||
+                      ["row", "form", "dialog", "alertdialog"].includes(
+                        parent.role ?? "",
+                      ))
+                  ) {
+                    attributes.push(`scopeRef=${JSON.stringify(parent.ref)}`);
+                    break;
+                  }
+                  ancestor = ancestor.parentElement;
+                }
                 for (const axis of ["Y", "X"] as const) {
                   if (!(axis === "Y" ? scrollY : scrollX)) continue;
                   const position =
@@ -999,7 +1019,9 @@ export class DomObservations {
             if (state.regions.size > 4000)
               for (const [id, region] of state.regions)
                 if (!region.open) state.regions.delete(id);
-            state.initialized = !limited && !input.scoped;
+            // A partial read cannot revoke the history established by an earlier
+            // complete capture. Explicit invalidation still clears this flag.
+            state.initialized ||= !limited && !input.scoped;
             return {
               content: lines.join("\n"),
               refs,

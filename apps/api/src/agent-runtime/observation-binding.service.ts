@@ -196,6 +196,7 @@ export class ObservationBindingService {
           targetId: target.targetId,
           contractDigest: binding.contractDigest,
           observationId: observation.captureId,
+          bindingDigest,
         };
         const saved = await this.prisma.$transaction(async (tx) => {
           await this.assertLease(tx, task);
@@ -216,12 +217,8 @@ export class ObservationBindingService {
             skipDuplicates: true,
           });
           const row = await tx.runObservationBinding.findUniqueOrThrow({
-            where: { attemptId_targetId_contractDigest_observationId: unique },
+            where: { observationResolution: unique },
           });
-          if (row.bindingDigest !== bindingDigest)
-            throw new ConflictException(
-              "BINDING_CONFLICT: an immutable observation cannot be overwritten.",
-            );
           return observationBindingSchema.parse({
             ...record(row.facts),
             id: row.id,

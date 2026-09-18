@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { randomUUID } from "node:crypto";
 import { ExecutionJournal } from "./execution-journal.js";
 import { taskTestAccount } from "./test-account.js";
 import { executionStateSchema } from "@devproof/agent-runtime-protocol";
@@ -47,6 +48,425 @@ const listing = {
   status: 200,
   responseSummary: JSON.stringify({ data: [record] }),
 };
+
+function uiRows(enabled: boolean, time: number, account = "13962083614") {
+  return {
+    status: "SUCCEEDED",
+    evidence: [...evidence.values()],
+    result: {
+      structuredObservation: {
+        version: 2,
+        captureId: randomUUID(),
+        capturedFrom: new Date(time).toISOString(),
+        capturedUntil: new Date(time).toISOString(),
+        pageIdentity: "https://app.test/records",
+        frames: [],
+        regions: [],
+        renderedText: "",
+        consistency: "VERIFIED",
+        coverage: {
+          scope: "VIEWPORT",
+          completeWithinScope: true,
+          truncated: false,
+          unavailableFrames: [],
+        },
+        nodes: [
+          { nodeId: "row", tag: "tr" },
+          ...["123", account, "合规模型映射", enabled ? "启用" : "禁用"].map(
+            (text, i) => ({
+              nodeId: `cell-${i}`,
+              tag: "td",
+              parentId: "row",
+              text,
+            }),
+          ),
+        ].map((n) => ({
+          ...n,
+          ref: n.nodeId,
+          frameId: "frame",
+          documentEpoch: "frame",
+          visible: true,
+          attributes: {},
+          relations: [],
+          textLocation: { start: 0, end: 0 },
+        })),
+      },
+    },
+  };
+}
+
+it("confirms restoration from a fresh UI read without requiring network receipts", () => {
+  const j = new ExecutionJournal({});
+  const baseline = uiRows(true, 1000);
+  j.observe(baseline, evidence, { commandType: "page.snapshot", payload: {} });
+  j.update({
+    records: [
+      {
+        id: "123",
+        type: "合规模型映射",
+        account: "13962083614",
+        ownership: "EXISTING",
+        initialState: '{"enabled":true}',
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "PENDING", instruction: "恢复启用" },
+      },
+    ],
+  });
+  expect(j.state.records[0]?.uiBaseline).toBeDefined();
+  j.observe(uiRows(false, 2000), evidence, {
+    commandType: "page.click",
+    payload: {},
+  });
+  j.observe(uiRows(true, 3000), evidence, {
+    commandType: "page.click",
+    payload: {},
+  });
+  expect(j.state.cleanupConfirmations).toEqual([]);
+  // Reload returns before the executor's automatic canonical snapshot.
+  j.observe({ status: "SUCCEEDED", result: {} }, evidence, {
+    commandType: "page.reload",
+    payload: {},
+  });
+  expect(j.state.cleanupConfirmations).toEqual([]);
+  j.observe(uiRows(true, 4000), evidence);
+  expect(j.state.cleanupConfirmations[0]?.source).toBe("UI");
+  j.update({
+    records: [
+      {
+        recordRef: j.state.records[0]!.recordRef,
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "COMPLETED", instruction: "恢复启用" },
+      },
+    ],
+  });
+  expect(j.state.records[0]?.cleanup?.status).toBe("COMPLETED");
+  j.observe(uiRows(false, 5000), evidence, {
+    commandType: "page.click",
+    payload: {},
+  });
+  expect(j.state.records[0]?.cleanup?.status).toBe("PENDING");
+  expect(j.state.cleanupConfirmations).toEqual([]);
+});
+
+it("rejects stale, foreign-account and still-modified UI restoration evidence", () => {
+  const j = new ExecutionJournal({});
+  const baseline = uiRows(true, 1000);
+  j.observe(baseline, evidence);
+  j.update({
+    records: [
+      {
+        id: "123",
+        type: "合规模型映射",
+        account: "13962083614",
+        ownership: "EXISTING",
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "PENDING", instruction: "恢复" },
+      },
+    ],
+  });
+  for (const read of [
+    baseline,
+    uiRows(false, 2000),
+    uiRows(true, 3000, "other-user"),
+  ]) {
+    j.observe(read, evidence, { commandType: "page.reload", payload: {} });
+    expect(j.state.cleanupConfirmations).toEqual([]);
+  }
+});
+
+it("does not use identity-only rows as restoration baselines", () => {
+  const j = new ExecutionJournal({});
+  const baseline = uiRows(true, 1000);
+  baseline.result.structuredObservation.nodes.pop();
+  j.observe(baseline, evidence);
+  j.update({
+    records: [
+      {
+        id: "123",
+        account: "13962083614",
+        ownership: "EXISTING",
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "PENDING", instruction: "恢复" },
+      },
+    ],
+  });
+  expect(j.state.records[0]?.uiBaseline).toBeUndefined();
+  j.observe(
+    {
+      ...baseline,
+      result: {
+        structuredObservation: {
+          ...baseline.result.structuredObservation,
+          captureId: randomUUID(),
+          capturedFrom: new Date(2000).toISOString(),
+          capturedUntil: new Date(2000).toISOString(),
+        },
+      },
+    },
+    evidence,
+    { commandType: "page.reload", payload: {} },
+  );
+  expect(j.state.cleanupConfirmations).toEqual([]);
+});
+
+it.each(["UI", "NETWORK"])(
+  "invalidates UI cleanup when a later %s read contradicts it",
+  (source) => {
+    const j = new ExecutionJournal({});
+    j.observe(output([listing]), evidence);
+    j.observe(uiRows(true, 1000), evidence);
+    j.update({
+      records: [
+        {
+          recordRef: j.state.observedRecords[0]!.recordRef,
+          evidenceRefs: ["network-1"],
+          cleanup: { status: "PENDING", instruction: "恢复" },
+        },
+      ],
+    });
+    j.observe(uiRows(true, 2000), evidence, {
+      commandType: "page.reload",
+      payload: {},
+    });
+    const recordRef = j.state.records[0]!.recordRef;
+    j.update({
+      records: [
+        {
+          recordRef,
+          evidenceRefs: ["network-1"],
+          cleanup: { status: "COMPLETED", instruction: "恢复" },
+        },
+      ],
+    });
+    expect(j.state.records[0]?.cleanup?.status).toBe("COMPLETED");
+    if (source === "UI")
+      j.observe(uiRows(false, 3000), evidence, {
+        commandType: "page.snapshot",
+        payload: {},
+      });
+    else
+      j.observe(
+        output([
+          {
+            ...listing,
+            requestId: 3,
+            responseSummary: JSON.stringify({
+              data: [{ ...record, config: '{"value":false}' }],
+            }),
+          },
+        ]),
+        evidence,
+      );
+    expect(j.state.cleanupConfirmations).toEqual([]);
+    expect(j.state.records[0]?.cleanup?.status).toBe("PENDING");
+    if (source === "NETWORK") {
+      j.observe(uiRows(true, 4000), evidence, {
+        commandType: "page.reload",
+        payload: {},
+      });
+      expect(j.state.cleanupConfirmations).toEqual([]);
+    }
+  },
+);
+
+it("uses the submitted form and a visible row when the creation list body is unavailable", () => {
+  const j = new ExecutionJournal({});
+  j.observe(output([preflight]), evidence);
+  const form = uiRows(true, 1000);
+  form.result.structuredObservation.nodes = [
+    {
+      ...form.result.structuredObservation.nodes[0]!,
+      nodeId: "form",
+      tag: "form",
+    },
+    {
+      ...form.result.structuredObservation.nodes[1]!,
+      parentId: "form",
+      tag: "input",
+      text: "",
+      value: "13962083614",
+    },
+    {
+      ...form.result.structuredObservation.nodes[2]!,
+      parentId: "form",
+      tag: "select",
+      text: "",
+      selectedLabel: "合规模型映射",
+      selectedLabelSource: "NATIVE_SELECT",
+    },
+  ] as typeof form.result.structuredObservation.nodes;
+  j.observe(form, evidence);
+  const created = uiRows(true, 2000);
+  j.observe(
+    {
+      ...created,
+      result: {
+        ...created.result,
+        actionFeedback: {
+          commandId: "cmd",
+          requests: [{ ...create, bodyPending: true }],
+        },
+      },
+    },
+    evidence,
+    { commandType: "page.click", payload: {} },
+  );
+  expect(j.state.writes[0]?.uiTypeLabel).toBe("合规模型映射");
+  // Finishing body capture after the form closed must retain its type mapping.
+  j.observe(output([create]), evidence);
+  expect(j.state.writes).toHaveLength(1);
+  expect(j.state.writes[0]?.uiTypeLabel).toBe("合规模型映射");
+  expect(j.state.records).toEqual([]);
+  j.update({
+    records: [
+      {
+        id: "123",
+        account: "13962083614",
+        type: "合规模型映射",
+        ownership: "CREATED_THIS_RUN",
+        evidenceRefs: ["network-1"],
+      },
+    ],
+  });
+  expect(j.state.records[0]).toMatchObject({
+    id: "123",
+    type: "MAPPING",
+    displayType: "合规模型映射",
+    resourceUrl: url,
+    ownership: "CREATED_THIS_RUN",
+  });
+  expect(j.unresolvedWrites()).toEqual([]);
+  expect(() =>
+    j.update({
+      records: [
+        {
+          id: "999",
+          account: "13962083614",
+          type: "合规模型映射",
+          ownership: "CREATED_THIS_RUN",
+          evidenceRefs: ["network-1"],
+        },
+      ],
+    }),
+  ).toThrow("本次创建归属");
+});
+
+it.each(["pageIndex", "page_index"])(
+  "recognizes %s pagination for creation and cleanup",
+  (pageKey) => {
+    const j = new ExecutionJournal({});
+    const empty = {
+      ...preflight,
+      url: `${preflight.url}&${pageKey}=1&pageSize=10`,
+      responseSummary: '{"whitelists":[],"total":"0"}',
+    };
+    j.observe(output([empty, create, listing]), evidence);
+    expect(j.state.records[0]?.ownership).toBe("CREATED_THIS_RUN");
+    j.observe(
+      output([
+        {
+          method: "DELETE",
+          requestId: 3,
+          url: `${url}?id=123`,
+          status: 200,
+          responseSummary: "{}",
+        },
+        { ...empty, requestId: 4 },
+      ]),
+      evidence,
+    );
+    expect(j.state.cleanupConfirmations).toHaveLength(1);
+  },
+);
+
+it("inherits a pre-mutation canonical baseline rather than locking model display strings", () => {
+  const j = new ExecutionJournal({});
+  j.observe(output([listing]), evidence);
+  expect(j.state.observedRecords[0]).toMatchObject({
+    type: "MAPPING",
+    initialState: '{"value":true}',
+  });
+  j.update({
+    records: [
+      {
+        id: "123",
+        type: "合规模型映射",
+        account: "13962083614",
+        ownership: "EXISTING",
+        initialState: "配置值为启用",
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "PENDING", instruction: "恢复" },
+      },
+    ],
+  });
+  expect(j.state.records[0]).toMatchObject({
+    type: "MAPPING",
+    displayType: "合规模型映射",
+    resourceUrl: url,
+    initialState: '{"value":true}',
+  });
+  j.observe(
+    output([
+      {
+        method: "PUT",
+        requestId: 3,
+        url,
+        status: 200,
+        requestSummary: JSON.stringify({
+          id: 123,
+          type: "MAPPING",
+          account: "user-uuid",
+          config: '{"value":true}',
+        }),
+        responseSummary: "{}",
+      },
+      { ...listing, requestId: 4 },
+    ]),
+    evidence,
+  );
+  expect(j.unreviewedWrites()).toEqual([]);
+  expect(j.state.cleanupConfirmations).toHaveLength(1);
+});
+
+it("never derives an initial state from a post-mutation read", () => {
+  const j = new ExecutionJournal({});
+  j.observe(
+    output([
+      {
+        ...create,
+        method: "PUT",
+        requestSummary: JSON.stringify({
+          id: 123,
+          type: "MAPPING",
+          account: "user-uuid",
+        }),
+      },
+      listing,
+    ]),
+    evidence,
+  );
+  expect(j.state.observedRecords).toEqual([]);
+});
+
+it("atomically blocks pending records and unidentified writes without claiming cleanup", () => {
+  const j = new ExecutionJournal({});
+  j.observe(output([listing]), evidence);
+  j.update({
+    records: [
+      {
+        recordRef: j.state.observedRecords[0]!.recordRef,
+        evidenceRefs: ["network-1"],
+        cleanup: { status: "PENDING", instruction: "恢复" },
+      },
+    ],
+  });
+  j.observe(output([{ ...create, requestSummary: undefined }]), evidence);
+  j.blockCleanup("当前页面无法确认另一笔写入归属");
+  expect(j.state.records[0]?.cleanup?.status).toBe("BLOCKED");
+  expect(j.unreviewedWriteKeys()).toEqual([]);
+  expect(j.unresolvedWrites()).toHaveLength(1);
+  expect(j.cleanupNotice()).toContain("当前页面无法确认");
+});
 describe("execution business journal", () => {
   it.each([false, true])(
     "ignores blank and invalid response identities without joining unrelated users (multi=%s)",

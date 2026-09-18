@@ -8,6 +8,48 @@ import type { ObservationTargetV2 } from "../../../packages/agent-runtime-protoc
 import { DomObservations } from "./dom-observation.js";
 import { focusedObservation } from "../../agent-runtime/src/observation-view.js";
 
+it("preserves established reopening history across a scoped read and exposes row membership", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(
+      await readFile(
+        new URL("./fixtures/object-evidence.html", import.meta.url),
+        "utf8",
+      ),
+    );
+    const dom = new DomObservations();
+    const first = (await dom.snapshot(page)).structured;
+    const row = first.nodes.find((n) => n.tag === "tr")!;
+    const cell = first.nodes.find((n) => n.tag === "td")!;
+    expect(
+      first.renderedText.slice(cell.textLocation.start, cell.textLocation.end),
+    ).toContain(`scopeRef="${row.ref}"`);
+    expect(row.textLocation.start).toBeLessThan(cell.textLocation.start);
+    await dom.markAction(page, randomUUID());
+    await page.locator("#open").click();
+    await dom.snapshot(page);
+    await dom.markAction(page, randomUUID());
+    await page.locator("#close").click();
+    await dom.snapshot(page);
+    await dom.snapshot(page, page.locator("table"));
+    await dom.markAction(page, randomUUID());
+    await page.locator("#open").click();
+    const reopened = (await dom.snapshot(page)).structured;
+    const dialog = reopened.nodes.find((n) => n.tag === "dialog")!;
+    expect(
+      reopened.regions.find((r) => r.nodeId === dialog.nodeId),
+    ).toMatchObject({ phaseProven: true, reopened: true });
+    await dom.invalidatePhases(page);
+    const invalidated = (await dom.snapshot(page)).structured;
+    expect(
+      invalidated.regions.find((r) => r.nodeId === dialog.nodeId)?.phaseProven,
+    ).toBe(false);
+  } finally {
+    await browser.close();
+  }
+});
+
 it("captures popup ownership and focuses visible options beside a virtualized ARIA list", async () => {
   const browser = await chromium.launch({ headless: true });
   try {

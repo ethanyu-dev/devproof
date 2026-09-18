@@ -149,26 +149,31 @@ function operationOutput(
 }
 
 it.each([
-  { unavailable: false, business: false },
-  { unavailable: true, business: false },
-  { unavailable: false, business: true },
-  { unavailable: true, business: true },
+  { unavailable: false, business: false, terminal: false },
+  { unavailable: true, business: false, terminal: false },
+  { unavailable: false, business: true, terminal: false },
+  { unavailable: true, business: true, terminal: false },
+  { unavailable: false, business: false, terminal: true },
+  { unavailable: false, business: true, terminal: true },
 ])(
   "resolves cached observation IDs and isolates binding exhaustion from independent criteria (%j)",
-  async ({ unavailable, business }) => {
+  async ({ unavailable, business, terminal }) => {
     const captureId = "41b749ff-60c6-48f1-b837-550b062dacce";
+    const attempts = terminal ? 1 : 3;
+    const summary = terminal ? "停止无效重试" : "三次绑定";
     let calls = 0;
     const create = vi.fn().mockImplementation(async (request) => {
       const snapshot = contextData(request, "current_browser_page").data
         .snapshot;
       const index = calls++;
-      if (index > 3) throw new Error("Binding recovery did not converge");
+      if (index > attempts)
+        throw new Error("Binding recovery did not converge");
       return {
         id: `reply-${index}`,
         message: {
           role: "assistant",
           tool_calls: [
-            index < 3
+            index < attempts
               ? functionCall(
                   business ? "observe_subject" : "bind_observation",
                   business
@@ -303,6 +308,7 @@ it.each([
         if (_op === "read") return { bindings: [] };
         if (_op === "deliver") return { accepted: true };
         expect(selection.observationId).toBe(captureId);
+        if (terminal) throw new Error("HTTP 409 OBSERVATION_BINDING_CONFLICT");
         if (unavailable) throw new Error("HTTP 400 OBSERVATION_NOT_AVAILABLE");
         return {
           bindings: [],
@@ -328,7 +334,7 @@ it.each([
         expect.objectContaining({
           criterionId: "default-state",
           status: "INCONCLUSIVE",
-          summary: expect.stringContaining("三次绑定"),
+          summary: expect.stringContaining(summary),
         }),
         expect.objectContaining({
           criterionId: "page-visible",
@@ -338,12 +344,12 @@ it.each([
     });
     expect(
       observationOperation.mock.calls.filter((c) => c[1] === "bind"),
-    ).toHaveLength(3);
+    ).toHaveLength(attempts);
     expect(
       harness.controlPlane.appendEvent.mock.calls.some(
         (c) =>
           c[1] === "execution.checkpoint" &&
-          JSON.stringify(c[2]).includes("三次绑定"),
+          JSON.stringify(c[2]).includes(summary),
       ),
     ).toBe(true);
   },
@@ -6002,87 +6008,121 @@ describe("durable finalization regressions", () => {
       ).toBeLessThanOrEqual(200);
     },
   );
-  it("keeps a valid criterion through cleanup rejection and forced budget finalization", async () => {
-    const create = vi
-      .fn()
-      .mockResolvedValueOnce({
-        id: "read",
-        message: {
-          role: "assistant",
-          content: null,
-          tool_calls: [
-            functionCall(
-              "browser_command",
-              { commandType: "page.dom", payload: {} },
-              1,
-            ),
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        id: "finish",
-        message: {
-          role: "assistant",
-          content: null,
-          tool_calls: [
-            functionCall(
-              "finish_verification",
-              {
-                summary: "页面验证完成。",
-                verdict: "PASSED",
-                criteria: [
-                  {
-                    criterionId: "page-visible",
-                    status: "PASSED",
-                    summary: "页面可见。",
-                    evidenceRefs: ["artifact://proof"],
-                  },
-                ],
-              },
-              2,
-            ),
-          ],
-        },
+  it.each([false, true])(
+    "keeps criteria when finalizing blocked cleanup (explicit reason: %s)",
+    async (explicitReason) => {
+      const create = vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: "read",
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              functionCall(
+                "browser_command",
+                { commandType: "page.dom", payload: {} },
+                1,
+              ),
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          id: "finish",
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              functionCall(
+                "finish_verification",
+                {
+                  summary: "页面验证完成。",
+                  verdict: "PASSED",
+                  ...(explicitReason
+                    ? {
+                        cleanupBlockedReason:
+                          "页面不可用，需人工核对恢复已有记录和未关联提交。",
+                      }
+                    : {}),
+                  criteria: [
+                    {
+                      criterionId: "page-visible",
+                      status: "PASSED",
+                      summary: "页面可见。",
+                      evidenceRefs: ["artifact://proof"],
+                    },
+                  ],
+                },
+                2,
+              ),
+            ],
+          },
+        });
+      const { controlPlane, runTask } = convergenceHarness(create);
+      controlPlane.browserCommand.mockResolvedValue({
+        status: "SUCCEEDED",
+        artifacts: [{ id: "proof", kind: "DOM" }],
       });
-    const { controlPlane, runTask } = convergenceHarness(create);
-    controlPlane.browserCommand.mockResolvedValue({
-      status: "SUCCEEDED",
-      artifacts: [{ id: "proof", kind: "DOM" }],
-    });
-    runTask.snapshot.executionPolicy.executionState = {
-      writes: [
-        {
-          key: "w",
-          method: "POST",
-          url: "https://app.test/records",
-          status: 200,
-          confirmed: true,
-          evidenceRefs: ["artifact://proof"],
-        },
-      ],
-    };
-    const executor = new BrowserVerificationExecutor(
-      modelFactory(create),
-      controlPlane as never,
-      2,
-    );
-    const outcome = await executor.execute(
-      runTask,
-      lease,
-      new AbortController().signal,
-    );
-    expect(outcome).toMatchObject({
-      kind: "VERIFICATION_COMPLETED",
-      cleanup: { status: "BLOCKED" },
-      termination: { reason: "TOOL_LIMIT_REACHED" },
-      criteria: [expect.objectContaining({ status: "PASSED" })],
-    });
-    expect(
-      controlPlane.appendEvent.mock.calls.some(
-        (c) =>
-          c[1] === "execution.checkpoint" &&
-          c[2].verificationCheckpoint.criteria[0]?.status === "PASSED",
-      ),
-    ).toBe(true);
-  });
+      runTask.snapshot.executionPolicy.executionState = {
+        records: [
+          {
+            id: "123",
+            account: "test-account",
+            ownership: "EXISTING",
+            evidenceRefs: ["artifact://proof"],
+            cleanup: { status: "PENDING", instruction: "恢复已有记录" },
+          },
+        ],
+        writes: [
+          {
+            key: "w",
+            method: "POST",
+            url: "https://app.test/records",
+            status: 200,
+            confirmed: true,
+            evidenceRefs: ["artifact://proof"],
+          },
+        ],
+      };
+      const executor = new BrowserVerificationExecutor(
+        modelFactory(create),
+        controlPlane as never,
+        2,
+      );
+      const outcome = await executor.execute(
+        runTask,
+        lease,
+        new AbortController().signal,
+      );
+      expect(outcome).toMatchObject({
+        kind: "VERIFICATION_COMPLETED",
+        cleanup: { status: "BLOCKED" },
+        ...(explicitReason
+          ? {}
+          : { termination: { reason: "TOOL_LIMIT_REACHED" } }),
+        criteria: [expect.objectContaining({ status: "PASSED" })],
+      });
+      expect(
+        controlPlane.appendEvent.mock.calls.some(
+          (c) =>
+            c[1] === "execution.checkpoint" &&
+            c[2].verificationCheckpoint?.criteria[0]?.status === "PASSED",
+        ),
+      ).toBe(true);
+      if (explicitReason) {
+        expect(outcome).not.toHaveProperty("termination");
+        const journal = controlPlane.appendEvent.mock.calls
+          .filter((c) => c[1] === "execution.checkpoint" && c[2].executionState)
+          .at(-1)![2].executionState;
+        expect(journal.records[0].cleanup).toMatchObject({
+          status: "BLOCKED",
+          note: expect.stringContaining("人工核对"),
+        });
+        expect(journal.cleanupReview).toMatchObject({
+          status: "BLOCKED",
+          writeKeys: ["w"],
+        });
+      }
+    },
+  );
 });

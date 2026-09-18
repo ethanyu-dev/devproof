@@ -2,6 +2,10 @@ import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  structuredObservationSchema,
+  type StructuredObservation,
+} from "@devproof/runtime-protocol";
+import {
   executionStateSchema,
   executionRecordSchema,
   executionRecordDeltaSchema,
@@ -188,6 +192,28 @@ export const executionProgressSchema = z.object({
  */
 export class ExecutionJournal {
   state: ExecutionState;
+  private lastUiObservation?: StructuredObservation;
+  private lastUiEvidenceRefs: string[] = [];
+  private pendingUiRead = false;
+  private invalidateUiConfirmations(recordRef?: string) {
+    const refs = new Set(
+      this.state.cleanupConfirmations
+        .filter(
+          (p) => p.source === "UI" && (!recordRef || p.recordRef === recordRef),
+        )
+        .map((p) => p.recordRef),
+    );
+    for (const r of this.state.records)
+      if (
+        r.recordRef &&
+        refs.has(r.recordRef) &&
+        r.cleanup?.status === "COMPLETED"
+      )
+        r.cleanup.status = "PENDING";
+    this.state.cleanupConfirmations = this.state.cleanupConfirmations.filter(
+      (p) => p.source !== "UI" || (!!recordRef && p.recordRef !== recordRef),
+    );
+  }
   constructor(policy: Record<string, unknown>) {
     this.state = readExecutionState(policy);
     for (const record of this.state.records)
@@ -211,10 +237,35 @@ export class ExecutionJournal {
       this.state.accountAliases = [];
     }
   }
-  observe(output: unknown, evidence: Map<string, RuntimeEvidenceRef>) {
+  observe(
+    output: unknown,
+    evidence: Map<string, RuntimeEvidenceRef>,
+    command?: { commandType: string; payload: unknown },
+  ) {
     const before = JSON.stringify(this.state),
       root = object(output),
       result = object(root.result);
+    const target = object(object(command?.payload).target);
+    const clicked = this.lastUiObservation?.nodes.find(
+      (n) => n.ref === target.ref,
+    );
+    const freshUiRead =
+      command?.commandType === "page.reload" ||
+      (command?.commandType === "page.click" &&
+        !!clicked &&
+        /^(搜索|查询|刷新|search|refresh|reload)$/iu.test(
+          clicked.name ?? clicked.text ?? "",
+        ));
+    if (
+      command &&
+      !/\.(snapshot|get_text|get_url|get_title|network|errors|console|screenshot|dom|scroll)$/u.test(
+        command.commandType,
+      )
+    ) {
+      this.invalidateUiConfirmations();
+      this.pendingUiRead = false;
+    }
+    if (freshUiRead && root.status === "SUCCEEDED") this.pendingUiRead = true;
     const feedback = object(result.actionFeedback ?? root.actionFeedback);
     const network = parse(result.content);
     const entries = Array.isArray(network) ? network : [];
@@ -305,8 +356,10 @@ export class ExecutionJournal {
                 "page",
                 "pageSize",
                 "pageNum",
+                "pageIndex",
                 "page_size",
                 "page_num",
+                "page_index",
                 "limit",
                 "offset",
               ].includes(k),
@@ -344,6 +397,10 @@ export class ExecutionJournal {
         evidenceRefs.length
       ) {
         const key = requestKey;
+        const uiTypeLabel =
+          method === "POST"
+            ? this.submittedTypeLabel(object(parse(q.requestSummary)).account)
+            : undefined;
         const receipt = {
           key,
           sequence,
@@ -361,6 +418,7 @@ export class ExecutionJournal {
             ? { response: q.responseSummary.slice(0, 4000) }
             : {}),
           evidenceRefs,
+          ...(uiTypeLabel ? { uiTypeLabel } : {}),
         };
         const index = this.state.writes.findIndex((w) => w.key === key);
         if (index >= 0) {
@@ -377,7 +435,18 @@ export class ExecutionJournal {
                   ].slice(-20),
                 }
               : { ...previous, ...receipt };
-        } else this.state.writes.push(receipt);
+          const updated = this.state.writes[index]!;
+          if (
+            previous.request !== updated.request ||
+            previous.response !== updated.response ||
+            previous.status !== updated.status ||
+            previous.confirmed !== updated.confirmed
+          )
+            this.invalidateUiConfirmations();
+        } else {
+          this.state.writes.push(receipt);
+          this.invalidateUiConfirmations();
+        }
         if (this.state.writes.length > 200) {
           this.state.writeHistoryTruncated = true;
           this.state.writes = this.state.writes.slice(-200);
@@ -423,6 +492,30 @@ export class ExecutionJournal {
           ),
           evidenceRefs,
         };
+        const previous = this.state.readReceipts.find(
+          (r) => r.key === requestKey,
+        );
+        if (
+          !previous ||
+          !isDeepStrictEqual(previous.recordStates, read.recordStates)
+        ) {
+          for (const record of this.state.records) {
+            const actual =
+              read.recordStates[
+                recordKey(record.id, record.type, record.resourceUrl)
+              ];
+            if (
+              record.recordRef &&
+              actual !== undefined &&
+              record.initialState !== undefined &&
+              !isDeepStrictEqual(
+                parse(actual) ?? actual,
+                parse(record.initialState) ?? record.initialState,
+              )
+            )
+              this.invalidateUiConfirmations(record.recordRef);
+          }
+        }
         this.state.readReceipts = [
           ...this.state.readReceipts.filter((r) => r.key !== requestKey),
           read,
@@ -460,6 +553,55 @@ export class ExecutionJournal {
               parse(candidate.config) ?? candidate.config,
             ).slice(0, 2000);
           continue;
+        }
+        const assigned =
+          !this.state.accounts?.length ||
+          this.state.accounts.some(
+            (a) =>
+              [a.account, ...a.aliases].some((v) => aliases.includes(v)) &&
+              (!a.requiredTypes.length || a.requiredTypes.includes(type)),
+          );
+        if (
+          method === "GET" &&
+          assigned &&
+          !this.state.writes.some(
+            (w) =>
+              resource(w.url) === resource(url) &&
+              (requestedRecordId(w.url, object(parse(w.request))).id === id ||
+                (object(parse(w.request)).type === type &&
+                  aliases.includes(String(object(parse(w.request)).account)))),
+          )
+        ) {
+          const baseline = {
+            id,
+            type,
+            resourceUrl: resource(url),
+            account: aliases[0],
+            accountAliases: aliases,
+            ownership: "EXISTING" as const,
+            ...(candidate.config !== undefined
+              ? {
+                  initialState: JSON.stringify(
+                    parse(candidate.config) ?? candidate.config,
+                  ),
+                  currentState: JSON.stringify(
+                    parse(candidate.config) ?? candidate.config,
+                  ),
+                }
+              : {}),
+            evidenceRefs,
+          };
+          if (
+            !this.state.observedRecords.some(
+              (r) => recordKey(r.id, r.type, r.resourceUrl) === key,
+            ) &&
+            this.state.observedRecords.length < 100 &&
+            (baseline.initialState?.length ?? 0) <= 2000
+          )
+            this.state.observedRecords.push({
+              ...baseline,
+              recordRef: stableRecordRef(baseline),
+            });
         }
         if (this.state.existingRecordKeys.includes(key)) continue;
         const observed = {
@@ -520,7 +662,308 @@ export class ExecutionJournal {
       return false;
     });
     this.reconcileCleanup();
+    const ui = structuredObservationSchema.safeParse(
+      result.structuredObservation,
+    );
+    if (ui.success) {
+      this.observeUi(ui.data, evidenceRefs, this.pendingUiRead);
+      this.pendingUiRead = false;
+      this.lastUiObservation = ui.data;
+      this.lastUiEvidenceRefs = evidenceRefs;
+    }
     return before !== JSON.stringify(this.state);
+  }
+  private observeUi(
+    observation: StructuredObservation,
+    evidenceRefs: string[],
+    freshRead: boolean,
+  ) {
+    if (
+      !evidenceRefs.length ||
+      !observation.coverage.completeWithinScope ||
+      observation.coverage.truncated
+    )
+      return;
+    const byId = new Map(observation.nodes.map((n) => [n.nodeId, n]));
+    const rows = observation.nodes.filter(
+      (n) => n.visible && (n.tag === "tr" || n.role === "row"),
+    );
+    const values = (row: StructuredObservation["nodes"][number]) =>
+      observation.nodes.flatMap((n) => {
+        if (!n.visible || n.truncatedProperties?.length) return [];
+        let parent = n;
+        const seen = new Set<string>();
+        while (parent.nodeId !== row.nodeId) {
+          if (
+            seen.has(parent.nodeId) ||
+            ((parent.tag === "button" || parent.role === "button") &&
+              n.checked === undefined)
+          )
+            return [];
+          seen.add(parent.nodeId);
+          const next = byId.get(parent.parentId ?? "");
+          if (!next) return [];
+          parent = next;
+        }
+        return n.checked !== undefined
+          ? [`checked:${n.checked}`]
+          : n.value !== undefined
+            ? [`value:${n.value}`]
+            : n.text?.trim()
+              ? [n.text.trim()]
+              : [];
+      });
+    const observedRows = rows
+      .filter(
+        (r) =>
+          observation.consistency === "VERIFIED" ||
+          observation.verifiedScopeNodeIds?.includes(r.nodeId),
+      )
+      .map((row) => ({ row, values: values(row) }));
+    const known = [...this.state.observedRecords, ...this.state.records];
+    for (const record of known) {
+      const aliases = [record.account, ...record.accountAliases].filter(
+        (v): v is string => !!v,
+      );
+      if (!aliases.length || !record.recordRef) continue;
+      if (
+        known.some(
+          (other) =>
+            other.recordRef !== record.recordRef &&
+            other.id === record.id &&
+            other.resourceUrl !== record.resourceUrl &&
+            [other.account, ...other.accountAliases].some(
+              (v) => v && aliases.includes(v),
+            ),
+        )
+      )
+        continue;
+      const candidates = observedRows.filter((r) =>
+        r.values.some((v) => aliases.includes(v)),
+      );
+      const stateValues = (v: string[]) =>
+        v.filter((s) => s !== record.id && !aliases.includes(s));
+      if (
+        record.uiBaseline?.pageIdentity === observation.pageIdentity &&
+        candidates.some((r) => r.values.includes(record.id)) &&
+        !candidates.some((r) =>
+          isDeepStrictEqual(stateValues(r.values), record.uiBaseline!.values),
+        )
+      )
+        this.invalidateUiConfirmations(record.recordRef);
+      if (
+        !record.uiBaseline &&
+        !this.state.writes.some((w) => writeMatchesRecord(w, record))
+      ) {
+        const identified = candidates.filter((r) =>
+          r.values.includes(record.id),
+        );
+        if (identified.length === 1) {
+          const states = stateValues(identified[0]!.values);
+          // Scope the UI fallback to an actually readable boolean state. An
+          // identity-only row (e.g. its status column is clipped) proves nothing
+          // about restoration of a hidden configuration.
+          const booleans = states.filter((v) =>
+            /^(checked:(true|false)|启用|禁用|开启|关闭|enabled|disabled|on|off)$/iu.test(
+              v,
+            ),
+          );
+          if (
+            booleans.length === 1 &&
+            states.length <= 100 &&
+            states.every((v) => v.length <= 500)
+          )
+            record.uiBaseline = {
+              observationId: observation.captureId,
+              pageIdentity: observation.pageIdentity,
+              capturedAt: observation.capturedUntil,
+              values: states,
+              evidenceRefs,
+            };
+        }
+      }
+      if (
+        !freshRead ||
+        !record.cleanup ||
+        !record.uiBaseline ||
+        record.uiBaseline.pageIdentity !== observation.pageIdentity ||
+        Date.parse(observation.capturedFrom) <=
+          Date.parse(record.uiBaseline.capturedAt) ||
+        observation.captureId === record.uiBaseline.observationId
+      )
+        continue;
+      const matching = candidates.filter((r) =>
+        isDeepStrictEqual(stateValues(r.values), record.uiBaseline!.values),
+      );
+      if (matching.length !== 1 || record.ownership !== "EXISTING") continue;
+      const mutation = this.state.writes
+        .filter((w) => writeMatchesRecord(w, record))
+        .at(-1);
+      if (mutation && !["PUT", "PATCH"].includes(mutation.method)) continue;
+      // A concrete conflicting receipt needs reconciliation, even when the UI
+      // appears restored. Missing network capture alone does not disprove UI.
+      if (mutation && record.initialState !== undefined) {
+        const request = object(parse(mutation.request));
+        if (
+          request.config !== undefined &&
+          !isDeepStrictEqual(
+            parse(request.config) ?? request.config,
+            parse(record.initialState) ?? record.initialState,
+          )
+        )
+          continue;
+      }
+      const key = recordKey(record.id, record.type, record.resourceUrl);
+      const latestRead = this.state.readReceipts
+        .filter((read) => read.recordKeys.includes(key))
+        .sort((a, b) => b.sequence - a.sequence)[0];
+      const actual = latestRead?.recordStates[key];
+      if (
+        actual !== undefined &&
+        record.initialState !== undefined &&
+        (!mutation || latestRead!.sequence > (mutation.sequence ?? -1)) &&
+        !isDeepStrictEqual(
+          parse(actual) ?? actual,
+          parse(record.initialState) ?? record.initialState,
+        )
+      )
+        continue;
+      this.state.cleanupConfirmations = this.state.cleanupConfirmations.filter(
+        (p) => p.recordRef !== record.recordRef,
+      );
+      this.state.cleanupConfirmations.push({
+        source: "UI",
+        recordRef: record.recordRef,
+        writeKey: mutation?.key ?? `ui:${record.uiBaseline.observationId}`,
+        readKey: `ui:${observation.captureId}`,
+        evidenceRefs,
+      });
+    }
+  }
+  private submittedTypeLabel(account: unknown) {
+    const obs = this.lastUiObservation;
+    if (!obs || typeof account !== "string") return;
+    const nodes = new Map(obs.nodes.map((n) => [n.nodeId, n]));
+    const within = (
+      node: StructuredObservation["nodes"][number],
+      id: string,
+    ) => {
+      let current: typeof node | undefined = node;
+      const seen = new Set<string>();
+      while (current && !seen.has(current.nodeId)) {
+        if (current.nodeId === id) return true;
+        seen.add(current.nodeId);
+        current = nodes.get(current.parentId ?? "");
+      }
+      return false;
+    };
+    const forms = obs.nodes.filter(
+      (n) =>
+        n.visible &&
+        (n.tag === "form" || n.role === "form") &&
+        obs.nodes.some(
+          (field) =>
+            field.visible && field.value === account && within(field, n.nodeId),
+        ),
+    );
+    const labels = new Set(
+      forms.flatMap((form) =>
+        obs.nodes
+          .filter(
+            (n) =>
+              n.visible &&
+              n.selectedLabelSource &&
+              n.selectedLabel &&
+              !n.truncatedProperties?.length &&
+              within(n, form.nodeId),
+          )
+          .map((n) => n.selectedLabel!),
+      ),
+    );
+    return labels.size === 1 ? [...labels][0] : undefined;
+  }
+  /** A visible result row can complete the creation chain when the list JSON
+   * body is unavailable; identity still comes from the preflight and submit. */
+  private createdUiRecord(change: z.input<typeof executionRecordDeltaSchema>) {
+    const obs = this.lastUiObservation;
+    if (
+      !obs ||
+      !change.id ||
+      !this.lastUiEvidenceRefs.length ||
+      !obs.coverage.completeWithinScope ||
+      obs.coverage.truncated
+    )
+      return;
+    const byId = new Map(obs.nodes.map((n) => [n.nodeId, n]));
+    for (const write of [...this.state.writes].reverse()) {
+      const request = object(parse(write.request));
+      if (
+        write.method !== "POST" ||
+        !write.confirmed ||
+        !successful(write.status, parse(write.response)) ||
+        !write.uiTypeLabel ||
+        ![write.uiTypeLabel, request.type].includes(change.type) ||
+        typeof request.account !== "string" ||
+        typeof request.type !== "string" ||
+        !this.state.preflightAbsences.includes(
+          `${resource(write.url)}:${request.type}:${request.account}`,
+        ) ||
+        (change.account && change.account !== request.account)
+      )
+        continue;
+      try {
+        if (new URL(obs.pageIdentity).origin !== new URL(write.url).origin)
+          continue;
+      } catch {
+        continue;
+      }
+      const rows = new Map<string, Set<string>>();
+      for (const n of obs.nodes) {
+        if (!n.visible || n.truncatedProperties?.length || !n.text) continue;
+        let parent = n;
+        const seen = new Set<string>();
+        while (parent.tag !== "tr" && parent.role !== "row") {
+          if (seen.has(parent.nodeId)) break;
+          seen.add(parent.nodeId);
+          const next = byId.get(parent.parentId ?? "");
+          if (!next) break;
+          parent = next;
+        }
+        if (
+          (parent.tag === "tr" || parent.role === "row") &&
+          (obs.consistency === "VERIFIED" ||
+            obs.verifiedScopeNodeIds?.includes(parent.nodeId))
+        ) {
+          const values = rows.get(parent.nodeId) ?? new Set<string>();
+          values.add(n.text.trim());
+          rows.set(parent.nodeId, values);
+        }
+      }
+      const matches = [...rows.values()].filter(
+        (v) =>
+          v.has(change.id!) &&
+          v.has(request.account as string) &&
+          v.has(write.uiTypeLabel!),
+      );
+      if (matches.length !== 1) continue;
+      const record = {
+        id: change.id,
+        type: request.type,
+        displayType: write.uiTypeLabel,
+        resourceUrl: resource(write.url),
+        account: request.account,
+        accountAliases: [request.account],
+        ownership: "CREATED_THIS_RUN" as const,
+        evidenceRefs: [
+          ...new Set([...write.evidenceRefs, ...this.lastUiEvidenceRefs]),
+        ].slice(-20),
+        cleanup: {
+          instruction: "完成验证后清理本次创建记录并重新查询",
+          status: "PENDING" as const,
+        },
+      };
+      return { ...record, recordRef: stableRecordRef(record) };
+    }
   }
   private matchingCreation(
     record: ExecutionState["pendingRecords"][number],
@@ -559,6 +1002,73 @@ export class ExecutionJournal {
     const delta = executionProgressSchema.parse(next);
     const mergedRecords = [...this.state.records];
     for (const change of delta.records ?? []) {
+      if (
+        change.ownership === "CREATED_THIS_RUN" &&
+        !mergedRecords.some(
+          (r) =>
+            r.id === change.id &&
+            (r.type === change.type || r.displayType === change.type),
+        )
+      ) {
+        const created = this.createdUiRecord(change);
+        if (created) {
+          this.state.records.push(created);
+          mergedRecords.push(created);
+          Object.assign(change, {
+            recordRef: created.recordRef,
+            type: created.type,
+            resourceUrl: created.resourceUrl,
+            account: created.account,
+            accountAliases: created.accountAliases,
+          });
+        }
+      }
+      // Resolve a real baseline before locking identity. A display label is not
+      // an API enum, and a model-authored sentence cannot replace observed JSON.
+      const observed = this.state.observedRecords.filter(
+        (r) =>
+          (change.recordRef
+            ? r.recordRef === change.recordRef
+            : r.id === change.id) &&
+          (!change.resourceUrl ||
+            resource(change.resourceUrl) === r.resourceUrl) &&
+          (!change.account ||
+            [r.account, ...r.accountAliases].includes(change.account)),
+      );
+      if (observed.length > 1)
+        throw new Error(
+          "记录身份不唯一，请使用 observedRecords 中的 recordRef。",
+        );
+      const baseline = observed[0];
+      if (
+        baseline &&
+        !mergedRecords.some((r) => r.recordRef === baseline.recordRef)
+      ) {
+        const suppliedRefs = change.evidenceRefs ?? [];
+        if (!suppliedRefs.length)
+          throw new Error("登记记录必须引用已交付的观察。");
+        if (change.ownership && change.ownership !== "EXISTING")
+          throw new Error(
+            "修改前已观察到的记录属于 EXISTING，不能声明为本次创建。",
+          );
+        mergedRecords.push({
+          ...baseline,
+          ...(change.type && change.type !== baseline.type
+            ? { displayType: change.type }
+            : {}),
+        });
+        Object.assign(change, {
+          recordRef: baseline.recordRef,
+          id: baseline.id,
+          type: baseline.type,
+          resourceUrl: baseline.resourceUrl,
+          account: baseline.account,
+          accountAliases: baseline.accountAliases,
+          ownership: baseline.ownership,
+          initialState: baseline.initialState,
+          currentState: baseline.currentState,
+        });
+      }
       const candidates = mergedRecords.filter((r) =>
         change.recordRef
           ? r.recordRef === change.recordRef
@@ -570,6 +1080,15 @@ export class ExecutionJournal {
       if (candidates.length > 1)
         throw new Error("记录身份不唯一，请使用当前台账的 recordRef。");
       const locked = candidates[0];
+      if (
+        !locked &&
+        change.ownership === "EXISTING" &&
+        change.initialState !== undefined &&
+        parse(change.initialState) === undefined
+      )
+        throw new Error(
+          "INITIAL_STATE_FORMAT: initialState 必须是修改前状态的 JSON；优先引用 observedRecords 的 recordRef，由平台继承，不填写自然语言说明。",
+        );
       if (change.recordRef && !locked)
         throw new Error("未知 recordRef，请引用当前台账中的记录。");
       if (
@@ -589,7 +1108,11 @@ export class ExecutionJournal {
           JSON.stringify([...locked.accountAliases].sort())
       )
         throw new Error("账号别名由真实观察维护，不能通过进度更新修改。");
-      const record = executionRecordSchema.parse({ ...locked, ...change });
+      const record = executionRecordSchema.parse({
+        ...locked,
+        ...change,
+        uiBaseline: locked?.uiBaseline,
+      });
       record.recordRef ??= stableRecordRef(record);
       const index = locked ? mergedRecords.indexOf(locked) : -1;
       if (index < 0) mergedRecords.push(record);
@@ -663,6 +1186,7 @@ export class ExecutionJournal {
       accounts: this.state.accounts,
       accountAliases: this.state.accountAliases,
       pendingRecords: this.state.pendingRecords,
+      observedRecords: this.state.observedRecords,
       writeHistoryTruncated: this.state.writeHistoryTruncated,
       writes: this.state.writes,
       preflightAbsences: this.state.preflightAbsences,
@@ -675,6 +1199,8 @@ export class ExecutionJournal {
         ]),
       ].slice(-200),
     };
+    if (this.lastUiObservation)
+      this.observeUi(this.lastUiObservation, this.lastUiEvidenceRefs, false);
   }
   /** Independent records can make progress even if a different record is rejected. */
   updatePartial(
@@ -703,6 +1229,33 @@ export class ExecutionJournal {
       }
     }
     return results;
+  }
+  /** Record all outstanding cleanup obligations together when explicitly blocked. */
+  blockCleanup(note: string) {
+    this.state.phase = "CLEANUP";
+    for (const r of this.state.records)
+      if (r.cleanup?.status === "PENDING")
+        r.cleanup = {
+          ...r.cleanup,
+          status: "BLOCKED",
+          note: note.slice(0, 1000),
+        };
+    const writeKeys = this.unreviewedWriteKeys();
+    const refs = [
+      ...new Set(this.unresolvedWrites().flatMap((w) => w.evidenceRefs)),
+    ].slice(0, 20);
+    if (writeKeys.length && refs.length)
+      this.state.cleanupReview = {
+        status: "BLOCKED",
+        note: note.slice(0, 1000),
+        writeKeys: [
+          ...new Set([
+            ...(this.state.cleanupReview?.writeKeys ?? []),
+            ...writeKeys,
+          ]),
+        ].slice(0, 200),
+        evidenceRefs: refs,
+      };
   }
   private reconcileCleanup() {
     for (const record of this.state.records) {
@@ -772,8 +1325,10 @@ export class ExecutionJournal {
                 "page",
                 "pageSize",
                 "pageNum",
+                "pageIndex",
                 "page_size",
                 "page_num",
+                "page_index",
                 "limit",
                 "offset",
               ].includes(field),
@@ -813,10 +1368,18 @@ export class ExecutionJournal {
           };
       }
       this.state.cleanupConfirmations = this.state.cleanupConfirmations.filter(
-        (proof) => proof.recordRef !== record.recordRef,
+        (proof) =>
+          proof.recordRef !== record.recordRef ||
+          (!confirmation && proof.source === "UI"),
       );
       if (confirmation) this.state.cleanupConfirmations.push(confirmation);
-      else if (mutation && record.cleanup.status === "COMPLETED")
+      else if (
+        mutation &&
+        record.cleanup.status === "COMPLETED" &&
+        !this.state.cleanupConfirmations.some(
+          (p) => p.recordRef === record.recordRef,
+        )
+      )
         record.cleanup.status = "PENDING";
     }
   }
@@ -839,6 +1402,8 @@ export class ExecutionJournal {
       })),
       unreviewedWriteKeys: this.unreviewedWriteKeys(),
       cleanupNotice: this.cleanupNotice(),
+      recordGuidance:
+        "登记已有记录时优先只传 observedRecords 的 recordRef、cleanup 与观察引用；平台继承真实 ID、类型编码、资源地址和修改前 JSON。displayType 是页面名称，不要把自然语言说明写入 initialState。",
       prerequisiteFacts: {
         existingRecordKeys: this.state.existingRecordKeys.slice(-20),
         existingRecordCount: this.state.existingRecordKeys.length,

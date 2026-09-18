@@ -6,6 +6,34 @@ import {
 } from "./operation-summary.js";
 
 describe("operation facts", () => {
+  it("retains per-record rejection reasons when the surrounding checkpoint is large", () => {
+    const memory = new OperationMemory();
+    memory.record([
+      {
+        tool: "record_progress",
+        arguments: {},
+        outcome: "FAILED",
+        result: {
+          accepted: false,
+          error: "部分记录更新失败",
+          recordUpdates: [
+            {
+              recordRef: "record:one",
+              accepted: false,
+              error: "INITIAL_STATE_FORMAT: use observedRecords",
+            },
+          ],
+          executionState: {
+            records: Array.from({ length: 100 }, () => ({
+              note: "x".repeat(2000),
+            })),
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(memory.state())).toContain("INITIAL_STATE_FORMAT");
+    expect(JSON.stringify(memory.state())).toContain("record:one");
+  });
   it("enforces the byte cap even for deeply nested diagnostics with many priority fields", () => {
     let value: unknown = { error: '😀"\\'.repeat(5_000), code: "TOO_LARGE" };
     for (let index = 0; index < 4; index++)

@@ -2362,7 +2362,7 @@ model RunObservationBinding {
   run                ExecutionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   attempt            RunAttempt   @relation(fields: [attemptId], references: [id], onDelete: Cascade)
 
-  @@unique([attemptId, targetId, contractDigest, observationId])
+  @@unique([attemptId, targetId, contractDigest, observationId, bindingDigest], name: "observationResolution", map: "run_observation_bindings_resolution_key")
   @@index([runId, attemptId, criterionId, targetId])
   @@map("run_observation_bindings")
 }
