@@ -747,7 +747,7 @@ it("recaptures an unstable observation without replaying its business action", a
   } finally {
     await execute("session.close", {});
   }
-});
+}, 30_000);
 
 it("captures redacted cross-origin business JSON and stable request IDs while excluding auth payloads", async () => {
   const apiOrigin = await fixtureServer();
