@@ -76,7 +76,7 @@ function modelFactory(create: ReturnType<typeof vi.fn>) {
   return () => ({ complete: create }) as never;
 }
 
-function convergenceHarness(create: ReturnType<typeof vi.fn>) {
+function convergenceHarness(create: ReturnType<typeof vi.fn>, options = {}) {
   const controlPlane = {
     acquireBrowser: vi.fn().mockResolvedValue(acquiredBrowser),
     appendEvent: vi.fn().mockResolvedValue({}),
@@ -104,6 +104,7 @@ function convergenceHarness(create: ReturnType<typeof vi.fn>) {
     modelFactory(create),
     controlPlane as never,
     60,
+    options,
   );
   return { controlPlane, runTask, executor };
 }
@@ -896,7 +897,9 @@ describe("context delivery and slow models", () => {
       }
       return reply("finish_verification", finish, step);
     });
-    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    const { executor, controlPlane, runTask } = convergenceHarness(create, {
+      maxBytes: 96 * 1024,
+    });
     runTask.snapshot.deadlineAt = new Date(Date.now() + 900_000).toISOString();
     controlPlane.browserCommand.mockImplementation(async (_lease, command) => ({
       status: "SUCCEEDED",
@@ -2464,6 +2467,7 @@ describe("browser verification bounded context", () => {
       modelFactory(create),
       controlPlane as never,
       20,
+      { retention: { summaryTurns: 2 } },
     );
     const outcome = await executor.execute(
       runTask,
@@ -2575,6 +2579,7 @@ describe("browser verification bounded context", () => {
       modelFactory(create),
       controlPlane as never,
       10,
+      { maxBytes: 96 * 1024 },
     );
     await executor.execute(runTask, lease, new AbortController().signal);
     expect(
@@ -5607,6 +5612,67 @@ describe("structured account requests", () => {
       },
     });
     expect(create).toHaveBeenCalledOnce();
+  });
+});
+
+it("reserves output per provider and archives the exact fallback request and budget", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const create = vi.fn(async (request: Record<string, unknown>) => {
+    requests.push(structuredClone(request));
+    if (requests.length === 1) throw new Error("provider unavailable");
+    return {
+      id: "fallback",
+      message: {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          functionCall(
+            "request_human_input",
+            { prompt: "请完成登录。", summary: "需要登录。" },
+            1,
+          ),
+        ],
+      },
+    };
+  });
+  const { executor, controlPlane, runTask } = convergenceHarness(create, {
+    modelLimits: {
+      "gpt-test": {
+        contextWindowTokens: 500000,
+        outputReserveTokens: 8192,
+        imageTokensPerImage: 8192,
+      },
+      fallback: {
+        contextWindowTokens: 200000,
+        outputReserveTokens: 4096,
+        imageTokensPerImage: 8192,
+      },
+    },
+  });
+  runTask.snapshot.modelCandidates!.push({
+    ...runTask.snapshot.modelCandidates![0]!,
+    modelId: "fallback",
+  });
+  expect(
+    await executor.execute(runTask, lease, new AbortController().signal),
+  ).toMatchObject({ kind: "WAITING_HUMAN" });
+  expect(requests).toHaveLength(2);
+  expect(requests.map((r) => r.max_tokens)).toEqual([8192, 4096]);
+  expect(requests[0]!.messages).toEqual(requests[1]!.messages);
+  const events = controlPlane.appendEvent.mock.calls.filter(
+    (call) => call[1] === "agent.model.started",
+  );
+  events.forEach((event, index) => {
+    const archived = JSON.parse(
+      gunzipSync(
+        Buffer.from(event[2].contextSnapshot.data, "base64"),
+      ).toString(),
+    );
+    expect(archived.request).toEqual(requests[index]);
+    expect(archived.metrics).toMatchObject({
+      requestBytes: jsonBytes(requests[index]),
+      maxTextBytes: 194880,
+    });
   });
 });
 

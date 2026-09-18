@@ -26,6 +26,8 @@ export interface StepContextCall {
   durationMs: number | null;
   intent: string | null;
   hasFullContext: boolean;
+  requestBytes: number | null;
+  inputTokens: number | null;
   toolNames: string[];
 }
 

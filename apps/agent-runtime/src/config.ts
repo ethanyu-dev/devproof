@@ -1,5 +1,11 @@
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
+import {
+  contextRetentionSchema,
+  modelContextLimitsSchema,
+  parseContextJson,
+  DEFAULT_CONTEXT_MAX_BYTES,
+} from "./context-policy.js";
 
 for (const envPath of ["../../.env", ".env"]) {
   loadDotenv({ path: envPath, override: false, quiet: true });
@@ -24,7 +30,13 @@ const configSchema = z
       .int()
       .min(64 * 1_024)
       .max(1_024 * 1_024)
-      .default(96 * 1_024),
+      .default(DEFAULT_CONTEXT_MAX_BYTES),
+    DEVPROOF_AGENT_CONTEXT_RETENTION: z
+      .preprocess(parseContextJson, contextRetentionSchema)
+      .default(() => contextRetentionSchema.parse({})),
+    DEVPROOF_AGENT_CONTEXT_MODEL_LIMITS: z
+      .preprocess(parseContextJson, modelContextLimitsSchema)
+      .default({}),
     DEVPROOF_AGENT_POLL_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -54,7 +66,7 @@ const configSchema = z
       .int()
       .min(5)
       .max(200)
-      .default(60),
+      .default(120),
     DEVPROOF_AGENT_WORKER_ID: z
       .string()
       .trim()

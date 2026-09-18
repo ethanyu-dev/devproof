@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   specCapabilityError,
   localizationRequirementError,
+  networkAcceptanceError,
 } from "./spec-capabilities.js";
 import { observedValueMatches } from "./observed-value.js";
 
@@ -96,7 +97,7 @@ describe("source-bound browser test scope", () => {
     ).toBeTruthy();
     expect(localizationRequirementError(r, new Map())).toBeTruthy();
   });
-  it("rejects DOM-only request payload assertions", () => {
+  it("rejects network acceptance even with complete NETWORK evidence", () => {
     const c = {
       ...testCase,
       name: "创建",
@@ -104,8 +105,60 @@ describe("source-bound browser test scope", () => {
     };
     expect(specCapabilityError({ cases: [c] }, new Map())).toContain("NETWORK");
     c.criteria[0]!.requiredEvidenceKinds = ["NETWORK"];
-    expect(specCapabilityError({ cases: [c] }, new Map())).toBeNull();
+    expect(specCapabilityError({ cases: [c] }, new Map())).toContain(
+      "仅作 Agent 参考",
+    );
   });
+  it("keeps UI failures and optional network diagnostics within business tests", () => {
+    expect(
+      networkAcceptanceError({
+        description: "请求失败后页面显示重试按钮。",
+        requiredEvidenceKinds: ["DOM"],
+        observationTargets: [{ label: "重试按钮" }],
+      }),
+    ).toBeNull();
+    expect(
+      specCapabilityError(
+        {
+          cases: [
+            {
+              name: "保存配置",
+              preconditions: [],
+              steps: [{ action: "必要时读取请求体和响应数据辅助排查。" }],
+              criteria: [
+                {
+                  id: "saved",
+                  description: "保存后列表显示启用。",
+                  requiredEvidenceKinds: ["DOM"],
+                },
+              ],
+            },
+          ],
+        },
+        new Map(),
+      ),
+    ).toBeNull();
+  });
+  it.each([
+    {
+      description: "保存配置",
+      observationTargets: [
+        { label: "配置值", network: { path: "/whitelist" } },
+      ],
+    },
+    { description: "保存配置", requiredEvidenceKinds: ["DOM", "NETWORK"] },
+    {
+      description: "保存配置",
+      observationTargets: [{ label: "请求体中的 config" }],
+    },
+    { description: "筛选请求携带类型枚举。" },
+    { description: "响应状态码为 200。" },
+  ])(
+    "rejects network obligations regardless of their representation: %j",
+    (criterion) => {
+      expect(networkAcceptanceError(criterion)).toContain("不进入验收标准");
+    },
+  );
 });
 
 describe("observed JSON values", () => {

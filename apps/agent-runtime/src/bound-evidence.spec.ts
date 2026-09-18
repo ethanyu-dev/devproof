@@ -74,6 +74,7 @@ function fixture() {
     reasons: [],
   };
   return {
+    contract,
     binding,
     memory: new BoundEvidence(
       [{ id: "check", observationContract: contract }],
@@ -82,6 +83,34 @@ function fixture() {
     ),
   };
 }
+
+it("expands both binding and coverage budgets, prioritizing unfinished criteria", () => {
+  const { binding, contract } = fixture();
+  const criteria = Array.from({ length: 40 }, (_, i) => ({
+    id: `check-${i}`,
+    observationContract: contract,
+  }));
+  const memory = new BoundEvidence(criteria, binding.runId, binding.attemptId);
+  memory.ingest({
+    bindings: criteria.map((c) => ({
+      ...binding,
+      id: randomUUID(),
+      criterionId: c.id,
+    })),
+  });
+  const small = memory.view(12 * 1024, ["check-39"]);
+  const expanded = memory.view(32 * 1024, ["check-39"]);
+  expect(expanded.bindings.length).toBeGreaterThan(small.bindings.length);
+  expect(expanded.coverage.length).toBeGreaterThan(small.coverage.length);
+  expect(expanded.bindings[0]!.criterionId).toBe("check-39");
+  expect(expanded.coverage[0]!.criterionId).toBe("check-39");
+  expect(Buffer.byteLength(JSON.stringify(expanded))).toBeLessThanOrEqual(
+    32 * 1024,
+  );
+  expect(
+    Buffer.byteLength(JSON.stringify(memory.view(1024))),
+  ).toBeLessThanOrEqual(1024);
+});
 
 it("requires full facts in the actual model request, not IDs or a truncated preview", () => {
   const { binding, memory } = fixture();

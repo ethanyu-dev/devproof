@@ -29,12 +29,12 @@ it("does not confuse an action's switch with a list text assertion", () => {
   expect(specCriterionIssues(c, sources)).toEqual([]);
   expect(c.observationContract?.targets).toHaveLength(2);
 });
-it("rejects a network requirement compiled as a DOM business state even if NETWORK is also listed", () => {
+it("rejects a network assertion disguised as a DOM business state", () => {
   const c = expandSpecCheck(
     specCheckSchema.parse({
       requirementId: "r",
       description: "请求体 config 为指定值。",
-      requiredEvidenceKinds: ["DOM", "NETWORK"],
+      requiredEvidenceKinds: ["DOM"],
       businessCheck: {
         subjects: ["合规模型映射"],
         state: { label: "config", equals: '{"value":false}' },
@@ -44,6 +44,6 @@ it("rejects a network requirement compiled as a DOM business state even if NETWO
     "c",
   );
   expect(specCriterionIssues(c, sources)).toContainEqual(
-    expect.objectContaining({ code: "EVIDENCE_CHANNEL_MISMATCH" }),
+    expect.objectContaining({ code: "NETWORK_REFERENCE_ONLY" }),
   );
 });

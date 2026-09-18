@@ -45,6 +45,42 @@ const current = {
 } as never;
 
 describe("ExecutionRunService events", () => {
+  it("rejects new network acceptance runs before writes and still reads their historical evidence", async () => {
+    const criterion = {
+      id: "request",
+      description: "请求体 config 正确",
+      requiredEvidenceKinds: ["NETWORK"],
+    };
+    const existing = {
+      id: runId,
+      criteriaSnapshot: [criterion],
+      executionPolicy: snapshot.executionPolicy,
+      browserProfileId: null,
+      browserExecutions: [],
+      evidences: [],
+      observationBindings: [],
+      events: [],
+    };
+    const prisma = {
+      executionRun: { findFirst: vi.fn().mockResolvedValue(existing) },
+      $transaction: vi.fn(),
+    };
+    const service = new ExecutionRunService(prisma as never, {} as never);
+    await expect(
+      service.create(current, { criteria: [criterion] } as never),
+    ).rejects.toThrow("网络请求仅作 Agent 参考");
+    await expect(
+      service.createForTask(
+        current,
+        { criteria: [criterion] } as never,
+        "task",
+      ),
+    ).rejects.toThrow("网络请求仅作 Agent 参考");
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect((await service.detail(current, runId)).criteriaSnapshot).toEqual([
+      criterion,
+    ]);
+  });
   it("pauses new v2 runs during rollback while retaining existing evidence reads", async () => {
     const contract = {
       version: 2,

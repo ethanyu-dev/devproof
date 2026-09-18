@@ -334,6 +334,8 @@ export class AgentRuntimeWorker {
             {
               mode: this.config.DEVPROOF_AGENT_CONTEXT_MODE,
               maxBytes: this.config.DEVPROOF_AGENT_CONTEXT_MAX_BYTES,
+              retention: this.config.DEVPROOF_AGENT_CONTEXT_RETENTION,
+              modelLimits: this.config.DEVPROOF_AGENT_CONTEXT_MODEL_LIMITS,
               toolSurfaceMode: this.config.DEVPROOF_AGENT_TOOL_SURFACE_MODE,
             },
           );

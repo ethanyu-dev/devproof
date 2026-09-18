@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ModelAssistantMessage, ModelMessage } from "./model-types.js";
 import { modelFunctionCalls } from "./model-types.js";
+import { type ContextRetention } from "./context-policy.js";
 
 export interface OperationSummary {
   callId?: string;
@@ -14,6 +15,7 @@ export interface OperationSummary {
 export function summarizeTurn(
   message: ModelAssistantMessage | null,
   results: ModelMessage[],
+  detail?: ContextRetention,
 ): OperationSummary[] {
   const calls = message ? modelFunctionCalls(message) : [];
   if (!calls.length) {
@@ -21,12 +23,21 @@ export function summarizeTurn(
       const value = parseContent(result.content);
       const initial = object(value);
       return initial.kind === "runtime_initial_navigation"
-        ? summarizeOperation("browser_command", initial.command, initial.result)
+        ? summarizeOperation(
+            "browser_command",
+            initial.command,
+            initial.result,
+            detail,
+          )
         : {
             tool: "runtime",
             arguments: {},
             outcome: "NO_TOOL_CALL",
-            result: compactValue(value, 1_000),
+            result: compactValue(
+              value,
+              detail?.toolResultBytes ?? 1_000,
+              !!detail,
+            ),
           };
     });
   }
@@ -40,6 +51,7 @@ export function summarizeTurn(
         call.function.name,
         parseContent(call.function.arguments),
         parseContent(reply?.content),
+        detail,
       ),
     };
   });
@@ -49,13 +61,14 @@ export function summarizeOperation(
   tool: string,
   args: unknown,
   output: unknown,
+  detail?: ContextRetention,
 ): OperationSummary {
   const value = object(output);
   const failed =
     value.accepted === false || value.status === "FAILED" || value.ok === false;
   return {
     tool,
-    arguments: compactValue(args, 2_048),
+    arguments: compactValue(args, detail ? 4_096 : 2_048, !!detail),
     outcome: failed
       ? "FAILED"
       : value.status === "SUCCEEDED" ||
@@ -63,14 +76,30 @@ export function summarizeOperation(
           value.accepted === true
         ? "SUCCEEDED"
         : "RETURNED",
-    result: compactValue(output, 4_096),
+    result: compactValue(
+      output,
+      detail
+        ? failed ||
+          tool !== "browser_command" ||
+          /\.(?:click|press|select|check|uncheck|network)$/u.test(
+            String(object(args).commandType),
+          )
+          ? detail.keyResultBytes
+          : detail.toolResultBytes
+        : 4_096,
+      !!detail,
+    ),
   };
 }
 
 /** Bound data structurally; omitted strings are explicitly marked, never invalid JSON. */
-export function compactValue(value: unknown, maxBytes: number): unknown {
-  let textLimit = 1_200;
-  let arrayLimit = 8;
+export function compactValue(
+  value: unknown,
+  maxBytes: number,
+  preserveDetails = false,
+): unknown {
+  let textLimit = preserveDetails ? maxBytes : 1_200;
+  let arrayLimit = preserveDetails ? maxBytes : 8;
   const visit = (item: unknown, depth = 0): unknown => {
     if (typeof item === "string")
       return item.length <= textLimit
@@ -81,7 +110,7 @@ export function compactValue(value: unknown, maxBytes: number): unknown {
             totalChars: item.length,
           };
     if (item === null || typeof item !== "object") return item;
-    if (depth >= 7) return { truncated: true };
+    if (depth >= (preserveDetails ? 20 : 7)) return { truncated: true };
     if (Array.isArray(item)) {
       const kept = item
         .slice(0, arrayLimit)

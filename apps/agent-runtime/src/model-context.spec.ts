@@ -47,6 +47,150 @@ function turn(context: ModelContext, index: number, content = "observed") {
 }
 
 describe("bounded model context", () => {
+  it("keeps detailed facts for two turns, then summaries, without reasoning or pixels", () => {
+    const context = new ModelContext(initial);
+    const result = JSON.stringify({
+      values: Array.from({ length: 20 }, (_, index) => `option-${index}`),
+      receipt: "x".repeat(3000) + "receipt-tail",
+      dataBase64: "private-pixels",
+      reasoning_content: "private-reasoning",
+    });
+    turn(context, 0, result);
+    turn(context, 1);
+    const detailed = context.build({}, {});
+    expect(JSON.stringify(detailed.messages)).toContain("receipt-tail");
+    expect(JSON.stringify(detailed.messages)).toContain("option-19");
+    expect(JSON.stringify(detailed.messages)).not.toContain("private-");
+    turn(context, 2);
+    const summarized = context.build({}, {});
+    expect(JSON.stringify(summarized.messages)).not.toContain("receipt-tail");
+    expect(summarized.metrics).toMatchObject({
+      detailedTurns: 2,
+      summaryTurns: 1,
+      resultsWithOmissions: 2,
+    });
+  });
+
+  it("preserves early facts that the four-turn profile omitted in the same replay", () => {
+    const expanded = new ModelContext(initial);
+    const previous = new ModelContext(initial, {
+      retention: { summaryTurns: 2 },
+    });
+    for (const context of [expanded, previous]) {
+      turn(
+        context,
+        0,
+        JSON.stringify({
+          createdRecordId: "whitelist-140",
+          next: "verify then clean up",
+        }),
+      );
+      for (let i = 1; i <= 10; i++) turn(context, i);
+    }
+    expect(JSON.stringify(expanded.build({}, {}).messages)).toContain(
+      "whitelist-140",
+    );
+    expect(JSON.stringify(previous.build({}, {}).messages)).not.toContain(
+      "whitelist-140",
+    );
+  });
+
+  it("restores history on a later smaller request after trimming the current projection", () => {
+    const context = new ModelContext(initial, { maxBytes: 6000 });
+    for (let i = 0; i < 8; i++) turn(context, i);
+    const tight = context.build({}, {}, undefined, {
+      content: "x".repeat(4700),
+    });
+    expect(tight.metrics.droppedTurns).toBeGreaterThan(0);
+    expect(tight.metrics.truncations).toContainEqual(
+      expect.objectContaining({ reason: "OLDER_SUMMARY_BUDGET" }),
+    );
+    const roomy = context.build({}, {}, undefined, { content: "small" });
+    expect(roomy.metrics.retainedTurns).toBe(8);
+    expect(roomy.metrics.droppedTurns).toBe(0);
+  });
+
+  it("trims optional evidence while keeping write state, then restores it on a later request", () => {
+    const context = new ModelContext(initial, { maxBytes: 3000 });
+    const state = {
+      executionState: {
+        unresolvedWrites: ["write-1"],
+        accounts: ["account-1"],
+      },
+      acceptedCriteria: [{ id: "accepted", evidenceRefs: ["proof"] }],
+      savedCriterionObservations: {
+        observations: [{ id: "saved", quote: "x".repeat(800) }],
+        omitted: 0,
+      },
+      objectEvidence: {
+        bindings: [{ id: "binding", facts: "x".repeat(800) }],
+        omittedBindings: 0,
+      },
+    };
+    const before = structuredClone(state);
+    const tight = context.build({}, state, undefined, {
+      content: "x".repeat(1700),
+    });
+    expect(tight.metrics.omitted).toMatchObject({
+      savedObservations: 1,
+      objectBindings: 1,
+    });
+    expect(JSON.stringify(tight.messages)).toContain("write-1");
+    expect(JSON.stringify(tight.messages)).toContain("account-1");
+    expect(JSON.stringify(tight.messages)).toContain("proof");
+    expect(state).toEqual(before);
+    expect(context.build({}, state).metrics.omitted).toMatchObject({
+      savedObservations: 0,
+      objectBindings: 0,
+    });
+  });
+
+  it("accounts for reference images and metadata while reserving model output", () => {
+    const context = new ModelContext(initial, {
+      modelIds: ["vision"],
+      modelLimits: {
+        vision: {
+          contextWindowTokens: 10000,
+          outputReserveTokens: 2000,
+          imageTokensPerImage: 1000,
+        },
+      },
+    });
+    const image = {
+      artifactId: "3a6cbe48-f36c-4b48-bae1-d8d5e50f4ce0",
+      observationId: "6730b25a-d1d3-4a10-a0c1-69fd4d74643a",
+      capturedAt: new Date().toISOString(),
+      viewport: { width: 1280, height: 720 },
+      contentType: "image/jpeg" as const,
+      dataBase64: Buffer.alloc(100000).toString("base64"),
+      bindingId: "binding-1",
+      purpose: "REFERENCE_EVIDENCE" as const,
+    };
+    const view = context.build({}, {}, undefined, undefined, undefined, [
+      image,
+      { ...image, bindingId: "binding-2" },
+    ]);
+    expect(view.metrics).toMatchObject({
+      imageCount: 2,
+      imageBytes: 200000,
+      maxTextBytes: 4976,
+    });
+    expect(view.metrics.componentBytes.imageMetadata).toBeGreaterThan(0);
+    expect(
+      view.metrics.windowBudget.estimates[0]!.estimatedInputTokens,
+    ).toBeLessThanOrEqual(8000);
+    expect(view.metrics.requestBytes).toBeGreaterThan(200000);
+    expect(() =>
+      context.build(
+        {},
+        { required: "x".repeat(6000) },
+        undefined,
+        undefined,
+        undefined,
+        [image, image],
+      ),
+    ).toThrow(ContextBudgetExceeded);
+  });
   it("compacts repeated narration without losing checkpoints or old failures", () => {
     const context = new ModelContext(initial, { maxBytes: 262144 });
     for (const [name, result] of [
@@ -68,7 +212,7 @@ describe("bounded model context", () => {
       );
     }
     for (let i = 0; i < 27; i++) turn(context, i);
-    expect(context.build({}, {}).metrics.retainedTurns).toBe(4);
+    expect(context.build({}, {}).metrics.retainedTurns).toBe(14);
     context.compactForRecovery();
     const view = context.build({}, { acceptedCriteria: ["done"] });
     expect(view.metrics).toMatchObject({
@@ -90,18 +234,18 @@ describe("bounded model context", () => {
       acceptedCriteria: [{ id: "preserved", summary: "已验证" }],
     };
     const probe = new ModelContext(initial);
-    for (let i = 0; i < 4; i++) turn(probe, i);
+    for (let i = 0; i < 2; i++) turn(probe, i);
     const exactBytes = probe.build(request, state, undefined, complete).metrics
       .textRequestBytes;
 
     for (const maxBytes of [exactBytes, exactBytes - 1]) {
       const context = new ModelContext(initial, { maxBytes });
-      for (let i = 0; i < 4; i++) turn(context, i);
+      for (let i = 0; i < 2; i++) turn(context, i);
       const view = context.build(request, state, undefined, complete, paged);
       expect(view.currentPage).toBe(maxBytes === exactBytes ? complete : paged);
       expect(view.metrics).toMatchObject({
         usedPageFallback: maxBytes !== exactBytes,
-        retainedTurns: 4,
+        retainedTurns: 2,
         compactedTurns: 0,
       });
       expect(view.metrics.textRequestBytes).toBe(
@@ -223,7 +367,7 @@ describe("bounded model context", () => {
 
   it("caps recent turns even with spare budget and keeps exact requirements and accepted state", () => {
     const context = new ModelContext(initial);
-    for (let index = 0; index < 9; index += 1) turn(context, index);
+    for (let index = 0; index < 19; index += 1) turn(context, index);
     const state = {
       acceptedCriteria: [
         {
@@ -242,18 +386,23 @@ describe("bounded model context", () => {
       data: state,
     });
     expect(view.metrics).toMatchObject({
-      retainedTurns: 4,
+      retainedTurns: 14,
       compactedTurns: 5,
       historyMode: "OPERATION_SUMMARIES",
     });
     const history = JSON.parse(String(view.messages[3]!.content));
     expect(history.kind).toBe("recent_operations");
-    expect(history.turns).toHaveLength(4);
+    expect(history.turns).toHaveLength(14);
     expect(
       history.turns
         .flat()
         .map((operation: { callId: string }) => operation.callId),
-    ).toEqual([5, 6, 7, 8].flatMap((index) => [`${index}-0`, `${index}-1`]));
+    ).toEqual(
+      Array.from({ length: 14 }, (_, i) => i + 5).flatMap((index) => [
+        `${index}-0`,
+        `${index}-1`,
+      ]),
+    );
     expect(history.turns[0][0]).toMatchObject({
       tool: "browser_command",
       outcome: "RETURNED",
@@ -386,10 +535,10 @@ describe("bounded model context", () => {
       boundedBytes += view.metrics.requestBytes;
       legacyBytes += legacy.build(base, {}).metrics.requestBytes;
       if (index >= 10) tailSizes.push(view.metrics.requestBytes);
-      expect(view.metrics.requestBytes).toBeLessThanOrEqual(96 * 1_024);
+      expect(view.metrics.requestBytes).toBeLessThanOrEqual(512 * 1_024);
     }
     expect(boundedBytes / legacyBytes).toBeLessThan(0.5);
-    expect(Math.max(...tailSizes)).toBeLessThanOrEqual(96 * 1024);
+    expect(Math.max(...tailSizes)).toBeLessThanOrEqual(512 * 1024);
     console.info("Context byte fixture", {
       boundedBytes,
       legacyBytes,

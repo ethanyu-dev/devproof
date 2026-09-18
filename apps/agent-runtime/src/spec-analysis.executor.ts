@@ -33,6 +33,7 @@ import {
   normalizeCompactSpec,
   referencedSpecSchema,
   requirementPlanSchema,
+  specCheckSchema,
   type SpecRequirement,
 } from "./spec-draft.js";
 import {
@@ -67,6 +68,9 @@ const finishSpecSchema = z.object({
             .array(
               runtimeSpecCriterionSchema.safeExtend({
                 basis: runtimeSpecCriterionSchema.shape.basis.unwrap(),
+                observationTargets: specCheckSchema.shape.observationTargets,
+                requiredEvidenceKinds:
+                  specCheckSchema.shape.requiredEvidenceKinds.removeDefault(),
               }),
             )
             .min(1)
@@ -1360,11 +1364,11 @@ GitHub 工具的 pullRequestUrl 只能逐字选择 get_task_context 返回的 pu
 所有用户可见的生成内容必须使用简体中文，包括 Spec 摘要、范围、假设、风险、Case 名称、前置条件、测试数据、设计理由、操作步骤、预期现象、验收标准和清理步骤。标识符、URL、代码符号、API 路径、工具名、枚举值和 source reference 保持原样，不要翻译。
 ${compact ? "每条需求引用实际返回的 analysis-source 和原文，由系统传递给 Case 及验收标准；不要手工重复来源字段。" : "每个 Case 和每条验收标准都必须引用工具实际返回的 analysis-source；绝不能编造来源引用。"}
 验收标准 description 用一句简洁中文描述一个可观察、可判断的业务行为，保留必要的页面区域、触发条件和预期结果。多个独立行为拆为多条标准；只要求类型可发现时，不附加创建或保存要求。页面已有中文名称时优先使用中文名称；仅在来源承诺同一对象可显示技术枚举时，才将其放入 observationTargets.alternatives；来源原文和地址放入 basis/sourceRefs，不重复拼入 description。例如：在指定页面的类型下拉中，可以找到需求要求的选项（用来源中的实际页面名和选项名替换）。不得为了简短删掉影响判定的限制条件。
-每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字或接口值（expectedText）。涉及多个类型时，分别列出每个类型的显示名或接口值，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。${compact ? "每条标准必须引用 define_requirements 返回的 requirementId，来源原文必须直接支持断言。" : "每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。"}来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
+每条验收标准还必须提供 observationTargets，逐个列出需要验证的对象（label）及来源中可核对的页面文字（expectedText）。涉及多个类型时，分别列出每个类型的界面显示名，不能用一个“启用”概括所有类型；界面样式比较也必须分别覆盖目标类型和参照类型。${compact ? "每条标准必须引用 define_requirements 返回的 requirementId，来源原文必须直接支持断言。" : "每条验收标准必须提供 basis：sourceRef 必须属于该标准的 sourceRefs，quote 必须逐字摘自该来源工具实际返回的需求或代码，并直接支持该断言；observationTarget 明确验收的页面区域、控件及业务对象。"}来源存在不等于来源支持任意断言；不能用创建弹窗的类型选项证明列表筛选选项或筛选隔离。
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 ${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定位元素、探索路径和选择工具，不预先编造选择器。前置条件、测试数据和清理步骤按需填写。" : "生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。"}
 内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。等价业务类型可以共用一条验收，但必须分别观察所有 observationTargets；业务条件或预期不同才拆分，不能观察一个类型后判定所有类型通过。
-Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；简单场景通常 3–6 个业务步骤，按“新增→筛选→禁用→重新启用→清理”合并连续点击，不逐个描述按钮操作。复杂场景按需要增加步骤，不能为压缩遗漏要求。每个描述或步骤最多 300 字；长接口细节移到 observationTargets 的结构化网络字段。验收标准只写可判定结果，不复述操作步骤；不要在 name、preconditions、testData、steps、criteria 和账号说明中重复同一约束。
+Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；简单场景通常 3–6 个业务步骤，按“新增→筛选→禁用→重新启用→清理”合并连续点击，不逐个描述按钮操作。复杂场景按需要增加步骤，不能为压缩遗漏要求。每个描述或步骤最多 300 字；接口细节仅作执行参考，按需放入 testData，不进入 criteria。验收标准只写可判定结果，不复述操作步骤；不要在 name、preconditions、testData、steps、criteria 和账号说明中重复同一约束。
 账号字段各司其职：label 只写用途，rationale 一句话解释数量或隔离必要性，constraints 只写此业务对象特有的前置条件。通用登录、禁用随机账号、禁止修改他人记录、账号不可用时无法判定等平台规则由执行器统一提供，不在各 Case 中反复抄写。后台登录身份仅填 authRole，不能放进 accountRequirements；后台权限不能填 requiredTypes（它只表示业务类型）。
 每个 Case 必须填写 accountRequirementsVersion: 2。非空账号需求必须提供 subjectBinding：kind 为 BUSINESS_INPUT（账号填入业务字段）、BUSINESS_RECORD（按指定账号检查业务记录）或 AUTH_SUBJECT（该账号登录/权限本身是验收对象）；target 为实际业务字段或被测账号对象；stepOrders 引用当前步骤；basis 引用已读来源的 sourceRef 和准确 quote，说明业务确实需要这个账号。AUTH_SUBJECT 还必须填 criterionIds，${checkReferences ? "使用当前 Case 的 checkIds" : compact ? "使用当前 Case 验收标准的一基序号字符串，如 1" : "使用当前 Case 的 criterion id"}。真实来源原文必须支持账号用途，不能仅引用存在权限判断的代码。
 创建、编辑、克隆模型或产品配置不等于需要业务账号：模型名称、ID、时间属于普通测试资源，使用 testData 和清理台账。仅需模型编辑权限、列表查看或导出权限的操作账号放 authRole，accountRequirements 为 []。添加用户白名单、指定用户查询、双账号转账需要实际账号；验证账号登录权限时保留 AUTH_SUBJECT，不与执行身份混淆。
@@ -1388,7 +1392,7 @@ criteria.description 描述产品应满足的条件，不把“截图、记录�
       .split("\n")
       .map((line) => {
         if (line.startsWith("每条验收标准还必须提供 observationTargets"))
-          return "对象状态使用 businessCheck；普通文字发现与接口字段使用 observationTargets。每条标准引用 requirementId，来源原文必须直接支持断言。来源是需求依据，不是待匹配的页面文字；创建表单的选项不能证明列表筛选结果。";
+          return "对象状态使用 businessCheck；普通界面文字发现使用 observationTargets。网络请求仅作执行参考，不生成网络字段验收。每条标准引用 requirementId，来源原文必须直接支持断言。来源是需求依据，不是待匹配的页面文字；创建表单的选项不能证明列表筛选结果。";
         if (line.startsWith("同一个业务对象的同义显示方式"))
           return "businessCheck.subjects 分别声明必须覆盖的对象，state 只声明共同的预期；不同对象允许具有相同状态。单纯文字目标的 alternatives 仅表示同一对象的等价名称，启用/禁用不能互为 alternatives。";
         return line

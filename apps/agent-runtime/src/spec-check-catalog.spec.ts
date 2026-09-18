@@ -69,6 +69,36 @@ const draft = (checkIds = ["check-1", "check-2"]) => ({
 });
 
 describe("SpecCheckCatalog", () => {
+  it("keeps UI checks while rejecting network assertions and permits a business-result correction", () => {
+    const catalog = new SpecCheckCatalog();
+    const result = catalog.define(
+      {
+        expectedRevision: 0,
+        checks: [
+          option,
+          { ...option, description: "请求体 type 包含旧版对公转账枚举。" },
+        ],
+      },
+      requirements,
+      sources,
+    );
+    expect(result.saved).toHaveLength(1);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({
+        code: "NETWORK_REFERENCE_ONLY",
+        inputIndex: 1,
+      }),
+    );
+    const correction = catalog.define(
+      {
+        expectedRevision: catalog.revision,
+        checks: [{ ...option, description: "可以选择旧版对公转账白名单。" }],
+      },
+      requirements,
+      sources,
+    );
+    expect(correction.issues).toEqual([]);
+  });
   it("identifies malformed assertion fields and preserves accepted v2 contracts", () => {
     const catalog = new SpecCheckCatalog();
     const assertion = {

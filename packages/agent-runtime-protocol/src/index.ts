@@ -36,6 +36,7 @@ export {
   specCapabilityError,
   localizationRequirementError,
   requiresNetworkEvidence,
+  networkAcceptanceError,
   SPEC_EXECUTION_SCOPE_GUIDANCE,
 } from "./spec-capabilities.js";
 
