@@ -1,3 +1,5 @@
+import { AuthSnapshotTransferController } from "./browser-profiles/auth-snapshot-transfer.controller.js";
+import { AuthSnapshotTransferService } from "./browser-profiles/auth-snapshot-transfer.service.js";
 import { ExecutionContextService } from "./execution-runs/execution-context.service.js";
 import { ExecutionContextController } from "./execution-runs/execution-context.controller.js";
 import { ObservationBindingService } from "./agent-runtime/observation-binding.service.js";
@@ -101,6 +103,7 @@ import { VerificationService } from "./verification/verification.service.js";
 
 @Module({
   controllers: [
+    AuthSnapshotTransferController,
     AgentRuntimeControlController,
     AgentRuntimeTaskController,
     SpecAnalysisRuntimeController,
@@ -130,6 +133,7 @@ import { VerificationService } from "./verification/verification.service.js";
     VerificationMcpController,
   ],
   providers: [
+    AuthSnapshotTransferService,
     AgentRuntimeControlService,
     AgentModelConfigurationService,
     AgentRuntimeTaskService,

@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { consoleApi } from "@/lib/api";
+import { BrowserControlConnection } from "@/lib/browser-connection";
 import { BrowserInputQueue } from "@/lib/browser-input-queue";
 import {
   BrowserPointerController,
@@ -386,6 +387,11 @@ function BrowserHitl({
   onComplete,
 }: SharedBrowserHitlProps) {
   const [handoff, setHandoff] = useState<BrowserHandoffStatus | null>(null);
+  const connection = useRef<{
+    base: string;
+    controlId: string;
+    channel: BrowserControlConnection;
+  } | null>(null);
   const [controlId, setControlId] = useState<string | null>(null);
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [streamStatus, setStreamStatus] = useState<
@@ -445,9 +451,17 @@ function BrowserHitl({
   useEffect(() => {
     if (!controlId) return;
     lastFrameAt.current = Date.now();
-    const source = new EventSource(`/console/api${base}/stream`, {
-      withCredentials: true,
+    const source = new BrowserControlConnection({
+      connectionPath: `${base}/connection`,
+      connectionBody: { controlId },
+      streamUrl: `/console/api${base}/stream`,
+      relayInput: (events) =>
+        consoleApi(`${base}/control/input`, {
+          method: "POST",
+          body: JSON.stringify({ controlId, events }),
+        }),
     });
+    connection.current = { base, controlId, channel: source };
     let reconnectTimer: number | undefined;
     const reconnect = (message?: string) => {
       setStreamStatus("interrupted");
@@ -483,6 +497,7 @@ function BrowserHitl({
       window.clearInterval(watchdog);
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       source.close();
+      if (connection.current?.channel === source) connection.current = null;
     };
   }, [base, controlId, streamAttempt]);
 
@@ -535,10 +550,14 @@ function BrowserHitl({
     () =>
       new BrowserInputQueue((events) => {
         if (!controlId) return Promise.resolve();
-        return consoleApi(`${base}/control/input`, {
-          body: JSON.stringify({ controlId, events }),
-          method: "POST",
-        });
+        const current = connection.current;
+        if (
+          !current ||
+          current.base !== base ||
+          current.controlId !== controlId
+        )
+          return Promise.reject(new Error("浏览器控制权已切换，请重新操作。"));
+        return current.channel.input(events);
       }),
     [base, controlId],
   );

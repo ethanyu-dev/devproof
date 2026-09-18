@@ -1,3 +1,4 @@
+export * from "./direct-control.js";
 export * from "./structured-observation.js";
 import {
   actionObservationSchema,
@@ -9,7 +10,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 18,
+  minor: 19,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;
@@ -106,6 +107,7 @@ export const authSnapshotReferenceSchema = z
       .max(160)
       .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
     generation: z.number().int().positive().safe(),
+    distributed: z.boolean().optional(),
   })
   .strict();
 
@@ -692,6 +694,7 @@ const frameTargetSchema = runtimeLocatorSchema;
 
 export const authSnapshotVerificationSchema = z
   .object({
+    exactLocation: z.boolean().optional(),
     url: z.string().url().max(2048),
     authenticatedSelector: z.string().min(1).max(2000).optional(),
     successUrlPatterns: z.array(z.string().min(1).max(2048)).max(32).optional(),
@@ -708,6 +711,7 @@ const sessionCommandPayloadVariants = [
     payload: authSnapshotReferenceSchema.extend({
       verification: authSnapshotVerificationSchema.optional(),
       probeConcurrency: z.number().int().min(1).max(4).optional(),
+      publishDistributed: z.boolean().optional(),
     }),
   }),
   z.object({

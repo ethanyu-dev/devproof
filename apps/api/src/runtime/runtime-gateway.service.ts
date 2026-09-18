@@ -1,3 +1,4 @@
+import { snapshotDistributionEnabled } from "../browser-profiles/auth-snapshot-transfer.service.js";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -333,25 +334,28 @@ export class RuntimeGatewayService {
     );
     const connectionId = randomUUID();
     const capabilities = (hello.capabilities ?? []).filter((value) =>
-      [
-        "structured-observation-v1",
-        "scope-phase-v1",
-        "action-observation-v1",
-        "form-sequence-v1",
-        "observation-delta-v1",
-      ].includes(value)
-        ? selectedMinor >= 18
-        : value === "scroll-feedback-v1"
-          ? selectedMinor >= 17
-          : ["dom-vision-v1", "action-feedback-v1"].includes(value)
-            ? selectedMinor >= 16
-            : value === "no-launch-evidence-v1"
-              ? selectedMinor >= 15 &&
-                hello.capabilities?.includes("closure-evidence-v1")
-              : value === "closure-evidence-v1"
-                ? selectedMinor >= 14
-                : ["auth-snapshot-v1", "session-permits-v1"].includes(value) &&
-                  selectedMinor >= 13,
+      value === "distributed-auth-v1"
+        ? selectedMinor >= 19
+        : [
+              "structured-observation-v1",
+              "scope-phase-v1",
+              "action-observation-v1",
+              "form-sequence-v1",
+              "observation-delta-v1",
+            ].includes(value)
+          ? selectedMinor >= 18
+          : value === "scroll-feedback-v1"
+            ? selectedMinor >= 17
+            : ["dom-vision-v1", "action-feedback-v1"].includes(value)
+              ? selectedMinor >= 16
+              : value === "no-launch-evidence-v1"
+                ? selectedMinor >= 15 &&
+                  hello.capabilities?.includes("closure-evidence-v1")
+                : value === "closure-evidence-v1"
+                  ? selectedMinor >= 14
+                  : ["auth-snapshot-v1", "session-permits-v1"].includes(
+                      value,
+                    ) && selectedMinor >= 13,
     );
     const connected = await this.prisma.$transaction(async (tx) => {
       if (runtime.drainState === "RESUMING")
@@ -477,6 +481,7 @@ export class RuntimeGatewayService {
                     "action-feedback-v1",
                     "scroll-feedback-v1",
                     "auth-snapshot-v1",
+                    "distributed-auth-v1",
                     "session-permits-v1",
                     "closure-evidence-v1",
                     "no-launch-evidence-v1",
@@ -935,12 +940,36 @@ export class RuntimeGatewayService {
     >,
   ) {
     const profile = await this.prisma.userBrowserProfile.findFirst({
-      select: { id: true, teamId: true },
+      select: {
+        id: true,
+        teamId: true,
+        status: true,
+        executionMode: true,
+        authSnapshotGeneration: true,
+      },
       where: {
         assignedRuntimeId: runtimeId,
         runtimeProfileKey: message.profileKey,
       },
     });
+    if (
+      profile &&
+      snapshotDistributionEnabled() &&
+      profile.status === "READY" &&
+      profile.executionMode === "ISOLATED_AUTH" &&
+      profile.authSnapshotGeneration &&
+      (await this.prisma.browserAuthSnapshot.findUnique({
+        where: {
+          uploadedAt: { not: null },
+          deletedAt: null,
+          profileId_generation: {
+            profileId: profile.id,
+            generation: profile.authSnapshotGeneration,
+          },
+        },
+      }))
+    )
+      return; // The source directory may expire while a portable identity remains in use.
     if (!profile) {
       this.observability?.log("warn", "runtime.profile.expiry_unmatched", {
         runtimeId,

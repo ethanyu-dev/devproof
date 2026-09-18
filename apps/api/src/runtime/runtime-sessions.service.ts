@@ -1,3 +1,4 @@
+import { snapshotDistributionEnabled } from "../browser-profiles/auth-snapshot-transfer.service.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -587,6 +588,7 @@ export class RuntimeSessionsService {
     generation: number,
     verification: {
       url: string;
+      exactLocation?: boolean;
       authenticatedSelector?: string;
       successUrlPatterns?: string[];
       loginUrlPatterns?: string[];
@@ -602,6 +604,18 @@ export class RuntimeSessionsService {
       throw new ConflictException(
         "Authentication snapshots require an active Profile preparation session on Runtime protocol v1.13.",
       );
+    const distributionRuntime =
+      snapshotDistributionEnabled() && session.protocolMinor >= 19
+        ? await this.prisma.browserRuntime.findUnique({
+            where: { id: session.runtimeId },
+            select: { capabilities: true },
+          })
+        : null;
+    const publishDistributed =
+      Array.isArray(distributionRuntime?.capabilities) &&
+      distributionRuntime.capabilities.includes("distributed-auth-v1");
+    const { exactLocation: _exactLocation, ...legacyVerification } =
+      verification;
     const command = await this.commands.execute({
       commandType: "profile.snapshot",
       sessionId,
@@ -609,8 +623,10 @@ export class RuntimeSessionsService {
       payload: {
         profileKey: session.profileKey,
         generation,
-        verification,
+        verification:
+          session.protocolMinor >= 19 ? verification : legacyVerification,
         probeConcurrency: 4,
+        ...(publishDistributed ? { publishDistributed: true } : {}),
       },
       timeoutSeconds: 90,
     });
