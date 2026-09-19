@@ -109,3 +109,34 @@ it("does not silently downgrade a failed direct channel", async () => {
   expect(Source.instances).toHaveLength(0);
   expect(opts.onTransportChange).toHaveBeenCalledExactlyOnceWith("direct");
 });
+
+it.each(["direct", "relay"])(
+  "receives a read-only %s preview but never sends input",
+  async (transport) => {
+    vi.mocked(consoleApi).mockResolvedValue({
+      transport,
+      url: "wss://vm.example/browser-control",
+      ticket: "preview-ticket",
+    });
+    const connection = new BrowserControlConnection({
+      connectionPath: "/runs/run/browser/connection",
+      streamUrl: "/stream",
+    });
+    const onmessage = vi.fn();
+    connection.onmessage = onmessage;
+    open.push(connection);
+    await vi.advanceTimersByTimeAsync(0);
+    if (transport === "direct") {
+      const socket = Socket.instances[0]!;
+      socket.onmessage?.({ data: '{"type":"ready"}' });
+      socket.onmessage?.({ data: '{"type":"frame"}' });
+      expect(onmessage).toHaveBeenCalledWith({ data: '{"type":"frame"}' });
+    } else {
+      expect(Source.instances).toHaveLength(1);
+    }
+    await expect(
+      connection.input([{ type: "text", text: "blocked" }]),
+    ).rejects.toThrow("只读预览");
+    expect(Socket.instances[0]?.send.mock.calls ?? []).toHaveLength(0);
+  },
+);

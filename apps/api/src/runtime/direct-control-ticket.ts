@@ -4,7 +4,7 @@ import type { BrowserConnection } from "@devproof/runtime-protocol";
 import { directControlClaimsSchema } from "@devproof/runtime-protocol";
 import type { AuthContext } from "../auth/auth.types.js";
 
-/** Only call after validating the profile ownership or the HITL control lease. */
+/** Call only after authorizing control ownership or read-only Run access. */
 export function browserConnection(
   current: AuthContext,
   session: {
@@ -15,6 +15,7 @@ export function browserConnection(
     humanControlExpiresAt?: Date | null;
   },
   controlExpiresAt?: Date,
+  access: "control" | "preview" = "control",
 ): BrowserConnection {
   const endpoints = JSON.parse(
     process.env.BROWSER_DIRECT_ENDPOINTS_JSON || "{}",
@@ -41,13 +42,16 @@ export function browserConnection(
   const expiresAt = Math.min(
     now + 30_000,
     controlExpiresAt?.getTime() ?? Infinity,
-    session.humanControlExpiresAt?.getTime() ?? Infinity,
+    access === "control"
+      ? (session.humanControlExpiresAt?.getTime() ?? Infinity)
+      : Infinity,
   );
   if (expiresAt <= now)
     throw new ServiceUnavailableException("Browser control has expired.");
   const claims = directControlClaimsSchema.parse({
     version: 1,
     audience: session.runtimeId,
+    ...(access === "preview" ? { access } : {}),
     sessionId: session.id,
     userId: current.user.id,
     teamId: current.team.id,

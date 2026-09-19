@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import { browserConnection } from "../runtime/direct-control-ticket.js";
 import type { AuthContext } from "../auth/auth.types.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { RuntimeHumanControlRelay } from "../runtime/runtime-human-control-relay.service.js";
@@ -37,7 +38,11 @@ export class RunBrowserPreviewService {
             id: session.id,
             profileId: session.userBrowserProfileId ?? null,
             profileMode: session.profileMode,
-            runtime: session.runtime,
+            runtime: {
+              id: session.runtime.id,
+              name: session.runtime.name,
+              status: session.runtime.status,
+            },
             status: session.status,
           }
         : null,
@@ -51,6 +56,31 @@ export class RunBrowserPreviewService {
     emit: (event: HumanPreviewEvent) => void,
   ) {
     const { session } = await this.context(current, runId);
+    this.assertPreviewSession(session);
+    return this.relay.subscribe(session, emit);
+  }
+
+  async connection(current: AuthContext, runId: string) {
+    const { run, session } = await this.context(current, runId);
+    if (run.lifecycle !== "RUNNING") {
+      throw new ConflictException("Run is not running.");
+    }
+    this.assertPreviewSession(session);
+    // Older nodes cannot interpret scoped read-only tickets.
+    if (
+      !Array.isArray(session.runtime.capabilities) ||
+      !session.runtime.capabilities.includes("direct-preview-v1")
+    ) {
+      return { transport: "relay" as const };
+    }
+    return browserConnection(current, session, undefined, "preview");
+  }
+
+  private assertPreviewSession(
+    session: Awaited<
+      ReturnType<RunBrowserPreviewService["context"]>
+    >["session"],
+  ): asserts session is NonNullable<typeof session> {
     if (!session) {
       throw new ConflictException("Browser Runtime session is not available.");
     }
@@ -65,7 +95,6 @@ export class RunBrowserPreviewService {
     if (!["ACTIVE", "HUMAN_CONTROL"].includes(session.status)) {
       throw new ConflictException("Browser Runtime session is not available.");
     }
-    return this.relay.subscribe(session, emit);
   }
 
   private async context(current: AuthContext, runId: string) {
@@ -75,7 +104,14 @@ export class RunBrowserPreviewService {
           include: {
             runtimeSession: {
               include: {
-                runtime: { select: { id: true, name: true, status: true } },
+                runtime: {
+                  select: {
+                    id: true,
+                    name: true,
+                    status: true,
+                    capabilities: true,
+                  },
+                },
               },
             },
           },

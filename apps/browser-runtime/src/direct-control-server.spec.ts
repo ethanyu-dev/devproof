@@ -179,3 +179,92 @@ describe("direct browser control", () => {
     expect((await closed)[0]).toBe(4003);
   });
 });
+
+describe("direct read-only preview", () => {
+  it("streams to multiple viewers without replacing the human controller", async () => {
+    const f = await fixture();
+    const scope = {
+      sessionId: randomUUID(),
+      userId: randomUUID(),
+      teamId: randomUUID(),
+    };
+    const controller = await f.connect();
+    await message(controller, { type: "authenticate", ticket: ticket(scope) });
+    const viewers = [await f.connect(), await f.connect()];
+    for (const viewer of viewers) {
+      expect(
+        await message(viewer, {
+          type: "authenticate",
+          ticket: ticket({ ...scope, access: "preview" }),
+        }),
+      ).toEqual({ type: "ready" });
+    }
+    expect(
+      await message(controller, {
+        type: "input",
+        id: "still-controlling",
+        events: [{ type: "text", text: "hello" }],
+      }),
+    ).toEqual({ type: "ack", id: "still-controlling" });
+    for (const [index, viewer] of viewers.entries()) {
+      const frame = {
+        type: "frame",
+        dataBase64: "jpeg",
+        width: 1280,
+        height: 720,
+      };
+      const received = once(viewer, "message");
+      vi.mocked(f.handler.preview).mock.calls[index + 1]![2](frame);
+      expect(JSON.parse(String((await received)[0]))).toEqual(frame);
+    }
+    const closed = viewers.map((viewer) => once(viewer, "close"));
+    f.revoke();
+    expect((await Promise.all(closed)).map((result) => result[0])).toEqual([
+      4001, 4001,
+    ]);
+  });
+
+  it("rejects input with a preview ticket even while the session has a controller", async () => {
+    const f = await fixture();
+    const ws = await f.connect();
+    await message(ws, {
+      type: "authenticate",
+      ticket: ticket({ access: "preview" }),
+    });
+    const closed = once(ws, "close");
+    ws.send(
+      JSON.stringify({
+        type: "input",
+        id: "forbidden",
+        events: [{ type: "text", text: "must not be typed" }],
+      }),
+    );
+    expect((await closed)[0]).toBe(4003);
+    expect(f.handler.input).not.toHaveBeenCalled();
+  });
+
+  it("renews preview tickets but rejects changing their access on the same socket", async () => {
+    const f = await fixture();
+    const ws = await f.connect();
+    const scope = {
+      sessionId: randomUUID(),
+      userId: randomUUID(),
+      teamId: randomUUID(),
+      access: "preview",
+    };
+    await message(ws, { type: "authenticate", ticket: ticket(scope) });
+    expect(
+      await message(ws, { type: "authenticate", ticket: ticket(scope) }),
+    ).toEqual({ type: "ready" });
+    expect(f.handler.preview).toHaveBeenCalledTimes(1);
+    const closed = once(ws, "close");
+    ws.send(
+      JSON.stringify({
+        type: "authenticate",
+        ticket: ticket({ ...scope, access: "control" }),
+      }),
+    );
+    expect((await closed)[0]).toBe(4003);
+    expect(f.handler.input).not.toHaveBeenCalled();
+  });
+});

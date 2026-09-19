@@ -216,7 +216,8 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
     const accepted = await handleHello.call(service, socket, greeting);
 
     const negotiated = RUNTIME_CAPABILITIES.filter(
-      (capability) => capability !== "browser",
+      (capability) =>
+        capability !== "browser" && capability !== "direct-preview-v1",
     );
     expect(accepted?.capabilities).toEqual(new Set(negotiated));
     expect(JSON.parse(String(socket.send.mock.calls[0]?.[0]))).toMatchObject({
@@ -267,6 +268,7 @@ describe("RuntimeGatewayService DOM + vision and action feedback negotiation", (
           "action-observation-v1",
           "form-sequence-v1",
           "observation-delta-v1",
+          "direct-preview-v1",
         ],
       } as never);
       const greeting = runtimeClientMessageSchema.parse({
@@ -769,4 +771,25 @@ describe("Runtime handshake readiness", () => {
       expect.objectContaining({ data: { status: "ONLINE" } }),
     );
   });
+});
+
+it("negotiates direct preview only when advertised on a compatible node", async () => {
+  const { handleHello, prisma, service, socket } = fixture();
+  prisma.browserRuntime.findFirst.mockResolvedValue({
+    id: context.runtimeId,
+    enabled: true,
+    revokedAt: null,
+    capabilities: [],
+  } as never);
+  const greeting = runtimeClientMessageSchema.parse({
+    ...hello("0.2.33", 19),
+    capabilities: ["direct-preview-v1"],
+  });
+  const accepted = await handleHello.call(service, socket, greeting);
+  expect(accepted?.capabilities.has("direct-preview-v1")).toBe(true);
+  expect(prisma.browserRuntime.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({ capabilities: ["direct-preview-v1"] }),
+    }),
+  );
 });

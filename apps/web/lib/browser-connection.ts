@@ -29,7 +29,8 @@ export class BrowserControlConnection {
       connectionPath: string;
       connectionBody?: unknown;
       streamUrl: string;
-      relayInput: (events: BrowserHumanInputEvent[]) => Promise<unknown>;
+      // Omitting input support creates a read-only preview connection.
+      relayInput?: (events: BrowserHumanInputEvent[]) => Promise<unknown>;
       onTransportChange?: (transport: BrowserConnection["transport"]) => void;
     },
   ) {
@@ -133,6 +134,7 @@ export class BrowserControlConnection {
   }
 
   async input(events: BrowserHumanInputEvent[]) {
+    if (!this.options.relayInput) throw new Error("只读预览不支持浏览器输入。");
     if (this.closed || !this.ready)
       throw new Error("浏览器尚未连接，请等待画面恢复。");
     if (this.mode === "relay") {

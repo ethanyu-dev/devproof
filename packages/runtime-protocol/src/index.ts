@@ -24,6 +24,7 @@ export const RUNTIME_TELEMETRY_MINOR = 18;
 export const RUNTIME_TELEMETRY_STALE_MS = 45_000;
 export const RUNTIME_CAPABILITIES = [
   "browser",
+  "direct-preview-v1",
   "form-sequence-v1",
   "observation-delta-v1",
   STRUCTURED_OBSERVATION_CAPABILITY,

@@ -334,7 +334,7 @@ export class RuntimeGatewayService {
     );
     const connectionId = randomUUID();
     const capabilities = (hello.capabilities ?? []).filter((value) =>
-      value === "distributed-auth-v1"
+      ["distributed-auth-v1", "direct-preview-v1"].includes(value)
         ? selectedMinor >= 19
         : [
               "structured-observation-v1",
@@ -482,6 +482,7 @@ export class RuntimeGatewayService {
                     "scroll-feedback-v1",
                     "auth-snapshot-v1",
                     "distributed-auth-v1",
+                    "direct-preview-v1",
                     "session-permits-v1",
                     "closure-evidence-v1",
                     "no-launch-evidence-v1",

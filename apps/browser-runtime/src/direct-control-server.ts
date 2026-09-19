@@ -109,7 +109,8 @@ export async function startDirectControlServer(options: {
         !claims ||
         Date.now() >= expiry ||
         socket.readyState !== WebSocket.OPEN ||
-        controllers.get(claims.sessionId) !== socket
+        (claims.access !== "preview" &&
+          controllers.get(claims.sessionId) !== socket)
       )
         throw new Error("Browser control expired.");
       options.handler.assert(claims);
@@ -146,16 +147,19 @@ export async function startDirectControlServer(options: {
             (claims.sessionId !== next.sessionId ||
               claims.userId !== next.userId ||
               claims.teamId !== next.teamId ||
+              (claims.access ?? "control") !== (next.access ?? "control") ||
               claims.controlGeneration !== next.controlGeneration ||
               claims.fencingToken !== next.fencingToken)
           )
             throw new Error();
           options.handler.assert(next);
           usedTickets.set(next.nonce, next.expiresAt);
-          const previous = controllers.get(next.sessionId);
-          controllers.set(next.sessionId, socket);
-          if (previous && previous !== socket)
-            previous.close(4001, "Browser control reconnected.");
+          if (next.access !== "preview") {
+            const previous = controllers.get(next.sessionId);
+            controllers.set(next.sessionId, socket);
+            if (previous && previous !== socket)
+              previous.close(4001, "Browser control reconnected.");
+          }
           claims = next;
           expiry = next.expiresAt;
           if (!streamId) {
@@ -174,6 +178,7 @@ export async function startDirectControlServer(options: {
         }
         const current = assert();
         if (
+          current.access === "preview" ||
           value.type !== "input" ||
           typeof value.id !== "string" ||
           value.id.length > 80 ||
