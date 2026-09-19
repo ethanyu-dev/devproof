@@ -3,7 +3,10 @@ import {
   accountReplacementState,
 } from "./account-replacement.js";
 import { env } from "../config/env.js";
-import { executionCleanup, executionVerification } from "./execution-cleanup.js";
+import {
+  executionCleanup,
+  executionVerification,
+} from "./execution-cleanup.js";
 import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { randomBytes, randomUUID } from "node:crypto";
 
