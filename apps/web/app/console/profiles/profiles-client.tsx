@@ -27,7 +27,11 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
+import type {
+  BrowserConnection,
+  BrowserHumanInputEvent,
+} from "@devproof/runtime-protocol";
+import { BrowserTransportBadge } from "@/components/browser-transport-badge";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -646,6 +650,9 @@ function ProfileBrowser({
   const [streamStatus, setStreamStatus] = useState<
     "connecting" | "interrupted" | "live"
   >("connecting");
+  const [transport, setTransport] = useState<
+    BrowserConnection["transport"] | null
+  >(null);
   const container = useRef<HTMLDivElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const lastFrameAt = useRef(0);
@@ -709,8 +716,10 @@ function ProfileBrowser({
   useEffect(() => {
     lastFrameAt.current = Date.now();
     setStreamStatus("connecting");
+    setTransport(null);
     const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     const source = new BrowserControlConnection({
+      onTransportChange: setTransport,
       connectionPath: `/browser-profiles/${profile.id}/browser/connection`,
       streamUrl: `/console/api/browser-profiles/${profile.id}/browser/stream?pixelRatio=${pixelRatio}`,
       relayInput: (events) =>
@@ -824,6 +833,7 @@ function ProfileBrowser({
                   ? "由你控制"
                   : "连接中"}
             </Badge>
+            <BrowserTransportBadge transport={transport} />
           </span>
           <Button
             aria-label={fullscreen ? "退出全屏操作" : "全屏操作"}

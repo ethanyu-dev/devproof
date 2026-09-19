@@ -30,6 +30,7 @@ export class BrowserControlConnection {
       connectionBody?: unknown;
       streamUrl: string;
       relayInput: (events: BrowserHumanInputEvent[]) => Promise<unknown>;
+      onTransportChange?: (transport: BrowserConnection["transport"]) => void;
     },
   ) {
     void this.connect();
@@ -52,6 +53,7 @@ export class BrowserControlConnection {
       if (this.mode === "direct" && connection.transport !== "direct")
         throw new Error("Direct browser connection is unavailable.");
       this.mode = connection.transport;
+      this.options.onTransportChange?.(connection.transport);
       if (connection.transport === "relay") {
         this.source = new EventSource(this.options.streamUrl, {
           withCredentials: true,
