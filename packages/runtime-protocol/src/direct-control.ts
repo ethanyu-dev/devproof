@@ -4,6 +4,8 @@ export const directControlClaimsSchema = z
   .object({
     version: z.literal(1),
     audience: z.string().uuid(),
+    // Missing access preserves existing control tickets during rolling upgrades.
+    access: z.enum(["control", "preview"]).optional(),
     sessionId: z.string().uuid(),
     userId: z.string().uuid(),
     teamId: z.string().uuid(),

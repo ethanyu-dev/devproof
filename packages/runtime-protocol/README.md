@@ -131,3 +131,11 @@ installed runtimes. See [DOM + visual browser observations](../../docs/dom-visua
 The separate Agent protocol v2.20 adds validated business account subjects and
 reviewed account-plan corrections. It does not change the Browser wire protocol
 or require a daemon upgrade; see the [Agent protocol changelog](../agent-runtime-protocol/README.md).
+
+The optional `direct-preview-v1` capability (Browser Runtime 0.2.33, protocol
+1.19) enables direct read-only Run previews. Direct tickets with
+`access: "preview"` authorize frame streaming only. Tickets without `access`
+retain the existing human-control semantics for compatibility. Renewal cannot
+change access scope, and preview connections do not claim the single controller
+slot. Preview access remains fenced by the active session permit and control
+generation.

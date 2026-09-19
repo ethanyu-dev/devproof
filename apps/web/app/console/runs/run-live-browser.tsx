@@ -4,6 +4,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { CircleAlert, LoaderCircle, MonitorPlay, Radio } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { BrowserTransportBadge } from "@/components/browser-transport-badge";
+import type { BrowserConnection } from "@devproof/runtime-protocol";
+import { BrowserControlConnection } from "@/lib/browser-connection";
 import { consoleApi } from "@/lib/api";
 import { displayLabel, displayMessage } from "@/lib/display-text";
 import styles from "./run-live-browser.module.css";
@@ -50,6 +52,9 @@ export function RunLiveBrowser({
   const [streamStatus, setStreamStatus] = useState<
     "idle" | "connecting" | "live" | "interrupted"
   >("idle");
+  const [transport, setTransport] = useState<
+    BrowserConnection["transport"] | null
+  >(null);
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -86,6 +91,7 @@ export function RunLiveBrowser({
   }, [runId]);
 
   useEffect(() => {
+    setTransport(null);
     setFrame(null);
     setStreamError(null);
     if (!status?.ready || status.lifecycle !== "RUNNING") {
@@ -95,10 +101,11 @@ export function RunLiveBrowser({
 
     let lastFrameAt = Date.now();
     setStreamStatus("connecting");
-    const source = new EventSource(
-      `/console/api/runs/${runId}/browser/stream`,
-      { withCredentials: true },
-    );
+    const source = new BrowserControlConnection({
+      connectionPath: `/runs/${runId}/browser/connection`,
+      streamUrl: `/console/api/runs/${runId}/browser/stream`,
+      onTransportChange: setTransport,
+    });
     source.onmessage = (message) => {
       const event = parsePreviewEvent(message.data);
       if (event.type === "frame") {
@@ -148,7 +155,7 @@ export function RunLiveBrowser({
             {streamLabel(streamStatus)}
           </Badge>
           <BrowserTransportBadge
-            transport={streamStatus === "idle" ? null : "relay"}
+            transport={streamStatus === "idle" ? null : transport}
           />
         </span>
       </div>

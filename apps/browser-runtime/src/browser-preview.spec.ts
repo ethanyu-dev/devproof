@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
-import type { RuntimeSessionPermit } from "@devproof/runtime-protocol";
+import type {
+  DirectControlClaims,
+  RuntimeSessionPermit,
+} from "@devproof/runtime-protocol";
 
 import { atomicPointerClick, BrowserSessionManager } from "./index.js";
 
@@ -224,5 +227,75 @@ describe("atomicPointerClick", () => {
         },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("direct preview session permits", () => {
+  it("allows OPEN sessions for preview, fences stale tickets, and refuses preview after disconnect", () => {
+    const manager = new BrowserSessionManager(
+      {
+        removeSession: vi.fn(),
+        replaceSession: vi.fn(),
+        value: () => ({ sessions: [] }),
+      } as never,
+      "http://localhost:1",
+      vi.fn(),
+      vi.fn(),
+    );
+    const permit: RuntimeSessionPermit = {
+      sessionId: randomUUID(),
+      leaseToken: randomUUID(),
+      fencingToken: "9",
+      ownerKind: "SYSTEM",
+      controlGeneration: 1,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const session = {
+      ...permit,
+      permit,
+      state: "OPEN",
+      page: { evaluate: vi.fn().mockResolvedValue(undefined) },
+    };
+    (
+      manager as unknown as { sessions: Map<string, typeof session> }
+    ).sessions.set(permit.sessionId, session);
+    manager.acceptSessionPermits([permit], new Date().toISOString());
+    const claims: DirectControlClaims = {
+      version: 1,
+      audience: randomUUID(),
+      sessionId: permit.sessionId,
+      userId: randomUUID(),
+      teamId: randomUUID(),
+      fencingToken: permit.fencingToken,
+      controlGeneration: 1,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 20_000,
+      nonce: randomUUID(),
+      access: "preview",
+    };
+    expect(manager.directSession(claims)).toMatchObject({
+      sessionId: permit.sessionId,
+      leaseToken: permit.leaseToken,
+    });
+    expect(() =>
+      manager.directSession({ ...claims, access: "control" }),
+    ).toThrow("not in human control");
+    expect(() =>
+      manager.directSession({ ...claims, fencingToken: "8" }),
+    ).toThrow("stale session");
+    expect(() =>
+      manager.directSession({ ...claims, controlGeneration: 0 }),
+    ).toThrow("stale control generation");
+    manager.acceptSessionPermits(
+      [{ ...permit, controlGeneration: 2 }],
+      new Date().toISOString(),
+    );
+    expect(() => manager.directSession(claims)).toThrow(
+      "stale control generation",
+    );
+    const current = { ...claims, controlGeneration: 2 };
+    expect(() => manager.directSession(current)).not.toThrow();
+    manager.disconnect();
+    expect(() => manager.directSession(current)).toThrow();
   });
 });

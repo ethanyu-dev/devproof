@@ -4673,7 +4673,14 @@ export class BrowserSessionManager {
     };
     if (!session.permit)
       throw new Error("Direct browser control requires session permits.");
-    this.ownedHumanSession(fence);
+    if (claims.access === "preview") {
+      this.ownedPreviewSession(fence);
+      const permit = this.permits.assert(session);
+      if ((permit.controlGeneration ?? 0) !== claims.controlGeneration)
+        throw new Error("Browser preview owns a stale control generation.");
+    } else {
+      this.ownedHumanSession(fence);
+    }
     return fence;
   }
 

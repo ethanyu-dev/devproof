@@ -29,6 +29,16 @@ The browser authenticates on the WSS connection's first message, not in a URL. T
 
 Only endpoints explicitly configured on the API switch to direct mode. A direct connection error never silently falls back to sending input through Railway. Unconfigured nodes retain the legacy SSE/POST relay for rolling upgrades. Browser frame capture remains periodic at 500 ms, plus input-triggered refresh; this change removes Railway transport hops but is not a video-streaming implementation.
 
+## Read-only Run previews
+
+Browser Runtime 0.2.33 adds the `direct-preview-v1` capability on protocol 1.19. The Run's read-only live view now requests `POST /console/api/runs/:runId/browser/connection` and negotiates the same WSS endpoint as HITL and Profile preparation. Unconfigured nodes and older nodes without this capability explicitly retain SSE relay. A selected direct connection never silently downgrades on failure.
+
+The API checks team access, a running Run and an available online session before issuing a ticket with `access: "preview"`. These tickets do not grant human control. Runtime accepts them for an OPEN or HUMAN_CONTROL session only while its execution permit and control generation remain valid. It rejects input on preview sockets and refuses changes of access scope during renewal. Multiple viewers can watch concurrently without replacing a human controller. Preview tickets last at most 30 seconds and are renewed independently of any previous human-control lease; permission changes stop further ticket issuance, while session fencing and permit revocation invalidate active access at Runtime.
+
+Existing control tickets omit `access` for compatibility with older direct-control nodes. API and Web can roll out before Runtime: direct previews begin only after the upgraded node reconnects and advertises the capability. A Runtime downgrade clears the stored capability on reconnect.
+
+Deploy API/Web and upgrade each participating Browser Runtime to 0.2.33. End active browser sessions before restarting a Runtime. No new key pair or endpoint is needed when HITL direct access is already configured. A node still needs a browser-reachable WSS endpoint and a trusted TLS certificate; this change does not provide NAT traversal or a network tunnel.
+
 ## Configuration and rollout
 
 First apply migrations with `pnpm prisma:deploy`, deploy API and Web, and upgrade participating Browser Runtimes to 0.2.32. Existing files and Profiles need no destructive migration.

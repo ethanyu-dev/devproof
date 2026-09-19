@@ -59,3 +59,28 @@ it("fails closed for configured direct access with missing signing keys", () => 
   vi.stubEnv("BROWSER_DIRECT_SIGNING_KEY", "");
   expect(() => browserConnection(current, session)).toThrow();
 });
+
+it("does not cap preview tickets by a previous human control expiry", () => {
+  const keys = generateKeyPairSync("ed25519");
+  vi.stubEnv(
+    "BROWSER_DIRECT_SIGNING_KEY",
+    keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  );
+  vi.stubEnv(
+    "BROWSER_DIRECT_ENDPOINTS_JSON",
+    JSON.stringify({ [session.runtimeId]: "wss://vm.example/browser-control" }),
+  );
+  const result = browserConnection(
+    current,
+    { ...session, humanControlExpiresAt: new Date(0) },
+    undefined,
+    "preview",
+  );
+  expect(result.transport).toBe("direct");
+  if (result.transport !== "direct") throw new Error();
+  const claims = JSON.parse(
+    Buffer.from(result.ticket.split(".")[0]!, "base64url").toString(),
+  );
+  expect(claims.access).toBe("preview");
+  expect(claims.expiresAt - claims.issuedAt).toBe(30_000);
+});

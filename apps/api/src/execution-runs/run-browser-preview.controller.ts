@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Param,
+  Post,
   Sse,
   type MessageEvent,
   UseGuards,
@@ -21,6 +22,14 @@ export class RunBrowserPreviewController {
   @Get(":runId/browser")
   status(@CurrentAuth() current: AuthContext, @Param("runId") runId: string) {
     return this.browser.status(current, runId);
+  }
+
+  @Post(":runId/browser/connection")
+  connection(
+    @CurrentAuth() current: AuthContext,
+    @Param("runId") runId: string,
+  ) {
+    return this.browser.connection(current, runId);
   }
 
   @Sse(":runId/browser/stream")

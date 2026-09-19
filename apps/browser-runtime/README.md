@@ -1,6 +1,6 @@
 # @devproof/browser-runtime
 
-Browser Runtime is DevProof's independently deployable Playwright execution host. It opens only outbound WebSocket connections. Long-lived credentials and persistent Browser Profiles remain on the Runtime machine.
+Browser Runtime is DevProof's independently deployable Playwright execution host. Its control-plane WebSocket connection is outbound; optional direct browser access also uses an inbound listener behind a host-local TLS proxy. Long-lived credentials and persistent Browser Profiles remain on the Runtime machine.
 
 ## Install
 
@@ -230,3 +230,9 @@ Version 0.2.32 adds optional direct WSS human control and encrypted login snapsh
 for multiple execution nodes. Both are disabled until configured. See the
 [rollout guide](../../docs/browser-direct-access-and-snapshots.md) for VM-local TLS,
 API signing keys, node snapshot keys, supported sites and rollback.
+
+Version 0.2.33 adds read-only direct Run previews (`direct-preview-v1`). Scoped
+preview tickets stream frames without granting input or replacing the active
+human controller. Multiple viewers can connect simultaneously. Existing direct
+control keys and WSS endpoints are reused; older nodes retain SSE relay until
+upgraded. See the rollout guide above for deployment prerequisites.
