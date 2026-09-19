@@ -140,6 +140,11 @@ export function TaskDetailClient({ id }: { id: string }) {
             <div className="dp-task-overview-status">
               <div className={styles.statusSummary}>
                 <Badge tone={tone(outcome!.toneStatus)}>{outcome!.label}</Badge>
+                {detail.cleanupPending && (
+                  <span className={styles.statusDescription}>
+                    有后续收尾事项，不影响验证结果。
+                  </span>
+                )}
                 <span className={styles.statusDescription}>
                   {outcome!.description ??
                     (active

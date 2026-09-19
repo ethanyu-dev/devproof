@@ -1246,7 +1246,7 @@ describe("context delivery and slow models", () => {
     },
   );
 
-  it("does not finish while an observed record is still awaiting its creation receipt", async () => {
+  it("finishes verification with a reminder when a creation receipt remains unconfirmed", async () => {
     const create = vi
       .fn()
       .mockImplementation(async () => reply("finish_verification", finish, 1));
@@ -1256,17 +1256,22 @@ describe("context delivery and slow models", () => {
         { id: "123", type: "MAPPING", evidenceRefs: ["network-proof"] },
       ],
     };
-    await executor.execute(runTask, lease, new AbortController().signal);
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
     const finishes = controlPlane.appendEvent.mock.calls.filter(
       (call) =>
         call[1] === "agent.tool.completed" &&
         call[2].name === "finish_verification",
     );
     expect(finishes.length).toBeGreaterThan(0);
-    expect(finishes.every((call) => call[2].status === "FAILED")).toBe(true);
-    expect(JSON.stringify(finishes[0]?.[2].outputPreview)).toContain(
-      "创建回执尚未确认",
-    );
+    expect(finishes.at(-1)?.[2].status).toBe("SUCCEEDED");
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      cleanup: { note: expect.stringContaining("创建回执尚未确认") },
+    });
   });
 
   it("uses supplied accounts without issuing reservation events", async () => {
@@ -5928,7 +5933,7 @@ it("reserves cleanup by call count with ample time left and permits its final wr
       (call) => call[1].commandType === "page.click",
     ),
   ).toBe(true);
-  expect(outcome.summary).toContain("清理未完成");
+  expect(outcome.summary).toContain("待核对清理或恢复");
   expect(outcome.summary).toContain("133");
 });
 
@@ -6097,9 +6102,7 @@ describe("durable finalization regressions", () => {
       expect(outcome).toMatchObject({
         kind: "VERIFICATION_COMPLETED",
         cleanup: { status: "BLOCKED" },
-        ...(explicitReason
-          ? {}
-          : { termination: { reason: "TOOL_LIMIT_REACHED" } }),
+
         criteria: [expect.objectContaining({ status: "PASSED" })],
       });
       expect(
@@ -6109,8 +6112,8 @@ describe("durable finalization regressions", () => {
             c[2].verificationCheckpoint?.criteria[0]?.status === "PASSED",
         ),
       ).toBe(true);
+      expect(outcome).not.toHaveProperty("termination");
       if (explicitReason) {
-        expect(outcome).not.toHaveProperty("termination");
         const journal = controlPlane.appendEvent.mock.calls
           .filter((c) => c[1] === "execution.checkpoint" && c[2].executionState)
           .at(-1)![2].executionState;

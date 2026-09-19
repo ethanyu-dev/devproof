@@ -1854,10 +1854,6 @@ export class AgentRuntimeTaskService {
             retryPolicy: policy.retryPolicy,
           }),
         });
-        if (completedVerification?.cleanup) {
-          projection.executionDisposition = "BLOCKED";
-          projection.verdict = null;
-        }
         const completedAt = new Date(input.completedAt);
         const isWaiting = outcome.kind === "WAITING_HUMAN";
         let pausedDeadlineAt: Date | null = null;

@@ -22,6 +22,7 @@ import {
   taskAcceptanceMarkdown,
 } from "./task-acceptance-markdown";
 import styles from "./task-acceptance-report.module.css";
+import { CleanupReminder } from "./cleanup-reminder";
 
 const tone = (v: AcceptanceVerdict) =>
   v === "PASSED"
@@ -86,6 +87,7 @@ export function TaskAcceptanceReportContent({
 }) {
   const id = report.taskId;
   const assessment = reportAssessment(report);
+  const cleanupCount = report.cases.filter((c) => c.cleanup).length;
   function download() {
     if (!report) return;
     const url = URL.createObjectURL(
@@ -182,6 +184,12 @@ export function TaskAcceptanceReportContent({
             </small>
           </div>
         </div>
+        {cleanupCount > 0 && (
+          <p className={styles.caption}>
+            {cleanupCount} 个用例有后续收尾事项，不影响验证结果。详情见下方 Case
+            记录。
+          </p>
+        )}
         <details className={styles.scoringRules}>
           <summary>评分与验收规则</summary>
           <p>
@@ -417,6 +425,7 @@ export function TaskAcceptanceReportContent({
                   </>
                 )}
               </p>
+              {c.cleanup && <CleanupReminder note={c.cleanup.note} />}
               {c.criteria.map((k) => (
                 <div className={styles.criterion} key={k.id}>
                   <div>

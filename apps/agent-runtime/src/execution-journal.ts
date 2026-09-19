@@ -1486,10 +1486,26 @@ export class ExecutionJournal {
     if (
       !pending.length &&
       !unresolved.length &&
+      !this.state.pendingRecords.length &&
       !this.state.writeHistoryTruncated
     )
       return undefined;
-    return `${this.state.writeHistoryTruncated ? "提交台账超过保留上限，历史写入需人工对照原始网络证据核对。" : ""}清理未完成：${pending.map((r) => `${r.type ?? "记录"} ${r.id}（${r.cleanup?.status}${r.cleanup?.note ? `：${r.cleanup.note}` : ""}）`).join("、")}${unresolved.length ? `；${unresolved.length} 笔提交尚未确认记录归属，${this.state.cleanupReview?.note ?? "需查询确认，不能直接删除或宣称已清理"}` : ""}`;
+    return [
+      this.state.writeHistoryTruncated
+        ? "提交台账超过保留上限，历史写入需人工对照原始网络证据核对。"
+        : "",
+      pending.length
+        ? `待核对清理或恢复：${pending.map((r) => `${r.type ?? "记录"} ${r.id}${r.cleanup?.note ? `（${r.cleanup.note}）` : ""}`).join("、")}`
+        : "",
+      unresolved.length
+        ? `${unresolved.length} 笔提交尚未确认记录归属，${this.state.cleanupReview?.note ?? "需查询确认，不能直接删除或宣称已清理"}`
+        : "",
+      this.state.pendingRecords.length
+        ? `${this.state.pendingRecords.length} 条记录的创建回执尚未确认，需后续核对归属。`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
   pendingCleanup() {
     return this.state.records.filter(

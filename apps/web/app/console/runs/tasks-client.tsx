@@ -11,6 +11,8 @@ import {
   ArrowRight,
   ChevronLeft,
   ChevronRight,
+  GitPullRequest,
+  Globe,
   RefreshCw,
   RotateCcw,
   Search,
@@ -26,7 +28,6 @@ import {
   LoadingState,
 } from "@/components/settings-layout";
 import { consoleApi } from "@/lib/api";
-import { displayLabel } from "@/lib/display-text";
 import { TaskDeleteButton } from "./task-delete-button";
 import { TaskCreateButton } from "./task-create-button";
 import { taskOutcomeDisplay } from "./task-outcome";
@@ -395,13 +396,39 @@ function TaskRow({
   return (
     <article className="dp-task-row">
       <div className="dp-task-row-grid">
-        <Link className="dp-task-title-link" href={href}>
-          <strong title={displayed.title}>{displayed.title}</strong>
-          <small>
-            {displayLabel(displayed.kind)} ·{" "}
-            {displayLabel(displayed.currentStage)}
-          </small>
-        </Link>
+        <div className="dp-task-title-cell">
+          <Link className="dp-task-title-link" href={href}>
+            <strong title={displayed.title}>{displayed.title}</strong>
+          </Link>
+          {displayed.links?.pullRequests.map((url) => (
+            <a
+              className="dp-task-context-link"
+              href={url}
+              key={url}
+              rel="noopener noreferrer"
+              target="_blank"
+              title={`PR：${url}`}
+            >
+              <GitPullRequest aria-hidden="true" />
+              <span className="dp-task-context-label">PR</span>
+              <span className="dp-task-context-url">{url}</span>
+            </a>
+          ))}
+          {displayed.links?.environments.map((environment, index) => (
+            <a
+              className="dp-task-context-link"
+              href={environment.url}
+              key={`${environment.url}-${index}`}
+              rel="noopener noreferrer"
+              target="_blank"
+              title={`${environment.name}：${environment.url}`}
+            >
+              <Globe aria-hidden="true" />
+              <span className="dp-task-context-label">运行环境</span>
+              <span className="dp-task-context-url">{environment.url}</span>
+            </a>
+          ))}
+        </div>
         <div
           className="dp-task-status-cell"
           title={outcome.description ?? undefined}
@@ -413,6 +440,14 @@ function TaskRow({
           >
             {outcome.label}
           </Badge>
+          {displayed.cleanupPending && (
+            <small
+              className="text-muted-foreground"
+              title="测试数据的清理或恢复记录待核对，不影响验证结果。"
+            >
+              有收尾提醒
+            </small>
+          )}
         </div>
         <div className="dp-task-progress-cell">
           {acceptanceScore?.score != null && (

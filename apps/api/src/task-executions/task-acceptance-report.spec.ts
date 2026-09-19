@@ -16,12 +16,12 @@ function fixture() {
     goal: "新增白名单",
     lifecycle: "COMPLETED",
     executionDisposition: "EXECUTED",
-    verdict: "PASSED",
+    verdict: "PASSED" as string | null,
     currentAttemptNumber: 1,
     criteriaSnapshot: [{ ...criterion, requirementId: undefined }],
     environmentSnapshot: { targetUrl: "https://test.example/whitelist" },
     attempts: [{ id: "attempt-1", number: 1, error: null }],
-    tasks: [],
+    tasks: [] as Array<{ attemptId: string; error: unknown; result: unknown }>,
     criterionResults: [
       {
         attemptId: "attempt-1",
@@ -109,6 +109,49 @@ const report = (row: ReturnType<typeof fixture>) =>
   buildTaskAcceptanceReport(row as never, at);
 
 describe("AI acceptance report", () => {
+  it("preserves historical verified results and exposes cleanup as a reminder", () => {
+    const row = fixture();
+    const run = row.executionRuns[0]!;
+    run.executionDisposition = "BLOCKED";
+    run.verdict = null;
+    row.stages.push({
+      type: "SPEC_EXECUTION",
+      status: "FAILED",
+      lastError: null,
+    });
+    run.tasks = [
+      {
+        attemptId: "attempt-1",
+        error: null,
+        result: {
+          kind: "VERIFICATION_COMPLETED",
+          executionDisposition: "EXECUTED",
+          verdict: "PASSED",
+          cleanup: { status: "BLOCKED", note: "4 笔提交尚未确认记录归属。" },
+        },
+      },
+    ];
+    expect(report(row)).toMatchObject({
+      verdict: "PASSED",
+      aiAccepted: true,
+      assessment: { score: 100, passed: 1 },
+      cases: [
+        {
+          verdict: "PASSED",
+          issues: [],
+          cleanup: { note: "4 笔提交尚未确认记录归属。" },
+        },
+      ],
+      issues: [],
+    });
+    run.criterionResults[0]!.status = "FAILED";
+    expect(report(row).verdict).toBe("FAILED");
+    run.criterionResults[0]!.status = "PASSED";
+    run.evidences = [];
+    expect(report(row).verdict).toBe("INCONCLUSIVE");
+    run.tasks[0]!.attemptId = "old-attempt";
+    expect(report(row).cases[0]!.issues[0]!.code).toBe("BLOCKED");
+  });
   it("keeps unavailable optional CI checks informative without inventing an acceptance gate", () => {
     const row = fixture();
     row.specificationSnapshots[0]!.completeness = "PARTIAL";
@@ -388,7 +431,47 @@ describe("task list acceptance scores", () => {
       {} as never,
       {} as never,
     );
-    expect((await service.list(current))[0]!.acceptanceScore).toBeNull();
+    expect((await service.list(current))[0]).toMatchObject({
+      acceptanceScore: null,
+      cleanupPending: false,
+    });
+  });
+
+  it("keeps cleanup reminders separate from list verdicts", async () => {
+    const row = listRow();
+    const run = row.executionRuns[0]!;
+    run.executionDisposition = "BLOCKED";
+    run.verdict = null;
+    row.executionDisposition = "BLOCKED";
+    run.tasks = [
+      {
+        attemptId: "attempt-1",
+        error: null,
+        result: {
+          kind: "VERIFICATION_COMPLETED",
+          executionDisposition: "EXECUTED",
+          verdict: "PASSED",
+          cleanup: { status: "BLOCKED", note: "写入归属待核对" },
+        },
+      },
+    ];
+    const findMany = vi.fn().mockResolvedValue([row]);
+    const service = new TaskExecutionService(
+      { taskExecution: { findMany } } as never,
+      {} as never,
+      {} as never,
+    );
+    expect((await service.list(current))[0]).toMatchObject({
+      cleanupPending: true,
+      verdict: "PASSED",
+      executionDisposition: "EXECUTED",
+      acceptanceScore: { score: 100 },
+    });
+    run.evidences = [];
+    expect((await service.list(current))[0]).toMatchObject({
+      cleanupPending: true,
+      verdict: "INCONCLUSIVE",
+    });
   });
 
   it("uses evidence validation for zero scores and keeps unscored tasks null", async () => {
@@ -414,4 +497,60 @@ describe("task list acceptance scores", () => {
     });
     expect(result[1]!.acceptanceScore?.score).toBeNull();
   });
+
+  it.each(["PASSED", "INCONCLUSIVE", "BLOCKED", "EXECUTION_FAILED"] as const)(
+    "filters historical cleanup reminders before pagination for %s",
+    async (status) => {
+      const row = {
+        ...listRow(),
+        executionDisposition: "BLOCKED",
+        verdict: null,
+      };
+      const run = row.executionRuns[0]!;
+      run.executionDisposition = "BLOCKED";
+      run.verdict = null;
+      run.tasks = [
+        {
+          attemptId: "attempt-1",
+          error: null,
+          result: {
+            kind: "VERIFICATION_COMPLETED",
+            executionDisposition: "EXECUTED",
+            verdict: "PASSED",
+            cleanup: { status: "BLOCKED", note: "写入归属待核对" },
+          },
+        },
+      ];
+      if (status === "INCONCLUSIVE") run.evidences = [];
+      const findMany = vi
+        .fn()
+        .mockImplementation((args) => (args.take ? [] : [row]));
+      const count = vi.fn().mockResolvedValue(0);
+      const service = new TaskExecutionService(
+        {
+          taskExecution: { findMany, count },
+          $transaction: (queries: Promise<unknown>[]) => Promise.all(queries),
+        } as never,
+        {} as never,
+        {} as never,
+      );
+      await service.listPage(current, 2, 10, { status, query: "PFRD" });
+      const where = count.mock.calls[0]![0].where;
+      expect(findMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          skip: 10,
+          take: 10,
+          where,
+        }),
+      );
+      expect(where.AND[0]).toMatchObject({
+        teamId: "team-1",
+        OR: expect.any(Array),
+      });
+      expect(where.AND[1].OR[0].AND[1]).toEqual({ id: { notIn: [row.id] } });
+      expect(where.AND[1].OR[1]).toEqual({
+        id: { in: ["PASSED", "INCONCLUSIVE"].includes(status) ? [row.id] : [] },
+      });
+    },
+  );
 });

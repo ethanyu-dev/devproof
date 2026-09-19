@@ -180,7 +180,7 @@ const finishInputSchema = z.object({
     .max(1000)
     .optional()
     .describe(
-      "无法完成清理或确认归属时填写具体原因。平台一次性记录待处理对象和写入为 BLOCKED，并保留已有验收结果，无需逐条补写台账。",
+      "无法完成清理或确认归属时填写具体原因，平台将其保存为独立的后续收尾提醒，不改变验收判定。无需逐条补写台账。",
     ),
   summary: z.string().trim().min(1).max(8_000),
   verdict: z.enum(["PASSED", "FAILED", "INCONCLUSIVE"]),
@@ -2388,37 +2388,14 @@ export class BrowserVerificationExecutor {
         };
       const blocker =
         parsed.data.cleanupBlockedReason ??
-        input.journal?.state.cleanupReview?.note;
+        input.journal?.state.cleanupReview?.note ??
+        (input.journal?.cleanupNotice() ||
+        input.journal?.state.pendingRecords.length
+          ? "测试数据的清理、恢复或归属尚待核对，请后续处理；不影响本次验收判定。"
+          : undefined);
       if (blocker && input.journal) {
         input.journal.blockCleanup(blocker);
         await this.saveJournal(input.lease, input.journal);
-      }
-      const unresolvedWrites = input.journal?.unreviewedWriteKeys() ?? [];
-      if (unresolvedWrites.length) {
-        input.journal!.state.phase = "CLEANUP";
-        return correction(
-          input.browserCommandCount,
-          `仍有 ${unresolvedWrites.length} 笔提交未确认记录归属。根据当前记录补充清理台账；无法安全核对时，在本工具填写 cleanupBlockedReason，一次性保存阻塞和验收结果。不能将空台账当作没有写入。`,
-        );
-      }
-      if (
-        input.journal?.state.pendingRecords.length &&
-        !input.journal.state.cleanupReview
-      )
-        return correction(
-          input.browserCommandCount,
-          "已观察到提交后的记录，但创建回执尚未确认。请只读查询 page.network（includeResponseBodies=true）补齐回执，再核对记录归属与清理；不要重复提交创建。",
-        );
-      const pendingCleanup =
-        input.journal?.state.records.filter(
-          (r) => r.cleanup?.status === "PENDING",
-        ) ?? [];
-      if (pendingCleanup.length) {
-        input.journal!.state.phase = "CLEANUP";
-        return correction(
-          input.browserCommandCount,
-          `请先执行 Spec 清理并记录结果：${pendingCleanup.map((r) => `${r.type ?? "记录"} ${r.id}`).join("、")}。无法安全清理时在本工具填写 cleanupBlockedReason；不得仅凭删除点击声明完成。`,
-        );
       }
       const staged = input.criterionResults;
       const missing = input.task.snapshot.criteria
@@ -3380,7 +3357,7 @@ SCROLL_TARGET_NOT_SCROLLABLE 要求从新快照改用真实容器 ref；SCROLL_N
 下拉搜索要从实际页面文案出发：完整业务名称或内部枚举搜不到时，尝试较短关键词，再检查可见选项。连续清空并重复同一搜索而无进展时更换观察方式，不要循环。选项名称相似不能证明其内部枚举映射；要读取实际 DOM 值或对应网络证据。键盘组合使用 Control+A，不能使用 CTRL+A。
 STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或元素已被替换时重新观察并按原业务意图定位，不复用旧 ref/坐标。超时可能已经触发提交，须检查页面/网络结果再决定下一步，不盲目重复保存。
 browser_command 返回 LOCATOR_AMBIGUOUS、STALE_DOM_REFERENCE、STALE_VISUAL_OBSERVATION 或 SCROLL_TARGET_NOT_SCROLLABLE 时，执行器会自动附带 recovery snapshot 和 locatorRecovery.recoveryToken。下一次重新定位必须把该值原样放在 browser_command 顶层 locatorRecoveryToken 中，并从 snapshot 或候选中选择与操作意图一致的完整 ref，或在原 selector 上增加页面区域或文本结构约束；禁止原样重试通用 selector，禁止用 first/nth 猜测。所有重新定位失败（包括 ELEMENT_NOT_FOUND 和 ELEMENT_NOT_VISIBLE）都会消耗两次上限。两次后仍无法唯一确定时，将受影响的验收标准记录为 INCONCLUSIVE，绝不能把自动化定位失败记录为产品 FAILED。
-网络请求只供辅助判断、诊断和核对写入，不追加网络验收，也不为了匹配路径、字段或引用反复取证。需要响应内容时可使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。实际业务失败仍需结合页面结果判断。已有记录恢复后，重新查询或刷新页面，平台可将同一记录的稳定状态与修改前页面基线比较；网络回执辅助关联身份和识别矛盾，不必为了清理逐笔补齐。创建归属仍须有创建前不存在、提交、目标新记录的真实证据链；无法确认时用 finish_verification.cleanupBlockedReason 一次性保存阻塞和已完成结果。
+网络请求只供辅助判断、诊断和核对写入，不追加网络验收，也不为了匹配路径、字段或引用反复取证。需要响应内容时可使用 page.network，设置 includeResponseBodies=true，并提供尽可能精确的 urlIncludes。实际业务失败仍需结合页面结果判断。已有记录恢复后，重新查询或刷新页面，平台可将同一记录的稳定状态与修改前页面基线比较；网络回执辅助关联身份和识别矛盾，不必为了清理逐笔补齐。创建归属仍须有创建前不存在、提交、目标新记录的真实证据链；无法确认时用 finish_verification.cleanupBlockedReason 保存后续收尾提醒和已完成结果；清理提醒不改变验收判定。
 验收证据必须对应标准里的具体页面区域、控件和业务对象。记录 PASSED 时，优先使用 citations: [{target: observationTargets 中的 label, ref: 当前快照已交付的完整 ref}]。执行器会提取该节点的连续原文并绑定同次观察的 DOM 与截图，无需手抄 observationId、cursor、quote 或 artifact UUID。节点必须属于标准要求的实际区域和状态，匹配文字本身不代表验收通过。旧接口也可使用 observations，但必须逐个覆盖 observationTargets：在 observations 中提供对应 target（label）、observationId、cursor 和逐字 quote，quote 必须包含该对象的 expectedText 或 alternatives 中任一等价文本，且来自已交付观察。同一对象的文本是任选其一，不同 target 则必须全部覆盖。仅看见下拉候选列表不证明选择后表单已经切换，必须引用实际选中状态及对应表单；多个对象不能只验证其中一个。创建弹窗的类型选项不证明列表筛选选项，更不证明筛选隔离；列表标准须在列表筛选器操作后，只读核对结果集合及所选类型。来源摘录、探索步骤或自拟测试标识不是实际页面证据。若旧 Spec 假设了未获来源支持的字段（例如备注），不得因为该字段不存在而判产品 FAILED；记录 INCONCLUSIVE 并说明 Spec 与来源不一致。
 executionState.accounts 提供用户填写并按角色分配的账号，slotId 对应 Spec 中的账号角色（role:序号）。同环境同账号同类型的并发写操作由平台排队串行；历史使用不禁止账号复用。按 usage、requiredTypes 和业务约束使用，禁止把账号 A/B、角色名称当作真实账号。开始时先只读核对各角色的账号存在性和业务前置条件；账号已存在目标记录或需要授权修改既有记录时，使用 DATA_PRECONDITION 请求人工处置并保留浏览器，不使用 TEST_ACCOUNT 重复索取账号。账号不存在或不可用且没有可处置记录时，引用实际错误记录受影响项无法判定。可独立验证的标准继续正常判定。本次已创建的记录应继续验证及清理，不能当作创建前的数据冲突。
 创建模型、产品、配置记录不等于需要业务账号；唯一名称、记录 ID 和时间属于测试数据。后台编辑或导出权限属于登录身份，登录页或权限不足使用 BROWSER_HITL，不能改用 TEST_ACCOUNT。

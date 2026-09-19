@@ -110,6 +110,11 @@ export interface TaskStage {
 }
 
 export interface TaskDetail {
+  cleanupPending?: boolean;
+  links?: {
+    pullRequests: string[];
+    environments: Array<{ name: string; url: string }>;
+  };
   acceptanceScore?: Omit<AcceptanceAssessment, "findings"> | null;
   testAccountPreparation?: TaskAccountPreparation;
   analysisInputRequest?:
@@ -206,6 +211,7 @@ export interface TaskDetail {
 export type TaskSummary = Pick<
   TaskDetail,
   | "acceptanceScore"
+  | "cleanupPending"
   | "counts"
   | "createdAt"
   | "currentStage"
@@ -213,6 +219,7 @@ export type TaskSummary = Pick<
   | "id"
   | "kind"
   | "lifecycle"
+  | "links"
   | "source"
   | "title"
   | "updatedAt"

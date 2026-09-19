@@ -1,6 +1,7 @@
 "use client";
 
 import { ObjectEvidence } from "./object-evidence";
+import { CleanupReminder } from "./cleanup-reminder";
 
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -169,6 +170,7 @@ interface RunDetail extends RunSummary {
   }>;
   tasks: Array<{
     attemptId: string;
+    cleanup?: { status: string; note: string } | null;
     error: unknown;
     id: string;
     provider: string;
@@ -525,6 +527,12 @@ function RunDetailClient({ id }: { id: string }) {
     : false;
   const taskFailures = detail ? summarizeTaskFailures(detail.tasks) : [];
   const currentFailures = detail ? currentRunFailures(detail) : [];
+  const currentAttemptId = detail?.attempts.find(
+    (a) => a.number === detail.currentAttemptNumber,
+  )?.id;
+  const cleanup = detail?.tasks.find(
+    (t) => t.attemptId === currentAttemptId,
+  )?.cleanup;
   const pendingRecoveries =
     detail?.recoveries?.filter(
       (item) =>
@@ -723,6 +731,7 @@ function RunDetailClient({ id }: { id: string }) {
                     )}
                   </div>
                 </div>
+                {cleanup && <CleanupReminder note={cleanup.note} />}
                 <div className="dp-run-outcome-metrics" aria-label="结果摘要">
                   <span>
                     <b>

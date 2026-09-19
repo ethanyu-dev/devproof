@@ -1,0 +1,39 @@
+.reminder {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.heading strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+.reminder p {
+  margin: 4px 0 0;
+}
+.reminder details {
+  margin-top: 6px;
+}
+.reminder summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.reminder summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.reminder details p {
+  margin-top: 8px;
+  white-space: pre-wrap;
+}

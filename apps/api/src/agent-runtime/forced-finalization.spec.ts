@@ -248,7 +248,7 @@ describe("forced finalization write audit", () => {
   });
 });
 
-it("keeps verified criteria but marks the execution blocked when cleanup remains unresolved", async () => {
+it("keeps verification independent from unresolved cleanup", async () => {
   const { tx, outcome, submit } = fixture(0);
   await submit(
     runtimeOutcomeSchema.parse({
@@ -261,8 +261,8 @@ it("keeps verified criteria but marks the execution blocked when cleanup remains
   expect(tx.executionRun.update).toHaveBeenCalledWith(
     expect.objectContaining({
       data: expect.objectContaining({
-        executionDisposition: "BLOCKED",
-        verdict: null,
+        executionDisposition: "EXECUTED",
+        verdict: "INCONCLUSIVE",
       }),
     }),
   );

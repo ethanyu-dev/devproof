@@ -11,6 +11,27 @@ import {
 } from "./task-outcome";
 
 describe("taskOutcomeDisplay", () => {
+  it("does not let cleanup reminders override verification or lifecycle", () => {
+    const task = {
+      lifecycle: "COMPLETED",
+      executionDisposition: "EXECUTED",
+      verdict: "PASSED",
+      cleanupPending: true,
+    };
+    expect(taskOutcomeDisplay(task)).toMatchObject({
+      label: "验收项通过",
+      toneStatus: "PASSED",
+    });
+    expect(taskOutcomeDisplay({ ...task, verdict: "FAILED" }).label).toBe(
+      "发现产品问题",
+    );
+    expect(taskOutcomeDisplay({ ...task, lifecycle: "TIMED_OUT" }).label).toBe(
+      "任务执行超时",
+    );
+    expect(taskOutcomeDisplay({ ...task, cleanupPending: false }).label).toBe(
+      "验收项通过",
+    );
+  });
   it("shows confirmed product findings alongside a blocked task's remaining uncertainty", () => {
     expect(
       taskOutcomeDisplay({
