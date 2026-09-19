@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { CircleAlert, LoaderCircle, MonitorPlay, Radio } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { BrowserTransportBadge } from "@/components/browser-transport-badge";
 import { consoleApi } from "@/lib/api";
 import { displayLabel, displayMessage } from "@/lib/display-text";
 import styles from "./run-live-browser.module.css";
@@ -146,6 +147,9 @@ export function RunLiveBrowser({
           <Badge tone={streamStatus === "live" ? "success" : "neutral"}>
             {streamLabel(streamStatus)}
           </Badge>
+          <BrowserTransportBadge
+            transport={streamStatus === "idle" ? null : "relay"}
+          />
         </span>
       </div>
       {liveFrame ? (

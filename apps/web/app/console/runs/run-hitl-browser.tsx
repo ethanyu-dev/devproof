@@ -1,10 +1,14 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
+import { BrowserTransportBadge } from "@/components/browser-transport-badge";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import type { BrowserHumanInputEvent } from "@devproof/runtime-protocol";
+import type {
+  BrowserConnection,
+  BrowserHumanInputEvent,
+} from "@devproof/runtime-protocol";
 import {
   CircleAlert,
   Clock3,
@@ -393,6 +397,9 @@ function BrowserHitl({
     channel: BrowserControlConnection;
   } | null>(null);
   const [controlId, setControlId] = useState<string | null>(null);
+  const [transport, setTransport] = useState<
+    BrowserConnection["transport"] | null
+  >(null);
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [streamStatus, setStreamStatus] = useState<
     "idle" | "connecting" | "live" | "interrupted"
@@ -449,9 +456,11 @@ function BrowserHitl({
   }, [fullscreen]);
 
   useEffect(() => {
+    setTransport(null);
     if (!controlId) return;
     lastFrameAt.current = Date.now();
     const source = new BrowserControlConnection({
+      onTransportChange: setTransport,
       connectionPath: `${base}/connection`,
       connectionBody: { controlId },
       streamUrl: `/console/api${base}/stream`,
@@ -643,6 +652,7 @@ function BrowserHitl({
             <Badge tone={streamStatus === "live" ? "success" : "warning"}>
               {handoffLabel(controlId, streamStatus)}
             </Badge>
+            <BrowserTransportBadge transport={controlId ? transport : null} />
           </span>
           <Button
             aria-label={fullscreen ? "退出全屏操作" : "全屏操作"}

@@ -46,16 +46,19 @@ const options = () => ({
   connectionPath: "/connection",
   streamUrl: "/stream",
   relayInput: vi.fn(async () => undefined),
+  onTransportChange: vi.fn(),
 });
 it("keeps legacy nodes on the explicit relay transport", async () => {
   vi.mocked(consoleApi).mockResolvedValue({ transport: "relay" });
   const opts = options();
   const connection = new BrowserControlConnection(opts);
   open.push(connection);
+  expect(opts.onTransportChange).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(0);
   await connection.input([{ type: "text", text: "hello" }]);
   expect(opts.relayInput).toHaveBeenCalledOnce();
   expect(Source.instances).toHaveLength(1);
+  expect(opts.onTransportChange).toHaveBeenCalledWith("relay");
 });
 it("sends input and receives acknowledgements directly without invoking relay input", async () => {
   vi.mocked(consoleApi).mockResolvedValue({
@@ -80,6 +83,7 @@ it("sends input and receives acknowledgements directly without invoking relay in
   await input;
   expect(opts.relayInput).not.toHaveBeenCalled();
   expect(Source.instances).toHaveLength(0);
+  expect(opts.onTransportChange).toHaveBeenCalledWith("direct");
   await vi.advanceTimersByTimeAsync(5000);
   expect(consoleApi).toHaveBeenCalledTimes(2);
 });
@@ -103,4 +107,5 @@ it("does not silently downgrade a failed direct channel", async () => {
   ).rejects.toThrow();
   expect(opts.relayInput).not.toHaveBeenCalled();
   expect(Source.instances).toHaveLength(0);
+  expect(opts.onTransportChange).toHaveBeenCalledExactlyOnceWith("direct");
 });
