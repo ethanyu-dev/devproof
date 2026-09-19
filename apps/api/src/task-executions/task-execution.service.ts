@@ -1,4 +1,4 @@
-import { taskSourcePresentation } from "./task-source-context.js";
+import { taskLinks, taskSourcePresentation } from "./task-source-context.js";
 import { isSpecTask } from "@devproof/contracts";
 import { TaskAcceptanceReviewService } from "./task-acceptance-review.service.js";
 import { RetentionWorker } from "../observability/retention-worker.service.js";
@@ -16,6 +16,7 @@ import type { TaskTestAccountsInput } from "@devproof/contracts";
 import {
   acceptanceReportInclude,
   buildTaskAcceptanceReport,
+  taskVerificationPresentation,
 } from "./task-acceptance-report.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -206,12 +207,16 @@ const taskListInclude = {
       tasks: currentAgentTaskInclude,
     },
   },
-  deployments: { select: { id: true, enabled: true } },
+  deployments: {
+    orderBy: { createdAt: "asc" as const },
+    select: { id: true, enabled: true, name: true, targetUrl: true },
+  },
   specificationSnapshots: {
     orderBy: { generatedAt: "desc" as const },
     select: {
       _count: { select: { cases: true } },
       cases: { select: { id: true } },
+      primaryPullRequestUrl: true,
     },
     take: 1,
   },
@@ -517,7 +522,7 @@ export class TaskExecutionService {
     pageSize: number,
     filters: TaskListFilters = {},
   ) {
-    const where: Prisma.TaskExecutionWhereInput = {
+    const scope: Prisma.TaskExecutionWhereInput = {
       teamId: current.team.id,
       ...(filters.createdAfter
         ? { createdAt: { gte: filters.createdAfter } }
@@ -557,8 +562,12 @@ export class TaskExecutionService {
             ],
           }
         : {}),
-      ...taskStatusWhere(filters.status),
     };
+    const statusWhere = await this.verificationStatusWhere(
+      scope,
+      filters.status,
+    );
+    const where: Prisma.TaskExecutionWhereInput = { AND: [scope, statusWhere] };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.taskExecution.findMany({
         include: taskListInclude,
@@ -575,6 +584,79 @@ export class TaskExecutionService {
       pageSize,
       total,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
+  }
+
+  private async verificationStatusWhere(
+    scope: Prisma.TaskExecutionWhereInput,
+    status: TaskListFilters["status"],
+  ): Promise<Prisma.TaskExecutionWhereInput> {
+    const storedStatus = taskStatusWhere(status);
+    if (
+      !status ||
+      ![
+        "PASSED",
+        "FAILED",
+        "VERIFICATION_FAILED",
+        "INCONCLUSIVE",
+        "BLOCKED",
+        "EXECUTION_FAILED",
+      ].includes(status)
+    )
+      return storedStatus;
+    // Only legacy cleanup-blocked tasks need a read-time correction. Apply it
+    // before pagination so badges, filters and totals use the same verdict.
+    const candidates = await this.prisma.taskExecution.findMany({
+      where: {
+        AND: [
+          scope,
+          {
+            lifecycle: "COMPLETED",
+            executionDisposition: "BLOCKED",
+            verdict: null,
+            executionRuns: {
+              some: {
+                tasks: {
+                  some: {
+                    result: { path: ["cleanup", "status"], equals: "BLOCKED" },
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
+      include: acceptanceReportInclude,
+    });
+    const corrected = candidates.flatMap((row) => {
+      const report = buildTaskAcceptanceReport(row);
+      const task = taskVerificationPresentation(
+        {
+          ...row,
+          counts: { passed: 0, failed: 0, inconclusive: 0, blocked: 0 },
+        },
+        report,
+      );
+      return task.executionDisposition === "EXECUTED" ? [task] : [];
+    });
+    if (!corrected.length) return storedStatus;
+    const verdict = status === "VERIFICATION_FAILED" ? "FAILED" : status;
+    return {
+      OR: [
+        {
+          AND: [
+            storedStatus,
+            { id: { notIn: corrected.map((task) => task.id) } },
+          ],
+        },
+        {
+          id: {
+            in: corrected
+              .filter((task) => task.verdict === verdict)
+              .map((task) => task.id),
+          },
+        },
+      ],
     };
   }
 
@@ -606,7 +688,10 @@ export class TaskExecutionService {
       const acceptanceScore = report?.final
         ? (({ findings: _findings, ...score }) => score)(report.assessment)
         : null;
-      return { ...toTaskSummary(row), acceptanceScore };
+      return {
+        ...taskVerificationPresentation(toTaskSummary(row), report),
+        acceptanceScore,
+      };
     });
   }
 
@@ -617,7 +702,39 @@ export class TaskExecutionService {
     });
     if (!row)
       throw new NotFoundException(`Task execution ${id} was not found.`);
-    return toTaskDetail(row);
+    const reportRow =
+      row.lifecycle === "COMPLETED"
+        ? await this.prisma.taskExecution.findFirst({
+            where: { id, teamId: current.team.id },
+            include: acceptanceReportInclude,
+          })
+        : null;
+    const sameRevision =
+      reportRow?.lifecycle === row.lifecycle &&
+      reportRow.updatedAt.getTime() === row.updatedAt.getTime();
+    const report = sameRevision ? buildTaskAcceptanceReport(reportRow) : null;
+    const detail = taskVerificationPresentation(toTaskDetail(row), report);
+    const effectiveRun = <T extends { runId: string }>(run: T) => {
+      const c = report?.cases.find((c) => c.runId === run.runId && c.cleanup);
+      return c
+        ? {
+            ...run,
+            executionDisposition: c.executionDisposition,
+            verdict: c.verdict,
+          }
+        : run;
+    };
+    return {
+      ...detail,
+      runs: detail.runs.map(effectiveRun),
+      cases: detail.cases.map((c) => ({
+        ...c,
+        executions: c.executions.map((e) => ({
+          ...e,
+          run: e.run ? effectiveRun(e.run) : null,
+        })),
+      })),
+    };
   }
 
   async acceptanceReport(current: ToolAuthContext, id: string) {
@@ -3815,6 +3932,7 @@ function toTaskDetail(row: TaskDetailRow) {
   );
   return {
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+    links: taskLinks(row),
     cases: caseDetails,
     counts,
     scheduling: summarizeCaseScheduling(allExecutions, row.lifecycle),
@@ -3958,6 +4076,7 @@ function toTaskSummary(
     : row.executionRuns.length;
   return {
     counts: executionCounts(executions, total, row.lifecycle),
+    links: taskLinks(row),
     scheduling: summarizeCaseScheduling(executions, row.lifecycle),
     createdAt: row.createdAt.toISOString(),
     currentStage: row.currentStage,

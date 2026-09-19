@@ -121,6 +121,20 @@ export function taskAcceptanceMarkdown(
           `AI 评述：${report.review?.status === "FAILED" ? "暂时不可用，已保留证据评分。" : report.final ? "待生成，当前建议基于已保存的判定规则。" : "全部用例结束后生成。"}`,
         ]),
     "",
+    ...(report.cases.some((c) => c.cleanup)
+      ? [
+          "## 后续收尾提醒",
+          "",
+          "以下事项不影响验证结果，可后续核对处理。",
+          ...report.cases
+            .filter((c) => c.cleanup)
+            .map(
+              (c) =>
+                `- ${md(c.name)}：${md(c.cleanup!.note.replace(/^清理未完成[：:][；;]?\s*/u, ""))}`,
+            ),
+          "",
+        ]
+      : []),
     "## 结果概览",
     "",
     "| 范围 | 总数 | 通过 | 未通过 | 无法判定 | 待完成 |",

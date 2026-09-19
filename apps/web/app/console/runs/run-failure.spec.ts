@@ -12,6 +12,24 @@ const wrapped = {
 };
 
 describe("execution failure reason", () => {
+  it("does not classify cleanup reminders as execution failures", () => {
+    const detail = {
+      currentAttemptNumber: 2,
+      attempts: [{ id: "new", number: 2, error: null }],
+      tasks: [
+        {
+          attemptId: "old",
+          cleanup: { status: "BLOCKED", note: "旧的清理原因" },
+        },
+        {
+          attemptId: "new",
+          error: null,
+          cleanup: { status: "BLOCKED", note: "5 笔提交尚未确认记录归属。" },
+        },
+      ],
+    };
+    expect(currentRunFailures(detail)).toEqual([]);
+  });
   it("shows the original stop reason separately from the write-result guard", () => {
     const failure = summarizeTaskFailures([{ error: wrapped }])[0]!;
     expect(failure.code).toBe("WRITE_OUTCOME_UNKNOWN");

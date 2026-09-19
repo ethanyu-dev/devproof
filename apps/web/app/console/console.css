@@ -1373,6 +1373,51 @@
   text-align: right;
 }
 
+.dp-task-title-cell {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.dp-task-context-link {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dp-task-context-link svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.dp-task-context-label {
+  flex-shrink: 0;
+}
+
+.dp-task-context-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-task-context-link:hover {
+  color: var(--primary);
+}
+
+.dp-task-context-link:hover .dp-task-context-url {
+  text-decoration: underline;
+}
+
+.dp-task-context-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 .dp-task-title-link {
   display: grid;
   min-width: 0;
@@ -1402,7 +1447,6 @@
   overflow-wrap: anywhere;
 }
 
-.dp-task-title-link small,
 .dp-task-progress-cell small,
 .dp-task-time-cell small {
   color: var(--muted-foreground);
@@ -1537,7 +1581,7 @@
     gap: 10px 16px;
   }
 
-  .dp-task-title-link {
+  .dp-task-title-cell {
     grid-area: title;
   }
   .dp-task-status-cell {

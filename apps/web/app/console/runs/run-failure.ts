@@ -1,5 +1,6 @@
 interface ErrorSource {
   error?: unknown;
+  cleanup?: { status: string; note: string } | null;
 }
 
 export interface FailureSummary {

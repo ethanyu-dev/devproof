@@ -1524,7 +1524,9 @@ describe("TaskExecutionService rerun", () => {
   });
 
   it("applies task search, type, status and time filters to list queries", async () => {
-    const findMany = vi.fn().mockReturnValue("rows-query");
+    const findMany = vi
+      .fn()
+      .mockImplementation((args) => (args.take ? "rows-query" : []));
     const count = vi.fn().mockReturnValue("count-query");
     const transaction = vi.fn().mockResolvedValue([[], 0]);
     const service = new TaskExecutionService(
@@ -1540,7 +1542,7 @@ describe("TaskExecutionService rerun", () => {
       team: { id: "team-1", name: "Team" },
     } as never;
     const createdAfter = new Date("2026-08-21T00:00:00.000Z");
-    const where = {
+    const scope = {
       OR: [
         { title: { contains: "ENG-42", mode: "insensitive" } },
         { sourceRef: { contains: "ENG-42", mode: "insensitive" } },
@@ -1564,10 +1566,15 @@ describe("TaskExecutionService rerun", () => {
       ],
       createdAt: { gte: createdAfter },
       kind: "LEGACY_RUN",
-      lifecycle: { in: ["QUEUED", "RUNNING", "WAITING_INPUT"] },
       teamId: "team-1",
     };
 
+    const where = {
+      AND: [
+        scope,
+        { lifecycle: { in: ["QUEUED", "RUNNING", "WAITING_INPUT"] } },
+      ],
+    };
     await service.listPage(current, 1, 10, {
       createdAfter,
       kind: "LEGACY_RUN",
@@ -1585,7 +1592,7 @@ describe("TaskExecutionService rerun", () => {
     });
     expect(findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        where: { teamId: "team-1", verdict: "FAILED" },
+        where: { AND: [{ teamId: "team-1" }, { verdict: "FAILED" }] },
       }),
     );
 
@@ -1593,24 +1600,28 @@ describe("TaskExecutionService rerun", () => {
     expect(findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         where: {
-          OR: [
-            { lifecycle: "TIMED_OUT" },
+          AND: [
+            { teamId: "team-1" },
             {
-              executionDisposition: {
-                in: [
-                  "NOT_RUN",
-                  "BLOCKED",
-                  "AGENT_ERROR",
-                  "PROVIDER_ERROR",
-                  "BROWSER_UNAVAILABLE",
-                  "RUNTIME_LOST",
-                ],
-              },
-              lifecycle: "COMPLETED",
+              OR: [
+                { lifecycle: "TIMED_OUT" },
+                {
+                  executionDisposition: {
+                    in: [
+                      "NOT_RUN",
+                      "BLOCKED",
+                      "AGENT_ERROR",
+                      "PROVIDER_ERROR",
+                      "BROWSER_UNAVAILABLE",
+                      "RUNTIME_LOST",
+                    ],
+                  },
+                  lifecycle: "COMPLETED",
+                },
+              ],
+              verdict: null,
             },
           ],
-          teamId: "team-1",
-          verdict: null,
         },
       }),
     );

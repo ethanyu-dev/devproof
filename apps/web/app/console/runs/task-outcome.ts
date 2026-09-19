@@ -2,6 +2,7 @@ import type { TaskCaseExecution, TaskScheduling } from "./task-types";
 import { displayLabel } from "../../../lib/display-text";
 
 interface TaskOutcomeSource {
+  cleanupPending?: boolean;
   scheduling?: {
     state: string;
     reason: string | null;

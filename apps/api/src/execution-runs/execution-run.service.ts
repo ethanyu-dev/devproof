@@ -3,6 +3,10 @@ import {
   accountReplacementState,
 } from "./account-replacement.js";
 import { env } from "../config/env.js";
+import {
+  executionCleanup,
+  executionVerification,
+} from "./execution-cleanup.js";
 import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -534,6 +538,7 @@ export class ExecutionRunService {
             createdAt: true,
             deadlineAt: true,
             error: true,
+            result: true,
             finishedAt: true,
             id: true,
             lastHeartbeatAt: true,
@@ -567,6 +572,11 @@ export class ExecutionRunService {
     return {
       ...run,
       recoveries,
+      ...executionVerification(run),
+      tasks: run.tasks.map(({ result, ...task }) => ({
+        ...task,
+        cleanup: executionCleanup(result),
+      })),
       observationHistoryTruncated:
         run.observationBindings.length > 1000 || run.events.length > 1000,
       observationBindings: run.observationBindings.slice(0, 1000),

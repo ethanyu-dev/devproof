@@ -11,13 +11,22 @@ import type {
 import { assessAcceptance } from "@devproof/contracts";
 import { caseRerunSource } from "./task-case-rerun.js";
 import { redactText } from "../observability/observability.service.js";
+import {
+  executionCleanup,
+  executionVerification,
+} from "../execution-runs/execution-cleanup.js";
 
 const runInclude = {
   attempts: { orderBy: { number: "desc" as const }, take: 1 },
   tasks: {
     orderBy: { createdAt: "desc" as const },
     take: 1,
-    select: { error: true, recoveryStatus: true },
+    select: {
+      attemptId: true,
+      error: true,
+      recoveryStatus: true,
+      result: true,
+    },
   },
   criterionResults: true,
   evidences: {
@@ -70,6 +79,47 @@ const issue = (
   message: string,
   nextStep: string,
 ): AcceptanceIssue => ({ category, code, message, nextStep });
+
+export function taskVerificationPresentation<
+  T extends {
+    lifecycle: string;
+    executionDisposition: string | null;
+    verdict: string | null;
+    counts: {
+      passed: number;
+      failed: number;
+      inconclusive: number;
+      blocked: number;
+    };
+  },
+>(task: T, report: TaskAcceptanceReport | null) {
+  const cleanupPending = report?.cases.some((c) => c.cleanup) ?? false;
+  const legacyCleanup =
+    task.lifecycle === "COMPLETED" &&
+    task.executionDisposition === "BLOCKED" &&
+    cleanupPending &&
+    report!.cases.every(
+      (c) =>
+        c.lifecycle === "COMPLETED" && c.executionDisposition === "EXECUTED",
+    );
+  return {
+    ...task,
+    cleanupPending,
+    ...(legacyCleanup
+      ? {
+          executionDisposition: "EXECUTED",
+          verdict: report!.verdict,
+          counts: {
+            ...task.counts,
+            passed: report!.counts.cases.PASSED,
+            failed: report!.counts.cases.FAILED,
+            inconclusive: report!.counts.cases.INCONCLUSIVE,
+            blocked: 0,
+          },
+        }
+      : {}),
+  };
+}
 
 function executionIssue(
   run: ReportRun | null,
@@ -214,7 +264,16 @@ function caseReport(
   },
   final: boolean,
 ): AcceptanceCase {
-  const { run, definition, dispatchError, ...meta } = input;
+  const { run: storedRun, definition, dispatchError, ...meta } = input;
+  const run = storedRun
+    ? { ...storedRun, ...executionVerification(storedRun) }
+    : null;
+  const attempt = run?.attempts.find(
+    (a) => a.number === run.currentAttemptNumber,
+  );
+  const cleanup = executionCleanup(
+    run?.tasks.find((t) => t.attemptId === attempt?.id)?.result,
+  );
   const lifecycle = run?.lifecycle ?? (final ? "COMPLETED" : "QUEUED");
   // The immutable Run snapshot is the acceptance contract for this attempt.
   const declared = rows(obj(definition).criteria);
@@ -267,6 +326,7 @@ function caseReport(
   }
   return {
     ...meta,
+    cleanup,
     lifecycle,
     executionDisposition: run?.executionDisposition ?? null,
     runId: run?.id ?? null,
@@ -432,6 +492,25 @@ export function buildTaskAcceptanceReport(
       ),
     );
   for (const stage of row.stages.filter((s) => s.status === "FAILED")) {
+    const legacyCleanupProjection = [
+      ...row.executionRuns,
+      ...row.caseExecutions.flatMap((c) => (c.run ? [c.run] : [])),
+    ].some(
+      (run) =>
+        run.executionDisposition === "BLOCKED" &&
+        executionVerification(run).executionDisposition === "EXECUTED",
+    );
+    if (
+      stage.type === "SPEC_EXECUTION" &&
+      !stage.lastError &&
+      legacyCleanupProjection &&
+      cases.length > 0 &&
+      cases.every(
+        (c) =>
+          c.lifecycle === "COMPLETED" && c.executionDisposition === "EXECUTED",
+      )
+    )
+      continue;
     const e = obj(stage.lastError);
     issues.push(
       issue(

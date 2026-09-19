@@ -89,6 +89,7 @@ export function runOutcome(
       tone: "warning",
       reasonCode: cause?.causeCode,
       nextStep:
+        cause?.nextStep ??
         "查看阻塞信息；如有待核对的业务写入，先确认实际结果，再决定是否重试。",
     };
   }

@@ -77,6 +77,20 @@ function fixture(): TaskAcceptanceReport {
   };
 }
 describe("acceptance report export", () => {
+  it("exports cleanup as follow-up work without changing the report verdict", () => {
+    const row = fixture();
+    row.verdict = "PASSED";
+    row.aiAccepted = true;
+    row.cases[0]!.cleanup = {
+      status: "BLOCKED",
+      note: "清理未完成：；4 笔提交尚未确认记录归属。",
+    };
+    expect(acceptanceTitle(row)).toBe("AI 验收通过");
+    const markdown = taskAcceptanceMarkdown(row, "http://localhost:3344");
+    expect(markdown).toContain("后续收尾提醒");
+    expect(markdown).toContain("不影响验证结果");
+    expect(markdown).not.toContain("清理未完成：；");
+  });
   it("exports scoped results, current batch, revisions, and durable evidence links", () => {
     const markdown = taskAcceptanceMarkdown(fixture(), "http://localhost:3344");
     expect(markdown).toContain("AI 验收待补充验证");

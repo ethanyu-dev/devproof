@@ -58,6 +58,7 @@ describe("ExecutionRunService events", () => {
       browserProfileId: null,
       browserExecutions: [],
       evidences: [],
+      tasks: [],
       observationBindings: [],
       events: [],
     };
@@ -123,6 +124,7 @@ describe("ExecutionRunService events", () => {
         facts: {},
       })),
       events: [],
+      tasks: [],
     };
     const prisma = {
       executionRun: {
@@ -170,6 +172,18 @@ describe("ExecutionRunService events", () => {
             { runtimeSessionId: "session", runtimeSession: null },
           ],
           evidences: [],
+          tasks: [
+            {
+              id: "runtime-task",
+              attemptId: "attempt-1",
+              error: null,
+              result: {
+                kind: "VERIFICATION_COMPLETED",
+                cleanup: { status: "BLOCKED", note: "4 笔提交未确认归属。" },
+                evidence: ["private-result-payload"],
+              },
+            },
+          ],
           observationBindings: [],
           events: [],
         }),
@@ -183,6 +197,10 @@ describe("ExecutionRunService events", () => {
       {} as never,
     ).consoleDetail(current, runId);
     expect(detail.recoveries).toEqual([recovery]);
+    expect(detail.tasks[0]).toMatchObject({
+      cleanup: { status: "BLOCKED", note: "4 笔提交未确认归属。" },
+    });
+    expect(detail.tasks[0]).not.toHaveProperty("result");
     expect(prisma.runtimeSessionRecovery.findMany).toHaveBeenCalledWith({
       where: { teamId: snapshot.teamId, sessionId: { in: ["session"] } },
       orderBy: { createdAt: "desc" },

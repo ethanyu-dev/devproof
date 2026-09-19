@@ -26,6 +26,13 @@ export const executionRecordSchema = z.object({
     )
     .optional(),
   currentState: z.string().max(2000).optional(),
+  baselineObservation: z
+    .object({
+      readKey: text,
+      sequence: z.number().int().nonnegative(),
+      timestamp: z.string().optional(),
+    })
+    .optional(),
   uiBaseline: z
     .object({
       observationId: z.string().uuid(),
@@ -39,18 +46,24 @@ export const executionRecordSchema = z.object({
   cleanup: z
     .object({
       instruction: text,
-      status: z.enum(["PENDING", "COMPLETED", "BLOCKED"]),
+      status: z.enum(["PENDING", "COMPLETED", "BLOCKED", "RETAINED"]),
+      resolution: z.enum(["DELETED", "RESTORED"]).optional(),
+      retainedAtWriteKey: text.optional(),
       note: z.string().max(1000).optional(),
     })
     .optional(),
 });
 
 export const executionRecordDeltaSchema = executionRecordSchema
-  .omit({ uiBaseline: true })
+  .omit({ uiBaseline: true, baselineObservation: true })
   .partial()
   .extend({
     accountAliases: z.array(text).max(20).optional(),
     evidenceRefs: z.array(text).max(20).optional(),
+    cleanup: executionRecordSchema.shape.cleanup
+      .unwrap()
+      .omit({ resolution: true, retainedAtWriteKey: true })
+      .optional(),
   });
 
 export const executionStateSchema = z.object({
@@ -66,6 +79,17 @@ export const executionStateSchema = z.object({
         empty: z.boolean(),
         complete: z.boolean(),
         recordKeys: z.array(z.string().max(3000)).max(100),
+        identitiesComplete: z.boolean().default(false),
+        identities: z
+          .array(
+            z.object({
+              id: text,
+              type: text,
+              accountAliases: z.array(text).max(20),
+            }),
+          )
+          .max(100)
+          .default([]),
         recordStates: z
           .record(z.string().max(3000), z.string().max(2000))
           .default({}),

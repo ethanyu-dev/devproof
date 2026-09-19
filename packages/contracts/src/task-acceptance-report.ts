@@ -37,6 +37,7 @@ export interface AcceptanceCriterion {
 }
 
 export interface AcceptanceCase {
+  cleanup?: { status: "BLOCKED"; note: string } | null;
   caseId: string;
   name: string;
   deployment: string;

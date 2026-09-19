@@ -1,6 +1,11 @@
 "use client";
 
 import { ObjectEvidence } from "./object-evidence";
+import {
+  CleanupReminder,
+  CleanupRecords,
+  type CleanupRecord,
+} from "./cleanup-reminder";
 
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -72,12 +77,7 @@ interface RunDetail extends RunSummary {
   events?: Array<{ id: string; attemptId: string | null; payload: unknown }>;
   executionPolicy?: {
     executionState?: {
-      records: Array<{
-        id: string;
-        type?: string;
-        account?: string;
-        cleanup?: { status: string; instruction: string; note?: string };
-      }>;
+      records: CleanupRecord[];
     };
   };
   taskExecutionId?: string | null;
@@ -169,6 +169,7 @@ interface RunDetail extends RunSummary {
   }>;
   tasks: Array<{
     attemptId: string;
+    cleanup?: { status: string; note: string } | null;
     error: unknown;
     id: string;
     provider: string;
@@ -525,6 +526,12 @@ function RunDetailClient({ id }: { id: string }) {
     : false;
   const taskFailures = detail ? summarizeTaskFailures(detail.tasks) : [];
   const currentFailures = detail ? currentRunFailures(detail) : [];
+  const currentAttemptId = detail?.attempts.find(
+    (a) => a.number === detail.currentAttemptNumber,
+  )?.id;
+  const cleanup = detail?.tasks.find(
+    (t) => t.attemptId === currentAttemptId,
+  )?.cleanup;
   const pendingRecoveries =
     detail?.recoveries?.filter(
       (item) =>
@@ -723,6 +730,7 @@ function RunDetailClient({ id }: { id: string }) {
                     )}
                   </div>
                 </div>
+                {cleanup && <CleanupReminder note={cleanup.note} />}
                 <div className="dp-run-outcome-metrics" aria-label="结果摘要">
                   <span>
                     <b>
@@ -756,36 +764,11 @@ function RunDetailClient({ id }: { id: string }) {
                     <small>浏览器节点</small>
                   </span>
                 </div>
-                {detail.executionPolicy?.executionState?.records
-                  .filter(
-                    (record) =>
-                      record.cleanup && record.cleanup.status !== "COMPLETED",
-                  )
-                  .map((record) => (
-                    <div
-                      className="dp-run-recovery-notice"
-                      key={`${record.type}:${record.id}`}
-                      role="status"
-                    >
-                      <TriangleAlert aria-hidden="true" />
-                      <div>
-                        <strong>
-                          {record.cleanup?.status === "BLOCKED"
-                            ? "业务数据清理受阻"
-                            : "业务数据待清理"}
-                        </strong>
-                        <p>
-                          记录 {record.id}
-                          {record.type ? ` · ${record.type}` : ""}
-                          {record.account ? ` · 账号 ${record.account}` : ""}
-                        </p>
-                        <p>{record.cleanup?.instruction}</p>
-                        {record.cleanup?.note ? (
-                          <p>{record.cleanup.note}</p>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
+                <CleanupRecords
+                  records={
+                    detail.executionPolicy?.executionState?.records ?? []
+                  }
+                />
                 {pendingRecoveries.map((recovery) => {
                   const attemptId = detail.browserExecutions.find(
                     (item) => item.runtimeSessionId === recovery.sessionId,
