@@ -15,6 +15,11 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+.record {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
 .heading strong {
   color: var(--foreground);
   font-size: 13px;

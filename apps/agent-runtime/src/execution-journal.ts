@@ -108,6 +108,83 @@ function completeList(body: unknown, url: string): boolean {
     /page|offset|cursor|limit|size/iu.test(k),
   );
 }
+
+// Unlike recursively finding records, this also accounts for malformed rows:
+// an unparseable row in a complete list must never prove a type absent.
+function listRows(body: unknown, depth = 0): unknown[] | undefined {
+  if (depth > 8) return;
+  if (Array.isArray(body)) return body;
+  const v = object(body);
+  const lists = [v.data, v.list, v.items, v.records, v.whitelists].filter(
+    Array.isArray,
+  );
+  if (lists.length) return lists.length === 1 ? lists[0] : undefined;
+  const nested = [v.data, v.result].flatMap((child) => {
+    const rows =
+      child && typeof child === "object"
+        ? listRows(child, depth + 1)
+        : undefined;
+    return rows ? [rows] : [];
+  });
+  return nested.length === 1 ? nested[0] : undefined;
+}
+
+const queryFields = [
+  "account",
+  "type",
+  "page",
+  "pageSize",
+  "pageNum",
+  "pageIndex",
+  "page_size",
+  "page_num",
+  "page_index",
+  "limit",
+  "offset",
+];
+
+/** An empty list is relevant only if its query scope includes this record. */
+function completeReadCoversRecord(
+  read: ExecutionState["readReceipts"][number],
+  record: ExecutionState["records"][number],
+) {
+  if (
+    !read.complete ||
+    !read.identitiesComplete ||
+    !record.resourceUrl ||
+    resource(read.url) !== resource(record.resourceUrl)
+  )
+    return false;
+  const identity = requestedRecordId(read.url, {});
+  if (
+    identity.conflict ||
+    (identity.id !== undefined && identity.id !== record.id)
+  )
+    return false;
+  const params = new URL(read.url).searchParams;
+  if (
+    ["id", "type", "account"].some((field) => params.getAll(field).length > 1)
+  )
+    return false;
+  if (params.has("id") && params.get("id") !== record.id) return false;
+  if (params.has("type") && params.get("type") !== record.type) return false;
+  if (
+    params.has("account") &&
+    ![record.account, ...record.accountAliases].includes(params.get("account")!)
+  )
+    return false;
+  return [...params.keys()].every(
+    (field) => field === "id" || queryFields.includes(field),
+  );
+}
+
+function responseRecordId(response: unknown): string | undefined {
+  const body = object(response);
+  const id = body.id ?? object(body.data).id ?? object(body.result).id;
+  return typeof id === "string" || typeof id === "number"
+    ? String(id)
+    : undefined;
+}
 function writeMatchesRecord(
   w: ExecutionState["writes"][number],
   r: ExecutionState["records"][number],
@@ -117,6 +194,10 @@ function writeMatchesRecord(
   const request = object(parse(w.request));
   const identity = requestedRecordId(w.url, request);
   if (identity.conflict) return false;
+  if (w.method === "POST") {
+    const createdId = responseRecordId(parse(w.response));
+    if (createdId !== undefined && createdId !== r.id) return false;
+  }
   if (identity.id !== undefined)
     return (
       identity.id === r.id &&
@@ -140,6 +221,16 @@ function successful(status: unknown, body: unknown) {
     r.success !== false &&
     (r.code === undefined ||
       [0, 200, "0", "200", "OK", "SUCCESS"].includes(r.code as never))
+  );
+}
+function rejectedWrite(w: ExecutionState["writes"][number]) {
+  return (
+    [400, 401, 403, 404, 405, 409, 415, 422].includes(w.status ?? 0) ||
+    (w.confirmed &&
+      w.status !== null &&
+      w.status >= 200 &&
+      w.status < 300 &&
+      !successful(w.status, parse(w.response)))
   );
 }
 function records(value: unknown, depth = 0): Record<string, unknown>[] {
@@ -187,7 +278,7 @@ export const executionProgressSchema = z.object({
 });
 
 /** Durable facts are distinct from product verdicts and permission to delete.
- * Ownership requires a filtered empty preflight, a successful matching creation,
+ * Ownership requires a complete preflight proving absence, a matching creation,
  * and a subsequent record on the same API resource. HTTP 200 alone is insufficient.
  */
 export class ExecutionJournal {
@@ -208,8 +299,11 @@ export class ExecutionJournal {
         r.recordRef &&
         refs.has(r.recordRef) &&
         r.cleanup?.status === "COMPLETED"
-      )
+      ) {
         r.cleanup.status = "PENDING";
+        delete r.cleanup.resolution;
+        r.cleanup.note = "后续操作使原核对结果失效，需要重新读取确认。";
+      }
     this.state.cleanupConfirmations = this.state.cleanupConfirmations.filter(
       (p) => p.source !== "UI" || (!!recordRef && p.recordRef !== recordRef),
     );
@@ -447,6 +541,9 @@ export class ExecutionJournal {
           this.state.writes.push(receipt);
           this.invalidateUiConfirmations();
         }
+        this.inferCreationAbsence(
+          this.state.writes.find((w) => w.key === key)!,
+        );
         if (this.state.writes.length > 200) {
           this.state.writeHistoryTruncated = true;
           this.state.writes = this.state.writes.slice(-200);
@@ -470,6 +567,31 @@ export class ExecutionJournal {
         continue;
       }
       if (method === "GET" && evidenceRefs.length && sequence >= 0) {
+        const collection = listRows(body);
+        const identities = (collection ?? []).slice(0, 100).flatMap((row) => {
+          const candidate = object(row);
+          const aliases = accountAliases([
+            candidate.account,
+            object(candidate.user).uuid,
+            object(candidate.user).phone,
+            object(candidate.user).email,
+          ]);
+          return (typeof candidate.id === "string" ||
+            typeof candidate.id === "number") &&
+            typeof candidate.type === "string" &&
+            candidate.type.length > 0 &&
+            candidate.type.length <= 500 &&
+            String(candidate.id).length <= 500 &&
+            aliases.length
+            ? [
+                {
+                  id: String(candidate.id),
+                  type: candidate.type,
+                  accountAliases: aliases,
+                },
+              ]
+            : [];
+        });
         const read = {
           key: requestKey,
           url,
@@ -479,6 +601,11 @@ export class ExecutionJournal {
             : {}),
           empty: emptyList(body),
           complete: completeList(body, url),
+          identitiesComplete:
+            !!collection &&
+            collection.length <= 100 &&
+            identities.length === collection.length,
+          identities,
           recordKeys: found.map((r) => recordKey(r.id, r.type, url)),
           recordStates: Object.fromEntries(
             found.flatMap((r) => {
@@ -561,17 +688,7 @@ export class ExecutionJournal {
               [a.account, ...a.aliases].some((v) => aliases.includes(v)) &&
               (!a.requiredTypes.length || a.requiredTypes.includes(type)),
           );
-        if (
-          method === "GET" &&
-          assigned &&
-          !this.state.writes.some(
-            (w) =>
-              resource(w.url) === resource(url) &&
-              (requestedRecordId(w.url, object(parse(w.request))).id === id ||
-                (object(parse(w.request)).type === type &&
-                  aliases.includes(String(object(parse(w.request)).account)))),
-          )
-        ) {
+        if (method === "GET" && assigned && sequence >= 0) {
           const baseline = {
             id,
             type,
@@ -579,6 +696,13 @@ export class ExecutionJournal {
             account: aliases[0],
             accountAliases: aliases,
             ownership: "EXISTING" as const,
+            baselineObservation: {
+              readKey: requestKey,
+              sequence,
+              ...(typeof q.timestamp === "string"
+                ? { timestamp: q.timestamp }
+                : {}),
+            },
             ...(candidate.config !== undefined
               ? {
                   initialState: JSON.stringify(
@@ -592,6 +716,7 @@ export class ExecutionJournal {
             evidenceRefs,
           };
           if (
+            this.baselinePrecedesWrites(baseline) &&
             !this.state.observedRecords.some(
               (r) => recordKey(r.id, r.type, r.resourceUrl) === key,
             ) &&
@@ -614,7 +739,24 @@ export class ExecutionJournal {
           ).slice(0, 2000),
           evidenceRefs,
         };
-        if (this.matchingCreation(observed) && evidenceRefs.length) {
+        const creation = this.matchingCreation(observed);
+        const creationAccount = object(parse(creation?.request)).account;
+        const matchingResults = found.filter(
+          (r) =>
+            r.type === type &&
+            accountAliases([
+              r.account,
+              object(r.user).uuid,
+              object(r.user).phone,
+              object(r.user).email,
+            ]).includes(String(creationAccount)),
+        );
+        if (
+          creation &&
+          evidenceRefs.length &&
+          (responseRecordId(parse(creation.response)) !== undefined ||
+            matchingResults.length === 1)
+        ) {
           const index = this.state.pendingRecords.findIndex(
             (r) => recordKey(r.id, r.type, r.resourceUrl) === key,
           );
@@ -661,6 +803,7 @@ export class ExecutionJournal {
       });
       return false;
     });
+    this.registerObservedMutations();
     this.reconcileCleanup();
     const ui = structuredObservationSchema.safeParse(
       result.structuredObservation,
@@ -671,7 +814,146 @@ export class ExecutionJournal {
       this.lastUiObservation = ui.data;
       this.lastUiEvidenceRefs = evidenceRefs;
     }
+    this.reconcileReview();
     return before !== JSON.stringify(this.state);
+  }
+
+  private inferCreationAbsence(write: ExecutionState["writes"][number]) {
+    const request = object(parse(write.request));
+    if (
+      write.method !== "POST" ||
+      write.sequence === undefined ||
+      this.state.requestOrderTruncated ||
+      this.state.writeHistoryTruncated ||
+      typeof request.account !== "string" ||
+      typeof request.type !== "string"
+    )
+      return;
+    // A second submit cannot reuse an old absence proof to claim another record.
+    if (
+      this.state.writes.some(
+        (w) =>
+          w.key !== write.key &&
+          w.method === "POST" &&
+          (w.sequence ?? -1) < write.sequence! &&
+          resource(w.url) === resource(write.url) &&
+          (!w.confirmed || successful(w.status, parse(w.response))) &&
+          (object(parse(w.request)).account === undefined ||
+            object(parse(w.request)).account === request.account) &&
+          (object(parse(w.request)).type === undefined ||
+            object(parse(w.request)).type === request.type),
+      )
+    )
+      return;
+    const read = [...this.state.readReceipts]
+      .sort((a, b) => b.sequence - a.sequence)
+      .find((r) => {
+        if (
+          resource(r.url) !== resource(write.url) ||
+          r.sequence >= write.sequence! ||
+          (r.timestamp &&
+            write.timestamp &&
+            !(Date.parse(r.timestamp) < Date.parse(write.timestamp)))
+        )
+          return false;
+        const params = new URL(r.url).searchParams;
+        return (
+          params.getAll("account").length === 1 &&
+          params.get("account") === request.account &&
+          params.getAll("type").length <= 1 &&
+          (!params.has("type") || params.get("type") === request.type) &&
+          [...params.keys()].every((field) => queryFields.includes(field))
+        );
+      });
+    if (
+      !read?.complete ||
+      !read.identitiesComplete ||
+      !read.evidenceRefs.length ||
+      !read.identities.every((r) =>
+        r.accountAliases.includes(request.account as string),
+      ) ||
+      read.identities.some((r) => r.type === request.type)
+    )
+      return;
+    this.state.preflightAbsences = [
+      ...new Set([
+        ...this.state.preflightAbsences,
+        `${resource(write.url)}:${request.type}:${request.account}`,
+      ]),
+    ].slice(-100);
+  }
+
+  private baselinePrecedesWrites(record: ExecutionState["records"][number]) {
+    const baseline = record.baselineObservation;
+    if (
+      !baseline ||
+      this.state.requestOrderTruncated ||
+      this.state.writeHistoryTruncated
+    )
+      return false;
+    return this.state.writes.every((write) => {
+      if (rejectedWrite(write) || resource(write.url) !== record.resourceUrl)
+        return true;
+      const request = object(parse(write.request));
+      const identity = requestedRecordId(write.url, request);
+      // An unidentified mutation might affect this record. Do not assume that a
+      // subsequent read is a baseline while its request body is still missing.
+      if (!identity.conflict) {
+        if (identity.id !== undefined && identity.id !== record.id) return true;
+        if (identity.id === undefined) {
+          if (request.type !== undefined && request.type !== record.type)
+            return true;
+          if (
+            request.account !== undefined &&
+            ![record.account, ...record.accountAliases].includes(
+              String(request.account),
+            )
+          )
+            return true;
+        }
+      }
+      return (
+        write.sequence !== undefined &&
+        baseline.sequence < write.sequence &&
+        (!baseline.timestamp ||
+          !write.timestamp ||
+          Date.parse(baseline.timestamp) < Date.parse(write.timestamp))
+      );
+    });
+  }
+
+  private registerObservedMutations() {
+    for (const write of this.state.writes) {
+      if (
+        !["PUT", "PATCH", "DELETE"].includes(write.method) ||
+        rejectedWrite(write)
+      )
+        continue;
+      const matches = this.state.observedRecords.filter(
+        (r) => writeMatchesRecord(write, r) && this.baselinePrecedesWrites(r),
+      );
+      if (matches.length !== 1 || this.state.records.length >= 50) continue;
+      const baseline = matches[0]!;
+      if (this.state.records.some((r) => r.recordRef === baseline.recordRef))
+        continue;
+      this.state.records.push({
+        ...baseline,
+        cleanup: {
+          instruction: "按修改前观察到的状态恢复既有记录，并重新读取核对。",
+          status: "PENDING",
+        },
+      });
+    }
+  }
+
+  private reconcileReview() {
+    const review = this.state.cleanupReview;
+    if (!review) return;
+    const unresolved = new Set(this.unresolvedWrites().map((w) => w.key));
+    if (this.state.writeHistoryTruncated) unresolved.add("history:truncated");
+    const remaining = review.writeKeys.filter((key) => unresolved.has(key));
+    if (remaining.length) review.writeKeys = remaining;
+    else delete this.state.cleanupReview;
   }
   private observeUi(
     observation: StructuredObservation,
@@ -792,12 +1074,14 @@ export class ExecutionJournal {
         observation.captureId === record.uiBaseline.observationId
       )
         continue;
-      const matching = candidates.filter((r) =>
-        isDeepStrictEqual(stateValues(r.values), record.uiBaseline!.values),
+      const matching = candidates.filter(
+        (r) =>
+          r.values.includes(record.id) &&
+          isDeepStrictEqual(stateValues(r.values), record.uiBaseline!.values),
       );
       if (matching.length !== 1 || record.ownership !== "EXISTING") continue;
       const mutation = this.state.writes
-        .filter((w) => writeMatchesRecord(w, record))
+        .filter((w) => writeMatchesRecord(w, record) && !rejectedWrite(w))
         .at(-1);
       if (mutation && !["PUT", "PATCH"].includes(mutation.method)) continue;
       // A concrete conflicting receipt needs reconciliation, even when the UI
@@ -838,6 +1122,15 @@ export class ExecutionJournal {
         readKey: `ui:${observation.captureId}`,
         evidenceRefs,
       });
+      record.cleanup = {
+        ...record.cleanup,
+        status: "COMPLETED",
+        resolution: "RESTORED",
+        note: "已刷新页面并确认同一记录恢复到修改前状态。",
+      };
+      record.evidenceRefs = [
+        ...new Set([...record.evidenceRefs, ...evidenceRefs]),
+      ].slice(-20);
     }
   }
   private submittedTypeLabel(account: unknown) {
@@ -976,6 +1269,8 @@ export class ExecutionJournal {
         resource(w.url) === record.resourceUrl &&
         request.type === record.type &&
         record.accountAliases.includes(request.account as string) &&
+        (responseRecordId(parse(w.response)) === undefined ||
+          responseRecordId(parse(w.response)) === record.id) &&
         (!requireAbsence ||
           this.state.preflightAbsences.includes(
             `${record.resourceUrl}:${record.type}:${String(request.account)}`,
@@ -1044,6 +1339,10 @@ export class ExecutionJournal {
         baseline &&
         !mergedRecords.some((r) => r.recordRef === baseline.recordRef)
       ) {
+        if (!this.baselinePrecedesWrites(baseline))
+          throw new Error(
+            "无法确认该状态来自写入前的观察，不能用修改后的状态作为恢复基线。",
+          );
         const suppliedRefs = change.evidenceRefs ?? [];
         if (!suppliedRefs.length)
           throw new Error("登记记录必须引用已交付的观察。");
@@ -1112,7 +1411,27 @@ export class ExecutionJournal {
         ...locked,
         ...change,
         uiBaseline: locked?.uiBaseline,
+        baselineObservation: locked?.baselineObservation,
       });
+      if (record.cleanup?.status === "RETAINED") {
+        if (
+          !locked ||
+          locked.ownership !== "CREATED_THIS_RUN" ||
+          !record.cleanup.note?.trim()
+        )
+          throw new Error(
+            "按计划保留仅适用于已确认本次创建的记录，须说明 Spec 保留依据和后续用途；既有数据应恢复原状。",
+          );
+        const proof = this.retentionRead(locked);
+        if (!proof)
+          throw new Error(
+            "保留记录前须确认最后一次提交成功，并重新读取同一记录的当前状态。",
+          );
+        record.cleanup.retainedAtWriteKey = proof.mutation.key;
+        record.evidenceRefs = [
+          ...new Set([...record.evidenceRefs, ...proof.read.evidenceRefs]),
+        ].slice(-20);
+      }
       record.recordRef ??= stableRecordRef(record);
       const index = locked ? mergedRecords.indexOf(locked) : -1;
       if (index < 0) mergedRecords.push(record);
@@ -1201,6 +1520,8 @@ export class ExecutionJournal {
     };
     if (this.lastUiObservation)
       this.observeUi(this.lastUiObservation, this.lastUiEvidenceRefs, false);
+    this.reconcileCleanup();
+    this.reconcileReview();
   }
   /** Independent records can make progress even if a different record is rejected. */
   updatePartial(
@@ -1264,9 +1585,19 @@ export class ExecutionJournal {
       // Recompute from the latest mutation/read, so replaying an old empty
       // response cannot re-establish a proof invalidated by later activity.
       const mutation = this.state.writes
-        .filter((w) => writeMatchesRecord(w, record))
+        .filter((w) => writeMatchesRecord(w, record) && !rejectedWrite(w))
         .sort((a, b) => (a.sequence ?? -1) - (b.sequence ?? -1))
         .at(-1);
+      if (record.cleanup.status === "RETAINED") {
+        const proof = this.retentionRead(record);
+        if (
+          !proof ||
+          proof.mutation.key !== record.cleanup.retainedAtWriteKey
+        ) {
+          record.cleanup.status = "PENDING";
+          delete record.cleanup.retainedAtWriteKey;
+        }
+      }
       let confirmation:
         ExecutionState["cleanupConfirmations"][number] | undefined;
       if (
@@ -1285,58 +1616,19 @@ export class ExecutionJournal {
           )
           .sort((a, b) => b.sequence - a.sequence);
         let confirmedRead: ExecutionState["readReceipts"][number] | undefined;
-        if (mutation.method === "DELETE") {
-          const latestRead = laterReads.find((read) => {
-            if (read.recordKeys.includes(key)) return true;
-            if (
-              !read.complete ||
-              resource(read.url) !== resource(record.resourceUrl!)
-            )
-              return false;
-            const identity = requestedRecordId(read.url, {});
-            if (
-              identity.conflict ||
-              (identity.id !== undefined && identity.id !== record.id)
-            )
-              return false;
-            const params = new URL(read.url).searchParams;
-            if (
-              ["id", "type", "account"].some(
-                (field) => params.getAll(field).length > 1,
-              )
-            )
-              return false;
-            if (params.has("id") && params.get("id") !== record.id)
-              return false;
-            if (params.has("type") && params.get("type") !== record.type)
-              return false;
-            if (
-              params.has("account") &&
-              ![record.account, ...record.accountAliases].includes(
-                params.get("account")!,
-              )
-            )
-              return false;
-            return [...params.keys()].every((field) =>
-              [
-                "id",
-                "account",
-                "type",
-                "page",
-                "pageSize",
-                "pageNum",
-                "pageIndex",
-                "page_size",
-                "page_num",
-                "page_index",
-                "limit",
-                "offset",
-              ].includes(field),
-            );
-          });
+        if (
+          mutation.method === "DELETE" &&
+          record.ownership === "CREATED_THIS_RUN"
+        ) {
+          const latestRead = laterReads.find(
+            (read) =>
+              read.recordKeys.includes(key) ||
+              completeReadCoversRecord(read, record),
+          );
           if (latestRead && !latestRead.recordKeys.includes(key))
             confirmedRead = latestRead;
         } else if (
+          record.ownership === "EXISTING" &&
           ["PUT", "PATCH"].includes(mutation.method) &&
           record.initialState !== undefined
         ) {
@@ -1372,16 +1664,66 @@ export class ExecutionJournal {
           proof.recordRef !== record.recordRef ||
           (!confirmation && proof.source === "UI"),
       );
-      if (confirmation) this.state.cleanupConfirmations.push(confirmation);
-      else if (
+      if (confirmation) {
+        this.state.cleanupConfirmations.push(confirmation);
+        record.cleanup = {
+          ...record.cleanup,
+          status: "COMPLETED",
+          resolution: mutation!.method === "DELETE" ? "DELETED" : "RESTORED",
+          note:
+            mutation!.method === "DELETE"
+              ? "已核对删除回执及后续查询，记录已不存在。"
+              : "已重新读取并确认恢复到修改前状态。",
+        };
+        delete record.cleanup.retainedAtWriteKey;
+        record.evidenceRefs = [
+          ...new Set([...record.evidenceRefs, ...confirmation.evidenceRefs]),
+        ].slice(-20);
+      } else if (
         mutation &&
         record.cleanup.status === "COMPLETED" &&
         !this.state.cleanupConfirmations.some(
           (p) => p.recordRef === record.recordRef,
         )
-      )
+      ) {
         record.cleanup.status = "PENDING";
+        delete record.cleanup.resolution;
+        record.cleanup.note =
+          "最新写入或查询与原收尾结果不一致，需要重新核对。";
+      }
     }
+  }
+  private retentionRead(record: ExecutionState["records"][number]) {
+    if (this.state.requestOrderTruncated) return;
+    const mutation = this.state.writes
+      .filter((w) => writeMatchesRecord(w, record) && !rejectedWrite(w))
+      .sort((a, b) => (a.sequence ?? -1) - (b.sequence ?? -1))
+      .at(-1);
+    if (
+      !mutation?.confirmed ||
+      mutation.sequence === undefined ||
+      mutation.method === "DELETE" ||
+      !successful(mutation.status, parse(mutation.response))
+    )
+      return;
+    const key = recordKey(record.id, record.type, record.resourceUrl);
+    const read = this.state.readReceipts
+      .filter((r) => resource(r.url) === resource(record.resourceUrl ?? ""))
+      .sort((a, b) => b.sequence - a.sequence)
+      .find(
+        (r) =>
+          r.recordKeys.includes(key) || completeReadCoversRecord(r, record),
+      );
+    if (
+      !read ||
+      read.sequence <= mutation.sequence ||
+      !read.recordKeys.includes(key) ||
+      (read.timestamp &&
+        mutation.timestamp &&
+        !(Date.parse(read.timestamp) > Date.parse(mutation.timestamp)))
+    )
+      return;
+    return { mutation, read };
   }
   modelView() {
     return {
@@ -1431,16 +1773,7 @@ export class ExecutionJournal {
   /** Unidentified writes remain cleanup obligations, even when no record could be bound. */
   unresolvedWrites() {
     return this.state.writes.filter((w) => {
-      if ([400, 401, 403, 404, 405, 409, 415, 422].includes(w.status ?? 0))
-        return false;
-      if (
-        w.confirmed &&
-        w.status !== null &&
-        w.status >= 200 &&
-        w.status < 300 &&
-        !successful(w.status, parse(w.response))
-      )
-        return false;
+      if (rejectedWrite(w)) return false;
       const request = object(parse(w.request));
       return !this.state.records.some((r) => {
         if (
@@ -1509,7 +1842,7 @@ export class ExecutionJournal {
   }
   pendingCleanup() {
     return this.state.records.filter(
-      (r) => r.cleanup && r.cleanup.status !== "COMPLETED",
+      (r) => r.cleanup && !["COMPLETED", "RETAINED"].includes(r.cleanup.status),
     );
   }
   accountRequestError(context: Record<string, unknown>) {
