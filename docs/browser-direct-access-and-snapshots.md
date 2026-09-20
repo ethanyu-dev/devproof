@@ -52,6 +52,19 @@ For direct access:
 - Configure API `BROWSER_DIRECT_ENDPOINTS_JSON={"runtime-uuid":"wss://vm.example/browser-control"}` only after the endpoint is reachable from user browsers. NAT-only machines require a reachable VPN or separate tunnel; no WebRTC/TURN path is implemented.
 - The Linux installer already loads `~/.config/devproof/browser-runtime.env`. Restart its systemd user service after changing VM settings. Keep API/VM clocks synchronized.
 
+For an external load balancer that connects directly to the VM, bind
+`DEVPROOF_DIRECT_CONTROL_HOST` to the VM's private IP instead of loopback, allow
+9444 only from that balancer, and forward HTTP/WebSocket (not HTTPS) to 9444.
+An ordinary HTTP request to this listener returns 404, including health checks;
+configure a compatible check or a separate proxy health endpoint.
+
+Runtime 0.2.34's release installer adds `--direct-config FILE` for validated,
+rollback-protected first-time configuration. See the [installer example](../apps/browser-runtime/README.md#direct-control-and-distributed-login-state).
+The JSON contains only the public key, listener settings, Console origins and
+public WSS URL. API signing and endpoint activation remain control-plane
+configuration; no new Runtime registration fields are needed. Once configured,
+the usual installation command preserves these settings on later upgrades.
+
 For snapshot distribution:
 
 - Set a new random 32-byte base64 `DEVPROOF_AUTH_SNAPSHOT_KEY` on the trusted participating VMs. This is separate from the API credential cipher key. Do not install it on API/Web. All participating VMs currently share one key; per-node envelope keys and live key rotation are not implemented.

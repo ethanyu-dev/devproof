@@ -28,11 +28,17 @@ jobs:
       - run: pnpm build:packages
       - run: pnpm --filter @devproof/browser-runtime build
       - run: pnpm --filter @devproof/browser-runtime test
+      - name: Check release installers
+        run: |
+          for script in scripts/bootstrap-browser-runtime.sh scripts/install-browser-runtime.sh scripts/deploy-browser-runtime.sh; do
+            bash -n "$script"
+          done
       - name: Pack runtime
         run: |
           pnpm --filter @devproof/browser-runtime pack --pack-destination release
           package="$(find release -maxdepth 1 -name 'devproof-browser-runtime-*.tgz' -print -quit)"
           test -n "$package"
+          tar -tzf "$package" | grep -Fx 'package/dist/install-direct-access.js'
           mv "$package" release/devproof-browser-runtime.tgz
           cp scripts/install-browser-runtime.sh release/install-browser-runtime.sh
           cp scripts/bootstrap-browser-runtime.sh release/install.sh

@@ -1,6 +1,6 @@
 # @devproof/browser-runtime
 
-Browser Runtime is DevProof's independently deployable Playwright execution host. Its control-plane WebSocket connection is outbound; optional direct browser access also uses an inbound listener behind a host-local TLS proxy. Long-lived credentials and persistent Browser Profiles remain on the Runtime machine.
+Browser Runtime is DevProof's independently deployable Playwright execution host. Its control-plane WebSocket connection is outbound; optional direct browser access also uses an inbound listener behind a TLS proxy on the host or a private-network load balancer. Long-lived credentials and persistent Browser Profiles remain on the Runtime machine.
 
 ## Install
 
@@ -225,6 +225,54 @@ package. The companion Agent change that stops exhausted locator recovery ships
 separately in PR #62. See [browser reference recovery](../../docs/browser-reference-recovery.md).
 
 ## Direct control and distributed login state
+
+Runtime 0.2.34 adds `--direct-config FILE` to the release installer. After this
+release is published, new direct-access nodes can use one installation command
+with a local JSON file. Already-configured nodes keep using the ordinary upgrade
+command: it preserves `~/.config/devproof/browser-runtime.env`.
+
+Create `direct-access.json` once, using the public Ed25519 key supplied by the API
+operator (PEM newlines are JSON `\n` escapes):
+
+```json
+{
+  "host": "10.1.80.119",
+  "port": 9444,
+  "origins": ["https://devproof.ethankit.com"],
+  "publicKey": "-----BEGIN PUBLIC KEY-----\n<base64 public key>\n-----END PUBLIC KEY-----\n",
+  "publicUrl": "wss://agent-browser-runtime.paigod.work/browser-control"
+}
+```
+
+Use `127.0.0.1` for a VM-local reverse proxy. For an external load balancer, use
+the VM's private IP and restrict port 9444 to that load balancer. The proxy
+terminates TLS on 443 and forwards HTTP/WebSocket to 9444, preserving the exact
+`/browser-control` path and Console Origin. These are operator-supplied values;
+the installer does not infer network exposure or allocate domains/certificates.
+
+```bash
+curl -4 -fsSL https://github.com/ethanyu-dev/devproof/releases/latest/download/install.sh \
+  | bash -s -- --direct-config "$HOME/direct-access.json"
+```
+
+The installer validates the configuration before stopping the old service,
+merges only the four direct-control variables, keeps unrelated settings and a
+private backup, and restores the old configuration/package on upgrade failure.
+On a paired node it checks the local WebSocket upgrade after startup and prints
+the Runtime ID → public WSS URL entry to merge into the API's
+`BROWSER_DIRECT_ENDPOINTS_JSON`. It does not activate that mapping automatically.
+First-time nodes still require Console pairing before their listener starts.
+
+The API signing **private** key stays on the API. Do not place it in the JSON or
+on a Runtime. Public DNS, TLS and authenticated frame/input/renewal checks must
+pass before enabling the API mapping; a local listener check does not establish
+public reachability. Direct connection failures do not automatically use relay.
+The listener returns 404 for ordinary HTTP requests, so a load balancer expecting
+HTTP 200 needs a compatible health check or a separate proxy health endpoint.
+
+For SSH-based deployment, the same `--direct-config FILE` option uploads and
+applies configuration to one target at a time. Omit the option on subsequent
+upgrades to preserve the existing settings.
 
 Version 0.2.32 adds optional direct WSS human control and encrypted login snapshots
 for multiple execution nodes. Both are disabled until configured. See the
