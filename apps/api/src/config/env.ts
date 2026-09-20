@@ -11,6 +11,7 @@ const envSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
+    TASK_WEBHOOK_ALLOWED_ORIGINS: z.string().default(""),
     API_PORT: z.coerce.number().int().positive().default(4433),
     API_PUBLIC_URL: z.string().url().default("http://localhost:4433"),
     BROWSER_EXECUTION_DATA_LOCKS_ENABLED: z

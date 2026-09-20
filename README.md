@@ -204,13 +204,17 @@ With multiple Runtimes registered, configure target domains under Console → Ac
 
 ## Agent integration
 
+Public developer documentation is available without login at `/docs`, with an interactive Scalar reference at `/docs/api`. API calls still require an explicit DevProof bearer token.
+
+For service-to-service integration, use the [external Task HTTP/MCP guide](docs/external-task-integration.md) and `GET /v2/openapi.json`. HTTP supports paginated filters, external business references, owner-authorized profile grants, and signed durable task webhooks.
+
 Generate a `dvp_sk_...` token under Console → Access → MCP Integration. HTTP requests use:
 
     Authorization: Bearer dvp_sk_...
 
 The MCP endpoint is `http://localhost:4433/mcp` and uses the same Bearer token. Streamable HTTP MCP is recommended for Agent Runtime; HTTP API remains available as a compatibility entry point. Runtime stores credentials safely, invokes the model, resumes waiting states, and submits final results.
 
-MCP exposes only the unified Task control plane: `get_integration_status`, `create_task`, `get_task`, `list_tasks`, `set_task_deployment_target`, `retry_task_stage`, and `cancel_task`. Use `get_run`, `resolve_run_intervention`, and `read_run_evidence` only when drilling down into Case-level Runtime details. Legacy Spec, Verification, browser command, Profile cleanup, and compatible `create_run` tools are no longer published. Callers do not receive Browser Sessions and do not call low-level `command`, `complete`, or `release` lifecycle tools. The read-only discovery resource is `devproof://task-tools`.
+MCP exposes the unified Task control plane (see the integration guide for pagination, rerun, event, account-input and authorized-profile tools): `get_integration_status`, `create_task`, `get_task`, `list_tasks`, `set_task_deployment_target`, `retry_task_stage`, and `cancel_task`. Use `get_run`, `resolve_run_intervention`, and `read_run_evidence` only when drilling down into Case-level Runtime details. Legacy Spec, Verification, browser command, Profile cleanup, and compatible `create_run` tools are no longer published. Callers do not receive Browser Sessions and do not call low-level `command`, `complete`, or `release` lifecycle tools. The read-only discovery resource is `devproof://task-tools`.
 
 In Console → Task Execution, select **Create task** and provide at least one of a Linear Issue, GitHub PR URLs (up to 25), or a testing brief; the title is optional. PR-only, Issue-only and brief-only inputs all enter Spec analysis. Console creation requires at least one test environment (up to 20); HTTP/MCP/Feishu can discover an environment or wait for supplementation. Use `kind: "SPEC_TASK"` with top-level `issueRef`, `pullRequestUrls`, and/or `goal` in HTTP/MCP. Legacy `ISSUE_SPEC` remains supported. Each task has an independent UUID; request retries retain their idempotency key, while deliberately testing the same source again creates a new task. See the [design and Feishu command examples](docs/source-independent-test-tasks-design.md) and [v2.21 upgrade procedure](docs/upgrading.md#source-independent-spec-tasks).
 

@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  BookOpen,
   ListTree,
   Cable,
   LogOut,
@@ -52,6 +53,7 @@ const adminSections = [
     label: "接入配置",
     group: "管理",
   },
+  { href: "/docs", icon: BookOpen, label: "API 文档", group: "开发者" },
 ] as const;
 
 export function ConsoleShell({ children }: { children: ReactNode }) {

@@ -179,6 +179,7 @@ interface RuntimeRoutingRule {
 }
 
 interface ToolCredential {
+  profileGrants?: Array<{ profileId: string }>;
   createdAt: string;
   expiresAt: string | null;
   id: string;
@@ -306,6 +307,10 @@ export function AccessClient() {
     null,
   );
   const [credentials, setCredentials] = useState<ToolCredential[] | null>(null);
+  const [ownedProfiles, setOwnedProfiles] = useState<Array<{
+    id: string;
+    displayName: string;
+  }> | null>(null);
   const [pairing, setPairing] = useState<{
     command: string;
     expiresAt: string;
@@ -970,6 +975,44 @@ export function AccessClient() {
       setCredentialMessage({ text: (error as Error).message, tone: "error" });
     } finally {
       setCreatingCredential(false);
+    }
+  }
+
+  async function loadOwnedProfiles() {
+    if (ownedProfiles !== null) return;
+    try {
+      setOwnedProfiles(
+        await consoleApi<Array<{ id: string; displayName: string }>>(
+          "/browser-profiles",
+        ),
+      );
+    } catch (error) {
+      setCredentialMessage({ text: (error as Error).message, tone: "error" });
+    }
+  }
+
+  async function setCredentialProfile(
+    row: ToolCredential,
+    profileId: string,
+    enabled: boolean,
+  ) {
+    if (pendingItem) return;
+    setPendingItem(`profile-grant:${row.id}:${profileId}`);
+    try {
+      await consoleApi(`/tool-credentials/${row.id}/profiles/${profileId}`, {
+        method: enabled ? "POST" : "DELETE",
+      });
+      setCredentials(await consoleApi<ToolCredential[]>("/tool-credentials"));
+      setCredentialMessage({
+        text: enabled
+          ? "已授权此 Token 使用该浏览器身份创建任务。"
+          : "已撤销授权，已有任务不受影响。",
+        tone: "success",
+      });
+    } catch (error) {
+      setCredentialMessage({ text: (error as Error).message, tone: "error" });
+    } finally {
+      setPendingItem(null);
     }
   }
 
@@ -2177,8 +2220,8 @@ export function AccessClient() {
                       </span>
                       <span className="dp-count">
                         {
-                          mcpCredentials.filter(
-                            (credential) => !credential.revokedAt,
+                          mcpCredentials.filter((credential) =>
+                            credentialAvailable(credential),
                           ).length
                         }{" "}
                         个可用
@@ -2193,13 +2236,17 @@ export function AccessClient() {
                           <div className="dp-runtime-item" key={row.id}>
                             <div>
                               <i
-                                className={`status ${row.revokedAt ? "revoked" : "online"}`}
+                                className={`status ${credentialAvailable(row) ? "online" : "revoked"}`}
                               />
                               <span>
                                 <strong title={row.name}>{row.name}</strong>
                                 <small>
                                   {row.tokenHint} ·{" "}
-                                  {row.revokedAt ? "已撤销" : "可用"}
+                                  {row.revokedAt
+                                    ? "已撤销"
+                                    : credentialAvailable(row)
+                                      ? "可用"
+                                      : "已过期"}
                                 </small>
                               </span>
                             </div>
@@ -2231,6 +2278,57 @@ export function AccessClient() {
                                 </dd>
                               </div>
                             </dl>
+                            {credentialAvailable(row) &&
+                            row.scopes.includes("run:write") ? (
+                              <details
+                                onToggle={(event) => {
+                                  if (event.currentTarget.open)
+                                    void loadOwnedProfiles();
+                                }}
+                              >
+                                <summary>授权使用我的浏览器身份</summary>
+                                <p>
+                                  授权后，该 Token
+                                  可使用选中的身份创建任务；撤销授权不取消已有任务。网站与入口授权仍需有效。
+                                </p>
+                                {ownedProfiles === null ? (
+                                  <p>正在加载…</p>
+                                ) : ownedProfiles.length === 0 ? (
+                                  <p>暂无浏览器身份，请先在身份库中添加。</p>
+                                ) : (
+                                  ownedProfiles.map((profile) => (
+                                    <label
+                                      key={profile.id}
+                                      style={{
+                                        display: "flex",
+                                        gap: "8px",
+                                        alignItems: "center",
+                                        marginTop: "8px",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          row.profileGrants?.some(
+                                            (grant) =>
+                                              grant.profileId === profile.id,
+                                          ) ?? false
+                                        }
+                                        disabled={pendingItem !== null}
+                                        onChange={(event) =>
+                                          void setCredentialProfile(
+                                            row,
+                                            profile.id,
+                                            event.target.checked,
+                                          )
+                                        }
+                                      />
+                                      {profile.displayName}
+                                    </label>
+                                  ))
+                                )}
+                              </details>
+                            ) : null}
                             {!row.revokedAt ? (
                               <Button
                                 disabled={pendingItem !== null}
@@ -2355,4 +2453,11 @@ function focusEditor(form: HTMLFormElement | null) {
   form
     ?.querySelector<HTMLInputElement | HTMLSelectElement>("input, select")
     ?.focus({ preventScroll: true });
+}
+
+function credentialAvailable(credential: ToolCredential) {
+  return (
+    !credential.revokedAt &&
+    (!credential.expiresAt || Date.parse(credential.expiresAt) > Date.now())
+  );
 }

@@ -242,9 +242,11 @@ export interface TaskRequestActor {
 }
 
 export interface TaskListFilters {
-  createdAfter?: Date;
-  kind?: "SPEC_TASK" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN";
-  query?: string;
+  source?: string | undefined;
+  externalId?: string | undefined;
+  createdAfter?: Date | undefined;
+  kind?: "SPEC_TASK" | "ISSUE_SPEC" | "DIRECT_RUN" | "LEGACY_RUN" | undefined;
+  query?: string | undefined;
   status?:
     | "ACTIVE"
     | "WAITING_HUMAN"
@@ -257,7 +259,8 @@ export interface TaskListFilters {
     | "NOT_RUN"
     | "COMPLETED"
     | "CANCELLED"
-    | "TIMED_OUT";
+    | "TIMED_OUT"
+    | undefined;
 }
 
 function taskStatusWhere(
@@ -506,6 +509,33 @@ export class TaskExecutionService {
     }
   }
 
+  async authorizedProfiles(current: ToolAuthContext) {
+    const grants = await this.prisma.toolProfileGrant.findMany({
+      where: {
+        credentialId: current.credential.id,
+        profile: { teamId: current.team.id },
+      },
+      select: {
+        profile: {
+          select: {
+            id: true,
+            displayName: true,
+            status: true,
+            verificationUrl: true,
+          },
+        },
+      },
+    });
+    return grants.map(({ profile }) => ({
+      id: profile.id,
+      displayName: profile.displayName,
+      status: profile.status,
+      siteHostname: profile.verificationUrl
+        ? new URL(profile.verificationUrl).hostname
+        : null,
+    }));
+  }
+
   async list(current: ToolAuthContext) {
     const rows = await this.prisma.taskExecution.findMany({
       include: taskListInclude,
@@ -524,6 +554,8 @@ export class TaskExecutionService {
   ) {
     const scope: Prisma.TaskExecutionWhereInput = {
       teamId: current.team.id,
+      ...(filters.source ? { externalSource: filters.source } : {}),
+      ...(filters.externalId ? { externalId: filters.externalId } : {}),
       ...(filters.createdAfter
         ? { createdAt: { gte: filters.createdAfter } }
         : {}),
@@ -571,7 +603,7 @@ export class TaskExecutionService {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.taskExecution.findMany({
         include: taskListInclude,
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         skip: (page - 1) * pageSize,
         take: pageSize,
         where,
@@ -2107,16 +2139,35 @@ export class TaskExecutionService {
     actor: TaskRequestActor,
   ) {
     if (input.profilePolicy.strategy === "EXPLICIT_PROFILE") {
-      if (actor.kind !== "USER" || !actor.userId) {
+      if (actor.kind === "CREDENTIAL") {
+        const grant = await this.prisma.toolProfileGrant.findFirst({
+          where: {
+            credentialId: current.credential.id,
+            profileId: input.profilePolicy.profileId!,
+            credential: {
+              teamId: current.team.id,
+              revokedAt: null,
+              OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+            },
+            profile: { teamId: current.team.id },
+          },
+          select: { profile: { select: { ownerUserId: true } } },
+        });
+        if (!grant)
+          throw new ForbiddenException(
+            "The profile owner must explicitly authorize this service token.",
+          );
+        // Attribute the task to the machine, never impersonate the profile owner.
+      } else if (actor.kind !== "USER" || !actor.userId) {
         throw new ForbiddenException(
-          "Explicit browser profiles can only be selected by their signed-in owner.",
+          "Explicit browser profiles require owner authorization.",
         );
       }
       const ownedProfile = await this.prisma.userBrowserProfile.findFirst({
         select: { id: true },
         where: {
           id: input.profilePolicy.profileId!,
-          ownerUserId: actor.userId,
+          ...(actor.kind === "USER" ? { ownerUserId: actor.userId } : {}),
           teamId: current.team.id,
         },
       });
@@ -2162,6 +2213,8 @@ export class TaskExecutionService {
             idempotencyKey: input.idempotencyKey,
             inputSnapshot: json(input),
             creationInputSnapshot: json(input),
+            externalSource: input.externalReference?.source ?? null,
+            externalId: input.externalReference?.externalId ?? null,
             kind: input.kind,
             notificationContext: json(actor.notificationContext ?? {}),
             requestedByKind: actor.kind,
@@ -2275,6 +2328,8 @@ export class TaskExecutionService {
             idempotencyKey: input.idempotencyKey,
             inputSnapshot: json(input),
             creationInputSnapshot: json(input),
+            externalSource: input.externalReference?.source ?? null,
+            externalId: input.externalReference?.externalId ?? null,
             kind: "DIRECT_RUN",
             lifecycle: "RUNNING",
             migrationSource: preserveRunIdempotency
@@ -3991,6 +4046,10 @@ function toTaskDetail(row: TaskDetailRow) {
       verdict: run.verdict,
     })),
     source: { kind: row.sourceKind, ref: row.sourceRef },
+    externalReference:
+      row.externalSource && row.externalId
+        ? { source: row.externalSource, externalId: row.externalId }
+        : null,
     specification: latestSnapshot
       ? {
           completeness: latestSnapshot.completeness,
@@ -4085,6 +4144,10 @@ function toTaskSummary(
     kind: row.kind,
     lifecycle: row.lifecycle,
     source: { kind: row.sourceKind, ref: row.sourceRef },
+    externalReference:
+      row.externalSource && row.externalId
+        ? { source: row.externalSource, externalId: row.externalId }
+        : null,
     title: row.title,
     updatedAt: row.updatedAt.toISOString(),
     verdict: row.verdict,

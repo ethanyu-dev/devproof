@@ -1,3 +1,6 @@
+import { TaskApiContractController } from "./task-executions/task-api-contract.controller.js";
+import { TaskWebhookController } from "./task-executions/task-webhook.controller.js";
+import { TaskWebhookService } from "./task-executions/task-webhook.service.js";
 import { AuthSnapshotTransferController } from "./browser-profiles/auth-snapshot-transfer.controller.js";
 import { AuthSnapshotTransferService } from "./browser-profiles/auth-snapshot-transfer.service.js";
 import { ExecutionContextService } from "./execution-runs/execution-context.service.js";
@@ -124,6 +127,8 @@ import { VerificationService } from "./verification/verification.service.js";
     ExecutionRunConsoleController,
     RunBrowserPreviewController,
     RunHitlBrowserController,
+    TaskApiContractController,
+    TaskWebhookController,
     TaskExecutionController,
     TaskExecutionConsoleController,
     TestSpecificationController,
@@ -187,6 +192,7 @@ import { VerificationService } from "./verification/verification.service.js";
     TaskExecutionService,
     TaskProfileResolverService,
     ProfileReservationService,
+    TaskWebhookService,
     TaskExecutionWorker,
     TaskLogBundleService,
     TestDataService,

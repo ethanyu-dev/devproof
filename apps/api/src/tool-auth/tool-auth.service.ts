@@ -53,9 +53,58 @@ export class ToolAuthService {
         revokedAt: true,
         scopes: true,
         tokenHint: true,
+        profileGrants: {
+          where: { profile: { ownerUserId: current.user.id } },
+          select: { profileId: true },
+        },
       },
       where: { teamId: current.team.id },
     });
+  }
+
+  async setProfileGrant(
+    current: AuthContext,
+    credentialId: string,
+    profileId: string,
+    enabled: boolean,
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      const profile = await tx.userBrowserProfile.findFirst({
+        where: {
+          id: profileId,
+          teamId: current.team.id,
+          ownerUserId: current.user.id,
+        },
+        select: { id: true },
+      });
+      const credential = await tx.toolCredential.findFirst({
+        where: { id: credentialId, teamId: current.team.id },
+        select: { id: true },
+      });
+      if (!profile || !credential)
+        throw new NotFoundException(
+          "Owned profile or team token was not found.",
+        );
+      if (enabled) {
+        await tx.toolProfileGrant.upsert({
+          where: { credentialId_profileId: { credentialId, profileId } },
+          create: { credentialId, profileId },
+          update: {},
+        });
+      } else {
+        await tx.toolProfileGrant.deleteMany({
+          where: { credentialId, profileId },
+        });
+      }
+    });
+    await this.audit.record(
+      current,
+      enabled ? "tool.profile_granted" : "tool.profile_revoked",
+      "tool_credential",
+      credentialId,
+      { profileId },
+    );
+    return { ok: true };
   }
 
   async create(current: AuthContext, input: ToolCredentialCreateInput) {
