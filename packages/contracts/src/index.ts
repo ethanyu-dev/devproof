@@ -992,7 +992,72 @@ export const githubPullRequestUrlSchema = z
     return canonical;
   });
 
+export const taskExternalReferenceSchema = z.object({
+  source: z.string().trim().min(1).max(100),
+  externalId: z.string().trim().min(1).max(500),
+});
+
+export const taskListQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).max(10_000).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(20),
+    query: z.string().trim().min(1).max(200).optional(),
+    status: z
+      .enum([
+        "ACTIVE",
+        "WAITING_HUMAN",
+        "PASSED",
+        "FAILED",
+        "VERIFICATION_FAILED",
+        "EXECUTION_FAILED",
+        "INCONCLUSIVE",
+        "BLOCKED",
+        "NOT_RUN",
+        "COMPLETED",
+        "CANCELLED",
+        "TIMED_OUT",
+      ])
+      .optional(),
+    kind: z
+      .enum(["SPEC_TASK", "ISSUE_SPEC", "DIRECT_RUN", "LEGACY_RUN"])
+      .optional(),
+    createdAfter: z.iso.datetime({ offset: true }).optional(),
+    source: z.string().trim().min(1).max(100).optional(),
+    externalId: z.string().trim().min(1).max(500).optional(),
+  })
+  .strict();
+
+export const taskWebhookCreateInputSchema = z
+  .object({
+    url: z
+      .url()
+      .max(2000)
+      .refine((value) => {
+        const url = new URL(value);
+        return (
+          ["http:", "https:"].includes(url.protocol) &&
+          !url.username &&
+          !url.password &&
+          !url.hash
+        );
+      }, "Webhook URL must use HTTP(S) without credentials or fragments."),
+    events: z
+      .array(
+        z.enum([
+          "task.completed",
+          "task.timed_out",
+          "task.waiting_input",
+          "task.stage.failed",
+        ]),
+      )
+      .min(1)
+      .max(4)
+      .default(["task.completed", "task.timed_out", "task.waiting_input"]),
+  })
+  .strict();
+
 const specTaskCreateBaseSchema = z.object({
+  externalReference: taskExternalReferenceSchema.optional(),
   analysisMaxAttempts: z.number().int().min(1).max(10).default(3),
   browserPolicy: taskBrowserPolicySchema,
   deadlineSeconds: z.number().int().min(60).max(86_400).default(7_200),
@@ -1060,6 +1125,7 @@ const specTaskCreateBaseSchema = z.object({
 });
 
 const directTaskExecutionCreateInputSchema = z.object({
+  externalReference: taskExternalReferenceSchema.optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   kind: z.literal("DIRECT_RUN"),
   run: executionRunCreateInputSchema,

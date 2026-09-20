@@ -30,10 +30,28 @@ describe("VerificationMcpService", () => {
       id: "72b2525c-b0d7-4451-82fc-ee210541016d",
       lifecycle: "QUEUED",
     }));
+    const listPage = vi.fn().mockResolvedValue({
+      items: [],
+      page: 2,
+      pageSize: 10,
+      total: 0,
+      totalPages: 1,
+    });
+    const events = vi.fn().mockResolvedValue([]);
+    const rerunCase = vi.fn().mockResolvedValue({
+      id: "72b2525c-b0d7-4451-82fc-ee210541016d",
+      lifecycle: "QUEUED",
+    });
     const service = new VerificationMcpService(
       invocations as never,
       {} as never,
-      { create: createTask, provideAnalysisInput } as never,
+      {
+        create: createTask,
+        provideAnalysisInput,
+        listPage,
+        events,
+        rerunCase,
+      } as never,
     );
     const createServer = Reflect.get(service, "createServer") as (
       current: ToolAuthContext,
@@ -67,6 +85,13 @@ describe("VerificationMcpService", () => {
         "get_run",
         "resolve_run_intervention",
         "read_run_evidence",
+        "list_task_events",
+        "get_task_acceptance_report",
+        "set_task_deployments",
+        "provide_task_test_accounts",
+        "rerun_task",
+        "rerun_task_case",
+        "list_authorized_profiles",
       ]);
 
       const task = await client.callTool({
@@ -80,6 +105,48 @@ describe("VerificationMcpService", () => {
         name: "create_task",
       });
       expect(task.structuredContent).toMatchObject({ lifecycle: "QUEUED" });
+      expect(
+        tools.tools.find(({ name }) => name === "create_task")?.outputSchema,
+      ).toHaveProperty("properties.id");
+      const paged = await client.callTool({
+        name: "list_tasks",
+        arguments: {
+          query: { page: 2, pageSize: 10, source: "ci", externalId: "build-1" },
+        },
+      });
+      expect(paged.isError).not.toBe(true);
+      expect(listPage).toHaveBeenCalledWith(current, 2, 10, {
+        source: "ci",
+        externalId: "build-1",
+      });
+      await client.callTool({
+        name: "list_task_events",
+        arguments: {
+          taskId: "72b2525c-b0d7-4451-82fc-ee210541016d",
+          after: "9007199254740993",
+        },
+      });
+      expect(events).toHaveBeenCalledWith(
+        current,
+        "72b2525c-b0d7-4451-82fc-ee210541016d",
+        9007199254740993n,
+      );
+      await client.callTool({
+        name: "rerun_task_case",
+        arguments: {
+          taskId: "72b2525c-b0d7-4451-82fc-ee210541016d",
+          caseId: "285146a8-5230-4b02-832a-5eef19e8dc8a",
+          idempotencyKey: "case-retry-key",
+        },
+      });
+      expect(rerunCase).toHaveBeenCalledWith(
+        current,
+        "72b2525c-b0d7-4451-82fc-ee210541016d",
+        "285146a8-5230-4b02-832a-5eef19e8dc8a",
+        undefined,
+        { idempotencyKey: "case-retry-key" },
+      );
+
       expect(createTask).toHaveBeenCalledWith(
         current,
         expect.objectContaining({
@@ -128,6 +195,13 @@ describe("VerificationMcpService", () => {
           "create_task",
           "provide_task_analysis_input",
           "read_run_evidence",
+          "list_task_events",
+          "get_task_acceptance_report",
+          "set_task_deployments",
+          "provide_task_test_accounts",
+          "rerun_task",
+          "rerun_task_case",
+          "list_authorized_profiles",
         ]),
       });
     } finally {
@@ -172,6 +246,9 @@ describe("VerificationMcpService", () => {
         "get_task",
         "get_run",
         "read_run_evidence",
+        "list_task_events",
+        "get_task_acceptance_report",
+        "list_authorized_profiles",
       ]);
       const resources = await client.listResources();
       expect(resources.resources.map(({ uri }) => uri)).toEqual([

@@ -551,6 +551,8 @@ model ToolCredential {
   updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz
   team               Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
   createdBy          User                @relation("ToolCredentialCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  profileGrants      ToolProfileGrant[]
+  webhooks           TaskWebhook[]
   verificationRuns   VerificationRun[]
   verificationEvents VerificationEvent[]
   toolInvocations    ToolInvocation[]
@@ -1201,6 +1203,9 @@ model TaskExecution {
   requestedByUserId         String?                        @map("requested_by_user_id") @db.Uuid
   requestedByKind           RequestActorKind               @default(CREDENTIAL) @map("requested_by_kind")
   kind                      TaskExecutionKind
+  externalSource            String?                        @map("external_source")
+  externalId                String?                        @map("external_id")
+  webhooks                  TaskWebhook[]
   sourceKind                String                         @map("source_kind")
   sourceRef                 String?                        @map("source_ref")
   idempotencyKey            String                         @map("idempotency_key")
@@ -1248,6 +1253,7 @@ model TaskExecution {
   @@unique([teamId, idempotencyKey])
   @@index([teamId, lifecycle, createdAt(sort: Desc)])
   @@index([teamId, sourceKind, sourceRef])
+  @@index([teamId, externalSource, externalId])
   @@index([requestedByUserId, createdAt(sort: Desc)], map: "task_executions_requested_by_created_idx")
   @@index([projectionNeededAt])
   @@index([legacySpecificationId])
@@ -1438,17 +1444,18 @@ model TaskCaseExecution {
 }
 
 model TaskExecutionEvent {
-  id              String        @id @default(uuid()) @db.Uuid
-  teamId          String        @map("team_id") @db.Uuid
-  taskExecutionId String        @map("task_execution_id") @db.Uuid
-  sequence        BigInt        @default(autoincrement())
-  actor           String
-  kind            String
-  payload         Json          @default("{}")
-  occurredAt      DateTime      @default(now()) @map("occurred_at") @db.Timestamptz
-  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
-  team            Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  taskExecution   TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+  webhookDeliveries TaskWebhookDelivery[]
+  id                String                @id @default(uuid()) @db.Uuid
+  teamId            String                @map("team_id") @db.Uuid
+  taskExecutionId   String                @map("task_execution_id") @db.Uuid
+  sequence          BigInt                @default(autoincrement())
+  actor             String
+  kind              String
+  payload           Json                  @default("{}")
+  occurredAt        DateTime              @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt         DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  team              Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  taskExecution     TaskExecution         @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
 
   @@unique([taskExecutionId, sequence])
   @@index([teamId, taskExecutionId, sequence])
@@ -1480,6 +1487,7 @@ model UserExternalIdentity {
 }
 
 model UserBrowserProfile {
+  toolGrants               ToolProfileGrant[]
   id                       String                         @id @default(uuid()) @db.Uuid
   teamId                   String                         @map("team_id") @db.Uuid
   ownerUserId              String                         @map("owner_user_id") @db.Uuid
@@ -2370,17 +2378,65 @@ model RunObservationBinding {
 // Kept independently of Profile deletion so encrypted objects remain retryably collectible.
 model BrowserAuthSnapshot {
   // Retain tombstones so even an interrupted/late object upload remains collectible.
-  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz
-  id          String   @id @default(uuid()) @db.Uuid
-  profileId   String   @map("profile_id") @db.Uuid
-  teamId      String   @map("team_id") @db.Uuid
-  generation  Int
-  uploadedAt  DateTime? @map("uploaded_at") @db.Timestamptz
-  storageKey  String   @unique @map("storage_key")
-  checksum    String
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt  DateTime? @map("deleted_at") @db.Timestamptz
+  id         String    @id @default(uuid()) @db.Uuid
+  profileId  String    @map("profile_id") @db.Uuid
+  teamId     String    @map("team_id") @db.Uuid
+  generation Int
+  uploadedAt DateTime? @map("uploaded_at") @db.Timestamptz
+  storageKey String    @unique @map("storage_key")
+  checksum   String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   @@unique([profileId, generation])
   @@index([createdAt])
   @@map("browser_auth_snapshots")
+}
+
+model ToolProfileGrant {
+  credentialId String             @map("credential_id") @db.Uuid
+  profileId    String             @map("profile_id") @db.Uuid
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  credential   ToolCredential     @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  profile      UserBrowserProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@id([credentialId, profileId])
+  @@map("tool_profile_grants")
+}
+
+model TaskWebhook {
+  id             String                @id @default(uuid()) @db.Uuid
+  taskId         String                @map("task_id") @db.Uuid
+  credentialId   String                @map("credential_id") @db.Uuid
+  url            String
+  secretEnvelope String                @map("secret_envelope")
+  events         String[]
+  disabledAt     DateTime?             @map("disabled_at") @db.Timestamptz
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  task           TaskExecution         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  credential     ToolCredential        @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  deliveries     TaskWebhookDelivery[]
+
+  @@unique([taskId, credentialId, url])
+  @@map("task_webhooks")
+}
+
+model TaskWebhookDelivery {
+  id             String             @id @default(uuid()) @db.Uuid
+  webhookId      String             @map("webhook_id") @db.Uuid
+  eventId        String             @map("event_id") @db.Uuid
+  status         String             @default("PENDING")
+  attempts       Int                @default(0)
+  nextAttemptAt  DateTime           @default(now()) @map("next_attempt_at") @db.Timestamptz
+  leaseToken     String?            @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?          @map("lease_expires_at") @db.Timestamptz
+  lastError      String?            @map("last_error")
+  deliveredAt    DateTime?          @map("delivered_at") @db.Timestamptz
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  webhook        TaskWebhook        @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event          TaskExecutionEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([webhookId, eventId])
+  @@index([status, nextAttemptAt])
+  @@map("task_webhook_deliveries")
 }

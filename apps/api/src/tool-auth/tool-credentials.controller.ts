@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from "@nestjs/common";
@@ -31,6 +32,24 @@ export class ToolCredentialsController {
       current,
       parseBody(toolCredentialCreateInputSchema, body),
     );
+  }
+
+  @Post(":id/profiles/:profileId")
+  grantProfile(
+    @CurrentAuth() current: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Param("profileId", new ParseUUIDPipe()) profileId: string,
+  ) {
+    return this.credentials.setProfileGrant(current, id, profileId, true);
+  }
+
+  @Delete(":id/profiles/:profileId")
+  revokeProfile(
+    @CurrentAuth() current: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Param("profileId", new ParseUUIDPipe()) profileId: string,
+  ) {
+    return this.credentials.setProfileGrant(current, id, profileId, false);
   }
 
   @Delete(":id")

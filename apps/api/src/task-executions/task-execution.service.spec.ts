@@ -1098,6 +1098,7 @@ describe("TaskExecutionService profile ownership", () => {
   it("rejects explicit user profiles from machine credentials", async () => {
     const service = new TaskExecutionService(
       {
+        toolProfileGrant: { findFirst: vi.fn().mockResolvedValue(null) },
         taskExecution: { findUnique: vi.fn().mockResolvedValue(null) },
       } as never,
       {} as never,

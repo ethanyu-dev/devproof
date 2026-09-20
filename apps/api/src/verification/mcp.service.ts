@@ -4,6 +4,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
+  taskListQuerySchema,
+  taskDeploymentsInputSchema,
+  taskCaseRerunInputSchema,
+  taskTestAccountsInputSchema,
   runInterventionResolveInputSchema,
   taskDeploymentTargetInputSchema,
   taskAnalysisInputSchema,
@@ -33,6 +37,13 @@ const TASK_TOOL_GUIDE = {
     "get_run",
     "resolve_run_intervention",
     "read_run_evidence",
+    "list_task_events",
+    "get_task_acceptance_report",
+    "set_task_deployments",
+    "provide_task_test_accounts",
+    "rerun_task",
+    "rerun_task_case",
+    "list_authorized_profiles",
   ],
   rules: [
     "Callers create and observe Task executions; DevProof owns Spec analysis, Case dispatch, Run attempts, browser commands, evidence and cleanup.",
@@ -44,6 +55,13 @@ const TASK_TOOL_GUIDE = {
 
 const MCP_TOOL_SCOPES: Readonly<Partial<Record<string, ToolCredentialScope>>> =
   {
+    list_authorized_profiles: "run:read",
+    list_task_events: "run:read",
+    get_task_acceptance_report: "run:read",
+    set_task_deployments: "run:write",
+    provide_task_test_accounts: "run:write",
+    rerun_task: "run:write",
+    rerun_task_case: "run:write",
     cancel_task: "run:cancel",
     create_task: "run:write",
     get_run: "run:read",
@@ -55,6 +73,61 @@ const MCP_TOOL_SCOPES: Readonly<Partial<Record<string, ToolCredentialScope>>> =
     retry_task_stage: "run:write",
     set_task_deployment_target: "run:write",
   };
+
+const taskOutputSchema = z
+  .object({
+    id: z.string().uuid(),
+    lifecycle: z.string(),
+    kind: z.string().optional(),
+    externalReference: z
+      .object({ source: z.string(), externalId: z.string() })
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
+const taskListOutputSchema = z
+  .object({
+    value: z.array(taskOutputSchema).optional(),
+    items: z.array(taskOutputSchema).optional(),
+    page: z.number().int().optional(),
+    pageSize: z.number().int().optional(),
+    total: z.number().int().optional(),
+    totalPages: z.number().int().optional(),
+  })
+  .passthrough()
+  .refine((value) => Array.isArray(value.value) || Array.isArray(value.items));
+const MCP_OUTPUT_SCHEMAS: Record<string, z.ZodType> = {
+  get_integration_status: z.object({
+    authenticated: z.literal(true),
+    scopes: z.array(z.string()),
+    transport: z.literal("MCP"),
+  }),
+  create_task: taskOutputSchema,
+  get_task: taskOutputSchema,
+  rerun_task: taskOutputSchema,
+  list_tasks: taskListOutputSchema,
+  list_task_events: z.object({
+    value: z.array(
+      z
+        .object({
+          id: z.string().uuid(),
+          sequence: z.string().regex(/^\d+$/u),
+          kind: z.string(),
+        })
+        .passthrough(),
+    ),
+  }),
+  list_authorized_profiles: z.object({
+    value: z.array(
+      z.object({
+        id: z.string().uuid(),
+        displayName: z.string(),
+        status: z.string(),
+        siteHostname: z.string().nullable(),
+      }),
+    ),
+  }),
+};
 
 function jsonSafe(value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
@@ -191,11 +264,18 @@ export class VerificationMcpService {
       {
         description:
           "List user-visible task executions with their current stage, Case progress and aggregate result.",
-        inputSchema: {},
+        inputSchema: { query: taskListQuerySchema.optional() },
       },
-      async () => {
+      async ({ query }) => {
         requireToolScope(current, "run:read");
-        return result(await this.taskService().list(current));
+        if (!query) return result(await this.taskService().list(current));
+        const { page, pageSize, createdAfter, ...filters } = query;
+        return result(
+          await this.taskService().listPage(current, page, pageSize, {
+            ...filters,
+            ...(createdAfter ? { createdAfter: new Date(createdAfter) } : {}),
+          }),
+        );
       },
     );
 
@@ -381,6 +461,123 @@ export class VerificationMcpService {
       },
     );
 
+    server.registerTool(
+      "list_task_events",
+      {
+        description:
+          "Read durable task events after a decimal sequence cursor. Persist the last returned sequence for the next poll.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          after: z.string().regex(/^\d+$/u).optional(),
+        },
+      },
+      async ({ taskId, after }) => {
+        requireToolScope(current, "run:read");
+        return result(
+          await this.taskService().events(
+            current,
+            taskId,
+            after === undefined ? undefined : BigInt(after),
+          ),
+        );
+      },
+    );
+    server.registerTool(
+      "get_task_acceptance_report",
+      {
+        description: "Read the task acceptance report.",
+        inputSchema: { taskId: z.string().uuid() },
+      },
+      async ({ taskId }) => {
+        requireToolScope(current, "run:read");
+        return result(
+          await this.taskService().acceptanceReport(current, taskId),
+        );
+      },
+    );
+    server.registerTool(
+      "set_task_deployments",
+      {
+        description:
+          "Update the test environment matrix before execution admission permits changes.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskDeploymentsInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().setDeployments(current, taskId, input),
+        );
+      },
+    );
+    server.registerTool(
+      "provide_task_test_accounts",
+      {
+        description:
+          "Provide task test account bindings using the declared account schema. Do not put credentials in free-text prompts.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskTestAccountsInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().provideTestAccounts(current, taskId, input),
+        );
+      },
+    );
+    server.registerTool(
+      "rerun_task",
+      {
+        description:
+          "Create a new task from an existing task. Each successful call starts a new rerun; do not blindly retry after an ambiguous response.",
+        inputSchema: { taskId: z.string().uuid() },
+      },
+      async ({ taskId }) => {
+        requireToolScope(current, "run:write");
+        return result(await this.taskService().rerun(current, taskId));
+      },
+    );
+    server.registerTool(
+      "rerun_task_case",
+      {
+        description:
+          "Rerun a case, optionally in one deployment, with an idempotency key.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          caseId: z.string().uuid(),
+          deploymentId: z.string().uuid().optional(),
+          ...taskCaseRerunInputSchema.shape,
+        },
+      },
+      async ({ taskId, caseId, deploymentId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().rerunCase(
+            current,
+            taskId,
+            caseId,
+            deploymentId,
+            input,
+          ),
+        );
+      },
+    );
+    server.registerTool(
+      "list_authorized_profiles",
+      {
+        description:
+          "List browser identities whose owners authorized this service token. Use an ID with EXPLICIT_PROFILE; normal site and entry grants still apply.",
+        inputSchema: {},
+      },
+      async () => {
+        requireToolScope(current, "run:read");
+        return result(await this.taskService().authorizedProfiles(current));
+      },
+    );
     return server;
   }
 
@@ -401,7 +598,12 @@ export class VerificationMcpService {
       }
       return register(
         name,
-        config as never,
+        {
+          ...(config as Record<string, unknown>),
+          ...(MCP_OUTPUT_SCHEMAS[name]
+            ? { outputSchema: MCP_OUTPUT_SCHEMAS[name] }
+            : {}),
+        } as never,
         (async (...items: unknown[]) => {
           const extra = items.at(-1) as {
             requestId?: string | number;

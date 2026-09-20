@@ -10,6 +10,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import {
+  taskListQuerySchema,
+  taskTestAccountsInputSchema,
   taskDeploymentTargetInputSchema,
   taskDeploymentsInputSchema,
   taskExecutionCreateInputSchema,
@@ -41,9 +43,50 @@ export class TaskExecutionController {
   }
 
   @Get()
-  list(@CurrentToolAuth() current: ToolAuthContext) {
+  list(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Query() query: Record<string, unknown> = {},
+  ) {
     requireToolScope(current, "run:read");
-    return this.tasks.list(current);
+    // Preserve the legacy array response for callers without query parameters.
+    if (!Object.keys(query).length) return this.tasks.list(current);
+    const { page, pageSize, createdAfter, ...filters } = parseBody(
+      taskListQuerySchema,
+      query,
+    );
+    return this.tasks.listPage(current, page, pageSize, {
+      ...filters,
+      ...(createdAfter ? { createdAfter: new Date(createdAfter) } : {}),
+    });
+  }
+
+  @Post(":id/test-accounts")
+  provideTestAccounts(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.provideTestAccounts(
+      current,
+      id,
+      parseBody(taskTestAccountsInputSchema, body),
+    );
+  }
+
+  @Get(":id/acceptance-report")
+  acceptanceReport(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+  ) {
+    requireToolScope(current, "run:read");
+    return this.tasks.acceptanceReport(current, id);
+  }
+
+  @Get("authorized-profiles")
+  authorizedProfiles(@CurrentToolAuth() current: ToolAuthContext) {
+    requireToolScope(current, "run:read");
+    return this.tasks.authorizedProfiles(current);
   }
 
   @Get(":id")
