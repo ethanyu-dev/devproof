@@ -12,6 +12,7 @@ PAIR_API=""
 PAIR_TOKEN=""
 FORCE_ACTIVE=false
 SKIP_BUILD=false
+DIRECT_CONFIG=""
 TARGETS=()
 
 usage() {
@@ -30,6 +31,7 @@ Options:
                         token. Only one target may be supplied in this mode.
   --force-active        Upgrade even when persisted browser sessions are active.
   --skip-build          Reuse the newest release/devproof-browser-runtime-*.tgz.
+  --direct-config FILE  Upload and apply direct-access JSON to one target.
   -h, --help            Show this help.
 
 Examples:
@@ -93,6 +95,12 @@ while (($#)); do
       SKIP_BUILD=true
       shift
       ;;
+    --direct-config)
+      (($# >= 2)) || die "--direct-config requires a file."
+      DIRECT_CONFIG="$(expand_home "$2")"
+      [[ -f "$DIRECT_CONFIG" ]] || die "direct configuration file does not exist."
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -115,6 +123,9 @@ if [[ -n "$PAIR_API" && -z "$PAIR_TOKEN" ]] ||
 fi
 if [[ -n "$PAIR_TOKEN" && ${#TARGETS[@]} -ne 1 ]]; then
   die "a one-time pairing token can only be used with one target."
+fi
+if [[ -n "$DIRECT_CONFIG" && ${#TARGETS[@]} -ne 1 ]]; then
+  die "a direct configuration belongs to one target; deploy each node separately."
 fi
 [[ -z "$SSH_IDENTITY" || -f "$SSH_IDENTITY" ]] ||
   die "SSH identity does not exist: $SSH_IDENTITY"
@@ -201,6 +212,10 @@ for target in "${TARGETS[@]}"; do
     --package "$remote_dir/$(basename "$package")"
     --sha256 "$package_sha256"
   )
+  if [[ -n "$DIRECT_CONFIG" ]]; then
+    scp "${ssh_options[@]}" "$DIRECT_CONFIG" "$target:$remote_dir/direct-config.json"
+    remote_args+=(--direct-config "$remote_dir/direct-config.json")
+  fi
   [[ "$FORCE_ACTIVE" == true ]] && remote_args+=(--force-active)
   if [[ -n "$PAIR_TOKEN" ]]; then
     remote_args+=(--pair-api "$PAIR_API" --pair-token-stdin)

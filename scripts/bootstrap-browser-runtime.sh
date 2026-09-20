@@ -9,6 +9,7 @@ readonly CHECKSUM_ASSET="SHA256SUMS"
 
 VERSION=""
 FORCE_ACTIVE=false
+DIRECT_CONFIG=""
 
 usage() {
   cat <<'EOF'
@@ -20,6 +21,7 @@ Usage:
 Options:
   --version VERSION     Install a specific runtime-vVERSION release.
   --force-active        Continue when persisted browser sessions are active.
+  --direct-config FILE  Configure direct access from a local JSON file.
   -h, --help            Show this help.
 
 An unpaired first installation leaves the service ready but stopped. Run the
@@ -43,6 +45,12 @@ while (($#)); do
     --force-active)
       FORCE_ACTIVE=true
       shift
+      ;;
+    --direct-config)
+      (($# >= 2)) || die "--direct-config requires a file."
+      [[ -f "$2" ]] || die "direct configuration file does not exist: $2"
+      DIRECT_CONFIG="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -115,6 +123,7 @@ installer_args=(
   --sha256 "$package_sha256"
 )
 [[ "$FORCE_ACTIVE" == true ]] && installer_args+=(--force-active)
+[[ -n "$DIRECT_CONFIG" ]] && installer_args+=(--direct-config "$DIRECT_CONFIG")
 "$temporary/$INSTALLER_ASSET" "${installer_args[@]}"
 
 trap - EXIT HUP INT TERM
