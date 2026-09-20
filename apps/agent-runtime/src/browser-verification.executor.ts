@@ -865,6 +865,12 @@ export class BrowserVerificationExecutor {
               step,
             },
           });
+          const onTelemetry = await this.controlPlane.prepareModelTelemetry?.(
+            "RUN",
+            lease,
+            candidate,
+            modelCallId,
+          );
           const modelAbort = abortScope(
             signal,
             deadlinePolicy.maxModelCallSeconds * 1_000,
@@ -881,6 +887,7 @@ export class BrowserVerificationExecutor {
                   signal: modelAbort.signal,
                   timeoutMs: deadlinePolicy.maxModelCallSeconds * 1_000,
                   onRequestAttempt: (attempt) => requestAttempts.push(attempt),
+                  onTelemetry,
                 },
               ),
               modelAbort.signal,

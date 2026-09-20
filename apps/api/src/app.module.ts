@@ -1,3 +1,9 @@
+import { TaskMetricsService } from "./task-executions/task-metrics.service.js";
+import {
+  TaskMetricsConsoleController,
+  TaskMetricsController,
+  ModelCallMetricsController,
+} from "./task-executions/task-metrics.controller.js";
 import { TaskApiContractController } from "./task-executions/task-api-contract.controller.js";
 import { TaskWebhookController } from "./task-executions/task-webhook.controller.js";
 import { TaskWebhookService } from "./task-executions/task-webhook.service.js";
@@ -131,6 +137,9 @@ import { VerificationService } from "./verification/verification.service.js";
     TaskWebhookController,
     TaskExecutionController,
     TaskExecutionConsoleController,
+    TaskMetricsConsoleController,
+    TaskMetricsController,
+    ModelCallMetricsController,
     TestSpecificationController,
     TestSpecificationConsoleController,
     VerificationController,
@@ -190,6 +199,7 @@ import { VerificationService } from "./verification/verification.service.js";
     SessionRecoveryWorker,
     RuntimeDrainService,
     TaskExecutionService,
+    TaskMetricsService,
     TaskProfileResolverService,
     ProfileReservationService,
     TaskWebhookService,

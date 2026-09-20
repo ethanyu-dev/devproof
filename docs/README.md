@@ -5,6 +5,8 @@ English is the canonical language for project documentation.
 - [Architecture](architecture.md): system boundaries, state ownership, and execution invariants
 - [Upgrading](upgrading.md): database-safe upgrades and clean repository transfer
 - [Observability and operations](observability.md): health, metrics, logs, retention, and runbooks
+- [Task execution metrics design](task-execution-metrics-design.md): per-model token usage, task elapsed time, parallel activity attribution, and metrics delivery plan
+- [Task execution metrics](task-execution-metrics.md): implemented accounting, Console views, historical backfill, and rollout
 - [Redundant feature removal plan](redundant-feature-removal-plan.md): implementation and retirement of Playground, post-run analysis, its Runtime pool, and unreachable legacy code
 - [Concise Agent tool corrections](agent-tool-error-design.md): command-specific validation, bounded error feedback, and regression coverage
 - [Bounded browser working context](agent-context-budget-design.md): observation paging, complete-turn compaction, request budgets, and rollback

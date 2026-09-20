@@ -42,7 +42,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 24,
+  minor: 25,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -200,6 +200,7 @@ export const runtimeCriterionSchema = z
   });
 
 export const runtimeModelCandidateSchema = z.object({
+  configurationId: z.string().uuid().optional(),
   apiKey: z.string().min(1).max(4_096),
   baseUrl: z.string().url().max(2_000),
   displayName: z.string().trim().min(1).max(100),
@@ -1031,3 +1032,5 @@ export {
 export { specRequirementCoverageError } from "./spec-requirement-coverage.js";
 
 export * from "./acceptance-review.js";
+
+export * from "./model-usage.js";

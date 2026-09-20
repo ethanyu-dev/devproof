@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { displayLabel } from "@/lib/display-text";
 import { TaskDeleteButton } from "./task-delete-button";
+import { TaskMetricsView } from "./task-metrics";
 import { TaskAcceptanceReportView } from "./task-acceptance-report";
 import { TaskDetailContent } from "./task-detail-content";
 import styles from "./task-detail.module.css";
@@ -51,6 +52,9 @@ export function TaskDetailClient({ id }: { id: string }) {
   const reportHref = `${baseHref.split("?")[0]}?${reportParams}`;
   const logParams = new URLSearchParams(taskHref.split("?")[1]);
   logParams.set("view", "logs");
+  const metricsParams = new URLSearchParams(taskHref.split("?")[1]);
+  metricsParams.set("view", "metrics");
+  const metricsHref = `${taskHref.split("?")[0]}?${metricsParams}`;
   const logsHref = `${taskHref.split("?")[0]}?${logParams}`;
   const {
     detail,
@@ -73,12 +77,16 @@ export function TaskDetailClient({ id }: { id: string }) {
     [detail, events],
   );
   const view =
-    requestedView === "logs"
-      ? "logs"
-      : requestedView === "report" ||
-          (!requestedView && detail && terminalLifecycles.has(detail.lifecycle))
-        ? "report"
-        : "specs";
+    requestedView === "metrics"
+      ? "metrics"
+      : requestedView === "logs"
+        ? "logs"
+        : requestedView === "report" ||
+            (!requestedView &&
+              detail &&
+              terminalLifecycles.has(detail.lifecycle))
+          ? "report"
+          : "specs";
   const outcome = detail ? taskOutcomeDisplay(detail) : null;
   const active = detail !== null && !terminalLifecycles.has(detail.lifecycle);
 
@@ -266,8 +274,18 @@ export function TaskDetailClient({ id }: { id: string }) {
             >
               <ScrollText /> 任务日志
             </Link>
+            <Link
+              href={metricsHref}
+              replace
+              scroll={false}
+              aria-current={view === "metrics" ? "page" : undefined}
+            >
+              <Layers3 /> 消耗与耗时
+            </Link>
           </nav>
-          {view === "report" ? (
+          {view === "metrics" ? (
+            <TaskMetricsView key={id} id={id} />
+          ) : view === "report" ? (
             <TaskAcceptanceReportView
               key={detail.id}
               id={detail.id}

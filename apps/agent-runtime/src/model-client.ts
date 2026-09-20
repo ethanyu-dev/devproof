@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { numericModelUsage } from "@devproof/agent-runtime-protocol";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import type { RuntimeModelCandidate } from "@devproof/agent-runtime-protocol";
 import type { ModelRequestAttempt, ModelClient } from "./model-types.js";
@@ -39,27 +40,64 @@ export function createChatCompletionsClient(
           }
         },
       });
-      const response = await client.chat.completions.create(
-        { ...request, stream: false } as ChatCompletionCreateParamsNonStreaming,
-        {
-          signal: options?.signal,
-          timeout: options?.timeoutMs ?? DEFAULT_MODEL_CALL_SECONDS * 1_000,
-        },
-      );
-      const message = response.choices[0]?.message;
-      if (!message || message.role !== "assistant") {
-        throw new Error("Chat Completions returned no assistant message.");
+      const startedAt = new Date().toISOString();
+      const started = performance.now();
+      let captured: {
+        responseId?: string;
+        responseModel?: string;
+        usage?: Record<string, unknown>;
+      } = {};
+      let durationMs = 0;
+      let outcome: "SUCCEEDED" | "FAILED" | "INTERRUPTED" = "FAILED";
+      try {
+        const response = await client.chat.completions.create(
+          {
+            ...request,
+            stream: false,
+          } as ChatCompletionCreateParamsNonStreaming,
+          {
+            signal: options?.signal,
+            timeout: options?.timeoutMs ?? DEFAULT_MODEL_CALL_SECONDS * 1_000,
+          },
+        );
+        durationMs = Math.max(0, Math.round(performance.now() - started));
+        captured = {
+          responseId: response.id,
+          responseModel: response.model,
+          usage: numericModelUsage(response.usage),
+        };
+        const message = response.choices[0]?.message;
+        if (!message || message.role !== "assistant") {
+          throw new Error("Chat Completions returned no assistant message.");
+        }
+        if (message.tool_calls?.some((call) => call.type !== "function")) {
+          throw new Error(
+            "Chat Completions returned an unsupported tool call.",
+          );
+        }
+        outcome = "SUCCEEDED";
+        return {
+          id: response.id,
+          message,
+          ...(response.usage
+            ? { usage: response.usage as unknown as Record<string, unknown> }
+            : {}),
+        };
+      } finally {
+        await options?.onTelemetry?.({
+          requestedModel: candidate.modelId,
+          configurationId: candidate.configurationId,
+          configurationName: candidate.displayName,
+          startedAt,
+          durationMs:
+            durationMs || Math.max(0, Math.round(performance.now() - started)),
+          outcome:
+            options?.signal?.aborted && !captured.responseId
+              ? "INTERRUPTED"
+              : outcome,
+          ...captured,
+        });
       }
-      if (message.tool_calls?.some((call) => call.type !== "function")) {
-        throw new Error("Chat Completions returned an unsupported tool call.");
-      }
-      return {
-        id: response.id,
-        message,
-        ...(response.usage
-          ? { usage: response.usage as unknown as Record<string, unknown> }
-          : {}),
-      };
     },
   };
 }

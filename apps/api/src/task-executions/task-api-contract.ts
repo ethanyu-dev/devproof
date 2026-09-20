@@ -149,6 +149,37 @@ export function taskApiContract() {
     undefined,
     { type: "array", items: objectResult },
   );
+  route(
+    "get",
+    "/v2/tasks/{id}/metrics",
+    "getTaskMetrics",
+    "run:read",
+    undefined,
+    objectResult,
+    200,
+    "Per-model input/output/cache usage and exclusive elapsed-time breakdown. Counts are decimal strings; missing usage is null. Includes execution and AI review usage, while elapsed time ends at task completion.",
+  );
+  for (const [suffix, operation] of [
+    ["model-calls", "listTaskModelCalls"],
+    ["timeline", "listTaskMetricTimeline"],
+  ]) {
+    const path = `/v2/tasks/{id}/metrics/${suffix}`;
+    route(
+      "get",
+      path,
+      operation!,
+      "run:read",
+      undefined,
+      objectResult,
+      200,
+      "Cursor-paginated task metrics. nextCursor is null on the final page.",
+    );
+    (paths[path]!.get as { parameters: unknown[] }).parameters.push({
+      name: "after",
+      in: "query",
+      schema: { type: "string", maxLength: 500 },
+    });
+  }
   const eventOp = paths["/v2/tasks/{id}/events"]!.get as {
     parameters: unknown[];
   };

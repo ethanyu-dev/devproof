@@ -30,6 +30,7 @@ const publicModelSelect = {
 } satisfies Prisma.AgentModelConfigurationSelect;
 
 export interface AgentModelCandidate {
+  configurationId?: string;
   apiKey: string;
   baseUrl: string;
   displayName: string;
@@ -204,6 +205,7 @@ export class AgentModelConfigurationService {
     const rows = await this.prisma.agentModelConfiguration.findMany({
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
       select: {
+        id: true,
         apiKeyEncrypted: true,
         baseUrl: true,
         displayName: true,
@@ -212,6 +214,7 @@ export class AgentModelConfigurationService {
       where: { pool, teamId },
     });
     return rows.map((row) => ({
+      configurationId: row.id,
       apiKey: this.cipher.decrypt(row.apiKeyEncrypted),
       baseUrl: row.baseUrl,
       displayName: row.displayName,

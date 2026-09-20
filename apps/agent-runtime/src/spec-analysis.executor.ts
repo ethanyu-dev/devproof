@@ -208,6 +208,12 @@ export class SpecAnalysisExecutor {
               step,
             },
           });
+          const onTelemetry = await this.controlPlane.prepareModelTelemetry?.(
+            "SPEC_ANALYSIS",
+            lease,
+            candidate,
+            modelCallId,
+          );
           try {
             response = await this.modelClient(candidate).complete(
               {
@@ -228,7 +234,7 @@ export class SpecAnalysisExecutor {
                   task.snapshot.observationContractVersion === 3,
                 ),
               },
-              { signal },
+              { signal, onTelemetry },
             );
             selectedModel = candidate;
             this.modelHealth.success(candidate);

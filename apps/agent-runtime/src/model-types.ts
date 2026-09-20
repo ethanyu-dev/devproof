@@ -1,4 +1,7 @@
-import type { RuntimeModelCandidate } from "@devproof/agent-runtime-protocol";
+import type {
+  ModelCallTelemetry,
+  RuntimeModelCandidate,
+} from "@devproof/agent-runtime-protocol";
 import type {
   ChatCompletionAssistantMessageParam,
   ChatCompletionMessageFunctionToolCall,
@@ -20,6 +23,8 @@ export interface ModelCompletion {
   id: string;
   message: ModelAssistantMessage;
   usage?: Record<string, unknown>;
+  responseModel?: string;
+  durationMs?: number;
 }
 
 /** Transport metadata only; never contains URLs, headers or request bodies. */
@@ -37,6 +42,9 @@ export interface ModelClient {
     options?: {
       signal?: AbortSignal;
       timeoutMs?: number;
+      onTelemetry?:
+        | ((value: Omit<ModelCallTelemetry, "modelCallId">) => Promise<void>)
+        | undefined;
       onRequestAttempt?: (attempt: ModelRequestAttempt) => void;
     },
   ): Promise<ModelCompletion>;

@@ -23,6 +23,58 @@ const response = () =>
   );
 
 describe("Chat Completions transport", () => {
+  it("captures usage before rejecting an invalid assistant response without retaining private fields", async () => {
+    const onTelemetry = vi.fn().mockResolvedValue(undefined);
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "bad-output",
+          model: "actual-model",
+          choices: [],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            prompt_tokens_details: { cached_tokens: 600 },
+            private: "credential",
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    await expect(
+      createChatCompletionsClient(candidate, fetch).complete(request, {
+        onTelemetry,
+      }),
+    ).rejects.toThrow("no assistant message");
+    expect(onTelemetry).toHaveBeenCalledOnce();
+    expect(onTelemetry.mock.calls[0]?.[0]).toMatchObject({
+      requestedModel: "fixed-model",
+      responseModel: "actual-model",
+      outcome: "FAILED",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 100,
+        prompt_tokens_details: { cached_tokens: 600 },
+      },
+    });
+    expect(JSON.stringify(onTelemetry.mock.calls)).not.toContain("credential");
+    expect(JSON.stringify(onTelemetry.mock.calls)).not.toContain("sk-private");
+  });
+
+  it("reports transport failure with unknown usage rather than zero", async () => {
+    const onTelemetry = vi.fn().mockResolvedValue(undefined);
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValue(new Error("network unavailable"));
+    await expect(
+      createChatCompletionsClient(candidate, fetch).complete(request, {
+        onTelemetry,
+      }),
+    ).rejects.toThrow();
+    expect(onTelemetry).toHaveBeenCalledOnce();
+    expect(onTelemetry.mock.calls[0]?.[0]).toMatchObject({ outcome: "FAILED" });
+    expect(onTelemetry.mock.calls[0]?.[0]).not.toHaveProperty("usage");
+  });
   it.each(["deepseek-flash", "kimi-k3"])(
     "sends native chat messages, tools, images and preserved tool history for %s",
     async (modelId) => {

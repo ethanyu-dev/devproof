@@ -1,3 +1,10 @@
+import { createHash } from "node:crypto";
+import { ModelTelemetrySpool } from "./model-telemetry-spool.js";
+import type {
+  ModelCallRegistration,
+  ModelCallTelemetry,
+  RuntimeModelCandidate,
+} from "@devproof/agent-runtime-protocol";
 import {
   BOUND_EVIDENCE_CAPABILITIES,
   BUSINESS_CHECK_CAPABILITY,
@@ -39,11 +46,75 @@ export interface ActiveLease {
 
 /** Authenticated data-plane client; it never owns Run lifecycle transitions. */
 export class ControlPlaneClient {
+  private telemetrySpool: ModelTelemetrySpool;
+  private metricsClock = { offsetMs: 0, uncertaintyMs: 0 };
+  async prepareModelTelemetry(
+    ownerKind: ModelCallRegistration["ownerKind"],
+    lease: Pick<ActiveLease, "taskId" | "leaseToken" | "workerId">,
+    candidate: RuntimeModelCandidate,
+    modelCallId: string,
+  ) {
+    void this.telemetrySpool.flush().catch(() => {});
+    const registeredAt = Date.now();
+    const registrationTimer = performance.now();
+    try {
+      const receipt = (await this.request("/internal/v2/runtime/model-calls", {
+        body: {
+          ownerKind,
+          ownerId: lease.taskId,
+          workerId: lease.workerId,
+          leaseToken: lease.leaseToken,
+          modelCallId,
+          requestedModel: candidate.modelId,
+          configurationId: candidate.configurationId,
+          configurationName: candidate.displayName,
+        },
+        signal: AbortSignal.timeout(5000),
+      })) as { serverTime?: string };
+      if (receipt.serverTime) {
+        const elapsed = performance.now() - registrationTimer;
+        this.metricsClock = {
+          offsetMs:
+            Date.parse(receipt.serverTime) - (registeredAt + elapsed / 2),
+          uncertaintyMs: Math.ceil(elapsed / 2),
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof ControlPlaneError && error.status === 404))
+        console.error("runtime.model_telemetry.registration_failed");
+      return undefined;
+    }
+    const callClock = { ...this.metricsClock };
+    return (telemetry: Omit<ModelCallTelemetry, "modelCallId">) =>
+      this.telemetrySpool!.settle({
+        workerId: lease.workerId,
+        leaseToken: lease.leaseToken,
+        telemetry: {
+          ...telemetry,
+          modelCallId,
+          clockOffsetMs: callClock.offsetMs,
+          clockUncertaintyMs: callClock.uncertaintyMs,
+        },
+      });
+  }
+
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
     private readonly pool?: RuntimePool,
-  ) {}
+  ) {
+    this.telemetrySpool = new ModelTelemetrySpool(
+      createHash("sha256")
+        .update(this.baseUrl + this.token)
+        .digest("hex")
+        .slice(0, 24),
+      (input) =>
+        this.request("/internal/v2/runtime/model-calls/settle", {
+          body: input,
+          signal: AbortSignal.timeout(5000),
+        }),
+    );
+  }
 
   async register(workerId: string, signal?: AbortSignal) {
     const result = await this.request("/internal/v2/runtime/registration", {
@@ -54,6 +125,7 @@ export class ControlPlaneClient {
   }
 
   async claim(workerId: string, signal?: AbortSignal) {
+    void this.telemetrySpool?.flush().catch(() => {});
     const started = performance.now();
     const result = await this.request("/internal/v2/runtime/tasks/claim", {
       body: {
@@ -76,6 +148,7 @@ export class ControlPlaneClient {
   }
 
   async claimSpec(workerId: string, signal?: AbortSignal) {
+    void this.telemetrySpool?.flush().catch(() => {});
     const started = performance.now();
     const result = await this.request("/internal/v2/runtime/spec-tasks/claim", {
       body: { protocol: AGENT_RUNTIME_PROTOCOL, workerId },
@@ -163,7 +236,7 @@ export class ControlPlaneClient {
           eventId: randomUUID(),
           kind,
           occurredAt: new Date().toISOString(),
-          payload,
+          payload: { ...payload, metricsClock: this.metricsClock },
         },
       },
     });
@@ -185,7 +258,7 @@ export class ControlPlaneClient {
             eventId: randomUUID(),
             kind,
             occurredAt: new Date().toISOString(),
-            payload,
+            payload: { ...payload, metricsClock: this.metricsClock },
           },
         },
       },

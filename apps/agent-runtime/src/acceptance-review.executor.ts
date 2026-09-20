@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { ControlPlaneClient } from "./control-plane.client.js";
 import { z } from "zod";
 import {
   acceptanceReviewResultSchema,
@@ -9,11 +11,22 @@ export async function executeAcceptanceReview(
   task: AcceptanceReviewLease,
   modelClient: ModelClientFactory,
   signal: AbortSignal,
+  telemetry?: { controlPlane: ControlPlaneClient; workerId: string },
 ) {
   let lastError: unknown;
   // Bounded synthesis: no browser, source lookup, or repeated agent loop.
   for (const candidate of task.modelCandidates.slice(0, 3)) {
     signal.throwIfAborted();
+    const onTelemetry = await telemetry?.controlPlane.prepareModelTelemetry?.(
+      "ACCEPTANCE_REVIEW",
+      {
+        taskId: task.id,
+        leaseToken: task.leaseToken,
+        workerId: telemetry.workerId,
+      },
+      candidate,
+      randomUUID(),
+    );
     try {
       const response = await modelClient(candidate).complete(
         {
@@ -44,7 +57,7 @@ export async function executeAcceptanceReview(
             function: { name: "submit_acceptance_review" },
           },
         },
-        { signal, timeoutMs: 120_000 },
+        { signal, timeoutMs: 120_000, onTelemetry },
       );
       const call = modelFunctionCalls(response.message).find(
         (c) => c.function.name === "submit_acceptance_review",
