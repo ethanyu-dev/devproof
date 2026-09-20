@@ -1,3 +1,4 @@
+import { responseRef, taskApiResponseSchemas } from "./task-api-responses.js";
 import { z } from "zod";
 import {
   taskExecutionCreateInputSchema,
@@ -12,36 +13,7 @@ import {
   runInterventionResolveInputSchema,
 } from "@devproof/contracts";
 
-const taskResponse = {
-  type: "object",
-  required: ["id", "kind", "lifecycle"],
-  properties: {
-    id: { type: "string", format: "uuid" },
-    kind: { type: "string" },
-    lifecycle: {
-      type: "string",
-      enum: [
-        "QUEUED",
-        "RUNNING",
-        "WAITING_INPUT",
-        "WAITING_HUMAN",
-        "COMPLETED",
-        "CANCELLED",
-        "TIMED_OUT",
-      ],
-    },
-    verdict: { type: ["string", "null"] },
-    waitingReason: { type: ["string", "null"] },
-    externalReference: {
-      type: ["object", "null"],
-      properties: {
-        source: { type: "string" },
-        externalId: { type: "string" },
-      },
-    },
-  },
-  additionalProperties: true,
-};
+const taskResponse = responseRef("TaskDetail");
 const jsonSchema = (schema: z.ZodType) =>
   z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
 const objectResult = { type: "object", additionalProperties: true };
@@ -326,16 +298,115 @@ export function taskApiContract() {
     objectResult,
     201,
   );
+  const summaries: Record<string, string> = {
+    createTask: "创建并派发任务",
+    listTasks: "分页查询任务",
+    getTask: "查看任务详情",
+    listTaskEvents: "读取任务事件",
+    getTaskAcceptanceReport: "读取验收报告",
+    listAuthorizedProfiles: "查询已授权浏览器身份",
+    provideTaskAnalysisInput: "补充分析信息",
+    setTaskDeploymentTarget: "设置测试地址",
+    setTaskDeployments: "更新测试环境",
+    provideTaskTestAccounts: "补充测试账号",
+    retryTaskStage: "重试任务阶段",
+    rerunTaskCase: "重跑单个用例",
+    rerunTaskCaseDeployment: "重跑指定环境的用例",
+    rerunTask: "重新创建一轮任务",
+    cancelTask: "取消任务",
+    getRun: "查看单次执行",
+    resolveRunIntervention: "提交人工处理结果",
+    subscribeTaskWebhook: "订阅任务回调",
+    listTaskWebhooks: "查询回调订阅",
+    disableTaskWebhook: "停用回调订阅",
+    listTaskWebhookDeliveries: "查询回调投递记录",
+    retryTaskWebhookDelivery: "重试失败的回调",
+  };
+  const responseNames: Record<string, string> = {
+    createTask: "TaskDetail",
+    getTask: "TaskDetail",
+    getTaskAcceptanceReport: "TaskAcceptanceReport",
+    listTaskEvents: "TaskEvent[]",
+    listAuthorizedProfiles: "AuthorizedProfile[]",
+    subscribeTaskWebhook: "WebhookCreated",
+    listTaskWebhooks: "WebhookSubscription[]",
+    listTaskWebhookDeliveries: "WebhookDelivery[]",
+    disableTaskWebhook: "OperationOk",
+    retryTaskWebhookDelivery: "OperationOk",
+    provideTaskAnalysisInput: "TaskDetail",
+    setTaskDeploymentTarget: "TaskDetail",
+    setTaskDeployments: "TaskDetail",
+    provideTaskTestAccounts: "TaskDetail",
+    retryTaskStage: "TaskDetail",
+    rerunTaskCase: "TaskDetail",
+    rerunTaskCaseDeployment: "TaskDetail",
+    rerunTask: "TaskDetail",
+    cancelTask: "TaskDetail",
+  };
+  for (const [path, methods] of Object.entries(paths)) {
+    for (const operation of Object.values(methods)) {
+      const op = operation as {
+        operationId: string;
+        summary: string;
+        description: string;
+        tags?: string[];
+        responses: Record<
+          string,
+          { content?: Record<string, { schema: unknown }> }
+        >;
+      };
+      op.summary = summaries[op.operationId] ?? op.operationId;
+      op.tags = [
+        path.includes("webhooks")
+          ? "事件回调"
+          : path.includes("authorized-profiles")
+            ? "浏览器身份"
+            : path.startsWith("/v2/runs")
+              ? "执行与人工处理"
+              : "任务",
+      ];
+      const scope = (operation as Record<string, unknown>)["x-required-scope"];
+      op.description = `所需权限：${scope}。\n\n${op.description}`;
+      const name = responseNames[op.operationId];
+      for (const [status, response] of Object.entries(op.responses)) {
+        if (status.startsWith("2") && name && response.content)
+          response.content["application/json"]!.schema = name.endsWith("[]")
+            ? { type: "array", items: responseRef(name.slice(0, -2)) }
+            : responseRef(name);
+      }
+    }
+  }
+  const list = paths["/v2/tasks"]!.get as {
+    responses: Record<string, { content: Record<string, { schema: unknown }> }>;
+  };
+  list.responses["200"]!.content["application/json"]!.schema = {
+    oneOf: [
+      { type: "array", items: responseRef("TaskSummary") },
+      responseRef("TaskPage"),
+    ],
+  };
+  const create = paths["/v2/tasks"]!.post as {
+    requestBody: { content: Record<string, Record<string, unknown>> };
+  };
+  create.requestBody.content["application/json"]!.example = {
+    kind: "SPEC_TASK",
+    idempotencyKey: "ci-build-123-attempt-1",
+    externalReference: { source: "ci", externalId: "build-123" },
+    goal: "检查首页加载、主要导航和控制台错误。",
+    targetUrl: "https://preview.example.com",
+    profilePolicy: { strategy: "EPHEMERAL" },
+  };
   return {
     openapi: "3.1.0",
     info: {
-      title: "DevProof external task API",
+      title: "DevProof 对外任务 API",
       version: "1.0.0",
       description:
         "Stable task integration entry points. Additional response fields may be added. MCP is an adapter over the same task services.",
     },
     servers: [{ url: "/" }],
     components: {
+      schemas: taskApiResponseSchemas,
       securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
     },
     paths,

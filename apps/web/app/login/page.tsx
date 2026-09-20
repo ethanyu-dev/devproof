@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { ArrowRight } from "lucide-react";
 
 const errors: Record<string, string> = {
@@ -52,6 +54,12 @@ export default async function LoginPage({
           飞书登录
           <ArrowRight aria-hidden="true" className="size-4" />
         </a>
+        <Link
+          href="/docs"
+          className="mt-5 block text-center text-sm text-muted-foreground hover:text-primary"
+        >
+          API 文档 · 无需登录
+        </Link>
       </section>
     </main>
   );

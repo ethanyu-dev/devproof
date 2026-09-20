@@ -76,6 +76,50 @@ describe("external task contracts", () => {
   it("generates a serializable OpenAPI contract from real validators", () => {
     const contract = JSON.parse(JSON.stringify(taskApiContract()));
     expect(contract.openapi).toBe("3.1.0");
+    expect(contract.components.schemas.TaskDetail.allOf[0].$ref).toBe(
+      "#/components/schemas/TaskSummary",
+    );
+    expect(
+      contract.components.schemas.TaskAcceptanceReport.properties.assessment
+        .properties.score.maximum,
+    ).toBe(100);
+    expect(
+      contract.paths["/v2/tasks/{id}/acceptance-report"].get.responses["200"]
+        .content["application/json"].schema.$ref,
+    ).toBe("#/components/schemas/TaskAcceptanceReport");
+    expect(
+      contract.paths["/v2/tasks/{taskId}/webhooks"].post.responses["201"]
+        .content["application/json"].schema.$ref,
+    ).toBe("#/components/schemas/WebhookCreated");
+    expect(
+      contract.components.schemas.WebhookSubscription.properties,
+    ).not.toHaveProperty("signingSecret");
+    expect(contract.paths["/v2/tasks"].post.summary).toBe("创建并派发任务");
+    expect(
+      contract.paths["/v2/tasks"].post.requestBody.content["application/json"]
+        .example,
+    ).toMatchObject({ kind: "SPEC_TASK" });
+    const checkReferences = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        if (
+          key === "$ref" &&
+          typeof child === "string" &&
+          child.startsWith("#/")
+        ) {
+          const resolved = child
+            .slice(2)
+            .split("/")
+            .reduce(
+              (node: any, segment) =>
+                node?.[segment.replace(/~1/g, "/").replace(/~0/g, "~")],
+              contract,
+            );
+          expect(resolved, `Unresolved reference: ${child}`).toBeDefined();
+        } else checkReferences(child);
+      }
+    };
+    checkReferences(contract);
     expect(
       contract.paths["/v2/tasks"].post.requestBody.content["application/json"]
         .schema,

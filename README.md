@@ -204,6 +204,8 @@ With multiple Runtimes registered, configure target domains under Console → Ac
 
 ## Agent integration
 
+Public developer documentation is available without login at `/docs`, with an interactive Scalar reference at `/docs/api`. API calls still require an explicit DevProof bearer token.
+
 For service-to-service integration, use the [external Task HTTP/MCP guide](docs/external-task-integration.md) and `GET /v2/openapi.json`. HTTP supports paginated filters, external business references, owner-authorized profile grants, and signed durable task webhooks.
 
 Generate a `dvp_sk_...` token under Console → Access → MCP Integration. HTTP requests use:

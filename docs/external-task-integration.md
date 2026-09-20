@@ -2,6 +2,12 @@
 
 普通后端服务、CI/CD 推荐使用 HTTP；具备 MCP 客户端能力的 Agent 可使用 `/mcp`。两者共用 Task 服务、Token 权限和输入校验。HTTP 的机器可读契约在 `GET /v2/openapi.json`，由实际 Zod 输入校验器生成。
 
+## 公开文档与在线调试
+
+Web 提供免登录的 `/docs` 中文接入指南和 `/docs/api` Scalar API 参考，登录页与控制台均有入口。`/v2/openapi.json` 包含请求约束、响应字段和示例，可导入其他客户端。
+
+在线调试需要手动填写 DevProof Bearer Token，不携带控制台 Cookie，也不持久保存 Token。Web 的 `/v2/*` 同源代理使用 `API_BASE_URL` 转发到 API，移除 Cookie 与响应 Set-Cookie，保留显式 Authorization；后端仍校验 Token、权限和团队范围。页面资源随 Web 打包，不依赖第三方调试代理。MCP 客户端继续连接 API 服务的 `/mcp`。
+
 ## 部署与兼容性
 
 1. 执行 `pnpm prisma:deploy`，应用 `20260920120000_external_task_integration` 迁移；先迁移再启动新版 API。
