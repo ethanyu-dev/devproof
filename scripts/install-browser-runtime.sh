@@ -15,6 +15,7 @@ readonly RUNTIME_HOME="${DEVPROOF_RUNTIME_HOME:-$HOME/.devproof-browser-runtime}
 readonly STATE_PATH="$RUNTIME_HOME/runtime.json"
 readonly SERVICE_PATH="$HOME/.config/systemd/user/$SERVICE_NAME"
 readonly ENV_PATH="$HOME/.config/devproof/browser-runtime.env"
+readonly DIRECT_DROPIN_PATH="$SERVICE_PATH.d/90-devproof-direct-access.conf"
 
 export PATH="$INSTALL_PREFIX/bin:$PATH"
 
@@ -202,6 +203,9 @@ environment_changed=false
 environment_existed=false
 environment_backup=""
 environment_temporary=""
+direct_dropin_changed=false
+direct_dropin_existed=false
+direct_dropin_temporary=""
 upgrade_started=false
 active_child_pid=""
 installed_package="$INSTALL_PREFIX/lib/node_modules/@devproof/browser-runtime/package.json"
@@ -216,6 +220,7 @@ fi
 
 cleanup_files() {
   [[ -z "$environment_temporary" ]] || rm -f -- "$environment_temporary"
+  [[ -z "$direct_dropin_temporary" ]] || rm -f -- "$direct_dropin_temporary"
   [[ -z "$staging_dir" ]] || rm -rf -- "$staging_dir"
   [[ -z "$rollback_dir" ]] || rm -rf -- "$rollback_dir"
 }
@@ -233,6 +238,14 @@ restore_previous() {
         else
           rm -f -- "$ENV_PATH"
         fi
+      fi
+      if [[ "$direct_dropin_changed" == true ]]; then
+        if [[ "$direct_dropin_existed" == true ]]; then
+          cp -p -- "$staging_dir/direct-dropin.before" "$DIRECT_DROPIN_PATH"
+        else
+          rm -f -- "$DIRECT_DROPIN_PATH"
+        fi
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
       fi
       if [[ -n "$rollback_package" && -f "$rollback_package" ]]; then
         npm install --global --prefix "$INSTALL_PREFIX" "$rollback_package" >/dev/null 2>&1 || true
@@ -373,6 +386,24 @@ UMask=0077
 [Install]
 WantedBy=default.target
 EOF
+fi
+if [[ -n "$DIRECT_CONFIG" ]]; then
+  # Existing units may predate EnvironmentFile support. Do not overwrite their
+  # ExecStart or other operator settings; add a managed, rollback-safe drop-in.
+  mkdir -p "$(dirname "$DIRECT_DROPIN_PATH")"
+  if [[ -f "$DIRECT_DROPIN_PATH" ]]; then
+    direct_dropin_existed=true
+    cp -p -- "$DIRECT_DROPIN_PATH" "$staging_dir/direct-dropin.before"
+  fi
+  direct_dropin_temporary="$(mktemp "$DIRECT_DROPIN_PATH.pending.XXXXXX")"
+  cat >"$direct_dropin_temporary" <<'EOF'
+[Service]
+EnvironmentFile=%h/.config/devproof/browser-runtime.env
+EOF
+  chmod 0600 "$direct_dropin_temporary"
+  direct_dropin_changed=true
+  mv -f -- "$direct_dropin_temporary" "$DIRECT_DROPIN_PATH"
+  direct_dropin_temporary=""
 fi
 systemctl --user daemon-reload
 systemctl --user enable "$SERVICE_NAME" >/dev/null
