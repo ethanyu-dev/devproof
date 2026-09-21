@@ -14,7 +14,7 @@ The package README is the canonical field-level changelog: [`packages/runtime-pr
 
 The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. Browser Runtime has its own release version and is compatible based on protocol negotiation, not matching application version numbers.
 
-The separate Agent protocol is currently v2.24. It carries Spec source grounding,
+The separate Agent protocol is currently v2.26. It carries Spec source grounding,
 diagnostic finalization checkpoints, locator recovery exhaustion reasons, and
 optional meaningful tool-progress telemetry for adaptive deadlines, and
 per-object observation targets and delivered quotations for criterion results,
@@ -22,15 +22,27 @@ negotiated Spec generation using validated check references, and versioned
 business account subject declarations and observed account requests;
 see its [changelog](../packages/agent-runtime-protocol/README.md).
 
-## Unreleased object-observation extension
+## Object observations and write audit
 
-The draft [Browser observation V2](browser-observation-v2.md) adds structured
-captures, phase proofs, action observation, optional deltas, and bounded form
-sequences behind capability and creation gates. Its development implementation
-still advertises Browser protocol 1.18. Assign the next minor and a distinct
-Browser Runtime release before rollout; stock v1.18 nodes must not be treated as
-supporting these capabilities. The design document tracks known blocking defects
-and enablement criteria.
+The [Browser observation V2](browser-observation-v2.md) implementation supports
+structured captures, phase proofs, action observation, optional deltas, and
+bounded form sequences behind negotiated capabilities. Browser protocol 1.20
+raises the structured capture budget to 2 MiB, 8000 nodes and 500 regions and
+reports bounded capture diagnostics. The API and Agent must be upgraded before
+a Runtime emits the larger captures; model context budgets remain unchanged.
+
+Browser protocol 1.21 adds cumulative HTTP write audit metadata to session
+closure results. Live closure seals the audit with the durable closure record;
+retries and daemon restarts replay the same evidence. The API reassesses data
+leases after the result is persisted. Only a verified, isolated, complete audit
+with no potential writes can establish `NO_WRITE_VERIFIED`; interrupted sessions
+without an audit and unknown writes retain recovery guards.
+
+Object observations and shared business-data locks are enabled by default.
+Unknown resource scopes serialize at environment level. Operators can explicitly
+configure `BROWSER_OBSERVATION_V2_ENABLED=false` or
+`BROWSER_EXECUTION_DATA_LOCKS_ENABLED=false`; disabling data locks allows shared
+business state to be modified concurrently. Account coordination remains active.
 
 ## Current capability milestones
 
@@ -60,3 +72,10 @@ Agent v2.22 adds complete per-model-call context archives and public `stepIntent
 Agent v2.23 adds concise business checks, runtime subject binding and criterion-local evidence correction. See [Business Spec and runtime binding](business-spec.md). Observation payloads remain v2; existing Specs retain their original contracts.
 
 Agent v2.24 adds `attempt-evidence-catalog-v1` for complete attempt evidence catalogs and `typed-checks-v1` for explicit UI state properties and structured network assertions. Checkpoint criteria are persisted independently of final cleanup. See [the first four runtime reliability changes](runtime-reliability-first-four.md) for account replacement, record references, compatibility and regression coverage.
+
+Agent v2.26 adds opt-in `DISPLAY_TEXT` matching and named-resource ownership
+receipts. Tasks carrying these fields require compatible workers; existing
+stored Specs retain their matching semantics and remain readable. New generated
+Specs are limited to 10 Cases and five acceptance criteria per Case in both the
+Agent and API submission paths. Oversized output is rejected for correction,
+not truncated. See the [Agent changelog](../packages/agent-runtime-protocol/README.md).

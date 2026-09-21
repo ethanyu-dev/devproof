@@ -9,11 +9,31 @@ at most six native text fields from one observed form and does not submit it.
 Canonical observations preserve capture identity, frame/document identity,
 region lifecycle, relationships, state, coverage, and screenshot consistency.
 
-The working branch now advertises minor 19 for the authentication distribution
-extension below. A stock v1.18/0.2.28 daemon does not contain these extensions.
-Publish and upgrade to the distinct Browser Runtime 0.2.32 release before rollout.
+The working branch advertises minor 21, including the observation budget and
+closure write-audit extensions below. Older daemon builds do not contain these
+extensions. Publish and upgrade the independently installed Browser Runtime
+before relying on them.
 See [Browser observation V2](../../docs/browser-observation-v2.md) for the current
 implementation, known blockers, migration, and rollback constraints.
+
+## Protocol 1.20 (local Browser Runtime builds)
+
+Structured DOM observations support up to 2 MiB, 8000 nodes and 500 regions.
+The 256 Ki-character rendered-text limit remains separate. Runtime traversal
+uses the same node/ref cap; the API and Agent consume the shared schema.
+Upgrade these consumers before deploying a Runtime that emits larger captures.
+
+`coverage.limitEvents` reports the measured serialized size, node/region/text
+counts, applicable limits, exceeded budgets, and the action taken. An oversized
+viewport is recaptured once within a unique visible dialog (or a unique visible
+form when there is no dialog). A scoped capture that still exceeds a limit,
+an ambiguous scope, or exhausted capture time yields bounded partial data with
+`truncated=true` and `completeWithinScope=false`, rather than an empty snapshot.
+A region fallback proves only that region; partial data cannot prove absence.
+
+The compact diagnostics are also exposed as `captureDiagnostics`. The full
+`structuredObservation` remains excluded from model tool projections; existing
+context and evidence-summary budgets are unchanged.
 
 ## Protocol 1.19 (Browser Runtime 0.2.32)
 
@@ -139,3 +159,24 @@ retain the existing human-control semantics for compatibility. Renewal cannot
 change access scope, and preview connections do not claim the single controller
 slot. Preview access remains fenced by the active session permit and control
 generation.
+
+### Session HTTP write audit (1.21)
+
+`session.close` responses, including challenge-bound recovery responses, may include `writeAudit` with version 1,
+`launchIdentityId`, coverage `ISOLATED_CONTEXT_UNTIL_CLOSE`, `complete`,
+`requestCount`, and `potentialWrites`. Counts cover the fresh ephemeral browser
+context from launch through completed closure, across frames and origins; only
+GET/HEAD/OPTIONS are treated as HTTP reads. Request URLs and bodies are not stored
+in this audit. Persistent contexts, workers, WebSockets and page crashes invalidate
+completeness. Abrupt/recovery-only closures without this in-memory history cannot
+produce a complete audit. When a live browser is closed, the final audit is sealed
+in the durable closure record; subsequent challenges and daemon restarts replay
+that same audit. A restart which terminates an orphan without an already sealed
+audit does not fabricate one.
+
+The API requires verified closure, the matching launch/lease/fence, no human
+control, no pending commands and no command outside the audited surface before
+using a complete zero-write audit to settle `NO_WRITE_VERIFIED`. A verification
+verdict of INCONCLUSIVE does not override this independent evidence. Legacy
+sessions without the audit continue to require reconciliation or authorized retry;
+model-written cleanup summaries and empty partial action feedback are insufficient.

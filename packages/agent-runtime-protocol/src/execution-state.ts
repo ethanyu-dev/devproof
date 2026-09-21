@@ -15,6 +15,8 @@ export const executionRecordSchema = z.object({
     .optional(),
   displayType: text.optional(),
   resourceUrl: z.string().max(2000).optional(),
+  resourceName: text.optional(),
+  creationWriteKey: text.optional(),
   account: text.optional(),
   accountAliases: z.array(text).max(20).default([]),
   ownership: z.enum(["CREATED_THIS_RUN", "EXISTING", "UNCONFIRMED"]),
@@ -55,7 +57,12 @@ export const executionRecordSchema = z.object({
 });
 
 export const executionRecordDeltaSchema = executionRecordSchema
-  .omit({ uiBaseline: true, baselineObservation: true })
+  .omit({
+    uiBaseline: true,
+    baselineObservation: true,
+    resourceName: true,
+    creationWriteKey: true,
+  })
   .partial()
   .extend({
     accountAliases: z.array(text).max(20).optional(),
@@ -79,6 +86,10 @@ export const executionStateSchema = z.object({
         empty: z.boolean(),
         complete: z.boolean(),
         recordKeys: z.array(z.string().max(3000)).max(100),
+        namedResources: z
+          .array(z.object({ id: text, name: text }))
+          .max(100)
+          .default([]),
         identitiesComplete: z.boolean().default(false),
         identities: z
           .array(

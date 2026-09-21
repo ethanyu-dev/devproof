@@ -7,6 +7,18 @@ type Failure = { until: number; failures: number; reason: string };
 /** Shared by concurrent runs on this executor; keys never expose credentials. */
 export class ModelHealth {
   private readonly failures = new Map<string, Failure>();
+  private readonly slowSuccesses = new Map<string, number>();
+
+  /** Keep configured order unless two consecutive successful calls exceed one minute.
+   * A usable response is still consumed; subsequent decisions try a healthy alternative.
+   */
+  order(candidates: RuntimeModelCandidate[]) {
+    return [...candidates].sort(
+      (a, b) =>
+        Number((this.slowSuccesses.get(this.key(a)) ?? 0) >= 2) -
+        Number((this.slowSuccesses.get(this.key(b)) ?? 0) >= 2),
+    );
+  }
   constructor(private readonly now = () => Date.now()) {}
 
   private key(candidate: RuntimeModelCandidate, credential = false) {
@@ -53,7 +65,14 @@ export class ModelHealth {
     }
   }
 
-  success(candidate: RuntimeModelCandidate) {
+  success(candidate: RuntimeModelCandidate, durationMs = 0) {
+    const key = this.key(candidate);
+    this.slowSuccesses.set(
+      key,
+      durationMs >= 60_000 ? (this.slowSuccesses.get(key) ?? 0) + 1 : 0,
+    );
+    while (this.slowSuccesses.size > 256)
+      this.slowSuccesses.delete(this.slowSuccesses.keys().next().value!);
     this.failures.delete(this.key(candidate));
   }
 

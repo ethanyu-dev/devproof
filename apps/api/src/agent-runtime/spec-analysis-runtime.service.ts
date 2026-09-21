@@ -19,6 +19,7 @@ import {
 import { Prisma } from "@prisma/client";
 import {
   runtimeGeneratedSpecSchema,
+  generatedSpecSubmissionSchema,
   runtimeSpecAnalysisOutcomeSchema,
   runtimeSpecAnalysisToolOutputSchema,
   runtimeSpecSourceRefSchema,
@@ -816,7 +817,10 @@ export class SpecAnalysisRuntimeService {
     completionId: string,
     outcome: Extract<RuntimeSpecAnalysisOutcome, { kind: "SPEC_GENERATED" }>,
   ) {
-    const spec = runtimeGeneratedSpecSchema.parse(outcome.spec);
+    const parsedSpec = generatedSpecSubmissionSchema.safeParse(outcome.spec);
+    if (!parsedSpec.success)
+      throw new BadRequestException(parsedSpec.error.message);
+    const spec = parsedSpec.data;
     const accountIssues = validateCaseAccountRequirements(spec.cases, {
       requireVersion: true,
       sourceContents: new Map(

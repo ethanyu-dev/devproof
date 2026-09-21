@@ -10,7 +10,10 @@ import {
   executionTarget,
 } from "../verification/execution-concurrency.js";
 import { sessionExecutionPermit } from "./session-permit.js";
-import { hasVerifiedObservationOnlyHistory } from "./session-write-audit.js";
+import {
+  hasVerifiedObservationOnlyHistory,
+  hasVerifiedNoWriteNetworkAudit,
+} from "./session-write-audit.js";
 import {
   RESOLVED_WRITE_STATES,
   TERMINAL_AGENT_STATES,
@@ -206,7 +209,10 @@ export async function initialWriteState(
   if (leases.length && leases.every((lease) => lease.mode === "READ"))
     return "NOT_APPLICABLE";
   if (await hasConfirmedWriteOutcome(tx, session)) return "CONFIRMED";
-  if (await hasVerifiedObservationOnlyHistory(tx, session))
+  if (
+    (await hasVerifiedObservationOnlyHistory(tx, session)) ||
+    (await hasVerifiedNoWriteNetworkAudit(tx, session))
+  )
     return "NO_WRITE_VERIFIED";
   return "UNKNOWN";
 }
@@ -225,7 +231,8 @@ export async function refreshRecoveryWriteOutcome(
     return recovery;
   const state = (await hasConfirmedWriteOutcome(tx, session))
     ? "CONFIRMED"
-    : (await hasVerifiedObservationOnlyHistory(tx, session))
+    : (await hasVerifiedObservationOnlyHistory(tx, session)) ||
+        (await hasVerifiedNoWriteNetworkAudit(tx, session))
       ? "NO_WRITE_VERIFIED"
       : null;
   if (!state) return recovery;

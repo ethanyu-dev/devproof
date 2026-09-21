@@ -188,7 +188,7 @@ describe("recovery classification and business protection", () => {
     ).toBe("UNKNOWN");
   });
   it("records unknown outcomes without creating a global guard in parallel mode", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const { tx, session, recovery } = setup();
     await materializeRecoveryGuards(
       tx as never,

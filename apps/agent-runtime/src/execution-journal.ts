@@ -146,7 +146,15 @@ const queryFields = [
 /** An empty list is relevant only if its query scope includes this record. */
 function completeReadCoversRecord(
   read: ExecutionState["readReceipts"][number],
-  record: ExecutionState["records"][number],
+  record: Pick<
+    ExecutionState["records"][number],
+    | "id"
+    | "type"
+    | "resourceUrl"
+    | "resourceName"
+    | "account"
+    | "accountAliases"
+  >,
 ) {
   if (
     !read.complete ||
@@ -167,6 +175,12 @@ function completeReadCoversRecord(
   )
     return false;
   if (params.has("id") && params.get("id") !== record.id) return false;
+  if (
+    params.has("name") &&
+    (params.getAll("name").length !== 1 ||
+      params.get("name") !== record.resourceName)
+  )
+    return false;
   if (params.has("type") && params.get("type") !== record.type) return false;
   if (
     params.has("account") &&
@@ -174,7 +188,10 @@ function completeReadCoversRecord(
   )
     return false;
   return [...params.keys()].every(
-    (field) => field === "id" || queryFields.includes(field),
+    (field) =>
+      field === "id" ||
+      (field === "name" && Boolean(record.resourceName)) ||
+      queryFields.includes(field),
   );
 }
 
@@ -197,6 +214,7 @@ function writeMatchesRecord(
   if (w.method === "POST") {
     const createdId = responseRecordId(parse(w.response));
     if (createdId !== undefined && createdId !== r.id) return false;
+    if (r.creationWriteKey) return w.key === r.creationWriteKey;
   }
   if (identity.id !== undefined)
     return (
@@ -244,6 +262,18 @@ function records(value: unknown, depth = 0): Record<string, unknown>[] {
     v.account !== undefined
   )
     return [v];
+  if (
+    (typeof v.id === "string" || typeof v.id === "number") &&
+    String(v.id).length > 0 &&
+    String(v.id).length <= 500 &&
+    typeof v.name === "string" &&
+    v.name.trim().length > 0 &&
+    v.name.length <= 500 &&
+    v.account === undefined
+  )
+    return [
+      { id: v.id, type: "NAMED_RESOURCE", resourceName: v.name, config: v },
+    ];
   return Object.values(v).flatMap((child) => records(child, depth + 1));
 }
 function emptyList(value: unknown): boolean {
@@ -569,7 +599,9 @@ export class ExecutionJournal {
       if (method === "GET" && evidenceRefs.length && sequence >= 0) {
         const collection = listRows(body);
         const identities = (collection ?? []).slice(0, 100).flatMap((row) => {
-          const candidate = object(row);
+          const direct = object(row);
+          const candidate =
+            direct.id !== undefined ? (records(row)[0] ?? direct) : direct;
           const aliases = accountAliases([
             candidate.account,
             object(candidate.user).uuid,
@@ -582,7 +614,7 @@ export class ExecutionJournal {
             candidate.type.length > 0 &&
             candidate.type.length <= 500 &&
             String(candidate.id).length <= 500 &&
-            aliases.length
+            (aliases.length || candidate.resourceName !== undefined)
             ? [
                 {
                   id: String(candidate.id),
@@ -607,6 +639,11 @@ export class ExecutionJournal {
             identities.length === collection.length,
           identities,
           recordKeys: found.map((r) => recordKey(r.id, r.type, url)),
+          namedResources: found.flatMap((r) =>
+            typeof r.resourceName === "string"
+              ? [{ id: String(r.id), name: r.resourceName }]
+              : [],
+          ),
           recordStates: Object.fromEntries(
             found.flatMap((r) => {
               if (r.config === undefined) return [];
@@ -649,6 +686,9 @@ export class ExecutionJournal {
         ].slice(-200);
       }
       for (const candidate of found) {
+        // Named resources are reconciled against their own pre-create read and
+        // unique write receipt below, never against a fabricated account.
+        if (candidate.resourceName !== undefined) continue;
         const id = String(candidate.id),
           type = String(candidate.type),
           key = recordKey(id, type, url);
@@ -803,6 +843,7 @@ export class ExecutionJournal {
       });
       return false;
     });
+    this.reconcileNamedResources();
     this.registerObservedMutations();
     this.reconcileCleanup();
     const ui = structuredObservationSchema.safeParse(
@@ -920,6 +961,163 @@ export class ExecutionJournal {
           Date.parse(baseline.timestamp) < Date.parse(write.timestamp))
       );
     });
+  }
+
+  /** Bind accountless collections by endpoint + exact name + pre-write absence.
+   * A successful response alone is not ownership, and ID changes are never guessed.
+   */
+  private reconcileNamedResources() {
+    if (this.state.requestOrderTruncated || this.state.writeHistoryTruncated)
+      return;
+    for (const read of [...this.state.readReceipts].sort(
+      (a, b) => a.sequence - b.sequence,
+    )) {
+      for (const item of read.namedResources ?? []) {
+        const identity = {
+          id: item.id,
+          type: "NAMED_RESOURCE",
+          resourceUrl: resource(read.url),
+          resourceName: item.name,
+          accountAliases: [] as string[],
+        };
+        const key = recordKey(identity.id, identity.type, identity.resourceUrl);
+        const existing = this.state.records.find(
+          (r) => recordKey(r.id, r.type, r.resourceUrl) === key,
+        );
+        if (existing) {
+          const rename = this.state.writes.find(
+            (w) =>
+              ["PUT", "PATCH"].includes(w.method) &&
+              w.confirmed &&
+              successful(w.status, parse(w.response)) &&
+              writeMatchesRecord(w, existing) &&
+              w.sequence !== undefined &&
+              w.sequence < read.sequence &&
+              object(parse(w.request)).name === item.name,
+          );
+          if (rename) existing.resourceName = item.name;
+          if (read.recordStates[key])
+            existing.currentState = read.recordStates[key];
+          continue;
+        }
+        const creates = this.state.writes.filter((w) => {
+          const response = parse(w.response);
+          if (
+            w.method !== "POST" ||
+            !w.confirmed ||
+            response === undefined ||
+            !successful(w.status, response) ||
+            resource(w.url) !== identity.resourceUrl ||
+            w.sequence === undefined ||
+            w.sequence >= read.sequence ||
+            (w.timestamp &&
+              read.timestamp &&
+              Date.parse(w.timestamp) >= Date.parse(read.timestamp))
+          )
+            return false;
+          const request = object(parse(w.request));
+          const responseId = responseRecordId(response);
+          if (
+            request.name !== item.name ||
+            request.account !== undefined ||
+            request.id !== undefined ||
+            (responseId !== undefined && responseId !== item.id)
+          )
+            return false;
+          const prior = this.state.readReceipts
+            .filter(
+              (r) =>
+                r.sequence < w.sequence! &&
+                completeReadCoversRecord(r, identity) &&
+                (!r.timestamp ||
+                  !w.timestamp ||
+                  Date.parse(r.timestamp) < Date.parse(w.timestamp)),
+            )
+            .sort((a, b) => b.sequence - a.sequence)[0];
+          if (
+            !prior ||
+            prior.namedResources.some(
+              (r) => r.id === item.id || r.name === item.name,
+            )
+          )
+            return false;
+          // Any intervening ambiguous write can have created/modified this name.
+          return !this.state.writes.some((other) => {
+            if (
+              other.key === w.key ||
+              rejectedWrite(other) ||
+              resource(other.url) !== identity.resourceUrl ||
+              other.sequence === undefined ||
+              other.sequence <= prior.sequence ||
+              other.sequence >= read.sequence
+            )
+              return false;
+            const otherRequest = object(parse(other.request));
+            return (
+              otherRequest.name === item.name ||
+              (otherRequest.name === undefined &&
+                requestedRecordId(other.url, otherRequest).id === undefined)
+            );
+          });
+        });
+        if (
+          creates.length === 1 &&
+          read.identitiesComplete &&
+          read.namedResources.filter((r) => r.name === item.name).length ===
+            1 &&
+          !this.state.records.some(
+            (r) => r.creationWriteKey === creates[0]!.key,
+          ) &&
+          !this.state.existingRecordKeys.includes(key) &&
+          this.state.records.length < 50
+        ) {
+          const creation = creates[0]!;
+          this.state.records.push({
+            ...identity,
+            recordRef: stableRecordRef(identity),
+            creationWriteKey: creation.key,
+            ownership: "CREATED_THIS_RUN",
+            ...(read.recordStates[key]
+              ? { currentState: read.recordStates[key] }
+              : {}),
+            evidenceRefs: [
+              ...new Set([...creation.evidenceRefs, ...read.evidenceRefs]),
+            ].slice(-20),
+            cleanup: {
+              status: "PENDING",
+              instruction:
+                "按 Spec 清理本次创建的资源，并按 ID 或唯一名称重新查询确认。",
+            },
+          });
+        } else if (read.recordStates[key]) {
+          const baseline = {
+            ...identity,
+            recordRef: stableRecordRef(identity),
+            ownership: "EXISTING" as const,
+            initialState: read.recordStates[key]!,
+            currentState: read.recordStates[key]!,
+            baselineObservation: {
+              readKey: read.key,
+              sequence: read.sequence,
+              ...(read.timestamp ? { timestamp: read.timestamp } : {}),
+            },
+            evidenceRefs: read.evidenceRefs,
+          };
+          if (
+            this.baselinePrecedesWrites(baseline) &&
+            this.state.observedRecords.length < 100 &&
+            !this.state.observedRecords.some(
+              (r) => r.recordRef === baseline.recordRef,
+            )
+          ) {
+            this.state.observedRecords.push(baseline);
+            this.state.existingRecordKeys = [
+              ...new Set([...this.state.existingRecordKeys, key]),
+            ].slice(-200);
+          }
+        }
+      }
+    }
   }
 
   private registerObservedMutations() {
@@ -1640,7 +1838,8 @@ export class ExecutionJournal {
           );
           const actual = latestRead?.recordStates[key];
           if (
-            isDeepStrictEqual(config, expected) &&
+            (record.resourceName !== undefined ||
+              isDeepStrictEqual(config, expected)) &&
             actual !== undefined &&
             isDeepStrictEqual(parse(actual) ?? actual, expected)
           )

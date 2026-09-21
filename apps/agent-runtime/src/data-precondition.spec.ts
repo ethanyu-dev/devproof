@@ -161,3 +161,81 @@ it("allows a human to identify an unexposed record ID without fabricating it", (
   expect(result.records[0]!.id).toBeUndefined();
   expect(result.conflictKey).toContain("UNIDENTIFIED");
 });
+
+it("accepts an observed SKU resource without inventing an account and rejects ungrounded identities", async () => {
+  const { BrowserObservations } = await import("./browser-observation.js");
+  const { runtimeActionCommandInputSchema } =
+    await import("@devproof/runtime-protocol");
+  const observations = new BrowserObservations(undefined, true);
+  observations.capture(
+    runtimeActionCommandInputSchema.parse({
+      commandType: "page.snapshot",
+      payload: {},
+    }),
+    {
+      status: "SUCCEEDED",
+      result: {
+        content: '- <div> "SKU MA-llm-234 范围冲突" [ref=f1e1]',
+        url: "https://app.test",
+      },
+      artifacts: [{ id: "observed", kind: "DOM" }],
+    },
+  );
+  observations.deliverCurrentPage(observations.currentPage(true));
+  const raw = {
+    criterionIds: ["create"],
+    records: [
+      {
+        type: "product-discount",
+        resource: { kind: "SKU", key: "MA-llm-234" },
+        citations: [{ ref: "f1e1" }],
+      },
+    ],
+  };
+  const result = prepareDataPrecondition(
+    raw,
+    {},
+    new ExecutionJournal({}),
+    ["create"],
+    evidence,
+    observations,
+  );
+  expect(result.records[0]).toMatchObject({
+    resource: { kind: "SKU", key: "MA-llm-234" },
+  });
+  expect(result.records[0]?.account).toBeUndefined();
+  expect(() =>
+    prepareDataPrecondition(
+      {
+        ...raw,
+        records: [
+          { ...raw.records[0], resource: { kind: "SKU", key: "other" } },
+        ],
+      },
+      {},
+      journal(),
+      ["create"],
+      evidence,
+      observations,
+    ),
+  ).toThrow("资源冲突");
+  expect(() =>
+    prepareDataPrecondition(
+      {
+        ...raw,
+        records: [
+          {
+            type: "product-discount",
+            resource: { kind: "SKU", key: "MA-llm-234" },
+            evidenceRefs: [reference],
+          },
+        ],
+      },
+      {},
+      journal(),
+      ["create"],
+      evidence,
+      observations,
+    ),
+  ).toThrow("资源冲突");
+});

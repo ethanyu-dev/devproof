@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
+import {
+  runtimeTaskSnapshotSchema,
+  requiresAgentProtocol26,
+} from "@devproof/agent-runtime-protocol";
 import { leaseDigest } from "../runtime/session-recovery.state.js";
 
 import {
@@ -1022,6 +1025,60 @@ describe("AgentRuntimeTaskService completed evidence validation", () => {
 });
 
 describe("AgentRuntimeTaskService Runtime model configuration", () => {
+  it.each(["display matching", "named-resource resume"])(
+    "skips %s for an older worker before acquiring a lease",
+    async (scenario) => {
+      const next = runtimeTaskSnapshotSchema.parse(snapshot);
+      if (scenario === "display matching") {
+        next.criteria[0]!.observationTargets = [
+          { label: "星期", expectedText: "周一", matchMode: "DISPLAY_TEXT" },
+        ];
+      } else {
+        next.executionPolicy.executionState = {
+          records: [
+            {
+              id: "545",
+              resourceName: "test-weekdays",
+              ownership: "CREATED_THIS_RUN",
+              evidenceRefs: ["artifact://creation"],
+            },
+          ],
+        };
+      }
+      expect(requiresAgentProtocol26(next)).toBe(true);
+      expect(requiresAgentProtocol26(snapshot)).toBe(false);
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ now: new Date() }]),
+        agentRuntimeTask: {
+          findFirst: vi
+            .fn()
+            .mockResolvedValueOnce({ id: "new-task", snapshot: next })
+            .mockResolvedValue(null),
+          updateMany: vi.fn(),
+        },
+      };
+      const service = new AgentRuntimeTaskService(
+        {
+          $transaction: (callback: (value: typeof tx) => Promise<unknown>) =>
+            callback(tx),
+        } as never,
+        {
+          candidatesForPool: vi.fn().mockResolvedValue([{ modelId: "model" }]),
+        } as never,
+      );
+      expect(
+        await service.claim(snapshot.teamId, {
+          capabilities: ["BROWSER_VERIFICATION"],
+          protocol: { major: 2, minor: 25, name: "devproof-agent-runtime" },
+          workerId: "old-worker",
+        }),
+      ).toEqual({ task: null });
+      expect(tx.agentRuntimeTask.updateMany).not.toHaveBeenCalled();
+      expect(
+        tx.agentRuntimeTask.findFirst.mock.calls[1]?.[0].where.id.notIn,
+      ).toContain("new-task");
+    },
+  );
   it("rejects workers that cannot consume Console-managed model credentials", async () => {
     const agentModels = { candidatesForPool: vi.fn() };
     const service = new AgentRuntimeTaskService(

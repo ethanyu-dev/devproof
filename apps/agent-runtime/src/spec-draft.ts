@@ -3,6 +3,8 @@ import {
   businessCheckSchema,
   compileBusinessCheck,
   runtimeGeneratedSpecSchema,
+  GENERATED_SPEC_MAX_CASES,
+  GENERATED_SPEC_MAX_CRITERIA_PER_CASE,
   businessAccountRequirementsError,
   validateCaseAccountRequirements,
   accountRequirementIssuesMessage,
@@ -51,7 +53,15 @@ export const specCheckSchema = z.object({
     .max(20)
     .optional(),
   observationContract: observationContractSchema.optional(),
-  businessCheck: businessCheckSchema.optional(),
+  businessCheck: businessCheckSchema
+    .safeExtend({
+      identityMatchMode: z
+        .enum(["EXACT", "DISPLAY_TEXT"])
+        .describe(
+          "必须显式选择：界面按钮/标签使用 DISPLAY_TEXT；ID、SKU、账号使用 EXACT。",
+        ),
+    })
+    .optional(),
   supportingSourceRefs: z
     .array(z.string().trim().min(1).max(500))
     .max(99)
@@ -100,11 +110,14 @@ export const compactSpecSchema = z.object({
         preconditions: notes,
         testData: notes,
         cleanup: notes,
-        criteria: z.array(specCheckSchema).min(1).max(100),
+        criteria: z
+          .array(specCheckSchema)
+          .min(1)
+          .max(GENERATED_SPEC_MAX_CRITERIA_PER_CASE),
       }),
     )
     .min(1)
-    .max(100),
+    .max(GENERATED_SPEC_MAX_CASES),
 });
 
 /** Only the generation format changes; execution still receives full criteria. */
@@ -114,12 +127,15 @@ export const referencedSpecSchema = compactSpecSchema.extend({
       compactSpecSchema.shape.cases.element
         .omit({ criteria: true })
         .extend({
-          checkIds: z.array(z.string().trim().min(1).max(100)).min(1).max(100),
+          checkIds: z
+            .array(z.string().trim().min(1).max(100))
+            .min(1)
+            .max(GENERATED_SPEC_MAX_CRITERIA_PER_CASE),
         })
         .strict(),
     )
     .min(1)
-    .max(100),
+    .max(GENERATED_SPEC_MAX_CASES),
 });
 
 export function expandSpecCheck(

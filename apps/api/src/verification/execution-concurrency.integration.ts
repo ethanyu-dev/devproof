@@ -647,7 +647,7 @@ describe("PostgreSQL browser admission transactions", () => {
     await expect(sessions.create(current, input)).rejects.toThrow(
       "exclusive business access",
     );
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const manual = await Promise.all([
       sessions.create(current, input),
       sessions.create(current, input),
@@ -661,9 +661,9 @@ describe("PostgreSQL browser admission transactions", () => {
   });
 
   it.each(["UNKNOWN", "MUTATING"] as const)(
-    "admits four simultaneous %s executions on the same backend by default without exceeding capacity",
+    "admits four simultaneous %s executions without exceeding capacity when business-data locks are explicitly disabled",
     async (accessMode) => {
-      vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+      vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
       const work = await Promise.all(
         Array.from({ length: 6 }, () => execution(accessMode)),
       );
@@ -679,6 +679,26 @@ describe("PostgreSQL browser admission transactions", () => {
             result.reason.reason,
           );
       await assertAtomicInventory(4, 0);
+    },
+  );
+
+  it.each(["UNKNOWN", "MUTATING"] as const)(
+    "admits only one simultaneous unscoped %s execution on the same backend when business-data locks are unset",
+    async (accessMode) => {
+      vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+      const work = await Promise.all(
+        Array.from({ length: 6 }, () => execution(accessMode)),
+      );
+      const results = await Promise.allSettled(
+        work.map((item) => item.acquire()),
+      );
+      expect(
+        results.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1);
+      for (const result of results)
+        if (result.status === "rejected")
+          expect(result.reason).toMatchObject({ reason: "DATA_LOCK" });
+      await assertAtomicInventory(1);
     },
   );
 
@@ -742,7 +762,7 @@ describe("PostgreSQL browser admission transactions", () => {
     await db.$transaction((tx: Prisma.TransactionClient) =>
       quarantineSession(tx, lease.leaseId, "INTEGRATION_LOST"),
     );
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const next = await Promise.all(
       Array.from({ length: 4 }, () => execution("UNKNOWN", 1)),
     );
@@ -766,7 +786,7 @@ describe("PostgreSQL browser admission transactions", () => {
   });
 
   it("does not create a new global guard when a parallel execution closes with an unknown outcome", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const writer = await execution("UNKNOWN");
     const lease = await writer.acquire();
     await recordTimedOutCommand(lease.leaseId, "page.click");
@@ -1656,7 +1676,7 @@ describe("assigned-account admission without broad resource locking", () => {
     return work;
   }
   it("atomically admits only one simultaneous account replacement and retains both old account leases", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const runs = await Promise.all([
       assigned("old-a"),
       assigned("old-b", "MAPPING", "CREATE_OR_MODIFY", 1),
@@ -1699,7 +1719,7 @@ describe("assigned-account admission without broad resource locking", () => {
   });
 
   it("admits one writer and releases only after its trusted result and verified closure", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const writers = await Promise.all([
       assigned("same-subject"),
       assigned("same-subject", "MAPPING", "CREATE_OR_MODIFY", 1),
@@ -1738,7 +1758,7 @@ describe("assigned-account admission without broad resource locking", () => {
     await expect(writers[1 - index]!.acquire()).resolves.toBeDefined();
   });
   it("holds an unclosed account, then releases occupancy without pretending an unknown write was resolved", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const first = await assigned("uncertain-subject");
     const session = await first.acquire();
     const same = await assigned("uncertain-subject");
@@ -1754,7 +1774,7 @@ describe("assigned-account admission without broad resource locking", () => {
     await expect(unrelated.acquire()).resolves.toBeDefined();
   });
   it("keeps independent types and identities parallel, shares readers and excludes a matching writer", async () => {
-    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+    vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", "false");
     const a = await assigned("subject", "MAPPING", "READ_EXISTING");
     const b = await assigned("subject", "MAPPING", "READ_EXISTING", 1);
     const c = await assigned("subject", "OTHER");

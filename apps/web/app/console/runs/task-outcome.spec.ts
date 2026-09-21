@@ -199,3 +199,26 @@ it("explains an operator-blocked recovery without suggesting that it is running"
     "并发资格由当前调度策略和数据约束决定",
   );
 });
+
+it("distinguishes closed browsers awaiting write review from automatic recovery", () => {
+  const scheduling = {
+    state: "RECOVERING",
+    reason: "LEASE_RECOVERY",
+    blockedBy: { recoveryPhase: "VERIFIED" },
+  } as TaskScheduling;
+  expect(schedulingWaitText(scheduling)).toContain("等待业务写入核实");
+  expect(
+    taskOutcomeDisplay({
+      lifecycle: "RUNNING",
+      verdict: null,
+      executionDisposition: null,
+      scheduling,
+    }).label,
+  ).toBe("等待写入核实");
+  expect(
+    executionSchedulingLabel({
+      run: { lifecycle: "QUEUED" },
+      scheduling,
+    } as TaskCaseExecution),
+  ).toBe("等待写入核实");
+});

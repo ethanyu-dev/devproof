@@ -939,7 +939,9 @@ function SchedulingExplanation({
         </>
       ) : null}
       {scheduling.nextRetryAt &&
-      scheduling.blockedBy?.recoveryPhase !== "NEEDS_OPERATOR"
+      !["NEEDS_OPERATOR", "VERIFIED"].includes(
+        scheduling.blockedBy?.recoveryPhase ?? "",
+      )
         ? ` · 下次重试 ${new Date(scheduling.nextRetryAt).toLocaleTimeString("zh-CN")}`
         : ""}
     </small>

@@ -738,6 +738,10 @@ describe("SpecAnalysisExecutor", () => {
     );
     const caseInput =
       finishTool.function.parameters.properties.spec.properties.cases.items;
+    expect(
+      finishTool.function.parameters.properties.spec.properties.cases.maxItems,
+    ).toBe(10);
+    expect(caseInput.properties.criteria.maxItems).toBe(5);
     expect(caseInput.required).toEqual([
       "name",
       "steps",
@@ -1894,6 +1898,7 @@ it("negotiates concise business generation without exposing the DOM contract sch
               requirementId: "requirement-1",
               description: "两种类型的记录均显示启用。",
               businessCheck: {
+                identityMatchMode: "DISPLAY_TEXT",
                 subjects: ["合规模型映射", "旧版对公转账白名单"],
                 state: { label: "配置值", equals: "启用" },
               },
@@ -1978,4 +1983,52 @@ it("cannot disguise an absence prerequisite for independent editing with an extr
   testCase.name = "白名单新增到编辑的生命周期";
   testCase.preconditions = ["账号尚未配置目标类型记录"];
   expect(caseDataPreconditionError(testCase)).toBeNull();
+});
+
+it("rejects clearing a full weekend slot into retained weekdays but permits isolated data and negative checks", () => {
+  const testCase = {
+    name: "编辑星期回显与清空",
+    preconditions: [],
+    testData: [],
+    steps: [
+      {
+        action:
+          "准备工作日 00:00–09:00、12:00–14:00，以及周末 00:00–24:00 的折扣。",
+      },
+      { action: "将周末全天时段的周六、周日依次取消，保存并确认每天生效。" },
+    ],
+  } as unknown as Parameters<typeof caseDataPreconditionError>[0];
+  expect(caseDataPreconditionError(testCase)).toContain("重叠约束冲突");
+  testCase.steps[1]!.action =
+    "将周末全天时段的周六、周日依次取消，保存被拦截。";
+  expect(caseDataPreconditionError(testCase)).toBeNull();
+  testCase.steps[1]!.action =
+    "先移除其他时段，将周末全天时段的周六、周日依次取消，保存成功。";
+  expect(caseDataPreconditionError(testCase)).toBeNull();
+});
+
+it("rejects oversized full Specs before semantic validation while preserving historical read support", () => {
+  const base = refundSpec();
+  const sized = (cases: number, criteria: number) =>
+    runtimeGeneratedSpecSchema.parse({
+      ...base,
+      cases: Array.from({ length: cases }, () => ({
+        ...base.cases[0],
+        criteria: Array.from({ length: criteria }, (_, i) => ({
+          ...base.cases[0]!.criteria[0],
+          id: `check-${i}`,
+        })),
+      })),
+    });
+  const validate = (spec: typeof base) =>
+    validateFinalSpec({
+      spec,
+      sources: new Map(),
+      sourceContents: new Map(),
+      calledTools: new Set(),
+      linkedPullRequests: [],
+      unavailableTools: new Set(),
+    });
+  expect(validate(sized(11, 1))).toContain("最多生成 10 个 Case");
+  expect(validate(sized(1, 6))).toContain("最多 5 条验收标准");
 });

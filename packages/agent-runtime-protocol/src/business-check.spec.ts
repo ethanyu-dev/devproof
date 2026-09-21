@@ -374,3 +374,129 @@ it("normalizes a dialog to its form and rejects text expectations on switches", 
   expect(malformed.reasons).toContain("STATE_TYPE_MISMATCH:state");
   expect(malformed.evaluation).toBe("UNKNOWN");
 });
+
+it("checks every weekday's pressed state while tolerating explicitly declared label spacing", () => {
+  const weekdays = ["周一", "周二", "周三", "周四", "周五"];
+  const check = compileBusinessCheck(
+    businessCheckSchema.parse({
+      subjects: weekdays,
+      identityMatchMode: "DISPLAY_TEXT",
+      state: { label: "选中状态", property: "CHECKED", equals: true },
+      when: "AFTER_ACTION",
+    }),
+    { sourceRef: "source", quote: "工作日周一至周五选中" },
+    ["DOM"],
+  );
+  const observed = capture();
+  observed.sourceCommandId = randomUUID();
+  observed.consistency = "VERIFIED";
+  observed.nodes = [
+    node("form", { tag: "form" }),
+    ...weekdays.map((weekday, index) =>
+      node(`day${index}`, {
+        parentId: "form",
+        tag: "button",
+        text: weekday.replace("周", "周 "),
+        checked: index !== 3,
+      }),
+    ),
+  ];
+  const results = check.targets.map((target, index) =>
+    evaluateObservationTarget(target, observed, ["DOM"], {
+      scopeRef: "form",
+      entityRef: `day${index}`,
+      assertionRefs: { state: `day${index}` },
+    }),
+  );
+  expect(results.map((r) => r.binding?.evaluation)).toEqual([
+    "MATCHED",
+    "MATCHED",
+    "MATCHED",
+    "MISMATCHED",
+    "MATCHED",
+  ]);
+  expect(results.every((r) => r.binding?.phaseProven)).toBe(true);
+  delete observed.sourceCommandId;
+  expect(
+    evaluateObservationTarget(check.targets[0]!, observed, ["DOM"], {
+      scopeRef: "form",
+      entityRef: "day0",
+      assertionRefs: { state: "day0" },
+    }).binding?.reasons,
+  ).toContain("PHASE_UNPROVEN");
+});
+
+it("allows display normalization only for visible text, never input values or boolean state", () => {
+  for (const property of ["VALUE", "CHECKED"])
+    expect(
+      businessCheckSchema.safeParse({
+        subjects: ["配置"],
+        state: {
+          property,
+          label: "配置值",
+          equals: property === "CHECKED" ? true : "a b",
+          matchMode: "DISPLAY_TEXT",
+        },
+      }).success,
+    ).toBe(false);
+});
+
+it("binds empty-text toggle buttons by their observed name and prevents sibling state substitution", () => {
+  const target = compileBusinessCheck(
+    businessCheckSchema.parse({
+      subjects: ["周一"],
+      identityMatchMode: "DISPLAY_TEXT",
+      state: { label: "选中状态", property: "CHECKED", equals: true },
+      when: "AFTER_ACTION",
+    }),
+    { sourceRef: "source", quote: "周一选中" },
+    ["DOM"],
+  ).targets[0]!;
+  const observed = capture();
+  observed.sourceCommandId = randomUUID();
+  observed.nodes = [
+    node("dialog", { role: "dialog" }),
+    node("monday", {
+      tag: "button",
+      parentId: "dialog",
+      text: "",
+      name: "周 一",
+      nameSource: "TEXT",
+      checked: true,
+    }),
+    node("label", { tag: "span", parentId: "monday", text: "周 一" }),
+    node("tuesday", {
+      tag: "button",
+      parentId: "dialog",
+      text: "",
+      name: "周 二",
+      nameSource: "TEXT",
+      checked: false,
+    }),
+  ];
+  const selected = {
+    scopeRef: "dialog",
+    entityRef: "monday",
+    assertionRefs: { state: "monday" },
+  };
+  expect(
+    evaluateObservationTarget(target, observed, ["DOM"], selected).binding,
+  ).toMatchObject({ evaluation: "MATCHED", readiness: "READY" });
+  for (const entityRef of ["monday", "label"])
+    expect(
+      evaluateObservationTarget(target, observed, ["DOM"], {
+        ...selected,
+        entityRef,
+        assertionRefs: { state: "tuesday" },
+      }).binding?.readiness,
+    ).toBe("PARTIAL");
+  target.identity.matchMode = "EXACT";
+  expect(
+    evaluateObservationTarget(target, observed, ["DOM"], selected),
+  ).toMatchObject({ error: "ENTITY_NOT_CONFIRMED" });
+  target.identity.matchMode = "DISPLAY_TEXT";
+  observed.nodes[1]!.truncatedProperties = ["NAME"];
+  expect(
+    evaluateObservationTarget(target, observed, ["DOM"], selected).binding,
+  ).toBeUndefined();
+});

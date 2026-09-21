@@ -37,6 +37,65 @@ function capture(
 }
 
 describe("browser observations", () => {
+  it("keeps large structured payloads out of both model projections while exposing limit diagnostics", () => {
+    const cache = new BrowserObservations();
+    const captureDiagnostics = [
+      {
+        action: "SCOPED_RECAPTURE",
+        exceeded: ["BYTES"],
+        measured: {
+          bytes: 2200000,
+          nodes: 3000,
+          regions: 1,
+          textCharacters: 1000,
+        },
+      },
+    ];
+    const raw = {
+      status: "SUCCEEDED",
+      result: {
+        content: "Visible dialog [ref=f1e1]",
+        captureDiagnostics,
+        structuredObservation: {
+          version: 2,
+          captureId: randomUUID(),
+          capturedFrom: new Date().toISOString(),
+          capturedUntil: new Date().toISOString(),
+          pageIdentity: "fixture",
+          frames: [],
+          renderedText: "Visible dialog",
+          regions: [],
+          consistency: "VERIFIED",
+          coverage: {
+            scope: "REGION",
+            truncated: false,
+            completeWithinScope: true,
+            unavailableFrames: [],
+          },
+          nodes: Array.from({ length: 5000 }, (_, index) => ({
+            nodeId: `node-${index}`,
+            frameId: "frame",
+            documentEpoch: "doc",
+            tag: "span",
+            visible: false,
+            text: "INTERNAL_NODE_ONLY",
+            attributes: {},
+            relations: [],
+            textLocation: { start: 0, end: 0 },
+          })),
+        },
+      },
+    };
+    expect(jsonBytes(raw)).toBeGreaterThan(512 * 1024);
+    cache.capture(command("page.snapshot"), raw);
+    for (const bounded of [true, false]) {
+      const projected = cache.project(raw, bounded);
+      expect(projected).toMatchObject({ result: { captureDiagnostics } });
+      expect(JSON.stringify(projected)).not.toContain("INTERNAL_NODE_ONLY");
+      expect(projected).not.toHaveProperty("result.structuredObservation");
+      expect(jsonBytes(projected)).toBeLessThan(8192);
+    }
+  });
   it("maps cached IDs to their own canonical captures even with focus disabled", () => {
     const cache = new BrowserObservations(undefined, false, undefined, {
       focus: false,

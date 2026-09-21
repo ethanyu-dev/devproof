@@ -31,11 +31,11 @@ const input = {
   ],
 };
 
-function fixture(kinds = ["DOM", "SCREENSHOT"]) {
+function fixture(kinds = ["DOM", "SCREENSHOT"], observedContent = content) {
   const observations = new BrowserObservations(undefined, true);
   const raw = {
     status: "SUCCEEDED",
-    result: { content, url: "https://example.com" },
+    result: { content: observedContent, url: "https://example.com" },
     artifacts: kinds.map((kind, id) => ({ id: `evidence-${id}`, kind })),
   };
   observations.capture(
@@ -66,10 +66,50 @@ function fixture(kinds = ["DOM", "SCREENSHOT"]) {
       observations,
       evidence,
     );
-  return { observations, resolve, raw };
+  return { observations, resolve, raw, evidence };
 }
 
 describe("criterion citations", () => {
+  it("normalizes display comparison while retaining the exact citation and rejecting rewritten quotations", () => {
+    const actual = '- <button aria-pressed="true"> "周 一" [ref=f262e201]';
+    const { observations, evidence } = fixture(undefined, actual);
+    observations.deliverCurrentPage(observations.currentPage(true));
+    const target = {
+      label: input.citations[0]!.target,
+      expectedText: "周一",
+      matchMode: "DISPLAY_TEXT" as const,
+    };
+    const c = {
+      ...criterion,
+      requiredEvidenceKinds: [...criterion.requiredEvidenceKinds],
+      observationTargets: [target],
+    };
+    const result = resolveCriterionEvidence(
+      criterionSubmissionSchema.parse(input),
+      c,
+      observations,
+      evidence,
+    );
+    expect(result.error).toBeUndefined();
+    if (result.error) throw new Error(result.error.error);
+    expect(result.result?.observations?.[0]?.quote).toBe(actual);
+    const rewritten = resolveCriterionEvidence(
+      criterionSubmissionSchema.parse({
+        ...input,
+        citations: [],
+        observations: [
+          {
+            ...result.result!.observations![0],
+            quote: actual.replace("周 一", "周一"),
+          },
+        ],
+      }),
+      c,
+      observations,
+      evidence,
+    );
+    expect(rewritten.error?.code).toBe("QUOTE_NOT_EXACT");
+  });
   it("binds a delivered node to its exact quote and matching DOM and screenshot", () => {
     const { observations, resolve } = fixture();
     observations.deliverCurrentPage(observations.currentPage(true));
@@ -188,7 +228,7 @@ describe("criterion citations", () => {
         ...input,
         citations: [{ ...input.citations[0], ref: "f262e130" }],
       }).error?.code,
-    ).toBe("QUOTE_NOT_EXACT");
+    ).toBe("OBSERVED_VALUE_MISMATCH");
     expect(
       resolve({ ...input, evidenceRefs: ["artifact://misspelled"] }).error
         ?.code,

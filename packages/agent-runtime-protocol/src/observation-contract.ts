@@ -140,9 +140,11 @@ const observationContractV2Schema = z
 export const businessCheckSchema = z
   .object({
     subjects: z.array(z.string().trim().min(1).max(120)).min(1).max(20),
+    identityMatchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
     state: z
       .object({
         property: z.enum(["TEXT", "CHECKED", "VALUE"]).optional(),
+        matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
         label: z.string().trim().min(1).max(80),
         equals: z
           .union([z.boolean(), z.string().max(500)])
@@ -157,6 +159,15 @@ export const businessCheckSchema = z
   })
   .strict()
   .superRefine((check, ctx) => {
+    if (
+      check.state.matchMode === "DISPLAY_TEXT" &&
+      check.state.property !== "TEXT"
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["state", "matchMode"],
+        message: "DISPLAY_TEXT is only valid for TEXT assertions.",
+      });
     if (
       check.state.property &&
       (check.state.property === "CHECKED") !==
@@ -188,7 +199,12 @@ export const observationTargetV3Schema = z
   .object({
     targetId: id,
     label,
-    identity: z.object({ text: label }).strict(),
+    identity: z
+      .object({
+        text: label,
+        matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
+      })
+      .strict(),
     phase: observationTargetV2Schema.shape.phase,
     assertions: z
       .array(
@@ -196,6 +212,7 @@ export const observationTargetV3Schema = z
           .object({
             assertionId: id,
             property: z.enum(["TEXT", "CHECKED", "VALUE"]).optional(),
+            matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
             label,
             expected: z.union([z.boolean(), z.string().max(500)]).optional(),
           })
@@ -229,6 +246,12 @@ const observationContractV3Schema = z
     )
       issue("Each target must identify a distinct business subject.");
     for (const target of contract.targets) {
+      for (const assertion of target.assertions)
+        if (
+          assertion.matchMode === "DISPLAY_TEXT" &&
+          assertion.property !== "TEXT"
+        )
+          issue("DISPLAY_TEXT is only valid for TEXT assertions.");
       if (
         target.assertions.some((a) => a.expected === undefined) &&
         (!contract.comparisons.some(
@@ -283,13 +306,21 @@ export function compileBusinessCheck(
     targets: subjects.map((subject, i) => ({
       targetId: `subject-${i + 1}`,
       label: subject,
-      identity: { text: subject },
+      identity: {
+        text: subject,
+        ...(check.identityMatchMode
+          ? { matchMode: check.identityMatchMode }
+          : {}),
+      },
       phase: i < check.subjects.length ? check.when : "CURRENT",
       assertions: [
         {
           assertionId: "state",
           label: check.state.label,
           ...(check.state.property ? { property: check.state.property } : {}),
+          ...(check.state.matchMode
+            ? { matchMode: check.state.matchMode }
+            : {}),
           ...(i < check.subjects.length
             ? { expected: check.state.equals }
             : {}),
@@ -317,6 +348,9 @@ export const BUSINESS_CHECK_GUIDANCE = `对象状态验收只填写 businessChec
 示例：{"subjects":["合规模型映射","旧版对公转账白名单"],"state":{"label":"配置值","equals":"启用"}}。默认启用使用 equals=true、when="INITIAL_AFTER_OPEN"，不得手动开启来证明默认值。视觉对比才填写 compareWith 和 dimensions，参照对象不是新增测试需求。
 列表显示文字使用 state.property=TEXT；开关选中状态使用 CHECKED；输入值使用 VALUE。操作提到“开关”不代表列表断言是布尔值。
 网络请求只供 Agent 参考，不生成 observationTargets[].network、不要求 NETWORK 证据，也不把请求方法、路径、参数或响应字段改写为 businessCheck。验收保留用户可见的业务结果；接口细节按需放在 testData。
+必须显式填写 identityMatchMode：普通按钮名称设置 DISPLAY_TEXT，忽略汉字间排版空格；ID、SKU、账号仍使用 EXACT。
+多选按钮的选中状态同样使用 CHECKED。每个星期是独立 subject，不能把周一到周日写成 alternatives；要求“仅选中”时，还要验证其他对象为 false。工作日、全选、周末分开定义 AFTER_ACTION 检查，再次打开使用 REOPENED；不要用最终列表文字代替按钮状态。
+展示文字可使用 state.property=TEXT、state.matchMode=DISPLAY_TEXT，容忍汉字间排版空格和时间范围分隔符两侧空格；VALUE 仍精确匹配。
 普通文字发现继续使用 observationTargets；expectedText 只能是实际界面文字，不能填“列表展示目标记录”等需求句子。description 尽量一句话、80 字以内，步骤只保留业务动作及必要顺序，不规定点击路线。不要把每个字段或取证动作生成独立标准。`;
 export type ObservationContract = z.infer<typeof observationContractSchema>;
 export type ObservationTargetV2 = z.infer<typeof observationTargetV2Schema>;

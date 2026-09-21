@@ -1420,3 +1420,143 @@ it("correlates a UUID path ID with its collection resource", () => {
   expect(j.unresolvedWrites()).toEqual([]);
   expect(j.state.cleanupConfirmations).toHaveLength(1);
 });
+
+describe("named resources without business accounts", () => {
+  const endpoint = "https://app.test/product-discount";
+  const name = "test-weekdays-unique";
+  const request = (
+    id: number,
+    method: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    requestId: id,
+    method,
+    url: endpoint,
+    status: 200,
+    responseSummary: "{}",
+    ...extra,
+  });
+  const before = request(10, "GET", {
+    url: `${endpoint}?name=${name}`,
+    responseSummary: '{"data":[],"total":0}',
+  });
+  const post = request(11, "POST", {
+    requestSummary: JSON.stringify({
+      name,
+      applyRange: "all",
+      applyProducts: [{ applyProduct: "sku-1" }],
+    }),
+  });
+  const after = request(12, "GET", {
+    url: `${endpoint}?name=${name}`,
+    responseSummary: JSON.stringify({
+      data: [{ id: 545, name, dailyPeriods: [] }],
+      total: 1,
+    }),
+  });
+  it("binds preflight, creation and readback, survives resume, and confirms deletion only after a scoped read", () => {
+    let j = new ExecutionJournal({});
+    j.observe(output([before, post, after]), evidence);
+    expect(j.state.records).toHaveLength(1);
+    expect(j.state.records[0]).toMatchObject({
+      id: "545",
+      resourceName: name,
+      ownership: "CREATED_THIS_RUN",
+    });
+    expect(j.state.records[0]?.account).toBeUndefined();
+    expect(j.unresolvedWrites()).toEqual([]);
+    j = new ExecutionJournal({
+      executionState: JSON.parse(JSON.stringify(j.state)),
+    });
+    const deletion = request(13, "DELETE", { url: `${endpoint}?id=545` });
+    j.observe(output([deletion]), evidence);
+    expect(j.state.records[0]?.cleanup?.status).toBe("PENDING");
+    j.observe(
+      output([
+        request(14, "GET", {
+          url: `${endpoint}?name=other`,
+          responseSummary: '{"data":[],"total":0}',
+        }),
+      ]),
+      evidence,
+    );
+    expect(j.state.records[0]?.cleanup?.status).toBe("PENDING");
+    j.observe(output([{ ...before, requestId: 15 }]), evidence);
+    expect(j.state.records[0]?.cleanup).toMatchObject({
+      status: "COMPLETED",
+      resolution: "DELETED",
+    });
+    expect(j.unresolvedWrites()).toEqual([]);
+  });
+  it("does not infer creation without preflight, from pre-existing records, duplicate names or incomplete lists", () => {
+    const duplicate = {
+      ...after,
+      responseSummary: JSON.stringify({
+        data: [
+          { id: 545, name },
+          { id: 546, name },
+        ],
+        total: 2,
+      }),
+    };
+    for (const inputs of [
+      [post, after],
+      [{ ...after, requestId: 9 }, post, after],
+      [before, post, duplicate],
+      [{ ...before, responseTruncated: true }, post, after],
+      [
+        { ...before, url: `${endpoint}?name=${name}&status=active` },
+        post,
+        after,
+      ],
+      [before, post, { ...after, responseTruncated: true }],
+      [
+        before,
+        {
+          ...post,
+          responseSummary: JSON.stringify({
+            padding: "x".repeat(5000),
+            id: 546,
+          }),
+        },
+        after,
+      ],
+    ]) {
+      const j = new ExecutionJournal({});
+      j.observe(output(inputs), evidence);
+      expect(
+        j.state.records.filter((r) => r.ownership === "CREATED_THIS_RUN"),
+      ).toEqual([]);
+      expect(j.unresolvedWrites()).toHaveLength(1);
+    }
+  });
+  it("does not bind a different returned ID or guess that editing replaced the record", () => {
+    const j = new ExecutionJournal({});
+    j.observe(
+      output([before, { ...post, responseSummary: '{"id":546}' }, after]),
+      evidence,
+    );
+    expect(j.state.records).toEqual([]);
+    const valid = new ExecutionJournal({});
+    valid.observe(output([before, post, after]), evidence);
+    valid.observe(
+      output([
+        request(13, "PUT", {
+          requestSummary: JSON.stringify({ id: 545, name: "renamed" }),
+        }),
+        request(14, "GET", {
+          responseSummary: JSON.stringify({
+            data: [{ id: 546, name: "renamed" }],
+            total: 1,
+          }),
+        }),
+        request(15, "DELETE", { url: `${endpoint}?id=546` }),
+      ]),
+      evidence,
+    );
+    expect(valid.state.records.map((r) => r.id)).toEqual(["545"]);
+    expect(valid.unresolvedWrites().some((w) => w.method === "DELETE")).toBe(
+      true,
+    );
+  });
+});

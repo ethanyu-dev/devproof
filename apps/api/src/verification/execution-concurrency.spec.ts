@@ -124,3 +124,31 @@ it("serializes assigned account mutations without enabling broad locks, while un
     ),
   ).toBe(true);
 });
+
+it("serializes unknown accountless resources by default and respects declared independent scopes", async () => {
+  const { vi } = await import("vitest");
+  const { executionResourceClaims } =
+    await import("./execution-concurrency.js");
+  vi.stubEnv("BROWSER_EXECUTION_DATA_LOCKS_ENABLED", undefined);
+  try {
+    const unknown = executionResourceClaims(
+      "https://app.test/pricing",
+      { accessMode: "UNKNOWN" },
+      { testAccounts: [] },
+    );
+    expect(unknown).toEqual([
+      { rootKey: "origin:https://app.test", resourceKey: "", mode: "WRITE" },
+    ]);
+    const sku = (id: string) =>
+      executionResourceClaims(
+        "https://app.test/pricing",
+        { accessMode: "MUTATING", resourceScopes: [`product-discount/${id}`] },
+        { testAccounts: [] },
+      )[0]!;
+    expect(resourcesConflict(unknown[0]!, sku("sku-1"))).toBe(true);
+    expect(resourcesConflict(sku("sku-1"), sku("sku-1"))).toBe(true);
+    expect(resourcesConflict(sku("sku-1"), sku("sku-2"))).toBe(false);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

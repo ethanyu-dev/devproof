@@ -1,10 +1,16 @@
 import {
-  STRUCTURED_OBSERVATION_MAX_BYTES,
+  STRUCTURED_OBSERVATION_MAX_NODES,
+  STRUCTURED_OBSERVATION_MAX_REGIONS,
+  type ObservationLimitEvent,
   type ObservedNode,
   type StructuredObservation,
 } from "@devproof/runtime-protocol";
 import { randomUUID } from "node:crypto";
 import { selectors, type Locator, type Page } from "playwright";
+import {
+  observationLimitEvent,
+  trimObservation,
+} from "./observation-budget.js";
 import { SCROLL_OVERFLOWS } from "./scroll.js";
 
 // References point to observed DOM nodes, without adding attributes to the site.
@@ -192,7 +198,9 @@ export class DomObservations {
                   n.checked !== undefined &&
                   (["checkbox", "radio"].includes((el as HTMLInputElement).type)
                     ? (el as HTMLInputElement).checked
-                    : el.getAttribute("aria-checked") === "true") !== n.checked
+                    : (el.getAttribute("aria-checked") ??
+                        el.getAttribute("aria-pressed")) === "true") !==
+                    n.checked
                 )
                   return "CHECKED_CHANGED";
                 if (
@@ -325,7 +333,27 @@ export class DomObservations {
         ),
       ).values(),
     ].slice(0, 20);
+    const limit = observationLimitEvent(observation);
+    if (limit) trimObservation(observation, limit);
     return observation.consistencyIssues.length === 0;
+  }
+
+  private async activeRegion(page: Page): Promise<Locator | undefined> {
+    for (const selector of [
+      "dialog:visible,[role=dialog]:visible,[role=alertdialog]:visible",
+      "form:visible,[role=form]:visible",
+    ]) {
+      const candidates: Locator[] = [];
+      for (const frame of page.frames()) {
+        const locator = frame.locator(selector);
+        const count = await locator.count().catch(() => 0);
+        for (let index = 0; index < Math.min(count, 2); index++)
+          candidates.push(locator.nth(index));
+      }
+      if (candidates.length === 1) return candidates[0];
+      if (candidates.length > 1) return undefined;
+    }
+    return undefined;
   }
 
   async snapshot(
@@ -336,7 +364,13 @@ export class DomObservations {
       includeBoxes?: boolean | undefined;
       timeout?: number | undefined;
     } = {},
-  ) {
+  ): Promise<{
+    structured: StructuredObservation;
+    content: string;
+    captureLimited: boolean;
+    focusRef: string | undefined;
+    format: string;
+  }> {
     const structured: StructuredObservation = {
       version: 2,
       captureId: randomUUID(),
@@ -370,6 +404,7 @@ export class DomObservations {
           .map((frame) => ({ root: frame.locator(":root > body"), frame }));
     const sections: string[] = [];
     let limited = false;
+    const captureLimits = new Set<ObservationLimitEvent["exceeded"][number]>();
     let focusRef: string | undefined;
     for (const { root, frame: knownFrame } of roots) {
       if (Date.now() >= deadline) {
@@ -443,6 +478,9 @@ export class DomObservations {
             const refs: string[] = [];
             let visited = 0;
             let limited = false;
+            const limitReasons = new Set<
+              ObservationLimitEvent["exceeded"][number]
+            >();
             let focusRef: string | undefined;
             const text = (value: string | null | undefined) =>
               (value ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
@@ -474,11 +512,14 @@ export class DomObservations {
               parentId?: string,
             ) => {
               if (
-                ++visited > 20_000 ||
-                refs.length >= 1_500 ||
-                nodes.length >= 3500
+                ++visited > 40_000 ||
+                refs.length >= input.maxNodes ||
+                nodes.length >= input.maxNodes
               ) {
                 limited = true;
+                if (visited > 40_000) limitReasons.add("VISITS");
+                if (refs.length >= input.maxNodes) limitReasons.add("REFS");
+                if (nodes.length >= input.maxNodes) limitReasons.add("NODES");
                 return;
               }
               if (
@@ -510,9 +551,16 @@ export class DomObservations {
                 element.clientWidth > 0 &&
                 element.scrollWidth > element.clientWidth + 1;
               const fullOwnText = Array.from(element.childNodes)
-                .filter((node) => node.nodeType === 3)
-                .map((node) => node.textContent)
-                .join(" ");
+                // React separates interpolated text with comments. Preserve the
+                // actual characters, but do not join text across child elements.
+                .map((node) =>
+                  node.nodeType === 3
+                    ? node.textContent
+                    : node.nodeType === 8
+                      ? ""
+                      : " ",
+                )
+                .join("");
               const ownText = text(fullOwnText);
               const tag = element.tagName.toLowerCase();
               // Adopted microfrontend controls may retain another realm's prototype.
@@ -574,7 +622,9 @@ export class DomObservations {
                     if (value.length <= 500) observed.attributes[key] = value;
                   } else observed.attributes[key] = text(value);
                 }
-              const checked = element.getAttribute("aria-checked");
+              const checked =
+                element.getAttribute("aria-checked") ??
+                element.getAttribute("aria-pressed");
               if (checked === "true" || checked === "false")
                 observed.checked = checked === "true";
               if (control) {
@@ -982,10 +1032,14 @@ export class DomObservations {
                   ["dialog", "form", "tr", "body"].includes(node.tag) ||
                   (state.elements.get(node.nodeId) as Element).querySelector(
                     "h1,h2,h3,h4,h5,h6,label",
-                  )) &&
-                regions.length < 200
+                  ))
               ) {
-                if (!node.ref && refs.length < 1500) {
+                if (regions.length >= input.maxRegions) {
+                  limited = true;
+                  limitReasons.add("REGIONS");
+                  continue;
+                }
+                if (!node.ref && refs.length < input.maxNodes) {
                   node.ref = input.prefix + (refs.length + 1);
                   refs.push(node.ref);
                   store.set(node.ref, state.elements.get(node.nodeId));
@@ -1026,6 +1080,7 @@ export class DomObservations {
               content: lines.join("\n"),
               refs,
               limited,
+              limitReasons: [...limitReasons],
               focusRef,
               nodes,
               regions,
@@ -1043,6 +1098,8 @@ export class DomObservations {
             boxes: options.includeBoxes ?? true,
             scrollOverflows: SCROLL_OVERFLOWS,
             focusRef: previousFocus,
+            maxNodes: STRUCTURED_OBSERVATION_MAX_NODES,
+            maxRegions: STRUCTURED_OBSERVATION_MAX_REGIONS,
           },
         );
         if (captured.refs.length) {
@@ -1095,6 +1152,7 @@ export class DomObservations {
           `DOM viewport scope ${prefix.slice(0, -1)} (coordinates local to this frame):\n${captured.content}`,
         );
         limited ||= captured.limited;
+        for (const reason of captured.limitReasons) captureLimits.add(reason);
         focusRef ??= captured.focusRef;
       } catch (error) {
         if (target) throw error;
@@ -1115,23 +1173,40 @@ export class DomObservations {
     structured.renderedText = sections.join("\n\n");
     structured.coverage.completeWithinScope = !limited;
     structured.coverage.truncated = limited;
-    const structuredBytes = Buffer.byteLength(JSON.stringify(structured));
-    if (
-      structuredBytes > STRUCTURED_OBSERVATION_MAX_BYTES ||
-      structured.nodes.length > 4000 ||
-      structured.regions.length > 200
-    ) {
-      structured.nodes = [];
-      structured.regions = [];
-      structured.renderedText = "";
-      structured.coverage.completeWithinScope = false;
-      structured.coverage.truncated = true;
+    const event = observationLimitEvent(structured, [...captureLimits]);
+    if (event) {
+      // One retry only, using a fresh capture of a unique active dialog or form.
+      // Never replay the action that caused the oversized observation.
+      if (!target && Date.now() < deadline) {
+        const active = await this.activeRegion(page);
+        if (active && Date.now() < deadline) {
+          const scoped = await this.snapshot(page, active, {
+            ...options,
+            timeout: deadline - Date.now(),
+          });
+          scoped.structured.coverage.limitEvents = [
+            { ...event, action: "SCOPED_RECAPTURE" },
+            ...(scoped.structured.coverage.limitEvents ?? []),
+          ];
+          const combinedLimit = observationLimitEvent(scoped.structured);
+          if (combinedLimit) {
+            trimObservation(scoped.structured, combinedLimit);
+            scoped.captureLimited = true;
+            scoped.content =
+              "DOM coverage: incomplete region; narrow the snapshot target before verifying.\n\n" +
+              scoped.structured.renderedText;
+          }
+          return scoped;
+        }
+      }
+      trimObservation(structured, event);
+      limited = true;
     }
     return {
       structured,
       content:
         "DOM coverage: current viewport and unclipped content only. Scroll containers with atEnd=false have unseen content; absence here does not prove absence from the page or dropdown.\n\n" +
-        sections.join("\n\n"),
+        (event ? structured.renderedText : sections.join("\n\n")),
       captureLimited: limited,
       focusRef,
       format: "dom",

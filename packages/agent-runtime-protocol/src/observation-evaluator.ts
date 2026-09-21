@@ -9,6 +9,7 @@ import type {
   ObservationTargetV3,
   VisualComparisonReview,
 } from "./observation-contract.js";
+import { normalizeDisplayText } from "./observed-value.js";
 
 const normalize = (s: string) => s.replace(/\s+/gu, " ").trim();
 const same = (a: string | undefined, b: string) =>
@@ -45,6 +46,13 @@ export function evaluateObservationTarget(
   details?: unknown;
 } {
   const business = "identity" in target;
+  const sameIdentity = (actual: string | undefined, expected: string) =>
+    actual !== undefined &&
+    (business && target.identity.matchMode === "DISPLAY_TEXT"
+      ? normalizeDisplayText(actual) === normalizeDisplayText(expected)
+      : business && target.identity.matchMode === "EXACT"
+        ? actual === expected
+        : same(actual, expected));
   const nodes = observation.nodes;
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   function within(node: ObservedNode, root: ObservedNode) {
@@ -88,7 +96,9 @@ export function evaluateObservationTarget(
           "searchbox",
         ].includes(n.role ?? "") &&
         (n.role === "combobox" ||
-          !["option", "input", "textarea"].includes(n.tag)) &&
+          !["option", "input", "textarea"].includes(n.tag) ||
+          (n.tag === "input" &&
+            ["checkbox", "radio"].includes(n.attributes.type ?? ""))) &&
         !nodes.some(
           (parent) =>
             parent !== n &&
@@ -100,6 +110,11 @@ export function evaluateObservationTarget(
         : target.entity.controlKind === "ROW"
           ? n.tag === "tr" || n.role === "row"
           : ["input", "textarea"].includes(n.tag) || n.role === "textbox";
+  const identityControl = (n: ObservedNode) =>
+    n.tag === "button" ||
+    ["button", "switch", "checkbox", "radio"].includes(n.role ?? "") ||
+    (n.tag === "input" &&
+      ["checkbox", "radio"].includes(n.attributes.type ?? ""));
   const entityValue = (n: ObservedNode) => {
     if (business) {
       // A selected value is authoritative; a combobox's search text is not.
@@ -108,6 +123,13 @@ export function evaluateObservationTarget(
           !n.truncatedProperties?.includes("SELECTED_LABEL")
           ? n.selectedLabel
           : undefined;
+      if (
+        identityControl(n) &&
+        n.nameSource &&
+        n.name &&
+        !n.truncatedProperties?.includes("NAME")
+      )
+        return n.name;
       return !n.truncatedProperties?.includes("TEXT") ? n.text : undefined;
     }
     return n.truncatedProperties?.includes(target.entity.property)
@@ -125,7 +147,7 @@ export function evaluateObservationTarget(
       n.visible &&
       isEntity(n) &&
       (business
-        ? same(entityValue(n), target.identity.text)
+        ? sameIdentity(entityValue(n), target.identity.text)
         : named(n, target.entity.label) &&
           target.entity.oneOf.some((v) =>
             target.entity.property === "VALUE"
@@ -140,6 +162,26 @@ export function evaluateObservationTarget(
             within(n, parent),
         )),
   );
+  if (business && !entityCandidates.length)
+    return {
+      error: "ENTITY_NOT_CONFIRMED",
+      candidates: nodes
+        .filter((n) => n.visible && identityControl(n) && n.ref)
+        .slice(0, 20)
+        .map((n) => n.ref!),
+      details: {
+        expectedLabel: target.identity.text,
+        matchMode: target.identity.matchMode ?? "LEGACY",
+        controls: nodes
+          .filter((n) => n.visible && identityControl(n))
+          .slice(0, 20)
+          .map((n) => ({
+            ref: n.ref,
+            name: n.name ?? null,
+            text: n.text ?? null,
+          })),
+      },
+    };
   const businessScope = (n: ObservedNode) =>
     ["tr", "form", "dialog"].includes(n.tag) ||
     ["row", "form", "dialog", "alertdialog"].includes(n.role ?? "");
@@ -258,12 +300,17 @@ export function evaluateObservationTarget(
             name: n.name ?? null,
             selectedValue: entityValue(n) ?? null,
             labelMatched: business
-              ? same(entityValue(n), target.identity.text)
+              ? sameIdentity(entityValue(n), target.identity.text)
               : named(n, target.entity.label),
           })),
       },
     };
   const entity = entities[0]!;
+  // An identity inside a toggle belongs to that toggle, never a sibling toggle
+  // with the same generic state label elsewhere in the dialog.
+  const ownerControl = nodes.find(
+    (n) => identityControl(n) && within(entity, n),
+  );
   const facts: BindingEvaluation["facts"] = [];
   const reasons: string[] = [];
   for (const assertion of target.assertions) {
@@ -293,6 +340,10 @@ export function evaluateObservationTarget(
       (n) =>
         n.visible &&
         within(n, scope) &&
+        (!business ||
+          !ownerControl ||
+          n.nodeId === ownerControl.nodeId ||
+          within(n, ownerControl)) &&
         (modern
           ? (selection && !labeledStateExists
               ? Boolean(n.ref)
@@ -385,7 +436,12 @@ export function evaluateObservationTarget(
             ).some(
               (v) =>
                 typeof v === "string" &&
-                (property === "VALUE" ? actual === v : same(actual, v)),
+                (property === "VALUE" ||
+                (modern && assertion.matchMode === "EXACT")
+                  ? actual === v
+                  : modern && assertion.matchMode === "DISPLAY_TEXT"
+                    ? normalizeDisplayText(actual) === normalizeDisplayText(v)
+                    : same(actual, v)),
             )
           : actual === assertion.expected;
     facts.push({

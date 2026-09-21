@@ -287,3 +287,36 @@ it("releases verified account occupancy while preserving an unknown write assess
   expect(getLease()).toBeNull();
   expect(recovery.writeOutcomeState).toBe("UNKNOWN");
 });
+
+it("releases an inconclusive session after the close audit becomes durable, without waiting for another owner result", async () => {
+  const { tx, session, owner, closure, recovery, getLease } = fixture();
+  Object.assign(session, {
+    protocolMinor: 21,
+    controlGeneration: 0,
+    launchIdentityVersion: 1,
+    launchIdentity: { id: "launch-1" },
+  });
+  complete(owner);
+  owner.result = { kind: "VERIFICATION_COMPLETED", verdict: "INCONCLUSIVE" };
+  const findClose = vi.fn().mockResolvedValue(null);
+  Object.assign(tx.browserRuntimeCommand, { findFirst: findClose });
+  await closure.acceptRuntimeEvidence(context, proof);
+  expect(recovery.writeOutcomeState).toBe("UNKNOWN");
+  expect(getLease()?.quarantined).toBe(true);
+  findClose.mockResolvedValue({
+    result: {
+      closed: true,
+      writeAudit: {
+        version: 1,
+        launchIdentityId: "launch-1",
+        complete: true,
+        coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+        requestCount: 3,
+        potentialWrites: 0,
+      },
+    },
+  });
+  await closure.acceptRuntimeEvidence(context, proof);
+  expect(recovery.writeOutcomeState).toBe("NO_WRITE_VERIFIED");
+  expect(getLease()).toBeNull();
+});

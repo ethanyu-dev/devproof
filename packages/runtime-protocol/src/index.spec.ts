@@ -206,7 +206,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(19);
+    expect(RUNTIME_PROTOCOL.minor).toBe(21);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");

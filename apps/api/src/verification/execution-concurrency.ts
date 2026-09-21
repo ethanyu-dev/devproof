@@ -15,9 +15,9 @@ export interface ResourceClaim {
   origin?: string;
 }
 
-/** Broad resource locks are opt-in. Explicitly assigned accounts always coordinate. */
+/** Unknown/global mutations serialize by environment unless explicitly disabled. */
 export function businessDataLocksEnabled(): boolean {
-  return process.env.BROWSER_EXECUTION_DATA_LOCKS_ENABLED === "true";
+  return process.env.BROWSER_EXECUTION_DATA_LOCKS_ENABLED !== "false";
 }
 
 /** Only deployment configuration can alias origins which share backend state. */

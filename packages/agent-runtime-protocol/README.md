@@ -212,3 +212,22 @@ Protocol v2.23 adds `business-checks-v3`. Spec generation accepts compact subjec
 - Additive execution state fields provide account revisions, stable `recordRef`, request/read ordering and cleanup confirmations. Record progress accepts partial updates without losing immutable ownership and identity facts.
 
 See [runtime reliability implementation](../../docs/runtime-reliability-first-four.md) for behavior, compatibility and validation.
+
+## Protocol v2.26
+
+- Optional `EXACT`/`DISPLAY_TEXT` modes distinguish identifiers and input values
+  from display text with layout spacing. Generated business checks explicitly
+  choose the identity mode; historical contracts keep their original semantics.
+- Named resources carry an observed name and creation-write reference. Ownership
+  requires a complete pre-create read, an unambiguous write receipt and a unique
+  post-create identity. Data-precondition requests can identify a cited resource
+  instead of an assigned account.
+- Browser workers below minor 26 skip snapshots carrying the new match modes or
+  named-resource ownership fields, including resumed execution state.
+- New Spec generation accepts at most 10 Cases and five criteria/check references
+  per Case. Both model-facing schemas and the API enforce these limits without
+  truncating requirements; historical stored Specs retain their read limits.
+
+Deploy the updated protocol packages, API and Agent workers together. The
+Browser's capture and closure-audit changes additionally require a protocol 1.21
+Runtime build; no database migration is introduced by these extensions.

@@ -8,6 +8,7 @@ import { stepContextArchiveSchema } from "./step-context.js";
 export * from "./observation-contract.js";
 export * from "./observation-evaluator.js";
 import { observationContractSchema } from "./observation-contract.js";
+import { readExecutionState } from "./execution-state.js";
 export * from "./criterion-observation.js";
 import {
   testAccountRequirementsSchema,
@@ -26,7 +27,10 @@ export {
   readExecutionState,
 } from "./execution-state.js";
 export type { ExecutionRecord, ExecutionState } from "./execution-state.js";
-export { observedValueMatches } from "./observed-value.js";
+export {
+  observedValueMatches,
+  normalizeDisplayText,
+} from "./observed-value.js";
 export {
   requirementNecessityError,
   specNecessityError,
@@ -42,7 +46,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 25,
+  minor: 26,
   name: "devproof-agent-runtime",
 } as const;
 
@@ -161,6 +165,7 @@ export const runtimeObservationTargetSchema = z.object({
   network: networkCheckSchema.optional(),
   label: z.string().trim().min(1).max(500),
   expectedText: z.string().trim().min(1).max(500),
+  matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
   // Alternatives describe the same business object, not additional objects.
   alternatives: z.array(z.string().trim().min(1).max(500)).max(10).optional(),
 });
@@ -347,6 +352,30 @@ export const runtimeGeneratedSpecSchema = z.object({
   summary: z.string().trim().min(1).max(8_000),
 });
 
+export const GENERATED_SPEC_MAX_CASES = 10;
+export const GENERATED_SPEC_MAX_CRITERIA_PER_CASE = 5;
+
+/** New generation only: historical snapshots retain their original read limits. */
+export const generatedSpecSubmissionSchema = runtimeGeneratedSpecSchema.extend({
+  cases: z
+    .array(
+      runtimeGeneratedSpecCaseSchema.extend({
+        criteria: z
+          .array(runtimeSpecCriterionSchema)
+          .min(1)
+          .max(
+            GENERATED_SPEC_MAX_CRITERIA_PER_CASE,
+            "每个 Case 最多 5 条验收标准，请按独立业务结果重新组织，不得截断需求。",
+          ),
+      }),
+    )
+    .min(1)
+    .max(
+      GENERATED_SPEC_MAX_CASES,
+      "最多生成 10 个 Case，请合并重复场景并保留需求覆盖。",
+    ),
+});
+
 export const runtimeSpecAnalysisTaskSnapshotSchema = z.object({
   observationContractVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   specFormat: z.enum(["COMPACT", "CHECK_REFERENCES"]).optional(),
@@ -443,6 +472,37 @@ export const runtimeTaskSnapshotSchema = z.object({
   teamId: z.string().uuid(),
   traceId: z.string().regex(/^[a-f0-9]{32}$/u),
 });
+
+/** Older workers reject strict match-mode fields and discard named-resource ownership. */
+export function requiresAgentProtocol26(
+  snapshot: z.infer<typeof runtimeTaskSnapshotSchema>,
+): boolean {
+  if (
+    snapshot.criteria.some(
+      (criterion) =>
+        criterion.observationTargets?.some(
+          (target) => target.matchMode !== undefined,
+        ) ||
+        (criterion.observationContract?.version === 3 &&
+          criterion.observationContract.targets.some(
+            (target) =>
+              target.identity.matchMode !== undefined ||
+              target.assertions.some(
+                (assertion) => assertion.matchMode !== undefined,
+              ),
+          )),
+    )
+  )
+    return true;
+  const state = readExecutionState(snapshot.executionPolicy);
+  return (
+    [...state.records, ...state.observedRecords].some(
+      (record) =>
+        record.resourceName !== undefined ||
+        record.creationWriteKey !== undefined,
+    ) || state.readReceipts.some((read) => read.namedResources.length > 0)
+  );
+}
 
 /** Analysis provenance stays in the control plane; execution verifies observations. */
 export function browserExecutionCriterion(

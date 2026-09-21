@@ -8,6 +8,9 @@ import { randomUUID } from "node:crypto";
 
 import {
   runtimeGeneratedSpecSchema,
+  generatedSpecSubmissionSchema,
+  GENERATED_SPEC_MAX_CASES,
+  GENERATED_SPEC_MAX_CRITERIA_PER_CASE,
   runtimeGeneratedSpecCaseSchema,
   runtimeSpecCriterionSchema,
   runtimeSpecAnalysisOutcomeSchema,
@@ -74,11 +77,11 @@ const finishSpecSchema = z.object({
               }),
             )
             .min(1)
-            .max(100),
+            .max(GENERATED_SPEC_MAX_CRITERIA_PER_CASE),
         }),
       )
       .min(1)
-      .max(100),
+      .max(GENERATED_SPEC_MAX_CASES),
   }),
 });
 const MAX_CONSECUTIVE_SOURCE_FAILURES = 2;
@@ -1215,11 +1218,11 @@ function toolDefinitions(
                                   ),
                                 )
                                 .min(1)
-                                .max(100),
+                                .max(GENERATED_SPEC_MAX_CRITERIA_PER_CASE),
                             }),
                           )
                           .min(1)
-                          .max(100),
+                          .max(GENERATED_SPEC_MAX_CASES),
                       })
                     : compactSpecSchema,
                 })
@@ -1374,12 +1377,13 @@ ${compact ? "每条需求引用实际返回的 analysis-source 和原文，由�
 严格区分产品要求、探索步骤和自拟测试标识：只有来源明确的产品行为进入 criteria；未知字段和操作路径写成条件性探索步骤或 assumptions，不生成强制验收项。自拟标识只放在 testData，且必须先确认产品存在可填写的字段；不能假设备注字段存在，更不能要求不存在的备注字段或备注回显。用实际记录 ID、业务账号和类型追踪数据。
 ${compact ? "操作写清业务目标与必要动作；浏览器 Agent 负责定位元素、探索路径和选择工具，不预先编造选择器。前置条件、测试数据和清理步骤按需填写。" : "生成具体的前置条件、测试数据、有序操作、预期现象、验收标准、证据类型和清理步骤。优先描述业务可观察行为，而不是实现细节。"}
 内部枚举或代码符号不要求在 DOM 中显示，除非来源明确要求用户看到它。等价业务类型可以共用一条验收，但必须分别观察所有 observationTargets；业务条件或预期不同才拆分，不能观察一个类型后判定所有类型通过。
+最多生成 ${GENERATED_SPEC_MAX_CASES} 个 Case，每个 Case 最多 ${GENERATED_SPEC_MAX_CRITERIA_PER_CASE} 条验收标准（checkIds 同样受限）。这是硬性上限。先按独立业务结果组织场景、合并重复检查；同一结果可以验证多个对象，但不得将无关验收强塞成一条，也不能为满足数量限制截断、删除必要需求或将其伪装成 outOfScope。若范围无法在上限内完整覆盖，通过 request_analysis_input 请求用户明确优先级或拆分任务；未覆盖内容必须如实说明。
 Spec 用简短、无重复的业务语言：Case 名称只写对象与目标；简单场景通常 3–6 个业务步骤，按“新增→筛选→禁用→重新启用→清理”合并连续点击，不逐个描述按钮操作。复杂场景按需要增加步骤，不能为压缩遗漏要求。每个描述或步骤最多 300 字；接口细节仅作执行参考，按需放入 testData，不进入 criteria。验收标准只写可判定结果，不复述操作步骤；不要在 name、preconditions、testData、steps、criteria 和账号说明中重复同一约束。
 账号字段各司其职：label 只写用途，rationale 一句话解释数量或隔离必要性，constraints 只写此业务对象特有的前置条件。通用登录、禁用随机账号、禁止修改他人记录、账号不可用时无法判定等平台规则由执行器统一提供，不在各 Case 中反复抄写。后台登录身份仅填 authRole，不能放进 accountRequirements；后台权限不能填 requiredTypes（它只表示业务类型）。
 每个 Case 必须填写 accountRequirementsVersion: 2。非空账号需求必须提供 subjectBinding：kind 为 BUSINESS_INPUT（账号填入业务字段）、BUSINESS_RECORD（按指定账号检查业务记录）或 AUTH_SUBJECT（该账号登录/权限本身是验收对象）；target 为实际业务字段或被测账号对象；stepOrders 引用当前步骤；basis 引用已读来源的 sourceRef 和准确 quote，说明业务确实需要这个账号。AUTH_SUBJECT 还必须填 criterionIds，${checkReferences ? "使用当前 Case 的 checkIds" : compact ? "使用当前 Case 验收标准的一基序号字符串，如 1" : "使用当前 Case 的 criterion id"}。真实来源原文必须支持账号用途，不能仅引用存在权限判断的代码。
 创建、编辑、克隆模型或产品配置不等于需要业务账号：模型名称、ID、时间属于普通测试资源，使用 testData 和清理台账。仅需模型编辑权限、列表查看或导出权限的操作账号放 authRole，accountRequirements 为 []。添加用户白名单、指定用户查询、双账号转账需要实际账号；验证账号登录权限时保留 AUTH_SUBJECT，不与执行身份混淆。
 每个 Case 必须填写 accountRequirements 数组：不需要业务测试对象时为 []；需要时填写 role（稳定英文标识）、label（中文用途）、count、usage（CREATE_OR_MODIFY 或 READ_EXISTING）、requiredTypes、constraints、rationale。按独立业务测试对象计算最少账号数，不按验收点或类型累加；同一账号能安全验证多个类型时合并为一个角色并列出类型。只有不同身份/数据隔离确有必要才增加数量，并写明原因。账号 A/B 是角色占位符，禁止当作账号值。平台在执行前统一收集并按角色分配；同环境同账号同类型的写操作按执行会话串行，账号可以复用。步骤引用对应角色；账号前置冲突由执行器通过 DATA_PRECONDITION 人工接管获取处置意见；Spec 不预先规定冲突即结束，也不自行换号。纯界面只读 Case 不需要账号；无效账号负向输入不索取有效账号。
-每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。必要的权限、数据和控件定位检查放在本 Case 的步骤；仅在对应业务结果属于本次范围时才设为验收标准。不能把假设当作已经观察的事实。
+设计修改步骤时必须逐步推演数据约束：扩大生效范围（例如清空星期变为每天、改为全天）可能与保留的其他时段重叠。正向保存步骤必须先移除冲突时段，或使用独立的单时段测试记录；负向校验则明确预期拦截。清空星期、跨午夜、重叠等场景不得复用会造成相反预期的数据。每个 Case 必须可独立启动：当前调度器并发运行且不传递其他 Case 的验收结果，不能把“已完成 Case 1”“使用其他用例创建的数据”或“已了解参照类型的操作路径”写作前置条件。必要的权限、数据和控件定位检查放在本 Case 的步骤；仅在对应业务结果属于本次范围时才设为验收标准。不能把假设当作已经观察的事实。
 按数据前置条件拆分新增与编辑：新增要求账号下不存在目标记录，编辑要求已有目标记录，不能仅为合并步骤把独立编辑验收绑死在新增成功之后。只有来源明确要求同一记录的完整生命周期时才合并。独立编辑用例不得添加“新增成功”验收来绕过前置检查；数据不足时可在准备步骤说明经授权创建临时记录，准备动作不能充当编辑验收。独立编辑用例必须说明测试记录归属、可修改授权、初始值记录与恢复步骤；仅提供账号不代表授权修改该账号的全部既有数据。无法确认授权时请求 DATA_PRECONDITION，不自动删除既有记录来满足新增条件。账号 constraints 只声明真实业务约束；不同类型的唯一键互不冲突时，不自行增加跨 Case 必须不同账号的要求。
 正向写入需要的业务账号只能来自任务明确指定的测试账号或 TEST_ACCOUNT 答复。不能建议从列表挑选其他用户的账号进行新增或修改；只读筛选才允许复用已观察记录。自拟标识不能成为强制回显要求，除非来源证据明确支持相应字段。
 账号、用户 UUID 等已有实体不能用随机手机号或时间戳字符串替代。authRole 只描述后台登录身份；业务测试对象是另一用途，不要求与当前登录账号相同。缺少业务账号时通过现有 TEST_ACCOUNT HITL 请求，说明环境、Case、所需业务类型、唯一性约束和已有记录是否可复用。默认并发执行，确有隔离需要时在账号约束中说明独立账号或不冲突的唯一键；创建前只读核查账号+类型是否存在，已存在且不满足场景前置条件时，可由 DATA_PRECONDITION 人工接管处理或明确授权删除指定记录后继续；未授权不得自行删除，不反复索取新账号。列表筛选优先只读复用已有记录，不重复创建其他 Case 的数据。仅清理有明确创建证据且属于本 Case 的记录。故意验证无效账号的负向 Case 保留其无效输入和预期拒绝结果。
@@ -1389,6 +1393,7 @@ ${
     ? `当前使用精简 Spec 协议。先读取必要来源并完成范围筛选，再调用 define_requirements 固定本次必要需求；保留所有明确要求的业务对象与样式参照，不按操作、字段和等价类型机械拆分。最终每条需求都必须对应验收标准，或在 uncoveredRequirements 提供具体缺失信息，不能在修正格式时缩减需求范围。outOfScope 只记录不属于本次要求或改动影响的内容及排除原因。
 ${checkReferences ? `先调用 define_checks 分批定义验收标准，每项填写 requirementId、description、observationTargets 和必要的 requiredEvidenceKinds；界面文案来自其他已读来源时显式填写 supportingSourceRefs，原需求 basis 保持不变。工具会保存有效项并返回 checkId、revision 和逐字段 issues；只重提交失败项，修改已保存项时携带 checkId 及该项完整内容，并使用工具给出的 expectedRevision。不要为已保存的相同标准重复生成内容。最终 Case 填写 name、steps（有序操作字符串数组）、accountRequirements 和 checkIds，不填写 criteria。checkIds 必须来自 define_checks 成功保存的编号，系统展开完整标准和来源。同一个 check 只在对象、状态和预期完全一致时复用，每个 Case 独立观察和取证。` : `Case 填写 name、steps（有序操作字符串数组）、accountRequirements、criteria。每条 criterion 填写 requirementId、description、observationTargets；必要时用 supportingSourceRefs 引用额外已读的界面证据。`}仅确有需要时填写 preconditions、testData、cleanup；系统自动生成编号、默认优先级、步骤序号及来源 basis。
 同一个业务对象的同义显示方式才写在该 target 的 alternatives 中；启用/禁用、成功/失败属于不同状态，不能互为 alternatives。不同业务对象分别列 target，使用各对象实际可见的类型或区域名称作为 expectedText 锚点，所有对象都必须验证；不要让两个样式参照对象都只写“启用状态”。描述中的“或”必须体现在同一 target 的 alternatives 中，不能拆成两个必须出现的对象。UI 未承诺展示内部枚举时，优先使用业务中文名称。
+expectedText/equals 不得直接使用 {{a}}、\${value} 等模板变量；先按用例数据实例化，或引用来源支持的稳定提示文字。普通展示文字可显式使用 matchMode=DISPLAY_TEXT，容忍汉字间排版空格与时间范围分隔符两侧空格；标识、输入值、请求 JSON 继续精确匹配。
 criteria.description 描述产品应满足的条件，不把“截图、记录差异、观察页面”等测试动作当作通过条件。样式比较须写明被比较的目标、参照对象和要比较的结构/交互，requiredEvidenceKinds 包含 SCREENSHOT；来源没有明确比较范围时，在 uncoveredRequirements 中说明待确认内容，不擅自把像素、颜色或字段当作硬性要求。`
     : ""
 }`;
@@ -1426,6 +1431,8 @@ export function validateFinalSpec(input: {
   spec: z.infer<typeof runtimeGeneratedSpecSchema>;
   unavailableTools: ReadonlySet<string>;
 }) {
+  const sizeCheck = generatedSpecSubmissionSchema.safeParse(input.spec);
+  if (!sizeCheck.success) return sizeCheck.error.message;
   const capabilityError = specCapabilityError(
     input.spec,
     input.issueTexts ?? new Map(),
@@ -1482,6 +1489,31 @@ export function validateFinalSpec(input: {
 export function caseDataPreconditionError(
   testCase: z.infer<typeof runtimeGeneratedSpecSchema>["cases"][number],
 ) {
+  // Expanding a weekend full-day slot to every day conflicts with retained
+  // weekday slots. Reject this concrete positive-path contradiction before dispatch.
+  const actions = (testCase.steps ?? []).map((step) => step.action);
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i]!;
+    const prior = [
+      ...testCase.preconditions,
+      ...(testCase.testData ?? []),
+      ...actions.slice(0, i),
+    ].join("\n");
+    if (
+      /工作日/u.test(prior) &&
+      /周末/u.test(prior) &&
+      /00:00\s*[–—~～至-]\s*24:00|周末全天/u.test(prior) &&
+      /(?:清空|取消).*(?:星期|周六|周日)|(?:星期|周六|周日).*(?:清空|取消)/u.test(
+        action,
+      ) &&
+      /保存/u.test(action) &&
+      !/拦截|拒绝|无法保存|保存失败/u.test(action) &&
+      !/(?:删除|移除|清除).*(?:其他|其余).*时段|(?:独立|单独|另一).*(?:记录|折扣)/u.test(
+        [...actions.slice(0, i), action].join("\n"),
+      )
+    )
+      return `用例「${testCase.name}」将周末全天时段清空为每天生效，却仍保留工作日时段，正向保存将与重叠约束冲突。请先移除其余时段，或用独立单时段折扣验证清空星期。`;
+  }
   const editing =
     /编辑|修改|更新|禁用|重新启用/u.test(testCase.name) &&
     !/新增|创建|新建|生命周期/u.test(testCase.name);

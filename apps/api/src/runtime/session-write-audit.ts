@@ -95,3 +95,92 @@ export async function hasVerifiedObservationOnlyHistory(
     })) === 0
   );
 }
+
+/** Runtime 1.21 reports all context HTTP requests from blank launch until close.
+ * Unknown channels, persistent pages and human control cannot attest no writes.
+ * Verification verdicts and the model's textual cleanup claims are not evidence.
+ */
+export async function hasVerifiedNoWriteNetworkAudit(
+  tx: Prisma.TransactionClient,
+  session: BrowserRuntimeSession,
+) {
+  const identity = session.launchIdentity as { id?: string } | null;
+  if (
+    session.protocolMinor < 21 ||
+    session.purpose !== "EXECUTION" ||
+    session.status !== "CLOSED" ||
+    !session.closureVerifiedAt ||
+    !session.closureEvidenceId ||
+    session.controlGeneration !== 0 ||
+    !session.ownerTaskId ||
+    session.ownerFencingToken === null ||
+    session.launchIdentityVersion !== 1 ||
+    !identity?.id
+  )
+    return false;
+  const close = await tx.browserRuntimeCommand.findFirst({
+    where: {
+      sessionId: session.id,
+      commandType: "session.close",
+      status: "SUCCEEDED",
+      leaseToken: session.leaseToken,
+      fencingToken: session.fencingToken,
+    },
+    orderBy: { createdAt: "desc" },
+    select: { result: true },
+  });
+  const result = close?.result as {
+    closed?: boolean;
+    writeAudit?: {
+      version?: number;
+      launchIdentityId?: string;
+      coverage?: string;
+      complete?: boolean;
+      requestCount?: number;
+      potentialWrites?: number;
+    };
+  } | null;
+  const audit = result?.writeAudit;
+  if (
+    result?.closed !== true ||
+    audit?.version !== 1 ||
+    !audit.complete ||
+    audit.launchIdentityId !== identity.id ||
+    audit.coverage !== "ISOLATED_CONTEXT_UNTIL_CLOSE" ||
+    audit.potentialWrites !== 0 ||
+    !Number.isSafeInteger(audit.requestCount) ||
+    audit.requestCount! < 0
+  )
+    return false;
+  // Out-of-band HTTP/API commands and any different owner/epoch are outside this proof.
+  return (
+    (await tx.browserRuntimeCommand.count({
+      where: {
+        sessionId: session.id,
+        OR: [
+          { leaseToken: { not: session.leaseToken } },
+          { fencingToken: { not: session.fencingToken } },
+          {
+            commandType: {
+              notIn: [
+                ...SAFE_OBSERVATION_COMMANDS,
+                "session.open",
+                "session.close",
+                "page.navigate",
+                "page.click",
+                "page.fill",
+                "page.scroll",
+                "page.wait",
+                "page.press",
+                "page.select",
+                "page.check",
+                "page.uncheck",
+              ],
+            },
+          },
+          { status: { in: ["PENDING", "DISPATCHED"] } },
+        ],
+      },
+    })) === 0
+  );
+}
