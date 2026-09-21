@@ -137,6 +137,7 @@ export class BrowserObservations {
         | readonly {
             label: string;
             expectedText: string;
+            matchMode?: "EXACT" | "DISPLAY_TEXT" | undefined;
             alternatives?: string[] | undefined;
           }[]
         | undefined;
@@ -158,7 +159,7 @@ export class BrowserObservations {
               quote.length <= 1000 &&
               /\[ref=/.test(quote) &&
               [target.expectedText, ...(target.alternatives ?? [])].some(
-                (text) => observedValueMatches(quote, text),
+                (text) => observedValueMatches(quote, text, target.matchMode),
               ),
           )
           .sort((a, b) => a.quote.length - b.quote.length)
@@ -931,6 +932,9 @@ export class BrowserObservations {
               : {}),
             ...(record(result).interaction
               ? { interaction: record(result).interaction }
+              : {}),
+            ...(record(result).captureDiagnostics
+              ? { captureDiagnostics: record(result).captureDiagnostics }
               : {}),
           }
         : result;

@@ -35,6 +35,20 @@ export function executionDispositionLabel(disposition: string | null) {
   return "尚无执行结果";
 }
 
+export function needsWriteReview(
+  scheduling?: {
+    state: string;
+    reason?: string | null;
+    blockedBy?: { recoveryPhase?: string } | null;
+  } | null,
+) {
+  return (
+    scheduling?.state === "RECOVERING" &&
+    scheduling.reason === "LEASE_RECOVERY" &&
+    scheduling.blockedBy?.recoveryPhase === "VERIFIED"
+  );
+}
+
 export function taskOutcomeDisplay(
   task: TaskOutcomeSource,
 ): TaskOutcomeDisplay {
@@ -70,6 +84,15 @@ export function taskOutcomeDisplay(
       toneStatus: task.lifecycle,
     };
   }
+  if (
+    ["QUEUED", "PREPARING", "RUNNING"].includes(task.lifecycle) &&
+    needsWriteReview(task.scheduling)
+  )
+    return {
+      label: "等待写入核实",
+      description: "旧浏览器已关闭；请核实业务写入结果或授权继续执行。",
+      toneStatus: "PENDING",
+    };
   if (
     ["QUEUED", "PREPARING", "RUNNING"].includes(task.lifecycle) &&
     task.scheduling?.blockedBy?.recoveryPhase === "NEEDS_OPERATOR"
@@ -151,6 +174,7 @@ export function executionSchedulingLabel(execution: TaskCaseExecution) {
     scheduling?.blockedBy?.recoveryPhase === "NEEDS_OPERATOR"
   )
     return "等待人工恢复";
+  if (needsWriteReview(scheduling)) return "等待写入核实";
   if (scheduling?.state === "RECOVERING") return "执行恢复中";
   if (isSchedulingWait(scheduling))
     return displayLabel(scheduling?.reason ?? "WAITING");
@@ -166,6 +190,8 @@ export function schedulingWaitText(
   now = Date.now(),
 ) {
   if (!scheduling || !isSchedulingWait(scheduling)) return null;
+  if (needsWriteReview(scheduling))
+    return "旧浏览器已关闭 · 等待业务写入核实或授权继续执行";
   if (scheduling.blockedBy?.recoveryPhase === "NEEDS_OPERATOR")
     return "自动恢复已暂停 · 请查看会话恢复并处理阻塞原因";
   const since = scheduling.waitingSince

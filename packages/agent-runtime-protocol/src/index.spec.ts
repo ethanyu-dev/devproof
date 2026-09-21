@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentProviderSchema,
+  generatedSpecSubmissionSchema,
+  runtimeGeneratedSpecSchema,
   browserExecutionCriterion,
   browserExecutionSnapshot,
   missingRequiredEvidenceKinds,
@@ -468,5 +470,23 @@ describe("agent runtime protocol", () => {
     });
 
     expect(outcome.kind).toBe("SPEC_GENERATED");
+    if (outcome.kind !== "SPEC_GENERATED") throw new Error("Expected Spec");
+    const sized = (cases: number, criteria: number) => ({
+      ...outcome.spec,
+      cases: Array.from({ length: cases }, () => ({
+        ...outcome.spec.cases[0],
+        criteria: Array.from({ length: criteria }, (_, i) => ({
+          ...outcome.spec.cases[0]!.criteria[0],
+          id: `criterion-${i}`,
+        })),
+      })),
+    });
+    expect(
+      generatedSpecSubmissionSchema.parse(sized(10, 5)).cases,
+    ).toHaveLength(10);
+    for (const spec of [sized(11, 1), sized(1, 6)]) {
+      expect(generatedSpecSubmissionSchema.safeParse(spec).success).toBe(false);
+      expect(runtimeGeneratedSpecSchema.safeParse(spec).success).toBe(true);
+    }
   });
 });

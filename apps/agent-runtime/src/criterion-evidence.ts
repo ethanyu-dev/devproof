@@ -254,7 +254,7 @@ export function resolveCriterionEvidence(
                   (target.network
                     ? structuredNetworkMatches(item.quote, target.network)
                     : networkRequestMatches(item.quote, target.label, text))
-                : observedValueMatches(item.quote, text),
+                : observedValueMatches(item.quote, text, target.matchMode),
             );
             return (
               matched &&
@@ -265,12 +265,27 @@ export function resolveCriterionEvidence(
               )
             );
           })
-        )
+        ) {
+          const delivered =
+            target.network || requiresStructuredNetworkTarget(target.label)
+              ? undefined
+              : quotes.find(
+                  (item) =>
+                    item.target === target.label &&
+                    observations?.hasDeliveredQuote(
+                      item.observationId,
+                      item.cursor,
+                      item.quote,
+                    ),
+                );
           issues.push({
-            code: "QUOTE_NOT_EXACT",
+            code: delivered ? "OBSERVED_VALUE_MISMATCH" : "QUOTE_NOT_EXACT",
             path: "observations",
-            expected: `通过结论缺少已观察原文覆盖：${target.label}。需要确认「${target.expectedText}」。页面节点使用 citations；请求字段使用 page.network 的 networkCitations。手填 quote 必须是连续原文，不能拼接或改写。`,
+            expected: delivered
+              ? `已引用真实原文，但 ${target.label} 的业务预期未匹配。预期「${target.expectedText}」，匹配规则 ${target.matchMode ?? "EXACT"}，实际原文「${delivered.quote.slice(0, 300)}」。不要改写 quote；核对对象和状态，若是 Spec 模板或展示格式不适用则记录无法判定并重新生成标准。`
+              : `通过结论缺少已观察原文覆盖：${target.label}。需要确认「${target.expectedText}」。页面节点使用 citations；请求字段使用 page.network 的 networkCitations。手填 quote 必须是连续原文，不能拼接或改写。`,
           });
+        }
       }
     }
     const missing = missingRequiredEvidenceKinds(

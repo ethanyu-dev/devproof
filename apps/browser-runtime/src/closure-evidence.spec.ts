@@ -121,6 +121,77 @@ async function fixture(enabled = true) {
 }
 
 describe("challenge-bound durable closure evidence", () => {
+  it.each([false, true])(
+    "seals the live HTTP audit with closure and replays it after restart (write=%s)",
+    async (write) => {
+      const f = await fixture();
+      await f.manager.execute(f.command);
+      const live = (Reflect.get(f.manager, "sessions") as Map<string, any>).get(
+        f.command.sessionId,
+      );
+      await live.context.route("https://audit.test/**", (route: any) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<html><body>audit</body></html>",
+        }),
+      );
+      await live.page.goto("https://audit.test/");
+      if (write)
+        await live.page.evaluate(() =>
+          fetch("/record", { method: "POST", body: "test" }),
+        );
+      const closed = await f.close();
+      const audit = closed.result?.writeAudit;
+      expect(audit).toMatchObject({
+        version: 1,
+        launchIdentityId: live.launchIdentity.id,
+        coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+        complete: true,
+        potentialWrites: write ? 1 : 0,
+      });
+      expect(
+        (audit as { requestCount: number }).requestCount,
+      ).toBeGreaterThanOrEqual(write ? 2 : 1);
+      expect(closed.result?.closureEvidence).toMatchObject({
+        method: "LIVE_SESSION_TERMINATED",
+      });
+      expect(
+        (await f.journal.read(f.command.sessionId))?.closed?.writeAudit,
+      ).toEqual(audit);
+      const restarted = f.create(randomUUID());
+      const replay = await f.close(restarted, {
+        ...f.request,
+        requestId: randomUUID(),
+      });
+      expect(replay.result?.writeAudit).toEqual(audit);
+      const legacyReplay = await restarted.execute({
+        ...f.command,
+        commandId: randomUUID(),
+        commandType: "session.close",
+        payload: {},
+      });
+      expect(legacyReplay.result?.writeAudit).toEqual(audit);
+    },
+    30_000,
+  );
+
+  it("does not invent an audit when another daemon closes an orphan", async () => {
+    const f = await fixture();
+    await f.manager.execute(f.command);
+    const restarted = f.create(randomUUID());
+    const closed = await f.close(restarted, {
+      ...f.request,
+      requestId: randomUUID(),
+    });
+    expect(closed.result?.closureEvidence).toMatchObject({
+      method: "IDENTIFIED_PROCESS_SET_TERMINATED",
+    });
+    expect(closed.result).not.toHaveProperty("writeAudit");
+    expect(
+      (await f.journal.read(f.command.sessionId))?.closed,
+    ).not.toHaveProperty("writeAudit");
+  }, 30_000);
+
   it("requires explicit negotiated capability, even at the newest protocol minor", async () => {
     const f = await fixture(false);
     f.manager.configureProtocol(14, new Date().toISOString(), 0, []);

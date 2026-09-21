@@ -1,3 +1,15 @@
+/** Opt-in display equivalence. Never apply this to input values, JSON or source quotations. */
+export function normalizeDisplayText(value: string): string {
+  return value
+    .replace(/(?<=\p{Script=Han})[ \t\u00a0]+(?=\p{Script=Han})/gu, "")
+    .replace(
+      /(\b\d{2}:\d{2})[ \t\u00a0]*([–—-])[ \t\u00a0]*(?=\d{2}:\d{2}\b)/gu,
+      "$1$2",
+    )
+    .replace(/[ \t\u00a0]+/gu, " ")
+    .trim();
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object")
@@ -9,8 +21,14 @@ function canonical(value: unknown): string {
 }
 
 /** Text stays exact. JSON expectations compare parsed values, never stripped string contents. */
-export function observedValueMatches(quote: string, expected: string) {
+export function observedValueMatches(
+  quote: string,
+  expected: string,
+  matchMode: "EXACT" | "DISPLAY_TEXT" = "EXACT",
+) {
   if (quote.includes(expected)) return true;
+  if (matchMode === "DISPLAY_TEXT" && !/^[\[{]/u.test(expected.trim()))
+    return normalizeDisplayText(quote).includes(normalizeDisplayText(expected));
   let target: unknown;
   try {
     target = JSON.parse(expected);

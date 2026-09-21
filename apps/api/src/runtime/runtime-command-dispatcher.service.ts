@@ -661,6 +661,20 @@ export class RuntimeCommandDispatcher {
       return true;
     });
     if (!published) return;
+    // Closure proof is accepted before artifact/result publication so physical
+    // termination remains useful even if publication fails. Reassess after the
+    // sealed write audit is durable; the first pass could not read this result.
+    if (
+      command.commandType === "session.close" &&
+      result.ok &&
+      record(result.result).writeAudit
+    ) {
+      const proof = runtimeClosureEvidenceSchema.safeParse(
+        record(result.result).closureEvidence,
+      );
+      if (proof.success && this.closure && context)
+        await this.closure.acceptRuntimeEvidence(context, proof.data);
+    }
     this.metrics?.increment(
       "devproof_runtime_command_results_total",
       "Runtime command results by terminal status.",

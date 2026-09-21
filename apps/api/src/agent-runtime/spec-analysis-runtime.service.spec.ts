@@ -187,6 +187,80 @@ function issueTaskInput() {
 }
 
 describe("SpecAnalysisRuntimeService", () => {
+  it.each([
+    { cases: 11, criteria: 1, message: "最多生成 10 个 Case" },
+    { cases: 1, criteria: 6, message: "最多 5 条验收标准" },
+  ])(
+    "rejects oversized worker submissions before persisting ($cases cases / $criteria criteria)",
+    async ({ cases, criteria, message }) => {
+      const externalId = `analysis-source://${attemptId}/issue`;
+      const source = {
+        id: "source-1",
+        externalId,
+        contentHash: "a".repeat(64),
+        kind: "LINEAR_ISSUE" as const,
+        uri: "https://linear.app/acme/issue/ENG-123",
+        locator: {},
+        label: "退款需求",
+        excerpt: "支持退款。",
+        revision: null,
+        content: {
+          issue: {
+            id: "issue-1",
+            identifier: "ENG-123",
+            title: "退款需求",
+            description: "支持退款。",
+            url: "https://linear.app/acme/issue/ENG-123",
+          },
+          pullRequestUrls: [],
+        },
+      };
+      const attempt = { ...analysisAttempt(), analysisSources: [source] };
+      Object.assign(attempt.stage.taskExecution.inputSnapshot, {
+        targetUrl: "https://app.test",
+      });
+      const { service, prisma } = recoveryHarness(attempt as never);
+      const spec = runtimeGeneratedSpecSchema.parse({
+        summary: "验证退款。",
+        scope: { inScope: ["支持退款。"] },
+        cases: Array.from({ length: cases }, () => ({
+          name: "退款状态",
+          rationale: "支持退款。",
+          preconditions: ["具有退款权限。"],
+          sourceRefs: [externalId],
+          accountRequirementsVersion: 2,
+          accountRequirements: [],
+          steps: [
+            {
+              order: 1,
+              action: "发起退款。",
+              expectedObservation: "显示退款结果。",
+            },
+          ],
+          criteria: Array.from({ length: criteria }, (_, i) => ({
+            id: `criterion-${i}`,
+            description: "退款成功。",
+            sourceRefs: [externalId],
+            requiredEvidenceKinds: ["DOM"],
+          })),
+        })),
+      });
+      await expect(
+        service.submitOutcome(teamId, attemptId, {
+          ...identity,
+          completionId: "8c39cb07-3fd6-4493-89eb-84c7b01e2f2e",
+          outcome: {
+            kind: "SPEC_GENERATED",
+            summary: "验证退款。",
+            sourceRefs: [source],
+            spec,
+          },
+        }),
+      ).rejects.toThrow(message);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([false, true])(
     "requests only the environment before persisting an Issue-only Spec (compact: %s)",
     async (compact) => {

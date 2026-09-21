@@ -62,9 +62,29 @@ export function specCriterionIssues(
       );
   }
   const basis = criterion.basis;
+  const checkTemplate = (value: unknown, path: string) => {
+    if (typeof value === "string" && /\{\{[^{}]+\}\}|\$\{[^{}]+\}/u.test(value))
+      add(
+        "UNRESOLVED_TEMPLATE",
+        path,
+        "预期包含未实例化的模板变量；使用本用例的实际值或有来源依据的稳定提示文字，不能把代码模板直接当成页面原文。",
+        value,
+      );
+  };
   if (criterion.observationContract?.version === 3) {
-    for (const [ti, target] of criterion.observationContract.targets.entries())
-      for (const [ai, assertion] of target.assertions.entries())
+    for (const [
+      ti,
+      target,
+    ] of criterion.observationContract.targets.entries()) {
+      checkTemplate(
+        target.identity.text,
+        `observationContract.targets[${ti}].identity.text`,
+      );
+      for (const [ai, assertion] of target.assertions.entries()) {
+        checkTemplate(
+          assertion.expected,
+          `observationContract.targets[${ti}].assertions[${ai}].expected`,
+        );
         if (
           assertion.property &&
           assertion.expected !== undefined &&
@@ -76,6 +96,8 @@ export function specCriterionIssues(
             `observationContract.targets[${ti}].assertions[${ai}].expected`,
             "状态值类型必须与目标属性一致：CHECKED 为布尔值，TEXT/VALUE 为字符串。",
           );
+      }
+    }
   }
   if (!basis || !criterion.sourceRefs.includes(basis.sourceRef))
     add(
@@ -162,6 +184,31 @@ export function specCriterionIssues(
   const texts = new Set<string>();
   for (const [index, target] of targets.entries()) {
     const path = `observationTargets[${index}]`;
+    if (/(?:选中|勾选|按下|默认值|回显状态)/u.test(target.label))
+      add(
+        "STRUCTURED_STATE_REQUIRED",
+        path,
+        "控件状态与操作后回显必须使用 businessCheck/observationContract，声明对象、状态和 phase；文字存在不能证明控件状态。",
+        target.label,
+      );
+    if (target.network && target.matchMode === "DISPLAY_TEXT")
+      add(
+        "INVALID_MATCH_MODE",
+        `${path}.matchMode`,
+        "网络字段不能使用展示文字归一规则。",
+      );
+    const weekdays = new Set(
+      [target.expectedText, ...(target.alternatives ?? [])]
+        .filter((value) => /^(?:周|星期)[一二三四五六日天]$/u.test(value))
+        .map((value) => value.slice(-1).replace("天", "日")),
+    );
+    if (weekdays.size > 1)
+      add(
+        "ALTERNATIVES_ARE_DISTINCT_SUBJECTS",
+        `${path}.alternatives`,
+        "不同星期是必须分别验证的对象，不能互为 alternatives；逐个声明 target，状态检查使用 businessCheck.subjects。",
+        [...weekdays],
+      );
     if (labels.has(target.label))
       add(
         "DUPLICATE_TARGET",
@@ -189,6 +236,7 @@ export function specCriterionIssues(
       ),
     ];
     for (const [field, value] of values) {
+      checkTemplate(value, field);
       if (
         criterion.sourceRefs.some((ref) =>
           (sourceContents.get(ref) ?? "").includes(value),

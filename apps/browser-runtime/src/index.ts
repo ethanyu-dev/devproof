@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { SessionWriteAudit } from "./session-write-audit.js";
 import {
   uploadSnapshot,
   snapshotEncryptionKey,
@@ -156,6 +157,7 @@ interface RuntimeState {
 }
 
 interface LiveSession extends PersistedSession {
+  writeAudit?: SessionWriteAudit;
   portableVerification?: AuthSnapshotVerification;
   portableVerificationTask?: Promise<void>;
   networkProxy?: SsrfProxy;
@@ -1679,10 +1681,21 @@ export class BrowserSessionManager {
         // Retry only observation, never the user's click/fill/submit. Recreate
         // text, refs and image together so the returned capture stays coherent.
         for (let retry = 0; ; retry++) {
+          const textBeforeVerification = structured.data.renderedText;
           const stable = await this.domObservations.verifyCapture(
             active.page,
             structured.data,
           );
+          if (structured.data.renderedText !== textBeforeVerification) {
+            Object.assign(
+              (result as { result: Record<string, unknown> }).result,
+              pageText(
+                "DOM coverage: incomplete region; narrow the snapshot target before verifying.\n\n" +
+                  structured.data.renderedText,
+                {},
+              ),
+            );
+          }
           structured.data.consistency = stable ? "VERIFIED" : "DRIFTED";
           const dialogs = structured.data.nodes.filter(
             (n) =>
@@ -1763,6 +1776,12 @@ export class BrowserSessionManager {
         (
           result as { result: Record<string, unknown> }
         ).result.structuredObservation = structured.data;
+        Object.assign((result as { result: Record<string, unknown> }).result, {
+          captureTruncated: structured.data.coverage.truncated,
+          ...(structured.data.coverage.limitEvents
+            ? { captureDiagnostics: structured.data.coverage.limitEvents }
+            : {}),
+        });
       }
       const artifacts = (result as { artifacts?: RuntimeArtifactPayload[] })
         .artifacts;
@@ -1935,7 +1954,8 @@ export class BrowserSessionManager {
         this.openingDescriptors.get(command.sessionId) ??
         this.store
           .value?.()
-          .sessions.find((row) => row.sessionId === command.sessionId);
+          .sessions.find((row) => row.sessionId === command.sessionId) ??
+        (await this.closureJournal.read(command.sessionId));
       if (
         descriptor &&
         (descriptor.leaseToken !== command.leaseToken ||
@@ -1947,7 +1967,11 @@ export class BrowserSessionManager {
           true,
         );
       await this.close(command.sessionId);
-      return { result: { closed: true } };
+      const writeAudit = (await this.closureJournal.read(command.sessionId))
+        ?.closed?.writeAudit;
+      return {
+        result: { closed: true, ...(writeAudit ? { writeAudit } : {}) },
+      };
     }
     if (!session) {
       throw codedError("SESSION_LOST", "Runtime session is not open.", true);
@@ -2082,7 +2106,15 @@ export class BrowserSessionManager {
       case "session.close": {
         if (session.permit && !this.permits.networkAllowed(session)) {
           await this.close(command.sessionId);
-          return { result: { closed: true, videoCreated: false } };
+          const writeAudit = (await this.closureJournal.read(command.sessionId))
+            ?.closed?.writeAudit;
+          return {
+            result: {
+              closed: true,
+              videoCreated: false,
+              ...(writeAudit ? { writeAudit } : {}),
+            },
+          };
         }
         const finalScreenshot = await this.captureStepArtifact(
           command.sessionId,
@@ -2133,6 +2165,7 @@ export class BrowserSessionManager {
           ),
           result: {
             closed: true,
+            writeAudit: session.writeAudit?.closed(session.launchIdentity?.id),
             stepFrameCount: frameCount,
             videoCreated: video !== null,
             ...(videoError
@@ -2230,6 +2263,9 @@ export class BrowserSessionManager {
               ? { focusRef: snapshot.focusRef }
               : {}),
             captureTruncated: snapshot.captureLimited,
+            ...(snapshot.structured.coverage.limitEvents
+              ? { captureDiagnostics: snapshot.structured.coverage.limitEvents }
+              : {}),
             ...pageText(content, parsed.payload),
             title: boundedUtf8Text(await session.page.title(), 1_000),
             url: safeObservedUrl(session.page.url()),
@@ -2773,6 +2809,9 @@ export class BrowserSessionManager {
             ...pageText(content, parsed.payload),
             format: snapshot.format,
             captureTruncated: snapshot.captureLimited,
+            ...(snapshot.structured.coverage.limitEvents
+              ? { captureDiagnostics: snapshot.structured.coverage.limitEvents }
+              : {}),
             url: safeObservedUrl(session.page.url()),
           },
         };
@@ -3091,6 +3130,9 @@ export class BrowserSessionManager {
       return {
         result: {
           closed: true,
+          ...(record.closed.writeAudit
+            ? { writeAudit: record.closed.writeAudit }
+            : {}),
           closureEvidence: await this.closureJournal.evidence(
             request,
             identity,
@@ -3108,6 +3150,8 @@ export class BrowserSessionManager {
         request,
         identity,
       );
+      const writeAudit = (await this.closureJournal.read(command.sessionId))
+        ?.closed?.writeAudit;
       let video: RuntimeArtifactPayload | null = null;
       let videoError: ReturnType<typeof classifyCommandError> | undefined;
       if (live?.stepFrames.length) {
@@ -3136,6 +3180,7 @@ export class BrowserSessionManager {
         result: {
           closed: true,
           closureEvidence,
+          ...(writeAudit ? { writeAudit } : {}),
           videoCreated: video !== null,
           ...(videoError ? { videoError } : {}),
         },
@@ -3347,6 +3392,9 @@ export class BrowserSessionManager {
         session
           ? "LIVE_SESSION_TERMINATED"
           : "IDENTIFIED_PROCESS_SET_TERMINATED",
+        session?.launchIdentity
+          ? session.writeAudit?.closed(session.launchIdentity.id)
+          : undefined,
       );
     }
     this.sessions.delete(sessionId);
@@ -3625,6 +3673,18 @@ export class BrowserSessionManager {
           state: "INTERRUPTED",
         });
       }
+      const writeAudit = new SessionWriteAudit(
+        descriptor.profileMode === "EPHEMERAL",
+      );
+      context.on("request", (request) => writeAudit.request(request.method()));
+      context.on("serviceworker", () => writeAudit.invalidate());
+      const auditPage = (observedPage: Page) => {
+        observedPage.on("websocket", () => writeAudit.invalidate());
+        observedPage.on("worker", () => writeAudit.invalidate());
+        observedPage.on("crash", () => writeAudit.invalidate());
+      };
+      context.pages().forEach(auditPage);
+      context.on("page", auditPage);
       let liveSession: LiveSession | undefined;
       await context.route("**/*", async (route) => {
         if (descriptor.permit && !this.permits.networkAllowed(descriptor)) {
@@ -3647,6 +3707,7 @@ export class BrowserSessionManager {
         context,
         networkEntries: [],
         actionFeedback: new ActionFeedbackTracker(),
+        writeAudit,
         pendingNetworkCaptures: new Map(),
         networkFaultHits: [],
         networkFaultPolicies: new Map(),

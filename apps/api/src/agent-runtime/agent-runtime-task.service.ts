@@ -8,6 +8,7 @@ import {
   BUSINESS_CHECK_CAPABILITY,
   EVIDENCE_CATALOG_CAPABILITY,
   TYPED_CHECKS_CAPABILITY,
+  requiresAgentProtocol26,
 } from "@devproof/agent-runtime-protocol";
 import { randomUUID, createHash } from "node:crypto";
 
@@ -882,6 +883,13 @@ export class AgentRuntimeTaskService {
             const resumeSnapshot = runtimeTaskSnapshotSchema.parse(
               candidate.snapshot,
             );
+            if (
+              input.protocol.minor < 26 &&
+              requiresAgentProtocol26(resumeSnapshot)
+            ) {
+              skipped.add(candidate.id);
+              return undefined;
+            }
             if (
               !input.features?.includes(TYPED_CHECKS_CAPABILITY) &&
               resumeSnapshot.criteria.some(

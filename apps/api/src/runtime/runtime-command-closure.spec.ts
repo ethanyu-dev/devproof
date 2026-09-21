@@ -217,6 +217,48 @@ describe("Command delivery and closure evidence", () => {
     expect(f.closure.acceptRuntimeEvidence).not.toHaveBeenCalled();
     expect(f.prisma.browserRuntimeSession.updateMany).not.toHaveBeenCalled();
   });
+  it("reassesses closure after publishing its write audit", async () => {
+    const f = fixture("session.close");
+    const proof = {
+      evidenceId: randomUUID(),
+      recoveryId: randomUUID(),
+      requestId: f.command.id,
+      sessionId: f.session.id,
+      leaseToken: f.session.leaseToken,
+      fencingToken: "7",
+      hostInstanceId: f.context.hostInstanceId,
+      daemonInstanceId: f.context.daemonInstanceId,
+      launchIdentityVersion: 1,
+      method: "LIVE_SESSION_TERMINATED",
+      networkRevoked: true,
+      closureCompletedAt: new Date().toISOString(),
+    };
+    const states: string[] = [];
+    f.closure.acceptRuntimeEvidence.mockImplementation(async () => {
+      states.push(f.command.status);
+      return true;
+    });
+    f.prisma.browserRuntimeCommand.updateMany.mockImplementation(
+      async ({ data }: any) => {
+        Object.assign(f.command, data);
+        return { count: 1 };
+      },
+    );
+    const writeAudit = {
+      version: 1,
+      launchIdentityId: randomUUID(),
+      complete: true,
+      coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+      requestCount: 1,
+      potentialWrites: 0,
+    };
+    await f.dispatcher.acceptResult(
+      result(f, { closed: true, closureEvidence: proof, writeAudit }),
+      f.context,
+    );
+    expect(states).toEqual(["PENDING", "SUCCEEDED"]);
+    expect(f.command).toMatchObject({ result: { writeAudit } });
+  });
   it("accepts authenticated physical proof after the close command timed out", async () => {
     const f = fixture("session.close");
     f.command.status = "TIMED_OUT";

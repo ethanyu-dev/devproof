@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { specRequirementCoverageError } from "@devproof/agent-runtime-protocol";
 import {
   compactSpecSchema,
+  referencedSpecSchema,
   defineSpecRequirements,
   normalizeCompactSpec,
   specCheckSchema,
@@ -284,4 +285,56 @@ it("preserves account provenance and resolves AUTH_SUBJECT criterion ordinals", 
     basis: { sourceRef: accountSource },
   });
   expect(spec.cases[0]!.sourceRefs).toContain(accountSource);
+});
+
+it("requires an explicit identity matching mode for generated business checks", () => {
+  const check = {
+    requirementId: "requirement-1",
+    description: "点击后周一选中",
+    businessCheck: {
+      subjects: ["周一"],
+      state: { label: "选中状态", property: "CHECKED", equals: true },
+    },
+  };
+  expect(specCheckSchema.safeParse(check).success).toBe(false);
+  expect(
+    specCheckSchema.safeParse({
+      ...check,
+      businessCheck: {
+        ...check.businessCheck,
+        identityMatchMode: "DISPLAY_TEXT",
+      },
+    }).success,
+  ).toBe(true);
+});
+
+describe("generation size limits", () => {
+  it("accepts 10 compact Cases with 5 checks each and rejects either overflow without truncation", () => {
+    const testCase = draft.cases[0]!;
+    const sized = (cases: number, checks: number) => ({
+      ...draft,
+      cases: Array.from({ length: cases }, () => ({
+        ...testCase,
+        criteria: Array.from({ length: checks }, () => testCase.criteria[0]),
+      })),
+    });
+    expect(compactSpecSchema.parse(sized(10, 5)).cases).toHaveLength(10);
+    expect(() => normalizeCompactSpec(sized(11, 1), requirements)).toThrow();
+    expect(() => normalizeCompactSpec(sized(1, 6), requirements)).toThrow();
+  });
+  it("applies the same limits to referenced checks", () => {
+    const { criteria, ...testCase } = draft.cases[0]!;
+    const sized = (cases: number, checks: number) => ({
+      ...draft,
+      cases: Array.from({ length: cases }, () => ({
+        ...testCase,
+        checkIds: Array.from({ length: checks }, (_, i) => `check-${i}`),
+      })),
+    });
+    expect(
+      referencedSpecSchema.parse(sized(10, 5)).cases[0]!.checkIds,
+    ).toHaveLength(5);
+    expect(referencedSpecSchema.safeParse(sized(11, 1)).success).toBe(false);
+    expect(referencedSpecSchema.safeParse(sized(1, 6)).success).toBe(false);
+  });
 });

@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { actionTarget } from "./action-feedback.js";
 import { DomObservations } from "./dom-observation.js";
 import { VisualObservations } from "./visual-observation.js";
+import {
+  STRUCTURED_OBSERVATION_MAX_BYTES,
+  structuredObservationSchema,
+} from "@devproof/runtime-protocol";
 
 let browser: Browser;
 let page: Page;
@@ -27,6 +31,124 @@ function ref(content: string, label: string) {
 }
 
 describe("DOM + visual observation without ARIA", () => {
+  it("does not arbitrarily choose between two dialogs on overflow", async () => {
+    await page.setContent(
+      Array.from({ length: 3000 }, () => `<p>${"x".repeat(500)}</p>`).join("") +
+        '<div role="dialog" style="position:fixed;top:0">First</div><div role="dialog" style="position:fixed;top:20px">Second</div>',
+    );
+    const result = await new DomObservations().snapshot(page, undefined, {
+      timeout: 15000,
+    });
+    expect(result.structured.coverage.scope).toBe("VIEWPORT");
+    expect(result.structured.coverage.limitEvents?.[0].action).toBe("TRIMMED");
+    expect(result.structured.coverage.truncated).toBe(true);
+    expect(result.structured.nodes.length).toBeGreaterThan(0);
+  }, 20000);
+  it("retains structured captures above the old byte and region limits", async () => {
+    await page.setContent(
+      "<style>form{position:absolute;top:0}</style>" +
+        Array.from(
+          { length: 250 },
+          (_, i) => `<form><label>Field ${i}</label></form>`,
+        ).join("") +
+        Array.from({ length: 1000 }, () => `<p>${"x".repeat(350)}</p>`).join(
+          "",
+        ),
+    );
+    const observed = await new DomObservations().snapshot(page, undefined, {
+      timeout: 15000,
+    });
+    expect(
+      Buffer.byteLength(JSON.stringify(observed.structured)),
+    ).toBeGreaterThan(512 * 1024);
+    expect(observed.structured.regions.length).toBeGreaterThan(200);
+    expect(observed.structured.coverage.truncated).toBe(false);
+    expect(
+      structuredObservationSchema.safeParse(observed.structured).success,
+    ).toBe(true);
+  }, 20000);
+
+  it("recaptures a unique active dialog when the background exceeds the byte budget", async () => {
+    await page.setContent(
+      Array.from({ length: 3000 }, () => `<p>${"x".repeat(500)}</p>`).join("") +
+        '<div role="dialog" style="position:fixed;top:0"><button aria-pressed="true">周 一</button></div>',
+    );
+    const dom = new DomObservations();
+    const observed = await dom.snapshot(page, undefined, { timeout: 15000 });
+    expect(observed.structured.coverage).toMatchObject({
+      scope: "REGION",
+      truncated: false,
+      completeWithinScope: true,
+    });
+    expect(observed.structured.coverage.limitEvents?.[0]).toMatchObject({
+      action: "SCOPED_RECAPTURE",
+      exceeded: expect.arrayContaining(["BYTES"]),
+    });
+    const button = observed.structured.nodes.find((n) => n.tag === "button")!;
+    expect(button.checked).toBe(true);
+    expect(await dom.locator(page, button.ref!).count()).toBe(1);
+    expect(await dom.verifyCapture(page, observed.structured)).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(observed.structured))).toBeLessThan(
+      STRUCTURED_OBSERVATION_MAX_BYTES,
+    );
+  }, 20000);
+
+  it("keeps partial data when an explicitly scoped region is oversized, without recursive retries", async () => {
+    await page.setContent(
+      '<div role="dialog">' +
+        Array.from({ length: 3000 }, () => `<p>${"x".repeat(500)}</p>`).join(
+          "",
+        ) +
+        "</div>",
+    );
+    const observed = await new DomObservations().snapshot(
+      page,
+      page.getByRole("dialog"),
+      { timeout: 15000 },
+    );
+    expect(observed.structured.nodes.length).toBeGreaterThan(0);
+    expect(observed.captureLimited).toBe(true);
+    expect(observed.structured.coverage).toMatchObject({
+      completeWithinScope: false,
+      truncated: true,
+    });
+    expect(observed.structured.coverage.limitEvents).toHaveLength(1);
+    expect(observed.structured.coverage.limitEvents?.[0].action).toBe(
+      "TRIMMED",
+    );
+    expect(Buffer.byteLength(JSON.stringify(observed.structured))).toBeLessThan(
+      STRUCTURED_OBSERVATION_MAX_BYTES,
+    );
+    expect(
+      structuredObservationSchema.safeParse(observed.structured).success,
+    ).toBe(true);
+  }, 20000);
+  it("preserves interpolated text and captures toggle-button state", async () => {
+    await page.setContent(
+      '<div id="period"></div><button aria-pressed="true">周 一</button>',
+    );
+    await page.locator("#period").evaluate((element) => {
+      for (const value of ["周一, 周五 ", "09:00", "–", "18:00"])
+        element.append(
+          document.createTextNode(value),
+          document.createComment("react"),
+        );
+    });
+    const dom = new DomObservations();
+    const first = await dom.snapshot(page);
+    expect(first.content).toContain('"周一, 周五 09:00–18:00"');
+    expect(
+      first.structured.nodes.find((n) => n.tag === "button")?.checked,
+    ).toBe(true);
+    await page
+      .locator("button")
+      .evaluate((button) => button.setAttribute("aria-pressed", "false"));
+    const second = await dom.snapshot(page);
+    expect(
+      second.structured.nodes.find((n) => n.tag === "button")?.checked,
+    ).toBe(false);
+    expect(second.content).toContain('"周 一"');
+  });
   it("exposes custom switch state and changes the action fingerprint after toggling", async () => {
     await page.setContent(
       `<button role="switch" aria-checked="true" onclick="this.setAttribute('aria-checked',this.getAttribute('aria-checked')==='true'?'false':'true')"><span>启用禁用</span></button>`,

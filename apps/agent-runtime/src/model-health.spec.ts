@@ -143,3 +143,15 @@ it("stops a model after two consecutive timeout attempts in the same decision", 
   expect(attempts.next().done).toBe(true);
   expect(health.available({ ...candidate, modelId: "fallback" })).toBe(true);
 });
+
+it("uses a healthy alternative after consecutive slow successes, and recovers after a fast probe", () => {
+  const health = new ModelHealth();
+  const alternative = { ...candidate, modelId: "other" };
+  health.success(candidate, 95_000);
+  expect(health.order([candidate, alternative])[0]).toEqual(candidate);
+  health.success(candidate, 120_000);
+  expect(health.order([candidate, alternative])[0]).toEqual(alternative);
+  expect(health.order([candidate])).toEqual([candidate]);
+  health.success(candidate, 20_000);
+  expect(health.order([candidate, alternative])[0]).toEqual(candidate);
+});

@@ -14,6 +14,7 @@ export interface ToolCorrection {
   code:
     | "INVALID_JSON"
     | "QUOTE_NOT_EXACT"
+    | "OBSERVED_VALUE_MISMATCH"
     | "UNKNOWN_EVIDENCE_REF"
     | "MISSING_EVIDENCE_KIND"
     | "CITATION_NOT_AVAILABLE"

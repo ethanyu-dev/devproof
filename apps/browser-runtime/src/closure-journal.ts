@@ -12,6 +12,7 @@ import {
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { BrowserProcessIdentity } from "./browser-processes.js";
+import type { ClosedSessionWriteAudit } from "./session-write-audit.js";
 
 import {
   runtimeClosureEvidenceSchema,
@@ -44,6 +45,7 @@ interface ClosureRecord extends SessionEpoch {
   closed?: {
     method: RuntimeClosureEvidence["method"];
     completedAt: string;
+    writeAudit?: ClosedSessionWriteAudit;
   };
   evidence: RuntimeClosureEvidence[];
 }
@@ -323,6 +325,7 @@ export class SessionClosureJournal {
     epoch: SessionEpoch,
     identity: RuntimeProcessIdentity,
     method: RuntimeClosureEvidence["method"],
+    writeAudit?: ClosedSessionWriteAudit,
   ) {
     return this.serialize(async () => {
       const record = await this.read(epoch.sessionId);
@@ -336,7 +339,22 @@ export class SessionClosureJournal {
           "No durable launch scope and revocation exist on this host.",
         );
       this.assertEpoch(record, epoch);
-      record.closed ??= { method, completedAt: new Date().toISOString() };
+      if (
+        writeAudit &&
+        (method !== "LIVE_SESSION_TERMINATED" ||
+          writeAudit.launchIdentityId !== record.launch.id)
+      )
+        throw closureError(
+          "CLOSURE_UNVERIFIED",
+          "Write audit belongs to a different browser launch.",
+        );
+      // Seal the live audit with physical closure. Retries/restarts replay this
+      // evidence; they must never reconstruct an empty audit from missing history.
+      record.closed ??= {
+        method,
+        completedAt: new Date().toISOString(),
+        ...(writeAudit ? { writeAudit } : {}),
+      };
       await durableJsonWrite(this.sessionPath(epoch.sessionId), record);
     });
   }

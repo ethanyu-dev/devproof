@@ -565,6 +565,7 @@ it("generates concise business checks with repeated states and no generated DOM 
           requirementId: "requirement-1",
           description: "两种类型的记录均显示启用。",
           businessCheck: {
+            identityMatchMode: "DISPLAY_TEXT",
             subjects: ["合规模型映射", "旧版对公转账白名单"],
             state: { label: "配置值", equals: "启用" },
           },
@@ -614,6 +615,7 @@ it("rejects generated textual switch states and accepts their boolean correction
     description: "旧版对公转账白名单的启用状态开关默认开启。",
     supportingSourceRefs: [ui],
     businessCheck: {
+      identityMatchMode: "DISPLAY_TEXT",
       subjects: ["旧版对公转账白名单"],
       state: {
         property: "CHECKED",

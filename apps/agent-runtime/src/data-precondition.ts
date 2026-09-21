@@ -12,7 +12,14 @@ const contextSchema = z
         z
           .object({
             id: z.string().trim().min(1).max(500).optional(),
-            account: z.string().trim().min(1).max(500),
+            account: z.string().trim().min(1).max(500).optional(),
+            resource: z
+              .object({
+                kind: z.string().trim().min(1).max(100),
+                key: z.string().trim().min(1).max(500),
+              })
+              .strict()
+              .optional(),
             type: z.string().trim().min(1).max(500),
             evidenceRefs: z.array(z.string().min(1)).max(20).default([]),
             citations: z
@@ -32,7 +39,14 @@ const contextSchema = z
               .max(6)
               .optional(),
           })
-          .strict(),
+          .strict()
+          .refine(
+            (record) => Boolean(record.account) !== Boolean(record.resource),
+            {
+              message:
+                "Provide either an assigned account or an observed resource identity.",
+            },
+          ),
       )
       .min(1)
       .max(20),
@@ -58,13 +72,14 @@ export function prepareDataPrecondition(
       throw new Error("数据处置必须关联当前验收标准。");
   for (const record of context.records) {
     const accounts = journal?.state.accounts ?? [];
+    const account = record.account;
     if (
-      !accounts.some((a) =>
-        [a.account, ...a.aliases].includes(record.account),
-      ) &&
+      account &&
+      !accounts.some((a) => [a.account, ...a.aliases].includes(account)) &&
       journal?.state.account !== record.account
     )
       throw new Error("数据处置只能针对本任务已经提供的账号。");
+    let resourceObserved = false;
     for (const citation of record.citations ?? []) {
       const resolved = observations?.citation(citation.ref);
       if (!resolved)
@@ -72,6 +87,8 @@ export function prepareDataPrecondition(
           `冲突记录引用不可用：${citation.ref}；请引用当前页面节点。`,
         );
       record.evidenceRefs.push(...resolved.evidenceRefs);
+      if (record.resource && resolved.quote.includes(record.resource.key))
+        resourceObserved = true;
     }
     for (const quote of record.observations ?? []) {
       const refs = observations?.accountRequestEvidence(
@@ -81,7 +98,13 @@ export function prepareDataPrecondition(
       );
       if (!refs?.size) throw new Error("冲突记录必须引用已经读取的观察原文。");
       record.evidenceRefs.push(...refs.keys());
+      if (record.resource && quote.quote.includes(record.resource.key))
+        resourceObserved = true;
     }
+    if (record.resource && !resourceObserved)
+      throw new Error(
+        "资源冲突必须用 citations 或 observations 引用包含资源标识的已读原文；不能仅凭附件编号声明 SKU 或合同身份。",
+      );
     record.evidenceRefs = [...new Set(record.evidenceRefs)];
     const unknown = record.evidenceRefs.filter((ref) => !evidence.has(ref));
     if (unknown.length)
@@ -101,7 +124,8 @@ export function prepareDataPrecondition(
         (r) =>
           (record.id
             ? r.id === record.id
-            : [r.account, ...r.accountAliases].includes(record.account)) &&
+            : record.account !== undefined &&
+              [r.account, ...r.accountAliases].includes(record.account)) &&
           r.type === record.type &&
           r.ownership === "CREATED_THIS_RUN",
       )
@@ -112,7 +136,13 @@ export function prepareDataPrecondition(
   }
   const conflictKey = JSON.stringify(
     context.records
-      .map((r) => [r.account, r.type, r.id ?? "UNIDENTIFIED"].join("|"))
+      .map((r) =>
+        [
+          r.resource ? JSON.stringify(r.resource) : r.account,
+          r.type,
+          r.id ?? "UNIDENTIFIED",
+        ].join("|"),
+      )
       .sort(),
   );
   const history = Array.isArray(policy.humanResolutions)
