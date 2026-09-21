@@ -45,6 +45,7 @@ export interface AcceptanceReviewLease {
   deadlineAt: string;
   context: string;
   modelCandidates: Array<{
+    configurationId?: string | undefined;
     apiKey: string;
     baseUrl: string;
     displayName: string;
@@ -61,6 +62,7 @@ export const acceptanceReviewClaimOutputSchema = z.object({
       modelCandidates: z
         .array(
           z.object({
+            configurationId: z.string().uuid().optional(),
             apiKey: z.string(),
             baseUrl: z.string().url(),
             displayName: z.string(),

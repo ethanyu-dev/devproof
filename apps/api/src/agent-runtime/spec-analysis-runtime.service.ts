@@ -1,3 +1,4 @@
+import { TaskMetricsService } from "../task-executions/task-metrics.service.js";
 import { freezeObservationContract } from "@devproof/agent-runtime-protocol/observation-digest";
 import { taskSourcePresentation } from "../task-executions/task-source-context.js";
 import {
@@ -105,6 +106,7 @@ export class SpecAnalysisRuntimeService {
     private readonly linear: LinearContextClient,
     private readonly github: GithubPullRequestClient,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly taskMetrics?: TaskMetricsService,
   ) {}
 
   async claim(
@@ -399,6 +401,17 @@ export class SpecAnalysisRuntimeService {
             occurredAt: new Date(input.event.occurredAt),
           },
         });
+        await this.taskMetrics?.ingest(
+          tx,
+          {
+            teamId,
+            taskExecutionId: attempt.stage.taskExecutionId,
+            ownerId: attempt.id,
+            stage: "SPEC_ANALYSIS",
+            attemptNumber: attempt.number,
+          },
+          row,
+        );
         return { accepted: true, sequence: row.sequence.toString() };
       } catch (error) {
         if (!uniqueConstraint(error)) throw error;

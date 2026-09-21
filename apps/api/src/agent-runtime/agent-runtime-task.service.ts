@@ -1,3 +1,4 @@
+import { TaskMetricsService } from "../task-executions/task-metrics.service.js";
 import { coordinateResumedAccounts } from "../verification/account-coordination.js";
 import { decodeStepContext } from "../execution-runs/step-context-archive.js";
 import { runtimeCriterionResultSchema } from "@devproof/agent-runtime-protocol";
@@ -271,6 +272,7 @@ export class AgentRuntimeTaskService {
     @Optional() private readonly metrics?: MetricsService,
     @Optional()
     private readonly observationBindings?: ObservationBindingService,
+    @Optional() private readonly taskMetrics?: TaskMetricsService,
   ) {}
 
   onModuleInit() {
@@ -1400,6 +1402,19 @@ export class AgentRuntimeTaskService {
             teamId,
           },
         });
+        if (this.taskMetrics && task.run.taskExecutionId)
+          await this.taskMetrics.ingest(
+            tx,
+            {
+              teamId,
+              taskExecutionId: task.run.taskExecutionId,
+              ownerId: task.id,
+              stage: "SPEC_EXECUTION",
+              runId: task.runId,
+              attemptNumber: task.attempt.number,
+            },
+            event,
+          );
         if (contextArchive) {
           await tx.runStepContext.create({
             data: {

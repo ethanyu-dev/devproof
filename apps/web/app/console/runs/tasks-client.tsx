@@ -1,5 +1,7 @@
 "use client";
 
+import type { TaskMetrics } from "@devproof/contracts";
+import { metricDuration } from "./task-metrics";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -42,6 +44,12 @@ import {
 import { useTaskActions } from "./use-task-actions";
 import type { TaskDetail, TaskSummary } from "./task-types";
 
+type ListMetric = {
+  taskId: string;
+  elapsedMs: number;
+  totals: TaskMetrics["totals"] | null;
+  refreshPending: boolean;
+};
 const PAGE_SIZE = 10;
 interface TaskPage {
   items: TaskSummary[];
@@ -61,6 +69,22 @@ export function TasksClient() {
   const returnTo = taskListHref(page, appliedFilters);
   const [filters, setFilters] = useState<TaskFilters>(appliedFilters);
   const [result, setResult] = useState<TaskPage | null>(null);
+  const [metrics, setMetrics] = useState<Record<string, ListMetric>>({});
+  useEffect(() => {
+    const controller = new AbortController();
+    if (result?.items.length)
+      void consoleApi<ListMetric[]>(
+        `/tasks/metrics/batch?ids=${result.items.map((t) => t.id).join(",")}`,
+        { signal: controller.signal },
+      )
+        .then((rows) =>
+          setMetrics(Object.fromEntries(rows.map((r) => [r.taskId, r]))),
+        )
+        .catch(() => {
+          if (!controller.signal.aborted) setMetrics({});
+        });
+    return () => controller.abort();
+  }, [result]);
   const [loadingList, setLoadingList] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
@@ -295,6 +319,7 @@ export function TasksClient() {
               <span>任务</span>
               <span>状态</span>
               <span>执行进度 / 报告</span>
+              <span>耗时 / Token</span>
               <span>创建时间</span>
               <span className="dp-task-actions-heading">操作</span>
             </div>
@@ -306,6 +331,7 @@ export function TasksClient() {
                 onSummary={updateSummary}
                 href={taskDetailHref(task.id, returnTo)}
                 task={task}
+                metrics={metrics[task.id]}
               />
             ))}
           </div>
@@ -366,6 +392,7 @@ function taskListQuery(page: number, filters: TaskFilters) {
 }
 
 function TaskRow({
+  metrics,
   href,
   onDeleted,
   onRerun,
@@ -377,6 +404,7 @@ function TaskRow({
   onRerun: (task: TaskDetail) => void;
   onSummary: (task: TaskDetail) => void;
   task: TaskSummary;
+  metrics?: ListMetric | undefined;
 }) {
   const { busy, message, cancel, rerun } = useTaskActions({
     id: task.id,
@@ -493,6 +521,18 @@ function TaskRow({
               查看验收报告 <ArrowRight aria-hidden="true" />
             </Link>
           )}
+        </div>
+        <div className="dp-task-metrics-cell">
+          <span className="dp-task-cell-label">耗时 / Token</span>
+          <span>{metrics ? metricDuration(metrics.elapsedMs) : "—"}</span>
+          <small>
+            Token{" "}
+            {metrics?.totals
+              ? metrics.totals.total.known === null
+                ? "未上报"
+                : BigInt(metrics.totals.total.known).toLocaleString("zh-CN")
+              : "待统计"}
+          </small>
         </div>
         <time
           className="dp-task-time-cell"

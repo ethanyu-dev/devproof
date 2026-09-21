@@ -1354,7 +1354,7 @@
 .dp-task-grid-head,
 .dp-task-row-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 128px 172px 104px 104px;
+  grid-template-columns: minmax(220px, 1fr) 112px 160px 144px 104px 104px;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
@@ -1448,6 +1448,7 @@
 }
 
 .dp-task-progress-cell small,
+.dp-task-metrics-cell small,
 .dp-task-time-cell small {
   color: var(--muted-foreground);
   font-size: 12px;
@@ -1456,6 +1457,7 @@
 
 .dp-task-status-cell,
 .dp-task-progress-cell,
+.dp-task-metrics-cell,
 .dp-task-time-cell {
   display: grid;
   min-width: 0;
@@ -1570,14 +1572,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-@container task-list (max-width: 899px) {
+@container task-list (max-width: 999px) {
   .dp-task-grid-head {
     display: none;
   }
 
   .dp-task-row-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 104px;
-    grid-template-areas: "title title actions" "status progress time";
+    grid-template-areas:
+      "title title actions"
+      "status progress progress"
+      "metrics metrics time";
     gap: 10px 16px;
   }
 
@@ -1593,6 +1598,9 @@
   .dp-task-time-cell {
     grid-area: time;
   }
+  .dp-task-metrics-cell {
+    grid-area: metrics;
+  }
   .dp-task-row-controls {
     grid-area: actions;
   }
@@ -1607,7 +1615,11 @@
 @container task-list (max-width: 519px) {
   .dp-task-row-grid {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: "title title" "status actions" "progress time";
+    grid-template-areas:
+      "title title"
+      "status actions"
+      "progress progress"
+      "metrics time";
     gap: 10px 12px;
     padding: 12px;
   }

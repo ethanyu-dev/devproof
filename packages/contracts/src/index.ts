@@ -2000,3 +2000,5 @@ export type TaskTestAccountsInput = z.infer<typeof taskTestAccountsInputSchema>;
 export type * from "./task-acceptance-report.js";
 
 export * from "./acceptance-assessment.js";
+
+export * from "./task-metrics.js";

@@ -242,7 +242,10 @@ export class AgentRuntimeWorker {
         await import("./acceptance-review.executor.js");
       output = {
         ...identity,
-        ...(await executeAcceptanceReview(task, this.modelClient, signal)),
+        ...(await executeAcceptanceReview(task, this.modelClient, signal, {
+          controlPlane: this.controlPlane,
+          workerId,
+        })),
       };
     } catch {
       output = {

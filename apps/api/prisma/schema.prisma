@@ -1198,6 +1198,9 @@ model ExecutionRun {
 /// A user-visible execution request. Issue-driven tasks own two durable stages;
 /// concrete browser verification remains in child ExecutionRun records.
 model TaskExecution {
+  modelCalls                TaskModelCallUsage[]
+  metricSpans               TaskExecutionSpan[]
+  metrics                   TaskExecutionMetrics?
   id                        String                         @id @default(uuid()) @db.Uuid
   teamId                    String                         @map("team_id") @db.Uuid
   requestedByUserId         String?                        @map("requested_by_user_id") @db.Uuid
@@ -1258,6 +1261,71 @@ model TaskExecution {
   @@index([projectionNeededAt])
   @@index([legacySpecificationId])
   @@map("task_executions")
+}
+
+model TaskModelCallUsage {
+  leaseKey             String?       @map("lease_key")
+  id                   String        @id
+  teamId               String        @map("team_id") @db.Uuid
+  taskExecutionId      String        @map("task_execution_id") @db.Uuid
+  scope                String        @default("EXECUTION")
+  stage                String
+  runId                String?       @map("run_id") @db.Uuid
+  attemptNumber        Int?          @map("attempt_number")
+  ownerId              String        @map("owner_id")
+  segmentId            String?       @map("segment_id")
+  configurationId      String?       @map("configuration_id")
+  configurationName    String?       @map("configuration_name")
+  requestedModel       String        @map("requested_model")
+  responseModel        String?       @map("response_model")
+  responseId           String?       @map("response_id")
+  startedAt            DateTime?     @map("started_at") @db.Timestamptz
+  durationMs           BigInt?       @map("duration_ms")
+  outcome              String        @default("RUNNING")
+  inputTokens          BigInt?       @map("input_tokens")
+  outputTokens         BigInt?       @map("output_tokens")
+  cacheReadTokens      BigInt?       @map("cache_read_tokens")
+  rawUsage             Json?         @map("raw_usage")
+  issues               Json          @default("[]")
+  normalizationVersion Int           @default(1) @map("normalization_version")
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  taskExecution        TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, taskExecutionId, scope, id])
+  @@map("task_model_call_usage")
+}
+
+model TaskExecutionSpan {
+  id              String        @id
+  teamId          String        @map("team_id") @db.Uuid
+  taskExecutionId String        @map("task_execution_id") @db.Uuid
+  lane            String
+  label           String
+  activity        String
+  scope           String        @default("EXECUTION")
+  startedAt       DateTime      @map("started_at") @db.Timestamptz
+  finishedAt      DateTime?     @map("finished_at") @db.Timestamptz
+  estimated       Boolean       @default(true)
+  taskExecution   TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, taskExecutionId, startedAt, id])
+  @@map("task_execution_spans")
+}
+
+model TaskExecutionMetrics {
+  historyBackfilled Boolean       @default(false) @map("history_backfilled")
+  analysisCursor    BigInt        @default(0) @map("analysis_cursor")
+  runCursor         BigInt        @default(0) @map("run_cursor")
+  taskExecutionId   String        @id @map("task_execution_id") @db.Uuid
+  revision          BigInt        @default(0)
+  projectedRevision BigInt        @default(-1) @map("projected_revision")
+  summary           Json          @default("{}")
+  computedAt        DateTime?     @map("computed_at") @db.Timestamptz
+  dirty             Boolean       @default(true)
+  taskExecution     TaskExecution @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([dirty, computedAt])
+  @@map("task_execution_metrics")
 }
 
 /// An immutable test target within an Issue execution. Generated Specs are

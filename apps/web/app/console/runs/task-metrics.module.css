@@ -1,0 +1,168 @@
+.root {
+  display: grid;
+  gap: 20px;
+}
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.root h2 {
+  font-size: 20px;
+  font-weight: 650;
+}
+.root h3 {
+  font-size: 16px;
+  font-weight: 650;
+}
+.root p,
+.root small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.root small {
+  display: block;
+}
+.root select {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--background);
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.stat {
+  padding: 20px;
+  display: grid;
+  gap: 10px;
+}
+.stat span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.stat strong {
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+.panel {
+  padding: 22px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.bar {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--muted);
+}
+.legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 24px;
+}
+.legend > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.legend b {
+  margin-left: auto;
+}
+.legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.phases > div {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.phases span {
+  color: var(--muted-foreground);
+}
+.scroll {
+  overflow-x: auto;
+}
+.root table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+.root th,
+.root td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.root th {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.root td a {
+  color: #4f46e5;
+}
+.timeline {
+  display: grid;
+  gap: 10px;
+  overflow-x: auto;
+}
+.timelineRow {
+  display: grid;
+  grid-template-columns: 180px minmax(200px, 1fr) 90px;
+  align-items: center;
+  gap: 12px;
+  min-width: 510px;
+}
+.timelineRow > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.track {
+  height: 16px;
+  position: relative;
+  border-radius: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.track i {
+  position: absolute;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 3px;
+}
+@media (max-width: 800px) {
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .legend {
+    grid-template-columns: 1fr;
+  }
+  .panel {
+    padding: 16px;
+  }
+  .stat strong {
+    font-size: 18px;
+  }
+}
