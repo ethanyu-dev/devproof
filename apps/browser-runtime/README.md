@@ -226,6 +226,14 @@ separately in PR #62. See [browser reference recovery](../../docs/browser-refere
 
 ## Direct control and distributed login state
 
+Runtime 0.2.35 fixes direct configuration on existing systemd units that do not
+load `browser-runtime.env`. With `--direct-config`, the installer adds a managed
+`90-devproof-direct-access.conf` drop-in and reloads systemd before restart,
+preserving the existing unit and other drop-ins (including headless overrides).
+Upgrade failure restores the previous drop-in as well as the environment and
+package. If 0.2.34 failed with `ECONNREFUSED <private-IP>:9444`, rerun the command
+with `--direct-config` on 0.2.35; no manual unit edit is required.
+
 Runtime 0.2.34 adds `--direct-config FILE` to the release installer. After this
 release is published, new direct-access nodes can use one installation command
 with a local JSON file. Already-configured nodes keep using the ordinary upgrade

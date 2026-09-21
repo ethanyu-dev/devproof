@@ -6,6 +6,7 @@ import {
   readFileSync,
   writeFileSync,
   rmSync,
+  existsSync,
 } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
@@ -36,6 +37,18 @@ function fixture() {
   const before =
     'DEVPROOF_NETWORK_ALLOWLIST="preserve.example"\nDEVPROOF_DIRECT_CONTROL_HOST="127.0.0.1"\n';
   writeFileSync(env, before, { mode: 0o600 });
+  const unit = join(
+    root,
+    ".config/systemd/user/devproof-browser-runtime.service",
+  );
+  mkdirSync(dirname(unit), { recursive: true });
+  const legacyUnit =
+    "[Service]\nExecStart=/custom/runtime-wrapper start\nEnvironment=OPERATOR_SETTING=preserved\n";
+  writeFileSync(unit, legacyUnit);
+  const dropin = unit + ".d/90-devproof-direct-access.conf";
+  mkdirSync(dirname(dropin), { recursive: true });
+  const headless = join(dirname(dropin), "99-force-headless.conf");
+  writeFileSync(headless, "[Service]\nEnvironment=DEVPROOF_HEADLESS=true\n");
   const installed = join(
     root,
     ".local/lib/node_modules/@devproof/browser-runtime",
@@ -72,8 +85,15 @@ function fixture() {
     if(args.includes('is-active'))process.exit(fs.existsSync(active)?0:3);
     if(args.includes('stop'))fs.rmSync(active,{force:true});
     if(args.includes('start'))fs.writeFileSync(active,'active');
+    if(args.includes('daemon-reload')) {
+      const unit=p.join(root,'.config/systemd/user/devproof-browser-runtime.service');
+      const dropin=unit+'.d/90-devproof-direct-access.conf';
+      const effective=fs.readFileSync(unit,'utf8')+(fs.existsSync(dropin)?fs.readFileSync(dropin,'utf8'):'');
+      fs.writeFileSync(p.join(root,'loaded-env-file'),effective.includes('EnvironmentFile=%h/.config/devproof/browser-runtime.env')?'yes':'no');
+    }
     if(args.includes('restart')) {
-      fs.copyFileSync(p.join(root,'.config/devproof/browser-runtime.env'),p.join(root,'env-at-restart'));
+      const loadsEnv=fs.existsSync(p.join(root,'loaded-env-file'))&&fs.readFileSync(p.join(root,'loaded-env-file'),'utf8')==='yes';
+      fs.writeFileSync(p.join(root,'env-at-restart'),loadsEnv?fs.readFileSync(p.join(root,'.config/devproof/browser-runtime.env')):'');
       if(process.env.FAIL_RESTART==='yes')process.exit(1);
       fs.writeFileSync(active,'active');
     }
@@ -130,7 +150,7 @@ function fixture() {
       },
     );
   };
-  return { root, env, before, run };
+  return { root, env, before, run, unit, legacyUnit, dropin, headless };
 }
 
 const publicKey = generateKeyPairSync("ed25519")
@@ -149,6 +169,7 @@ it("ordinary upgrades preserve existing environment byte-for-byte", async () => 
   const result = await f.run();
   expect(result.code, result.output).toBe(0);
   expect(readFileSync(f.env, "utf8")).toBe(f.before);
+  expect(existsSync(f.dropin)).toBe(false);
 });
 
 it("invalid direct configuration does not stop the current Runtime or touch its environment", async () => {
@@ -173,6 +194,28 @@ it("failed service restart restores the previous environment and package", async
     /install --global .*old\.tgz/u,
   );
   expect(readFileSync(join(f.root, "service-active"), "utf8")).toBe("active");
+  expect(existsSync(f.dropin)).toBe(false);
+  expect(readFileSync(join(f.root, "loaded-env-file"), "utf8")).toBe("no");
+  expect(readFileSync(f.unit, "utf8")).toBe(f.legacyUnit);
+  expect(readFileSync(f.headless, "utf8")).toBe(
+    "[Service]\nEnvironment=DEVPROOF_HEADLESS=true\n",
+  );
+});
+
+it("rollback restores an existing managed drop-in and preserves other service overrides", async () => {
+  const f = fixture();
+  mkdirSync(dirname(f.dropin), { recursive: true });
+  const original =
+    "[Service]\n# Previous operator configuration\nEnvironmentFile=%h/.config/devproof/browser-runtime.env\n";
+  writeFileSync(f.dropin, original);
+  const unrelated = join(dirname(f.dropin), "20-operator.conf");
+  writeFileSync(unrelated, "[Service]\nMemoryMax=2G\n");
+  const result = await f.run(config, true);
+  expect(result.code).not.toBe(0);
+  expect(readFileSync(f.dropin, "utf8")).toBe(original);
+  expect(readFileSync(unrelated, "utf8")).toBe("[Service]\nMemoryMax=2G\n");
+  expect(readFileSync(f.env, "utf8")).toBe(f.before);
+  expect(readFileSync(join(f.root, "loaded-env-file"), "utf8")).toBe("yes");
 });
 
 it("applies direct settings before startup, checks the listener and prints a mapping without changing API state", async () => {
@@ -196,6 +239,16 @@ it("applies direct settings before startup, checks the listener and prints a map
     const f = fixture();
     const result = await f.run({ ...config, port: address.port });
     expect(result.code, result.output).toBe(0);
+    expect(readFileSync(f.unit, "utf8")).toBe(f.legacyUnit);
+    expect(readFileSync(f.headless, "utf8")).toBe(
+      "[Service]\nEnvironment=DEVPROOF_HEADLESS=true\n",
+    );
+    expect(readFileSync(f.dropin, "utf8")).toContain(
+      "EnvironmentFile=%h/.config/devproof/browser-runtime.env",
+    );
+    expect(readFileSync(join(f.root, "env-at-restart"), "utf8")).toContain(
+      `DEVPROOF_DIRECT_CONTROL_PORT="${address.port}"`,
+    );
     expect(readFileSync(f.env, "utf8")).toContain(
       'DEVPROOF_NETWORK_ALLOWLIST="preserve.example"',
     );
