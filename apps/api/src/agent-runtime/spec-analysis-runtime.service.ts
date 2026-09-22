@@ -186,6 +186,7 @@ export class SpecAnalysisRuntimeService {
         const leaseExpiresAt = leaseExpiry(now);
         const acquired = await tx.taskStageAttempt.updateMany({
           data: {
+            executor: "AGENT_RUNTIME",
             fencingToken: { increment: 1 },
             leaseExpiresAt,
             leaseOwner: input.workerId,

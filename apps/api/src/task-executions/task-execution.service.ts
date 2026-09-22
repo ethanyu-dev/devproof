@@ -2652,6 +2652,7 @@ export class TaskExecutionService {
         );
         const acquired = await tx.taskStageAttempt.updateMany({
           data: {
+            executor: "DETERMINISTIC",
             fencingToken: { increment: 1 },
             leaseExpiresAt,
             leaseOwner: ANALYSIS_WORKER,
