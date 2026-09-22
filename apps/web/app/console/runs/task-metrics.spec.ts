@@ -52,6 +52,13 @@ function timing(
     cumulative: { modelMs: 0, toolMs: 0, platformMs: 0, recoveryMs: 0 },
   };
 }
+function omitSplit(value: TaskMetrics): TaskMetrics {
+  const next = { ...value };
+  delete next.runtimes;
+  delete next.unassigned;
+  delete next.overlap;
+  return next;
+}
 function metrics(overrides: Partial<TaskMetrics> = {}): TaskMetrics {
   return {
     taskId: "task",
@@ -218,20 +225,11 @@ describe("task runtime occupancy", () => {
     { name: "version 1", value: metrics({ version: 1 }) },
     {
       name: "failed attribution",
-      value: metrics({
-        version: 1,
-        runtimes: undefined,
-        unassigned: undefined,
-        overlap: undefined,
-      }),
+      value: omitSplit(metrics({ version: 1 })),
     },
     {
       name: "version 2 without a split",
-      value: metrics({
-        runtimes: undefined,
-        unassigned: undefined,
-        overlap: undefined,
-      }),
+      value: omitSplit(metrics()),
     },
   ])("does not invent zeros when $name", ({ value }) => {
     expect(render(value)).toBe("");
