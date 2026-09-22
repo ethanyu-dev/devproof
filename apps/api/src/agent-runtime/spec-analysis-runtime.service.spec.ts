@@ -381,6 +381,9 @@ describe("SpecAnalysisRuntimeService", () => {
         stageStatus: "WAITING_INPUT",
         inputRequest: { missing: ["DEPLOYMENT_TARGET"] },
       });
+      expect(updateAttempt.mock.calls[0]![0].data).not.toHaveProperty(
+        "executor",
+      );
       expect(tx.taskExecution.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -750,6 +753,47 @@ describe("SpecAnalysisRuntimeService", () => {
     expect(tx.taskExecutionEvent.create).not.toHaveBeenCalled();
   });
 
+  it("records AGENT_RUNTIME when claiming and does not label the span", async () => {
+    const pending = analysisAttempt({
+      leaseExpiresAt: null,
+      status: "PENDING",
+    });
+    const running = {
+      ...pending,
+      executor: "AGENT_RUNTIME",
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+      leaseOwner: claimInput.workerId,
+      leaseToken: "70844616-602c-475b-95f6-393015b82ed2",
+      status: "RUNNING" as const,
+    };
+    const { service, tx } = recoveryHarness(pending);
+    const taskExecutionSpan = {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    };
+    Object.assign(tx, { taskExecutionSpan });
+    tx.taskStageAttempt.findUniqueOrThrow
+      .mockReset()
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(running);
+
+    const result = await service.claim(teamId, claimInput);
+
+    expect(result.task?.taskId).toBe(attemptId);
+    expect(tx.taskStageAttempt.updateMany).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        executor: "AGENT_RUNTIME",
+        leaseOwner: claimInput.workerId,
+        status: "RUNNING",
+      }),
+      where: { id: attemptId, status: "PENDING" },
+    });
+    expect(taskExecutionSpan.create).not.toHaveBeenCalled();
+    expect(taskExecutionSpan.update).not.toHaveBeenCalled();
+    expect(taskExecutionSpan.updateMany).not.toHaveBeenCalled();
+  });
+
   it("renews only a still-owned live lease and returns database-clock lease duration", async () => {
     const { service, tx } = recoveryHarness();
 
@@ -878,6 +922,10 @@ describe("SpecAnalysisRuntimeService", () => {
         leaseExpiresAt: { gt: now },
       }),
     });
+    const finished = tx.taskStageAttempt.updateMany.mock.calls.find(
+      (call) => call[0].data.status === "FAILED",
+    );
+    expect(finished?.[0].data).not.toHaveProperty("executor");
   });
 
   it("serves page 16 with the pinned revision and accurate completeness", async () => {

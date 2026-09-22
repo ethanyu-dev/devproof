@@ -1303,6 +1303,7 @@ model TaskExecutionSpan {
   label           String
   activity        String
   scope           String        @default("EXECUTION")
+  runtime         String?
   startedAt       DateTime      @map("started_at") @db.Timestamptz
   finishedAt      DateTime?     @map("finished_at") @db.Timestamptz
   estimated       Boolean       @default(true)
@@ -1397,6 +1398,7 @@ model TaskStageAttempt {
   stageId               String                     @map("stage_id") @db.Uuid
   number                Int
   status                TaskStageAttemptStatus     @default(PENDING)
+  executor              String?
   contextSnapshot       Json                       @default("{}") @map("context_snapshot")
   inputSnapshot         Json                       @map("input_snapshot")
   result                Json?
