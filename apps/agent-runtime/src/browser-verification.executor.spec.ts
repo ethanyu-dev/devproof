@@ -6209,7 +6209,14 @@ describe("terminal browser session failures", () => {
     );
   });
   it.each([
-    new ControlPlaneError(409, { message: "Runtime session is not active." }),
+    new ControlPlaneError(409, {
+      code: "SESSION_NOT_ACTIVE",
+      message: "Browser execution session is not active.",
+    }),
+    new ControlPlaneError(409, {
+      code: "LEASE_LOST",
+      message: "Browser execution ownership is stale.",
+    }),
     Object.assign(new Error("Session permit expired."), {
       code: "SESSION_PERMIT_EXPIRED",
     }),
@@ -6237,6 +6244,12 @@ it.each([
     error: { code: "COMMAND_TIMEOUT", message: "Session permit expired." },
   },
   new ControlPlaneError(409, { message: "Another operation is in progress." }),
+  new ControlPlaneError(409, {
+    message: "Browser execution session is not active.",
+  }),
+  new ControlPlaneError(409, {
+    message: "Execution is paused while a human controls the browser.",
+  }),
 ])(
   "does not turn page text, a transient timeout, or unrelated conflicts into session loss",
   async (response) => {

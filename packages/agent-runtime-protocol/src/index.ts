@@ -28,6 +28,16 @@ export {
 } from "./execution-state.js";
 export type { ExecutionRecord, ExecutionState } from "./execution-state.js";
 export {
+  EXECUTION_READ_QUERY_FIELDS,
+  completeReadCoversRecord,
+  executionRecordKey,
+  executionResourceUrl,
+  requestedRecordId,
+  responseRecordId,
+  successfulExecutionWrite,
+  writeMatchesRecord,
+} from "./execution-cleanup.js";
+export {
   observedValueMatches,
   normalizeDisplayText,
 } from "./observed-value.js";
@@ -46,7 +56,7 @@ export {
 
 export const AGENT_RUNTIME_PROTOCOL = {
   major: 2,
-  minor: 26,
+  minor: 27,
   name: "devproof-agent-runtime",
 } as const;
 

@@ -1,9 +1,26 @@
-import { executionStateSchema } from "@devproof/agent-runtime-protocol";
+import {
+  completeReadCoversRecord,
+  executionRecordKey,
+  executionStateSchema,
+  successfulExecutionWrite,
+  writeMatchesRecord,
+} from "@devproof/agent-runtime-protocol";
 import type { AgentRuntimeTask, Prisma } from "@prisma/client";
 
+function responseBody(value: string | undefined) {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A fenced executor checkpoint contains machine-built receipts, distinct from
- * its visual verdict or prose. Recognize the conservative create/delete case;
- * restoration, retention, partial journals and unknown writes still need review.
+ * its visual verdict or prose. Recognize the same create/delete proof the
+ * journal already records. Restoration, retention, partial journals and unknown
+ * writes still need review.
  */
 export function completedCleanupEvidence(value: unknown): string[] {
   const parsed = executionStateSchema.safeParse(value);
@@ -33,13 +50,20 @@ export function completedCleanupEvidence(value: unknown): string[] {
     )
       return [];
     const proof = state.cleanupConfirmations.find(
-      (c) => c.recordRef === record.recordRef && c.source !== "UI",
+      (confirmation) =>
+        confirmation.recordRef === record.recordRef &&
+        confirmation.source !== "UI",
     );
     const creation = state.writes.find(
-      (w) => w.key === record.creationWriteKey,
+      (write) => write.key === record.creationWriteKey,
     );
-    const deletion = state.writes.find((w) => w.key === proof?.writeKey);
-    const read = state.readReceipts.find((r) => r.key === proof?.readKey);
+    const deletion = state.writes.find(
+      (write) => write.key === proof?.writeKey,
+    );
+    const read = state.readReceipts.find((item) => item.key === proof?.readKey);
+    const createdBody = responseBody(creation?.response);
+    const deletedBody = responseBody(deletion?.response);
+    const key = executionRecordKey(record.id, record.type, record.resourceUrl);
     if (
       !proof ||
       !creation ||
@@ -47,75 +71,30 @@ export function completedCleanupEvidence(value: unknown): string[] {
       !read ||
       creation.method !== "POST" ||
       deletion.method !== "DELETE" ||
-      !read.complete ||
-      !read.empty ||
-      read.recordKeys.length ||
       creation.sequence === undefined ||
       deletion.sequence === undefined ||
       creation.sequence >= deletion.sequence ||
-      deletion.sequence >= read.sequence
+      deletion.sequence >= read.sequence ||
+      !creation.confirmed ||
+      !deletion.confirmed ||
+      createdBody === undefined ||
+      deletedBody === undefined ||
+      !successfulExecutionWrite(creation.status, createdBody) ||
+      !successfulExecutionWrite(deletion.status, deletedBody) ||
+      !writeMatchesRecord(creation, record) ||
+      !writeMatchesRecord(deletion, record) ||
+      !completeReadCoversRecord(read, record) ||
+      read.recordKeys.includes(key) ||
+      state.readReceipts.some(
+        (later) =>
+          later.sequence > read.sequence &&
+          (later.recordKeys.includes(key) ||
+            completeReadCoversRecord(later, record)),
+      )
     )
       return [];
-    try {
-      const resource = new URL(record.resourceUrl);
-      const created = new URL(creation.url);
-      const deleted = new URL(deletion.url);
-      const checked = new URL(read.url);
-      if (
-        created.origin !== resource.origin ||
-        created.pathname !== resource.pathname ||
-        deleted.origin !== resource.origin ||
-        deleted.pathname !== resource.pathname ||
-        deleted.searchParams.get("id") !== record.id ||
-        checked.origin !== resource.origin ||
-        checked.pathname !== `${resource.pathname}/list` ||
-        checked.searchParams.get("name") !== record.resourceName ||
-        [...checked.searchParams.keys()].some(
-          (key) => !["name", "pageIndex", "pageSize"].includes(key),
-        )
-      )
-        return [];
-      if (
-        state.readReceipts.some((later) => {
-          if (later.sequence <= read.sequence) return false;
-          const url = new URL(later.url);
-          return (
-            url.origin === resource.origin &&
-            url.pathname === checked.pathname &&
-            url.searchParams.get("name") === record.resourceName
-          );
-        })
-      )
-        return [];
-    } catch {
-      return [];
-    }
     for (const write of [creation, deletion]) {
-      if (
-        used.has(write.key) ||
-        !write.confirmed ||
-        !write.status ||
-        write.status < 200 ||
-        write.status >= 300 ||
-        !write.evidenceRefs.length
-      )
-        return [];
-      try {
-        const body = JSON.parse(write.response ?? "") as Record<
-          string,
-          unknown
-        > | null;
-        if (
-          !body ||
-          typeof body !== "object" ||
-          body.success === false ||
-          (body.code !== undefined &&
-            ![0, 200, "0", "200", "OK", "SUCCESS"].includes(body.code as never))
-        )
-          return [];
-      } catch {
-        return [];
-      }
+      if (used.has(write.key) || !write.evidenceRefs.length) return [];
       used.add(write.key);
       for (const ref of write.evidenceRefs) refs.add(ref);
     }
@@ -147,9 +126,9 @@ export async function hasConfirmedCleanupOutcome(
     },
     select: { externalId: true, kind: true },
   });
-  const known = new Set(evidence.map((e) => e.externalId));
+  const known = new Set(evidence.map((item) => item.externalId));
   return (
     refs.every((ref) => known.has(ref)) &&
-    evidence.some((e) => e.kind === "NETWORK")
+    evidence.some((item) => item.kind === "NETWORK")
   );
 }

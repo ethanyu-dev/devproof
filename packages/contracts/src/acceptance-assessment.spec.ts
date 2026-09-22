@@ -62,23 +62,43 @@ describe("evidence scoring and release gates", () => {
       ],
     });
   });
-  it("preserves proven passes and failures alongside environmental blockers", () => {
+  it("keeps a recorded locator gap when the case also lost its runtime", () => {
     const report = input(["PASSED", "FAILED", "INCONCLUSIVE"]);
-    report.cases[0]!.issues = [environmentIssue];
+    report.cases[0]!.issues = [
+      {
+        ...environmentIssue,
+        category: "EXECUTION",
+        code: "RUNTIME_LEASE_LOST",
+      },
+    ];
     expect(assessAcceptance(report)).toMatchObject({
-      score: 50,
-      total: 2,
+      score: 33,
+      total: 3,
       passed: 1,
       failed: 1,
-      excluded: 1,
+      unknown: 1,
+      excluded: 0,
       recommendation: "NOT_RECOMMENDED",
-      findings: [{ kind: "PRODUCT" }],
+      findings: [{ kind: "PRODUCT" }, { kind: "VALIDATION_GAP" }],
     });
-    report.cases[0]!.criteria.splice(1, 1);
-    expect(assessAcceptance({ ...report, aiAccepted: true })).toMatchObject({
+  });
+  it("excludes an unrecorded criterion when the case failed for an environment reason", () => {
+    const report = input(["PASSED", "INCONCLUSIVE"]);
+    report.cases[0]!.criteria[1]!.recordedVerdict = null;
+    report.cases[0]!.issues = [
+      {
+        ...environmentIssue,
+        category: "EXECUTION",
+        code: "RUNTIME_LEASE_LOST",
+      },
+    ];
+    expect(assessAcceptance(report)).toMatchObject({
       score: 100,
       total: 1,
+      passed: 1,
       excluded: 1,
+      unknown: 0,
+      findings: [],
       recommendation: "NEEDS_VALIDATION",
     });
   });
@@ -92,11 +112,13 @@ describe("evidence scoring and release gates", () => {
     "excludes unverified criteria for explicit execution environment failure %s",
     (code) => {
       const report = input(["INCONCLUSIVE"]);
+      report.cases[0]!.criteria[0]!.recordedVerdict = null;
       report.cases[0]!.issues = [
         { ...environmentIssue, category: "EXECUTION", code },
       ];
       expect(assessAcceptance(report)).toMatchObject({
         score: null,
+        total: 0,
         excluded: 1,
       });
     },

@@ -818,7 +818,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       throw new ConflictException(
         session?.status === "HUMAN_CONTROL"
           ? "Execution is paused while a human controls the browser."
-          : "Browser execution session is not active.",
+          : {
+              code: "SESSION_NOT_ACTIVE",
+              message: "Browser execution session is not active.",
+            },
       );
     }
     if (
@@ -1046,7 +1049,10 @@ export class BrowserExecutionRunner implements ExecutionRunner {
       throw new ConflictException(
         session?.status === "HUMAN_CONTROL"
           ? "Execution is paused while a human controls the browser."
-          : "Browser execution session is not active.",
+          : {
+              code: "SESSION_NOT_ACTIVE",
+              message: "Browser execution session is not active.",
+            },
       );
     }
     const requiredMinor = Math.max(

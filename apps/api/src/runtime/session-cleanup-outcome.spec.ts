@@ -1,3 +1,4 @@
+import { executionRecordKey } from "@devproof/agent-runtime-protocol";
 import { expect, it, vi } from "vitest";
 import {
   completedCleanupEvidence,
@@ -56,6 +57,7 @@ function journal() {
         sequence: 3,
         url: `${resourceUrl}/list?name=unique-case`,
         complete: true,
+        identitiesComplete: true,
         empty: true,
         recordKeys: [] as string[],
         evidenceRefs: ["queried"],
@@ -169,7 +171,10 @@ it.each([
   if (reason === "wrong query")
     s.readReceipts[0]!.url = "https://fixture.test/discount/list?name=other";
   if (reason === "old read") s.readReceipts[0]!.sequence = 0;
-  if (reason === "still present") s.readReceipts[0]!.recordKeys.push("557");
+  if (reason === "still present")
+    s.readReceipts[0]!.recordKeys.push(
+      executionRecordKey("557", undefined, "https://fixture.test/discount"),
+    );
   if (reason === "incomplete read") s.readReceipts[0]!.complete = false;
   if (reason === "extra write")
     s.writes.push({ ...s.writes[0]!, key: "extra" });
@@ -186,4 +191,21 @@ it.each([
       },
     });
   expect(completedCleanupEvidence(s)).toEqual([]);
+});
+
+it("accepts a covering read whose path is not /list", () => {
+  const state = journal();
+  state.readReceipts[0]!.url =
+    "https://fixture.test/discount?name=unique-case&page=1";
+  expect(completedCleanupEvidence(state)).toEqual([
+    "created",
+    "deleted",
+    "queried",
+  ]);
+});
+
+it("does not release a read that never completed identity coverage", () => {
+  const state = journal();
+  state.readReceipts[0]!.identitiesComplete = false;
+  expect(completedCleanupEvidence(state)).toEqual([]);
 });

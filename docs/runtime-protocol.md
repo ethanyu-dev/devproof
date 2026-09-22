@@ -14,7 +14,7 @@ The package README is the canonical field-level changelog: [`packages/runtime-pr
 
 The npm major of `@devproof/runtime-protocol` follows the wire-protocol major. Browser Runtime has its own release version and is compatible based on protocol negotiation, not matching application version numbers.
 
-The separate Agent protocol is currently v2.26. It carries Spec source grounding,
+The separate Agent protocol is currently v2.27. It carries Spec source grounding,
 diagnostic finalization checkpoints, locator recovery exhaustion reasons, and
 optional meaningful tool-progress telemetry for adaptive deadlines, and
 per-object observation targets and delivered quotations for criterion results,
@@ -80,3 +80,8 @@ stored Specs retain their matching semantics and remain readable. New generated
 Specs are limited to 10 Cases and five acceptance criteria per Case in both the
 Agent and API submission paths. Oversized output is rejected for correction,
 not truncated. See the [Agent changelog](../packages/agent-runtime-protocol/README.md).
+
+Agent v2.27 adds optional `blockingReason` on inconclusive criterion results
+and the `RUNTIME_SESSION_UNAVAILABLE` verification termination reason. Workers
+below 2.27 do not send either field. Deploy the criterion blocking-reason
+migration and the API before the Agent. Historical results remain readable.

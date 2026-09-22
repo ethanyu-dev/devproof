@@ -64,6 +64,10 @@ import type {
   ControlPlaneClient,
 } from "./control-plane.client.js";
 import {
+  BrowserSessionUnavailableError,
+  terminalBrowserSessionError,
+} from "./browser-session-unavailable.js";
+import {
   criterionSubmissionSchema,
   resolveCriterionEvidence,
 } from "./criterion-evidence.js";
@@ -2506,49 +2510,6 @@ function correction(
     correctionBytes: Buffer.byteLength(JSON.stringify(output)),
     output,
   };
-}
-
-class BrowserSessionUnavailableError extends Error {}
-
-function terminalBrowserSessionError(
-  value: unknown,
-): BrowserSessionUnavailableError | null {
-  if (value instanceof BrowserSessionUnavailableError) return value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const envelope = value as Record<string, unknown>;
-  const error =
-    envelope.error && typeof envelope.error === "object"
-      ? (envelope.error as Record<string, unknown>)
-      : envelope;
-  if (
-    [
-      "SESSION_PERMIT_EXPIRED",
-      "SESSION_CLOSED",
-      "SESSION_NOT_ACTIVE",
-      "BROWSER_SESSION_LOST",
-    ].includes(String(error.code))
-  )
-    return new BrowserSessionUnavailableError(
-      `${error.code}: ${typeof error.message === "string" ? error.message : "浏览器会话已失效。"}`,
-    );
-  // ControlPlaneError retains the HTTP status and parsed response body.
-  if (
-    envelope.status === 409 &&
-    envelope.body &&
-    typeof envelope.body === "object"
-  ) {
-    const body = envelope.body as Record<string, unknown>;
-    if (
-      typeof body.message === "string" &&
-      /^(?:(?:Browser|Runtime) )?session (?:is (?:not|no longer) active|not active)\.?$/iu.test(
-        body.message,
-      )
-    )
-      return new BrowserSessionUnavailableError(
-        `SESSION_NOT_ACTIVE: ${body.message}`,
-      );
-  }
-  return null;
 }
 
 function browserCommandError(value: unknown): Record<string, unknown> | null {

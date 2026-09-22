@@ -73,11 +73,12 @@ export function criterionScoringExclusion(
   // A lost/missing evidence reference must not erase an already recorded result.
   if (["PASSED", "FAILED"].includes(criterion.recordedVerdict ?? ""))
     return null;
-  return (
-    criterion.issues.find(isAcceptanceEnvironmentBlocker) ??
-    testCase.issues.find(isAcceptanceEnvironmentBlocker) ??
-    null
-  );
+  const own = criterion.issues.find(isAcceptanceEnvironmentBlocker);
+  if (own) return own;
+  // A recorded inconclusive, including a locator miss, stays in the score.
+  // Only a criterion with no result follows the case-level environment failure.
+  if (criterion.recordedVerdict) return null;
+  return testCase.issues.find(isAcceptanceEnvironmentBlocker) ?? null;
 }
 
 /** Proven criteria remain valid; environmental blockers are reported separately. */
