@@ -681,7 +681,7 @@ describe("task list acceptance scores", () => {
   );
 });
 
-it("excludes session-loss gaps while preserving verified product results", () => {
+it("keeps a recorded session-loss gap in the score and excludes only an unrecorded one", () => {
   const row = fixture();
   const run = row.caseExecutions[0]!.run;
   run.executionDisposition = "RUNTIME_LOST";
@@ -696,11 +696,27 @@ it("excludes session-loss gaps while preserving verified product results", () =>
       },
     },
   ];
-  run.criterionResults[0]!.status = "INCONCLUSIVE";
-  run.criterionResults[0]!.evidenceRefs = [];
-  expect(report(row).assessment).toMatchObject({ score: null, excluded: 1 });
-  run.criterionResults[0]!.status = "FAILED";
-  run.criterionResults[0]!.evidenceRefs = ["dom-1", "screen-1"];
+  const recorded = run.criterionResults[0]!;
+  recorded.status = "INCONCLUSIVE";
+  recorded.evidenceRefs = [];
+  expect(report(row).assessment).toMatchObject({
+    score: null,
+    excluded: 0,
+    unknown: 1,
+    total: 1,
+    findings: [expect.objectContaining({ kind: "VALIDATION_GAP" })],
+  });
+  run.criterionResults = [];
+  expect(report(row).assessment).toMatchObject({
+    score: null,
+    excluded: 1,
+    total: 0,
+    findings: [],
+    exclusions: [{ code: "RUNTIME_SESSION_UNAVAILABLE" }],
+  });
+  run.criterionResults = [recorded];
+  recorded.status = "FAILED";
+  recorded.evidenceRefs = ["dom-1", "screen-1"];
   expect(report(row).assessment).toMatchObject({
     failed: 1,
     excluded: 0,
