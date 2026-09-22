@@ -167,4 +167,88 @@ describe("task metrics background refresh", () => {
     expect(context.request).toHaveBeenCalledTimes(3);
     expect(context.changes).toHaveLength(0);
   });
+
+  it("drops the timeline cursor when the runtime filter changes", async () => {
+    vi.useFakeTimers();
+    const context = setup();
+    await context.loader.refresh();
+    await context.loader.more("timeline");
+    expect(context.request.mock.calls.map(([path]) => String(path))).toContain(
+      "/tasks/task/metrics/timeline?after=first",
+    );
+    context.request.mockClear();
+    await context.loader.setTimelineRuntime("BROWSER");
+    const switched = context.request.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.includes("/timeline"));
+    expect(switched).toEqual(["/tasks/task/metrics/timeline?runtime=BROWSER"]);
+    const afterSwitch = context.request.mock.calls.length;
+    await context.loader.setTimelineRuntime("BROWSER");
+    expect(context.request.mock.calls.length).toBe(afterSwitch);
+    context.request.mockClear();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(
+      context.request.mock.calls
+        .map(([path]) => String(path))
+        .filter((path) => path.includes("/timeline")),
+    ).toEqual(["/tasks/task/metrics/timeline?runtime=BROWSER"]);
+    await context.loader.more("timeline");
+    expect(context.request.mock.calls.map(([path]) => String(path))).toContain(
+      "/tasks/task/metrics/timeline?after=first&runtime=BROWSER",
+    );
+    context.loader.dispose();
+  });
+
+  it("does not continue an in-flight timeline page after the runtime filter changes", async () => {
+    const context = setup();
+    await context.loader.refresh();
+    await context.loader.more("timeline");
+    const pending = deferred();
+    context.request.mockClear();
+    context.request.mockImplementation((path: string) => {
+      if (path.endsWith("/metrics")) return Promise.resolve({ asOf: "next" });
+      if (path.includes("/model-calls"))
+        return Promise.resolve({ items: [{ id: "call" }], nextCursor: null });
+      if (path.includes("runtime=SPEC_ANALYSIS"))
+        return Promise.resolve({
+          items: [{ id: "analysis" }],
+          nextCursor: null,
+        });
+      if (path.includes("after="))
+        return Promise.resolve({
+          items: [{ id: "skipped" }],
+          nextCursor: null,
+        });
+      return pending.promise;
+    });
+    const refresh = context.loader.refresh();
+    for (
+      let attempt = 0;
+      attempt < 10 &&
+      !context.request.mock.calls.some(
+        ([path]) =>
+          String(path).includes("/timeline") &&
+          !String(path).includes("runtime="),
+      );
+      attempt += 1
+    )
+      await Promise.resolve();
+    const switched = context.loader.setTimelineRuntime("SPEC_ANALYSIS");
+    pending.resolve({
+      items: [{ id: "stale" }],
+      nextCursor: "stale-cursor",
+    });
+    await Promise.all([refresh, switched]);
+    const timeline = context.request.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.includes("/timeline"));
+    expect(timeline.some((path) => path.includes("after="))).toBe(false);
+    expect(timeline).toContain(
+      "/tasks/task/metrics/timeline?runtime=SPEC_ANALYSIS",
+    );
+    expect(context.state.spans?.items.map((item) => item.id)).toEqual([
+      "analysis",
+    ]);
+    context.loader.dispose();
+  });
 });

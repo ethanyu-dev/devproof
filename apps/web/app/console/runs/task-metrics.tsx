@@ -2,7 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { TaskActivity, TokenMetric } from "@devproof/contracts";
+import type {
+  RuntimeApplicability,
+  TaskActivity,
+  TaskMetrics,
+  TaskRuntimeKind,
+  TaskRuntimeTiming,
+  TaskTimingBucket,
+  TokenMetric,
+} from "@devproof/contracts";
 import { consoleApi } from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -71,9 +79,154 @@ export function metricTokens(metric: TokenMetric) {
 }
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+function runtimeLabel(runtime: TaskRuntimeKind | null | undefined) {
+  if (runtime === "SPEC_ANALYSIS") return "Spec 分析";
+  if (runtime === "BROWSER") return "浏览器";
+  return "未归属";
+}
+function runtimeStatus(
+  runtime: TaskRuntimeKind,
+  applicability: RuntimeApplicability,
+) {
+  if (applicability === "PARTIAL")
+    return "执行者未记录，边界来自已有模型/工具调用";
+  if (applicability === "NOT_APPLICABLE")
+    return runtime === "SPEC_ANALYSIS"
+      ? "分析阶段已跳过、阶段不存在，或只有确定性生成"
+      : "不适用";
+  if (applicability === "NOT_STARTED")
+    return runtime === "BROWSER" ? "尚未进入浏览器执行" : "尚未开始 Spec 分析";
+  return "按执行者记录";
+}
+function share(percentage: number | null) {
+  return percentage === null ? "—" : `${percentage}%`;
+}
+function ActivityShare({
+  buckets,
+  ofOccupancy = false,
+}: {
+  buckets: TaskTimingBucket[];
+  ofOccupancy?: boolean;
+}) {
+  return (
+    <>
+      {ofOccupancy && <p>条内百分比的分母是该占用，不是任务总耗时。</p>}
+      <div
+        className={styles.bar}
+        role="img"
+        aria-label={buckets
+          .map(
+            (bucket) => `${labels[bucket.activity]} ${bucket.percentage ?? 0}%`,
+          )
+          .join("，")}
+      >
+        {buckets.map((bucket) => (
+          <div
+            key={bucket.activity}
+            style={{
+              width: `${bucket.percentage ?? 0}%`,
+              background: colors[bucket.activity],
+            }}
+            title={`${labels[bucket.activity]}：${metricDuration(bucket.durationMs)}（${share(bucket.percentage)}）`}
+          />
+        ))}
+      </div>
+      <div className={styles.legend}>
+        {buckets.map((bucket) => (
+          <div key={bucket.activity}>
+            <i style={{ background: colors[bucket.activity] }} />
+            <span>{labels[bucket.activity]}</span>
+            <b>{metricDuration(bucket.durationMs)}</b>
+            <span>{share(bucket.percentage)}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+function OccupancyShare({
+  title,
+  occupiedMs,
+  percentage,
+  buckets,
+  status,
+  detail,
+}: {
+  title: string;
+  occupiedMs: number;
+  percentage: number | null;
+  buckets: TaskTimingBucket[];
+  status?: string;
+  detail?: string;
+}) {
+  return (
+    <section aria-label={title} className={styles.runtime}>
+      <h4>{title}</h4>
+      <p>
+        {metricDuration(occupiedMs)}
+        {" · 占任务总耗时 "}
+        {share(percentage)}
+        {status ? ` · ${status}` : ""}
+      </p>
+      {detail && <p>{detail}</p>}
+      {occupiedMs > 0 && buckets.length > 0 && (
+        <ActivityShare buckets={buckets} ofOccupancy />
+      )}
+    </section>
+  );
+}
+export function TaskRuntimeSplit({ metrics }: { metrics: TaskMetrics }) {
+  const analysis = metrics.runtimes?.find(
+    (item) => item.runtime === "SPEC_ANALYSIS",
+  );
+  const browser = metrics.runtimes?.find((item) => item.runtime === "BROWSER");
+  if (
+    metrics.version < 2 ||
+    !analysis ||
+    !browser ||
+    !metrics.unassigned ||
+    !metrics.overlap
+  )
+    return null;
+  const block = (timing: TaskRuntimeTiming, title: string) => (
+    <OccupancyShare
+      title={title}
+      occupiedMs={timing.occupiedMs}
+      percentage={timing.percentage}
+      buckets={timing.buckets}
+      status={runtimeStatus(timing.runtime, timing.applicability)}
+    />
+  );
+  return (
+    <div className={styles.runtimes}>
+      <p>阶段起止不是 Runtime 占用。</p>
+      {block(analysis, "Spec 分析 Runtime")}
+      {block(browser, "浏览器 Runtime")}
+      <OccupancyShare
+        title="未归属"
+        occupiedMs={metrics.unassigned.occupiedMs}
+        percentage={metrics.unassigned.percentage}
+        buckets={metrics.unassigned.buckets}
+        detail="身份准备、确定性 Spec 生成、尚未领取的分析排队、派发与收尾的控制面时间在这里。进程内租约恢复在新的等待区间写入之前，墙钟记在浏览器占用里，活动是“未能归因”，不是未归属，也不是排队。"
+      />
+      {metrics.overlap.occupiedMs > 0 && (
+        <OccupancyShare
+          title="重叠"
+          occupiedMs={metrics.overlap.occupiedMs}
+          percentage={metrics.overlap.percentage}
+          buckets={metrics.overlap.buckets}
+          detail="两个 Runtime 同时在工作，或一个 Runtime 的工作盖住另一个 Runtime 的等待。同一 Runtime 里的并行用例不算重叠。"
+        />
+      )}
+    </div>
+  );
+}
 export function TaskMetricsView({ id }: { id: string }) {
   const [state, setState] = useState(initialMetricsState);
   const [scope, setScope] = useState("ALL");
+  const [timelineRuntime, setTimelineRuntime] = useState<"" | TaskRuntimeKind>(
+    "",
+  );
   const loader = useRef<ReturnType<typeof createTaskMetricsLoader> | null>(
     null,
   );
@@ -81,6 +234,7 @@ export function TaskMetricsView({ id }: { id: string }) {
     const session = createTaskMetricsLoader(id, consoleApi, setState);
     loader.current = session;
     setState(initialMetricsState);
+    setTimelineRuntime("");
     void session.refresh();
     return () => {
       session.dispose();
@@ -146,34 +300,7 @@ export function TaskMetricsView({ id }: { id: string }) {
             ? "当前时间记录不完整。"
             : "运行节点时间采用估计对齐。"}
         </p>
-        <div
-          className={styles.bar}
-          role="img"
-          aria-label={metrics.buckets
-            .map((b) => `${labels[b.activity]} ${b.percentage ?? 0}%`)
-            .join("，")}
-        >
-          {metrics.buckets.map((b) => (
-            <div
-              key={b.activity}
-              style={{
-                width: `${b.percentage ?? 0}%`,
-                background: colors[b.activity],
-              }}
-              title={`${labels[b.activity]}：${metricDuration(b.durationMs)}（${b.percentage ?? "—"}%）`}
-            />
-          ))}
-        </div>
-        <div className={styles.legend}>
-          {metrics.buckets.map((b) => (
-            <div key={b.activity}>
-              <i style={{ background: colors[b.activity] }} />
-              <span>{labels[b.activity]}</span>
-              <b>{metricDuration(b.durationMs)}</b>
-              <span>{b.percentage === null ? "—" : `${b.percentage}%`}</span>
-            </div>
-          ))}
-        </div>
+        <ActivityShare buckets={metrics.buckets} />
         <div className={styles.phases}>
           {metrics.phases.map((p) => (
             <div key={p.phase}>
@@ -186,6 +313,7 @@ export function TaskMetricsView({ id }: { id: string }) {
             </div>
           ))}
         </div>
+        <TaskRuntimeSplit metrics={metrics} />
       </Card>
       <Card className={styles.panel}>
         <div className={styles.heading}>
@@ -268,6 +396,7 @@ export function TaskMetricsView({ id }: { id: string }) {
             <thead>
               <tr>
                 <th>时间 / 阶段</th>
+                <th>Runtime</th>
                 <th>模型</th>
                 <th>状态</th>
                 <th>Input / Output / Cache</th>
@@ -285,6 +414,7 @@ export function TaskMetricsView({ id }: { id: string }) {
                       次执行
                     </small>
                   </td>
+                  <td>{runtimeLabel(c.runtime)}</td>
                   <td>{c.model}</td>
                   <td>
                     {statuses[c.outcome] ?? c.outcome}
@@ -322,13 +452,36 @@ export function TaskMetricsView({ id }: { id: string }) {
         )}
       </Card>
       <Card className={styles.panel}>
-        <h3>执行时间线</h3>
-        <p>按已加载区间显示，悬停查看时间。开放区间仅表示尚未收到结束记录。</p>
+        <div className={styles.heading}>
+          <h3>执行时间线</h3>
+          <label>
+            Runtime{" "}
+            <select
+              aria-label="时间线 Runtime"
+              value={timelineRuntime}
+              onChange={(event) => {
+                const value = event.target.value;
+                const runtime =
+                  value === "SPEC_ANALYSIS" || value === "BROWSER" ? value : "";
+                setTimelineRuntime(runtime);
+                void loader.current?.setTimelineRuntime(runtime || null);
+              }}
+            >
+              <option value="">全部</option>
+              <option value="SPEC_ANALYSIS">Spec 分析</option>
+              <option value="BROWSER">浏览器</option>
+            </select>
+          </label>
+        </div>
+        <p>
+          按已加载区间显示，悬停查看时间。开放区间仅表示尚未收到结束记录。切换
+          Runtime 后从第一页重新加载；推断不到 Runtime 的区间显示为未归属。
+        </p>
         <div className={styles.timeline}>
           {sortedSpans.map((s) => (
             <div key={s.id} className={styles.timelineRow}>
               <span title={s.lane}>
-                {labels[s.activity]} · {s.label}
+                {runtimeLabel(s.runtime)} · {labels[s.activity]} · {s.label}
               </span>
               <div className={styles.track}>
                 <i

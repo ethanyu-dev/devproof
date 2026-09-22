@@ -99,6 +99,23 @@
 .phases span {
   color: var(--muted-foreground);
 }
+.runtimes {
+  display: grid;
+  gap: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.runtime {
+  display: grid;
+  gap: 8px;
+}
+.runtime h4 {
+  font-size: 13px;
+  font-weight: 650;
+}
+.runtime .bar {
+  height: 16px;
+}
 .scroll {
   overflow-x: auto;
 }
@@ -128,10 +145,10 @@
 }
 .timelineRow {
   display: grid;
-  grid-template-columns: 180px minmax(200px, 1fr) 90px;
+  grid-template-columns: 220px minmax(200px, 1fr) 90px;
   align-items: center;
   gap: 12px;
-  min-width: 510px;
+  min-width: 550px;
 }
 .timelineRow > span {
   overflow: hidden;

@@ -2,6 +2,7 @@ import type {
   TaskMetrics,
   TaskMetricCall,
   TaskMetricSpan,
+  TaskRuntimeKind,
 } from "@devproof/contracts";
 
 type Page<T> = { items: T[]; nextCursor: string | null };
@@ -37,9 +38,23 @@ export function createTaskMetricsLoader(
   let queue = Promise.resolve();
   let refreshing: Promise<void> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timelineRuntime: TaskRuntimeKind | null = null;
+  // Bumped when the filter changes so an in-flight page cannot reuse `after`.
+  let timelineEpoch = 0;
   const pageCounts = { "model-calls": 1, timeline: 1 };
   const message = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
+  function detailPath(
+    kind: DetailKind,
+    after: string | null,
+    runtime: TaskRuntimeKind | null,
+  ) {
+    const params = new URLSearchParams();
+    if (after) params.set("after", after);
+    if (kind === "timeline" && runtime) params.set("runtime", runtime);
+    const query = params.toString();
+    return `${base}/${kind}${query ? `?${query}` : ""}`;
+  }
   function update(patch: Partial<MetricsState>) {
     if (controller.signal.aborted) return;
     state = { ...state, ...patch };
@@ -53,16 +68,23 @@ export function createTaskMetricsLoader(
   }
   async function pages<T extends { id: string }>(
     kind: DetailKind,
-  ): Promise<Page<T>> {
+  ): Promise<Page<T> | "stale"> {
+    const epoch = timelineEpoch;
+    const runtime = kind === "timeline" ? timelineRuntime : null;
+    const count = pageCounts[kind];
     const items = new Map<string, T>();
     let nextCursor: string | null = null;
-    for (let index = 0; index < pageCounts[kind]; index++) {
-      const suffix: string = nextCursor
-        ? `?after=${encodeURIComponent(nextCursor)}`
-        : "";
-      const page: Page<T> = await request(`${base}/${kind}${suffix}`, {
-        signal: controller.signal,
-      });
+    for (let index = 0; index < count; index++) {
+      // A filter change makes the previous page's id skip or 404. Stop before
+      // the next `after` and let the caller load the first page again.
+      if (kind === "timeline" && epoch !== timelineEpoch) return "stale";
+      const page: Page<T> = await request(
+        detailPath(kind, nextCursor, runtime),
+        {
+          signal: controller.signal,
+        },
+      );
+      if (kind === "timeline" && epoch !== timelineEpoch) return "stale";
       for (const item of page.items) items.set(item.id, item);
       nextCursor = page.nextCursor;
       if (!nextCursor) break;
@@ -72,6 +94,7 @@ export function createTaskMetricsLoader(
   function refresh(): Promise<void> {
     if (controller.signal.aborted) return Promise.resolve();
     if (refreshing) return refreshing;
+    const epoch = timelineEpoch;
     clearTimeout(timer);
     refreshing = enqueue(async () => {
       await Promise.all([
@@ -82,28 +105,42 @@ export function createTaskMetricsLoader(
           pages<TaskMetricCall>("model-calls"),
           pages<TaskMetricSpan>("timeline"),
         ])
-          .then(([calls, spans]) => update({ calls, spans, detailError: null }))
+          .then(([calls, spans]) =>
+            update({
+              ...(calls === "stale" ? {} : { calls }),
+              ...(spans === "stale" ? {} : { spans }),
+              detailError: null,
+            }),
+          )
           .catch((error) => update({ detailError: message(error) })),
       ]);
     }).finally(() => {
       refreshing = null;
-      if (!controller.signal.aborted)
-        timer = setTimeout(() => void refresh(), 5000);
+      if (controller.signal.aborted) return;
+      if (epoch !== timelineEpoch) return refresh();
+      timer = setTimeout(() => void refresh(), 5000);
     });
     return refreshing;
   }
   async function more(kind: DetailKind) {
     if (controller.signal.aborted || state.loadingMore) return;
+    const epoch = timelineEpoch;
     update({ loadingMore: true });
     await enqueue(async () => {
       try {
+        if (kind === "timeline" && epoch !== timelineEpoch) return;
         const key = kind === "model-calls" ? "calls" : "spans";
         const current = state[key];
         if (!current?.nextCursor) return;
         const page = await request<Page<TaskMetricCall | TaskMetricSpan>>(
-          `${base}/${kind}?after=${encodeURIComponent(current.nextCursor)}`,
+          detailPath(
+            kind,
+            current.nextCursor,
+            kind === "timeline" ? timelineRuntime : null,
+          ),
           { signal: controller.signal },
         );
+        if (kind === "timeline" && epoch !== timelineEpoch) return;
         const items = new Map(
           [...current.items, ...page.items].map((item) => [item.id, item]),
         );
@@ -121,9 +158,20 @@ export function createTaskMetricsLoader(
       }
     });
   }
+  function setTimelineRuntime(runtime: TaskRuntimeKind | null) {
+    if (controller.signal.aborted || runtime === timelineRuntime)
+      return Promise.resolve();
+    timelineRuntime = runtime;
+    timelineEpoch += 1;
+    pageCounts.timeline = 1;
+    if (state.spans)
+      update({ spans: { items: state.spans.items, nextCursor: null } });
+    return refresh();
+  }
   return {
     refresh,
     more,
+    setTimelineRuntime,
     dispose() {
       controller.abort();
       clearTimeout(timer);
