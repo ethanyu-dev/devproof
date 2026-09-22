@@ -104,5 +104,58 @@ export function useTaskActions({
     }
   }
 
-  return { busy, message, mutate, cancel, rerun, rerunCase };
+  async function rerunCases(caseIds: string[]) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const idempotencyKey = `case-rerun:${crypto.randomUUID()}`;
+      const updated = await consoleApi<TaskDetail>(
+        `/tasks/${encodeURIComponent(id)}/cases/rerun`,
+        {
+          method: "POST",
+          body: JSON.stringify({ caseIds, idempotencyKey }),
+        },
+      );
+      onUpdated(updated);
+      setMessage({
+        text: `已重跑 ${caseIds.length} 个用例，历史执行记录保留。`,
+        tone: "success",
+      });
+    } catch (error) {
+      setMessage({ text: (error as Error).message, tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rerunCasesAsTask(caseIds: string[]) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const idempotencyKey = `case-rerun-task:${crypto.randomUUID()}`;
+      const task = await consoleApi<TaskDetail>(
+        `/tasks/${encodeURIComponent(id)}/cases/rerun-task`,
+        {
+          method: "POST",
+          body: JSON.stringify({ caseIds, idempotencyKey }),
+        },
+      );
+      onRerun(task);
+    } catch (error) {
+      setMessage({ text: (error as Error).message, tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return {
+    busy,
+    message,
+    mutate,
+    cancel,
+    rerun,
+    rerunCase,
+    rerunCases,
+    rerunCasesAsTask,
+  };
 }

@@ -125,9 +125,32 @@
   gap: 12px;
 }
 
+.caseHeader > input[type="checkbox"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.batchRerunBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+}
+
+.batchRerunBar > span {
+  flex: 1;
+  font-size: 12px;
+}
+
 .caseHeader h3 {
   min-width: 0;
   margin: 0;
+  flex: 1;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.6;

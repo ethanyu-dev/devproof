@@ -27,6 +27,16 @@ export const caseRerunInclude = {
           tasks: { select: { recoveryStatus: true } },
         },
       },
+      carriedFrom: {
+        include: {
+          run: {
+            select: {
+              lifecycle: true,
+              tasks: { select: { recoveryStatus: true } },
+            },
+          },
+        },
+      },
     },
   },
 } satisfies Prisma.TaskExecutionInclude;
@@ -55,6 +65,12 @@ export function caseRerunBlockReason(
       lifecycle: string;
       tasks?: { recoveryStatus: string | null }[];
     } | null;
+    carriedFrom?: {
+      run: {
+        lifecycle: string;
+        tasks?: { recoveryStatus: string | null }[];
+      } | null;
+    } | null;
   }[],
   task?: {
     lifecycle: string;
@@ -70,22 +86,26 @@ export function caseRerunBlockReason(
     task &&
     ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle) &&
     caseRerunSource(task.environmentSnapshot) !== null;
+  // Carried executions reuse the previous round's terminal run result.
+  const effectiveRun = (item: (typeof executions)[number]) =>
+    item.run ?? item.carriedFrom?.run ?? null;
   if (
     !executions.length ||
-    (!allowUnstarted && executions.some((item) => !item.run))
+    (!allowUnstarted && executions.some((item) => !effectiveRun(item)))
   )
     return "用例尚未创建执行记录，暂时无法单独重跑。";
   if (
-    executions.some(
-      (item) =>
-        item.run &&
-        !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(item.run.lifecycle),
-    )
+    executions.some((item) => {
+      const run = effectiveRun(item);
+      return (
+        run && !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(run.lifecycle)
+      );
+    })
   )
     return "用例仍在执行，请等待结束后重跑。";
   if (
     executions.some((item) =>
-      item.run?.tasks?.some(
+      effectiveRun(item)?.tasks?.some(
         (task) => task.recoveryStatus === "WRITE_OUTCOME_UNKNOWN",
       ),
     )
@@ -205,7 +225,7 @@ export async function insertCaseRerunTask(
     caseExecutionPolicies: undefined,
   };
   const title = options.suite
-    ? `${source.title}（隔离并行优化）`
+    ? `${source.title}（多用例重跑）`
     : `${source.sourceRef ?? source.title} · ${originalCase.name}（重跑）`;
   const environment = {
     ...asRecord(source.environmentSnapshot),

@@ -47,6 +47,8 @@ export interface AcceptanceCase {
   executionOrdinal: number;
   lifecycle: string;
   executionDisposition: string | null;
+  /** 重新分析后规格未变化,结果沿用上一轮执行。 */
+  carriedOver?: boolean;
   verdict: AcceptanceVerdict;
   criteria: AcceptanceCriterion[];
   issues: AcceptanceIssue[];

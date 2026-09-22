@@ -64,6 +64,7 @@ import {
   pauseAnalysisForInput,
 } from "../task-executions/task-analysis-input.js";
 import { taskDeploymentMatrix } from "../task-executions/task-deployment-matrix.js";
+import { planDiffDispatch } from "../task-executions/task-diff-dispatch.js";
 
 const SPEC_PROTOCOL_MINOR = 21;
 const SOURCE_PAGE_SIZE = 20;
@@ -1117,10 +1118,13 @@ export class SpecAnalysisRuntimeService {
         ];
       }
       await tx.taskCaseExecution.createMany({
-        data: taskDeploymentMatrix(
+        data: await this.diffDispatchExecutions(
+          tx,
+          attempt.stage.taskExecution.teamId,
           attempt.stage.taskExecutionId,
-          snapshot.cases,
+          snapshot,
           deployments,
+          attempt.retryPolicy,
         ),
       });
       const result = {
@@ -1233,6 +1237,94 @@ export class SpecAnalysisRuntimeService {
         stageStatus: "SUCCEEDED" as const,
       };
     });
+  }
+
+  /** DIFF re-analysis: dispatch changed Cases normally and carry terminal
+   * unchanged Cases from the previous snapshot. FULL or first analysis uses
+   * the ordinary deployment matrix. */
+  private async diffDispatchExecutions(
+    tx: Prisma.TransactionClient,
+    teamId: string,
+    taskExecutionId: string,
+    snapshot: {
+      id: string;
+      cases: Array<{ id: string; definitionHash: string }>;
+    },
+    deployments: Array<{ id: string }>,
+    retryPolicy: Prisma.JsonValue | null,
+  ): Promise<Prisma.TaskCaseExecutionCreateManyInput[]> {
+    const base = () =>
+      taskDeploymentMatrix(taskExecutionId, snapshot.cases, deployments);
+    if (record(retryPolicy).dispatchMode !== "DIFF") return base();
+    const previousSnapshot = await tx.taskSpecificationSnapshot.findFirst({
+      where: { taskExecutionId, id: { not: snapshot.id } },
+      orderBy: { generatedAt: "desc" },
+      select: { id: true },
+    });
+    if (!previousSnapshot) return base();
+    const previous = await tx.taskCaseExecution.findMany({
+      where: {
+        taskExecutionId,
+        deployment: { enabled: true },
+        testCase: { snapshotId: previousSnapshot.id },
+      },
+      include: {
+        run: {
+          select: {
+            lifecycle: true,
+            executionDisposition: true,
+            tasks: { select: { recoveryStatus: true } },
+          },
+        },
+        testCase: { select: { definitionHash: true } },
+      },
+    });
+    // Latest execution per (caseId, deploymentId) of the previous round.
+    const latest = new Map<string, (typeof previous)[number]>();
+    for (const item of previous) {
+      const key = `${item.caseId}:${item.deploymentId}`;
+      const seen = latest.get(key);
+      if (!seen || item.executionOrdinal > seen.executionOrdinal)
+        latest.set(key, item);
+    }
+    const planned = planDiffDispatch(
+      taskExecutionId,
+      snapshot.cases.map((testCase) => ({
+        id: testCase.id,
+        definitionHash: testCase.definitionHash,
+      })),
+      deployments,
+      [...latest.values()].map((item) => ({
+        id: item.id,
+        caseId: item.caseId,
+        deploymentId: item.deploymentId,
+        definitionHash: item.testCase.definitionHash,
+        run: item.run
+          ? {
+              lifecycle: item.run.lifecycle,
+              executionDisposition: item.run.executionDisposition,
+              writeOutcomeUnknown: item.run.tasks.some(
+                (task) => task.recoveryStatus === "WRITE_OUTCOME_UNKNOWN",
+              ),
+            }
+          : null,
+      })),
+    );
+    await tx.taskExecutionEvent.create({
+      data: taskEvent(
+        teamId,
+        taskExecutionId,
+        "AGENT_RUNTIME",
+        "task.spec.diff_dispatched",
+        {
+          carriedCount: planned.carriedCount,
+          dispatchedCount: planned.dispatchedCount,
+          dispatchMode: "DIFF",
+          snapshotId: snapshot.id,
+        },
+      ),
+    });
+    return planned.rows;
   }
 
   private async persistFailure(

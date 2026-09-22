@@ -1246,6 +1246,7 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
       stages: [{ id: "execution-stage-1", type: "SPEC_EXECUTION" }],
     });
     const taskCaseExecutionCreate = vi.fn().mockResolvedValue({
+      caseId,
       deploymentId,
       executionOrdinal: 2,
       id: nextExecutionId,
@@ -1300,7 +1301,12 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
         executionPolicy: expect.anything(),
         taskExecutionId: taskId,
       },
-      select: { deploymentId: true, executionOrdinal: true, id: true },
+      select: {
+        caseId: true,
+        deploymentId: true,
+        executionOrdinal: true,
+        id: true,
+      },
     });
     expect(taskExecutionStageUpdate).toHaveBeenCalledWith({
       data: {
@@ -1379,6 +1385,192 @@ describe("TaskExecutionService Spec Runtime rerun", () => {
 
     await expect(
       service.rerunCase(current, taskId, caseId),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe("TaskExecutionService re-analysis retry", () => {
+  const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
+  const stageId = "3fa0c4ad-6b5d-4d9a-b4f6-0d11b4c5a8f1";
+  const current = {
+    credential: { id: "credential-1", name: "Console user", scopes: [] },
+    team: { id: "6f090d88-8987-487f-8338-1a734beab6a6", name: "Team" },
+  } as never;
+  const inputSnapshot = {
+    kind: "ISSUE_SPEC",
+    issueRef: "ENG-123",
+    idempotencyKey: "original-task",
+    deadlineSeconds: 3600,
+  };
+
+  function serviceWith(task: Record<string, unknown>) {
+    const tx = {
+      taskExecutionEvent: { create: vi.fn() },
+      taskExecution: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      taskExecutionStage: { update: vi.fn().mockResolvedValue({}) },
+      taskStageAttempt: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      taskExecution: { findFirst: vi.fn().mockResolvedValue(task) },
+      $transaction: vi.fn(
+        async (operation: (client: typeof tx) => Promise<unknown>) =>
+          operation(tx),
+      ),
+    };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    return { service, tx };
+  }
+
+  it("allows a terminal task to re-run a succeeded analysis with DIFF dispatch", async () => {
+    const { service, tx } = serviceWith({
+      id: taskId,
+      kind: "ISSUE_SPEC",
+      lifecycle: "COMPLETED",
+      inputSnapshot,
+      cancelRequestedAt: null,
+      deadlineAt: new Date(Date.now() + 60_000),
+      caseExecutions: [],
+      stages: [
+        {
+          id: stageId,
+          type: "SPEC_ANALYSIS",
+          status: "SUCCEEDED",
+          currentAttemptNumber: 1,
+          maxAttempts: 1,
+        },
+      ],
+    });
+    vi.spyOn(service, "detail").mockResolvedValue({ id: taskId } as never);
+    await service.retryStage(current, taskId, "SPEC_ANALYSIS", {
+      reason: "refresh",
+      dispatchMode: "DIFF",
+    });
+    expect(tx.taskStageAttempt.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        number: 2,
+        retryPolicy: { dispatchMode: "DIFF" },
+        stageId,
+      }),
+    });
+    expect(tx.taskExecutionEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "task.stage.retry_queued",
+        payload: expect.objectContaining({
+          dispatchMode: "DIFF",
+          stage: "SPEC_ANALYSIS",
+        }),
+      }),
+    });
+  });
+
+  it("rejects re-analysis while the task is still running", async () => {
+    const { service } = serviceWith({
+      id: taskId,
+      kind: "ISSUE_SPEC",
+      lifecycle: "RUNNING",
+      inputSnapshot,
+      cancelRequestedAt: null,
+      deadlineAt: new Date(Date.now() + 60_000),
+      caseExecutions: [],
+      stages: [
+        {
+          id: stageId,
+          type: "SPEC_ANALYSIS",
+          status: "SUCCEEDED",
+          currentAttemptNumber: 1,
+          maxAttempts: 1,
+        },
+      ],
+    });
+    await expect(
+      service.retryStage(current, taskId, "SPEC_ANALYSIS", {
+        reason: "refresh",
+        dispatchMode: "DIFF",
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe("TaskExecutionService acceptance review rerun", () => {
+  const taskId = "9be3dc23-9a52-4a97-b6ca-7abbbcc4e1d0";
+  const reviewId = "3fa0c4ad-6b5d-4d9a-b4f6-0d11b4c5a8f1";
+  const current = {
+    credential: { id: "credential-1", name: "Console user", scopes: [] },
+    team: { id: "6f090d88-8987-487f-8338-1a734beab6a6", name: "Team" },
+  } as never;
+
+  it("resets the current revision row to QUEUED and audits the request", async () => {
+    const eventCreate = vi.fn();
+    const reviewUpdate = vi.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      taskExecution: {
+        findFirst: vi.fn().mockResolvedValue({ lifecycle: "COMPLETED" }),
+      },
+      taskAcceptanceReview: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: reviewId,
+          revision: "rev-1",
+          status: "COMPLETED",
+        }),
+        updateMany: reviewUpdate,
+      },
+      taskExecutionEvent: { create: eventCreate },
+    };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      undefined,
+      undefined,
+      { enqueueForTask: vi.fn() } as never,
+    );
+    vi.spyOn(service, "detail").mockResolvedValue({ id: taskId } as never);
+    await service.rerunAcceptanceReview(current, taskId, {
+      reason: "refresh",
+    });
+    expect(reviewUpdate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        attempts: 0,
+        status: "QUEUED",
+      }),
+      where: expect.objectContaining({ id: reviewId }),
+    });
+    expect(eventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "task.acceptance_review.rerun_queued",
+      }),
+    });
+  });
+
+  it("rejects rerun for a non-terminal task", async () => {
+    const prisma = {
+      taskExecution: {
+        findFirst: vi.fn().mockResolvedValue({ lifecycle: "RUNNING" }),
+      },
+    };
+    const service = new TaskExecutionService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      undefined,
+      undefined,
+      { enqueueForTask: vi.fn() } as never,
+    );
+    await expect(
+      service.rerunAcceptanceReview(current, taskId, { reason: "refresh" }),
     ).rejects.toMatchObject({ status: 409 });
   });
 });

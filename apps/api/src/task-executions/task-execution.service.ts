@@ -36,6 +36,9 @@ import {
   type TaskExecutionCreateInput,
   type TaskStageRetryInput,
   type TaskAnalysisInput,
+  type TaskAcceptanceReviewRerunInput,
+  type TaskCasesRerunInput,
+  type TaskCasesRerunTaskInput,
 } from "@devproof/contracts";
 import {
   caseExecutionPhase,
@@ -1176,19 +1179,28 @@ export class TaskExecutionService {
       if (!isSpecTask(task)) {
         throw new ConflictException("Only Spec tasks have an analysis stage.");
       }
-      if (stage.status !== "FAILED") {
+      const reanalysis = stage.status === "SUCCEEDED";
+      if (stage.status !== "FAILED" && !reanalysis) {
         throw new ConflictException(
-          stage.status === "SUCCEEDED"
-            ? "Create a new task to refresh an already generated specification."
-            : "Only a failed analysis stage can retry.",
+          "Only a failed or succeeded analysis stage can retry.",
+        );
+      }
+      if (
+        reanalysis &&
+        !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle)
+      ) {
+        throw new ConflictException(
+          "执行中的任务不能重新生成规格，请等待任务结束后重试。",
         );
       }
       const nextNumber = stage.currentAttemptNumber + 1;
+      const dispatchMode = input.dispatchMode ?? "DIFF";
       await this.prisma.$transaction(async (tx) => {
         await tx.taskStageAttempt.create({
           data: {
             inputSnapshot: task.inputSnapshot as Prisma.InputJsonValue,
             number: nextNumber,
+            retryPolicy: json({ dispatchMode }),
             stageId: stage.id,
           },
         });
@@ -1220,6 +1232,7 @@ export class TaskExecutionService {
         await tx.taskExecutionEvent.create({
           data: event(current.team.id, id, "HUMAN", "task.stage.retry_queued", {
             attemptNumber: nextNumber,
+            dispatchMode,
             reason: input.reason,
             stage: stageType,
           }),
@@ -1235,7 +1248,7 @@ export class TaskExecutionService {
         throw new ConflictException("Only a failed execution stage can retry.");
       }
       const retryCases = latestCaseExecutions(task.caseExecutions).filter(
-        (item) => item.run?.executionDisposition !== "EXECUTED",
+        (item) => item.run && item.run.executionDisposition !== "EXECUTED",
       );
       if (!retryCases.length) {
         throw new ConflictException(
@@ -1338,6 +1351,33 @@ export class TaskExecutionService {
     deploymentId?: string,
     input?: { idempotencyKey: string; reuseTestAccounts?: boolean | undefined },
   ) {
+    return this.rerunCasesInPlace(current, id, [caseId], deploymentId, input);
+  }
+
+  /** Reruns one or more Cases in place: new execution rounds under the same
+   * task, reusing the current Spec and environment. */
+  async rerunCases(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskCasesRerunInput,
+    deploymentId?: string,
+  ) {
+    return this.rerunCasesInPlace(
+      current,
+      id,
+      [...new Set(input.caseIds)],
+      deploymentId,
+      input,
+    );
+  }
+
+  private async rerunCasesInPlace(
+    current: ToolAuthContext,
+    id: string,
+    caseIds: string[],
+    deploymentId?: string,
+    input?: { idempotencyKey: string; reuseTestAccounts?: boolean | undefined },
+  ) {
     const now = new Date();
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -1357,8 +1397,15 @@ export class TaskExecutionService {
           });
           if (previousRequest) {
             const previous = record(previousRequest.payload);
+            const previousCaseIds = Array.isArray(previous.caseIds)
+              ? (previous.caseIds as string[])
+              : [String(previous.caseId)];
+            const sameCases =
+              previousCaseIds.length === caseIds.length &&
+              [...previousCaseIds].sort().join("\u0000") ===
+                [...caseIds].sort().join("\u0000");
             if (
-              previous.caseId !== caseId ||
+              !sameCases ||
               previous.requestedDeploymentId !== (deploymentId ?? null)
             )
               throw new ConflictException(
@@ -1381,11 +1428,21 @@ export class TaskExecutionService {
                 run: {
                   select: { lifecycle: true, tasks: currentAgentTaskInclude },
                 },
+                carriedFrom: {
+                  include: {
+                    run: {
+                      select: {
+                        lifecycle: true,
+                        tasks: currentAgentTaskInclude,
+                      },
+                    },
+                  },
+                },
                 testCase: true,
               },
               orderBy: { executionOrdinal: "desc" },
               where: {
-                caseId,
+                caseId: { in: caseIds },
                 deployment: { enabled: true },
                 ...(deploymentId ? { deploymentId } : {}),
               },
@@ -1413,20 +1470,29 @@ export class TaskExecutionService {
           );
         }
         const latestExecutions = latestCaseExecutions(task.caseExecutions);
-        if (!latestExecutions.length) {
-          throw new NotFoundException(`Spec Case ${caseId} was not found.`);
+        const missingCase = caseIds.find(
+          (caseId) =>
+            !latestExecutions.some((execution) => execution.caseId === caseId),
+        );
+        if (missingCase) {
+          throw new NotFoundException(
+            `Spec Case ${missingCase} was not found.`,
+          );
         }
-        if (latestExecutions.some((execution) => !execution.run)) {
+        // Carried executions reuse the previous round's terminal run result.
+        const effectiveRuns = latestExecutions.map((execution) => ({
+          execution,
+          run: execution.run ?? execution.carriedFrom?.run ?? null,
+        }));
+        if (effectiveRuns.some(({ run }) => !run)) {
           throw new ConflictException(
             "At least one latest Spec Runtime has not been created yet.",
           );
         }
         if (
-          latestExecutions.some(
-            (execution) =>
-              !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(
-                execution.run!.lifecycle,
-              ),
+          effectiveRuns.some(
+            ({ run }) =>
+              !["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(run!.lifecycle),
           )
         ) {
           throw new ConflictException(
@@ -1434,8 +1500,8 @@ export class TaskExecutionService {
           );
         }
         if (
-          latestExecutions.some((execution) =>
-            execution.run?.tasks?.some(
+          effectiveRuns.some(({ run }) =>
+            run?.tasks?.some(
               (agent) => agent.recoveryStatus === "WRITE_OUTCOME_UNKNOWN",
             ),
           )
@@ -1505,6 +1571,7 @@ export class TaskExecutionService {
             if (
               dependencies.some(
                 (dependency) =>
+                  !caseIds.includes(dependency) &&
                   !peers.some((peer) => peer.caseId === dependency),
               )
             ) {
@@ -1537,7 +1604,7 @@ export class TaskExecutionService {
             }
             return tx.taskCaseExecution.create({
               data: {
-                caseId,
+                caseId: latest.caseId,
                 deploymentId: latest.deploymentId,
                 executionOrdinal: latest.executionOrdinal + 1,
                 dispatchOrder: latest.dispatchOrder ?? latest.testCase.position,
@@ -1546,6 +1613,7 @@ export class TaskExecutionService {
                 taskExecutionId: task.id,
               },
               select: {
+                caseId: true,
                 deploymentId: true,
                 executionOrdinal: true,
                 id: true,
@@ -1589,7 +1657,8 @@ export class TaskExecutionService {
           nextExecutions.map((nextExecution) => {
             const previous = latestExecutions.find(
               (execution) =>
-                execution.deploymentId === nextExecution.deploymentId,
+                execution.deploymentId === nextExecution.deploymentId &&
+                execution.caseId === nextExecution.caseId,
             )!;
             return tx.taskExecutionEvent.create({
               data: event(
@@ -1599,7 +1668,8 @@ export class TaskExecutionService {
                 "task.case.rerun_queued",
                 {
                   caseExecutionId: nextExecution.id,
-                  caseId,
+                  caseIds,
+                  ...(caseIds.length === 1 ? { caseId: caseIds[0] } : {}),
                   deploymentId: nextExecution.deploymentId,
                   executionOrdinal: nextExecution.executionOrdinal,
                   previousCaseExecutionId: previous.id,
@@ -1625,6 +1695,122 @@ export class TaskExecutionService {
       throw error;
     }
     await this.dispatchPendingForTask(id);
+    return this.detail(current, id);
+  }
+
+  /** Reruns several Cases as a new task, reusing their original Spec. */
+  async rerunCasesAsTask(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskCasesRerunTaskInput,
+    actor: TaskRequestActor = { kind: "CREDENTIAL", triggerSource: "CONSOLE" },
+  ) {
+    const caseIds = [...new Set(input.caseIds)];
+    const taskId = await this.prisma.$transaction(async (tx) => {
+      await acquireAdvisoryTransactionLock(
+        tx,
+        `case-rerun:${current.team.id}:${input.idempotencyKey}`,
+      );
+      const existing = await tx.taskExecution.findUnique({
+        where: {
+          teamId_idempotencyKey: {
+            teamId: current.team.id,
+            idempotencyKey: input.idempotencyKey,
+          },
+        },
+        select: { id: true, environmentSnapshot: true },
+      });
+      if (existing) {
+        const source = caseRerunSource(existing.environmentSnapshot);
+        if (source?.taskId !== id || !caseIds.includes(source.caseId))
+          throw new ConflictException(
+            "该重跑请求标识已被其他任务使用，请刷新后重试。",
+          );
+        return existing.id;
+      }
+      const source = await tx.taskExecution.findFirst({
+        where: { id, teamId: current.team.id },
+        include: {
+          ...caseRerunInclude,
+          caseExecutions: {
+            ...caseRerunInclude.caseExecutions,
+            where: { caseId: { in: caseIds }, deployment: { enabled: true } },
+          },
+        },
+      });
+      if (!source)
+        throw new NotFoundException(`Task execution ${id} was not found.`);
+      if (!isSpecTask(source))
+        throw new ConflictException("仅 Spec 任务支持用例重跑。");
+      const executions = latestCaseExecutions(source.caseExecutions);
+      const missing = caseIds.find(
+        (caseId) =>
+          !executions.some((execution) => execution.caseId === caseId),
+      );
+      if (missing)
+        throw new NotFoundException(`Spec Case ${missing} was not found.`);
+      return insertCaseRerunTask(
+        tx,
+        source,
+        executions,
+        input.idempotencyKey,
+        actor,
+        { suite: true },
+      );
+    });
+    // The durable worker resolves identity and dispatches after commit. No
+    // external calls extend this request past the console's retry timeout.
+    return this.detail(current, taskId);
+  }
+
+  /** Regenerates the task acceptance review wholesale: the current revision
+   * row is reset to QUEUED and picked up by the Spec analysis pool again. */
+  async rerunAcceptanceReview(
+    current: ToolAuthContext,
+    id: string,
+    input: TaskAcceptanceReviewRerunInput,
+  ) {
+    const task = await this.prisma.taskExecution.findFirst({
+      select: { lifecycle: true },
+      where: { id, teamId: current.team.id },
+    });
+    if (!task)
+      throw new NotFoundException(`Task execution ${id} was not found.`);
+    if (!["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(task.lifecycle))
+      throw new ConflictException("任务结束后才能重新生成评述。");
+    await this.acceptanceReviews?.enqueueForTask(current.team.id, id);
+    const row = await this.prisma.taskAcceptanceReview.findFirst({
+      orderBy: { createdAt: "desc" },
+      where: { taskExecution: { id, teamId: current.team.id } },
+    });
+    if (!row) throw new NotFoundException("验收评述记录不存在。");
+    if (row.status === "RUNNING")
+      throw new ConflictException("评述正在生成中，请稍后重试。");
+    await this.prisma.taskAcceptanceReview.updateMany({
+      data: {
+        attempts: 0,
+        error: null,
+        leaseExpiresAt: null,
+        leaseOwner: null,
+        leaseToken: null,
+        model: null,
+        result: Prisma.DbNull,
+        status: "QUEUED",
+      },
+      where: {
+        id: row.id,
+        taskExecution: { teamId: current.team.id },
+      },
+    });
+    await this.prisma.taskExecutionEvent.create({
+      data: event(
+        current.team.id,
+        id,
+        "HUMAN",
+        "task.acceptance_review.rerun_queued",
+        { reason: input.reason, revision: row.revision },
+      ),
+    });
     return this.detail(current, id);
   }
 
@@ -1869,7 +2055,12 @@ export class TaskExecutionService {
     const task = await this.prisma.taskExecution.findUnique({
       include: {
         caseExecutions: {
-          include: { run: { include: { tasks: currentAgentTaskInclude } } },
+          include: {
+            run: { include: { tasks: currentAgentTaskInclude } },
+            carriedFrom: {
+              include: { run: { include: { tasks: currentAgentTaskInclude } } },
+            },
+          },
         },
         deployments: { select: { id: true }, where: { enabled: true } },
         executionRuns: { include: { tasks: currentAgentTaskInclude } },
@@ -1906,20 +2097,24 @@ export class TaskExecutionService {
           currentCases.some((testCase) => testCase.id === item.caseId),
       ),
     );
-    const issueCases = latestIssueExecutions.map((item) => ({
-      scheduling: item.scheduling,
-      dispatchAttempts: item.dispatchAttempts,
-      dispatchMaxAttempts: CASE_DISPATCH_MAX_ATTEMPTS,
-      dispatchStatus: item.dispatchStatus,
-      run: item.run
-        ? {
-            executionDisposition: item.run.executionDisposition,
-            lifecycle: item.run.lifecycle,
-            verdict: item.run.verdict,
-            tasks: item.run.tasks,
-          }
-        : null,
-    }));
+    const issueCases = latestIssueExecutions.map((item) => {
+      const carriedRun = item.carriedFrom?.run ?? null;
+      const run = item.run ?? carriedRun;
+      return {
+        scheduling: item.scheduling,
+        dispatchAttempts: item.dispatchAttempts,
+        dispatchMaxAttempts: CASE_DISPATCH_MAX_ATTEMPTS,
+        dispatchStatus: item.dispatchStatus,
+        run: run
+          ? {
+              executionDisposition: run.executionDisposition,
+              lifecycle: run.lifecycle,
+              verdict: run.verdict,
+              tasks: run.tasks,
+            }
+          : null,
+      };
+    });
     const directCases = task.executionRuns.map((run) => ({
       dispatchAttempts: 1,
       dispatchMaxAttempts: 1,
@@ -1954,8 +2149,9 @@ export class TaskExecutionService {
             (item) =>
               item.caseId === planned.caseId &&
               item.deploymentId === planned.deploymentId &&
-              item.dispatchStatus === "LINKED" &&
-              item.run,
+              (item.dispatchStatus === "LINKED"
+                ? Boolean(item.run)
+                : item.dispatchStatus === "CARRIED_OVER"),
           ),
         );
     const terminalRuns = direct

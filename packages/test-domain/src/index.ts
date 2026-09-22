@@ -144,7 +144,12 @@ export interface TaskExecutionProjectionInput {
     dispatchMaxAttempts: number;
     scheduling?: unknown;
     dispatchStatus:
-      "PENDING" | "DISPATCHING" | "LINKED" | "FAILED" | "CANCELLED";
+      | "PENDING"
+      | "DISPATCHING"
+      | "LINKED"
+      | "CARRIED_OVER"
+      | "FAILED"
+      | "CANCELLED";
     run: {
       executionDisposition: ExecutionDisposition | null;
       lifecycle: RunLifecycle;
@@ -253,6 +258,11 @@ export function projectTaskExecution(
   const runs = caseExecutions.flatMap((item) =>
     item.dispatchStatus === "LINKED" && item.run ? [item.run] : [],
   );
+  // Carried executions reuse the terminal result of the previous round; they
+  // never become active runs, but their verdicts count toward the task verdict.
+  const carriedRuns = caseExecutions.flatMap((item) =>
+    item.dispatchStatus === "CARRIED_OVER" && item.run ? [item.run] : [],
+  );
   if (runs.some((run) => run.lifecycle === "WAITING_HUMAN")) {
     return taskProjection(
       "SPEC_EXECUTION",
@@ -299,25 +309,33 @@ export function projectTaskExecution(
   }
 
   const fullyLinked = caseExecutions.every(
-    (item) => item.dispatchStatus === "LINKED" && item.run,
+    (item) =>
+      (item.dispatchStatus === "CARRIED_OVER" && item.run) ||
+      (item.dispatchStatus === "LINKED" && item.run),
+  );
+  const executedRuns = [...runs, ...carriedRuns].filter(
+    (run) => run.executionDisposition === "EXECUTED",
   );
   const fullyExecuted =
     fullyLinked &&
-    runs.length === caseExecutions.length &&
-    runs.every((run) => run.executionDisposition === "EXECUTED");
+    [...runs, ...carriedRuns].every(
+      (run) => run.executionDisposition === "EXECUTED",
+    );
   if (!fullyExecuted) {
     return taskProjection(
       "SPEC_EXECUTION",
       "COMPLETED",
       "FAILED",
-      runs.length ? "BLOCKED" : "NOT_RUN",
-      runs.some((run) => run.verdict === "FAILED") ? "FAILED" : null,
+      executedRuns.length ? "BLOCKED" : "NOT_RUN",
+      executedRuns.some((run) => run.verdict === "FAILED") ? "FAILED" : null,
     );
   }
 
-  const verdict = runs.some((run) => run.verdict === "FAILED")
+  const verdict = executedRuns.some((run) => run.verdict === "FAILED")
     ? "FAILED"
-    : runs.some((run) => run.verdict === "INCONCLUSIVE" || run.verdict === null)
+    : executedRuns.some(
+          (run) => run.verdict === "INCONCLUSIVE" || run.verdict === null,
+        )
       ? "INCONCLUSIVE"
       : "PASSED";
   return taskProjection(

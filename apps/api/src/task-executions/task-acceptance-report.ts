@@ -51,7 +51,12 @@ export const acceptanceReportInclude = {
     where: { enabled: true },
     orderBy: { createdAt: "asc" as const },
   },
-  caseExecutions: { include: { run: { include: runInclude } } },
+  caseExecutions: {
+    include: {
+      run: { include: runInclude },
+      carriedFrom: { include: { run: { include: runInclude } } },
+    },
+  },
   executionRuns: {
     include: runInclude,
     orderBy: { createdAt: "asc" as const },
@@ -307,6 +312,7 @@ function caseReport(
     run: ReportRun | null;
     definition: unknown;
     dispatchError?: unknown;
+    carriedOver?: boolean;
   },
   final: boolean,
 ): AcceptanceCase {
@@ -416,9 +422,12 @@ export function buildTaskAcceptanceReport(
               deployment: deployment.name,
               targetUrl: deployment.targetUrl,
               executionOrdinal: execution?.executionOrdinal ?? 1,
-              run: execution?.run ?? null,
+              run: execution?.run ?? execution?.carriedFrom?.run ?? null,
               definition: testCase.definition,
               dispatchError: execution?.dispatchLastError,
+              ...(execution?.dispatchStatus === "CARRIED_OVER"
+                ? { carriedOver: true }
+                : {}),
             },
             final,
           ),

@@ -219,3 +219,14 @@ correction; upgrading alone does not rewrite persisted plans. Use the
 [account recovery runbook](test-account-requirement-design.md). Retain an API
 that can read v2 account plans during rollback; an old v1-only reader must not
 resume dispatch or recreate original account demands.
+
+## Stage-independent rerun (Agent protocol additive)
+
+Additive migrations `20260922000000_stage_independent_rerun` and
+`20260922010000_stage_retry_policy` add a `CARRIED_OVER` dispatch status, a
+self-referencing `carried_from_execution_id`, and an optional attempt
+`retry_policy`. Deploy API (with migrations) before Web; Agent Runtimes need no
+upgrade for these features because re-analysis, Case batch rerun, and review
+rerun are control-plane paths. Carried executions appear to older readers as
+undispatched rows; do not roll back the API while carried rows exist without
+accounting for them in the completion projection.

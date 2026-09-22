@@ -91,6 +91,9 @@ describe("VerificationMcpService", () => {
         "provide_task_test_accounts",
         "rerun_task",
         "rerun_task_case",
+        "rerun_task_cases",
+        "rerun_task_cases_as_task",
+        "rerun_task_acceptance_review",
         "list_authorized_profiles",
       ]);
 

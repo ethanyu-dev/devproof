@@ -67,7 +67,16 @@ export function TaskDetailClient({ id }: { id: string }) {
     updateDetail,
     retryEvents,
   } = useTaskDetail(id, requestedView === "logs");
-  const { busy, message, mutate, cancel, rerun, rerunCase } = useTaskActions({
+  const {
+    busy,
+    message,
+    mutate,
+    cancel,
+    rerun,
+    rerunCase,
+    rerunCases,
+    rerunCasesAsTask,
+  } = useTaskActions({
     id,
     onUpdated: updateDetail,
     onRerun: (task) => router.push(taskDetailHref(task.id, returnTo)),
@@ -294,6 +303,8 @@ export function TaskDetailClient({ id }: { id: string }) {
           ) : (
             <TaskDetailContent
               onRerunCase={rerunCase}
+              onRerunCases={rerunCases}
+              onRerunCasesAsTask={rerunCasesAsTask}
               onCaseRetried={updateDetail}
               busy={busy}
               detail={detail}
