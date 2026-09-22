@@ -627,7 +627,6 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       scope: span.scope,
       startedAt: span.startedAt.getTime(),
       finishedAt: span.finishedAt?.getTime() ?? null,
-      runtime: span.runtime,
     }));
     // Known historical boundaries are useful without inventing gaps as platform work.
     if (row.startedAt && row.startedAt > row.createdAt)
@@ -777,15 +776,25 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
         );
       return summary;
     }
-    if ((projection.overlap.occupiedMs ?? 0) > 0) {
+    const priorOverlap = object(
+      object(row.metrics?.summary).overlap,
+    ).occupiedMs;
+    if (
+      (projection.overlap.occupiedMs ?? 0) > 0 &&
+      saved.count &&
+      !(
+        row.metrics?.projectedRevision === revision &&
+        typeof priorOverlap === "number" &&
+        priorOverlap > 0
+      )
+    ) {
       this.logger.log(
         `task metrics runtime overlap taskExecutionId=${id} overlapMs=${projection.overlap.occupiedMs}`,
       );
-      if (saved.count)
-        this.observability?.increment(
-          "devproof_task_metrics_runtime_overlap_total",
-          "Task metrics projections that contain cross-runtime overlap.",
-        );
+      this.observability?.increment(
+        "devproof_task_metrics_runtime_overlap_total",
+        "Task metrics projections that contain cross-runtime overlap.",
+      );
     }
     if (!row.metrics?.historyBackfilled)
       await this.prisma.taskExecutionMetrics.update({
@@ -974,7 +983,6 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
           { stage: usage.stage, scope: usage.scope, runId: usage.runId },
         ]),
       ),
-      interventionIds: new Set<string>(),
     };
   }
   private async requireTask(teamId: string, id: string) {

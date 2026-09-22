@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, afterAll, describe, it, expect } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { projectRuntimeTiming } from "./task-metrics.js";
 import { TaskMetricsService } from "./task-metrics.service.js";
 const url = process.env.DEVPROOF_METRICS_TEST_DATABASE_URL;
 if (url && !/^\/devproof_metrics_test_[a-f0-9]{8}$/.test(new URL(url).pathname))
@@ -10,7 +11,12 @@ describe.skipIf(!url)("task metrics persistence", () => {
   let db: PrismaClient, service: TaskMetricsService;
   beforeAll(() => {
     db = new PrismaClient({
-      adapter: new PrismaPg({ connectionString: url! }),
+      adapter: new PrismaPg({
+        connectionString: url!,
+        // Same UTC session as PrismaService. Otherwise trigger timestamptz
+        // values are read several hours away from task.createdAt.
+        options: "-c TimeZone=UTC",
+      }),
     });
     service = new TaskMetricsService(db as never);
   });
@@ -357,6 +363,57 @@ describe.skipIf(!url)("task metrics persistence", () => {
       runtime: "BROWSER",
       lane: run.id,
     });
+    const created = await db.taskExecution.findUniqueOrThrow({
+      where: { id: task.id },
+    });
+    expect(
+      Math.abs(recovering.startedAt.getTime() - created.createdAt.getTime()),
+    ).toBeLessThan(60_000);
+    const during = projectRuntimeTiming({
+      taskId: task.id,
+      start: created.createdAt.getTime(),
+      end: recovering.startedAt.getTime() + 5_000,
+      analysisStageStatus: "SUCCEEDED",
+      attempts: [
+        {
+          id: attempt.id,
+          stageType: "SPEC_ANALYSIS",
+          executor: "AGENT_RUNTIME",
+          createdAt: attempt.createdAt.getTime(),
+          finishedAt: attempt.finishedAt?.getTime() ?? null,
+        },
+      ],
+      runs: [
+        {
+          id: run.id,
+          createdAt: run.createdAt.getTime(),
+          finishedAt: null,
+        },
+      ],
+      spans: (
+        await db.taskExecutionSpan.findMany({
+          where: { taskExecutionId: task.id },
+        })
+      ).map((span) => ({
+        id: span.id,
+        lane: span.lane,
+        label: span.label,
+        activity: span.activity,
+        scope: span.scope,
+        startedAt: span.startedAt.getTime(),
+        finishedAt: span.finishedAt?.getTime() ?? null,
+      })),
+      usages: [],
+    });
+    expect(
+      during.segments.some(
+        (segment) =>
+          segment.activity === "QUEUE" &&
+          segment.runtime === "BROWSER" &&
+          segment.start <= recovering.startedAt.getTime() &&
+          segment.end > recovering.startedAt.getTime(),
+      ),
+    ).toBe(true);
     await db.taskCaseExecution.update({
       where: { id: linked.id },
       data: { scheduling: { state: "RUNNING", reason: "DATA_LOCK" } },
@@ -414,19 +471,98 @@ describe.skipIf(!url)("task metrics persistence", () => {
         },
       }),
     ).toMatchObject({ activity: "QUEUE", runtime: "BROWSER" });
-    const openQueue = await db.taskExecutionSpan.findFirstOrThrow({
-      where: { taskExecutionId: task.id, label: "PROFILE_RESERVED" },
+    await db.taskCaseExecution.update({
+      where: { id: waiting.id },
+      data: { scheduling: { state: "TERMINAL", reason: null } },
     });
-    // Anchor the task window on the span clock Prisma returns. Trigger
-    // timestamps in this session are not comparable to task.createdAt.
-    await db.taskExecution.update({
-      where: { id: task.id },
-      data: {
-        createdAt: new Date(openQueue.startedAt.getTime() - 1000),
-        lifecycle: "COMPLETED",
-        finishedAt: new Date(openQueue.startedAt.getTime() + 60_000),
+    await db.taskCaseExecution.update({
+      where: { id: linked.id },
+      data: { scheduling: { state: "RECOVERING", reason: "LEASE_RECOVERY" } },
+    });
+    const openRecovery = await db.taskExecutionSpan.findFirstOrThrow({
+      where: {
+        taskExecutionId: task.id,
+        id: { startsWith: `state:task_case_executions:${linked.id}:` },
+        finishedAt: null,
       },
     });
+    const runFinished = new Date(openRecovery.startedAt.getTime() + 60_000);
+    await db.executionRun.update({
+      where: { id: run.id },
+      data: { lifecycle: "COMPLETED", finishedAt: runFinished },
+    });
+    await db.taskCaseExecution.update({
+      where: { id: linked.id },
+      data: { scheduling: { state: "TERMINAL", reason: "LEASE_RECOVERY" } },
+    });
+    expect(
+      await db.taskExecutionSpan.count({
+        where: {
+          id: { startsWith: `state:task_case_executions:${linked.id}:` },
+          finishedAt: null,
+        },
+      }),
+    ).toBe(0);
+    const closedRecovery = await db.taskExecutionSpan.findFirstOrThrow({
+      where: {
+        taskExecutionId: task.id,
+        id: { startsWith: `state:task_case_executions:${linked.id}:` },
+        label: "LEASE_RECOVERY",
+      },
+      orderBy: { startedAt: "desc" },
+    });
+    expect(closedRecovery.finishedAt).not.toBeNull();
+    const taskFinished = new Date(runFinished.getTime() + 30_000);
+    await db.taskExecution.update({
+      where: { id: task.id },
+      data: { lifecycle: "COMPLETED", finishedAt: taskFinished },
+    });
+    const after = projectRuntimeTiming({
+      taskId: task.id,
+      start: created.createdAt.getTime(),
+      end: taskFinished.getTime(),
+      analysisStageStatus: "SUCCEEDED",
+      attempts: [
+        {
+          id: attempt.id,
+          stageType: "SPEC_ANALYSIS",
+          executor: "AGENT_RUNTIME",
+          createdAt: attempt.createdAt.getTime(),
+          finishedAt: attempt.finishedAt?.getTime() ?? null,
+        },
+      ],
+      runs: [
+        {
+          id: run.id,
+          createdAt: run.createdAt.getTime(),
+          finishedAt: runFinished.getTime(),
+        },
+      ],
+      spans: (
+        await db.taskExecutionSpan.findMany({
+          where: { taskExecutionId: task.id },
+        })
+      ).map((span) => ({
+        id: span.id,
+        lane: span.lane,
+        label: span.label,
+        activity: span.activity,
+        scope: span.scope,
+        startedAt: span.startedAt.getTime(),
+        finishedAt: span.finishedAt?.getTime() ?? null,
+      })),
+      usages: [],
+    });
+    const postRun = after.segments.filter(
+      (segment) => segment.start >= runFinished.getTime(),
+    );
+    expect(postRun.length).toBeGreaterThan(0);
+    expect(
+      postRun.every(
+        (segment) =>
+          segment.runtime === "UNASSIGNED" && segment.activity !== "QUEUE",
+      ),
+    ).toBe(true);
     const projected = await service.rebuild(team.id, task.id);
     expect(projected.version).toBe(2);
     expect(

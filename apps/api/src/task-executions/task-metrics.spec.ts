@@ -287,6 +287,28 @@ describe("exclusive runtime occupancy", () => {
       MODEL: sec(8),
     });
     expect(result.ok).toBe(true);
+    expect(
+      Object.fromEntries(
+        result.buckets.map((bucket) => [bucket.activity, bucket.durationMs]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        timingBuckets(0, sec(30), [
+          {
+            activity: "QUEUE",
+            lane: "run",
+            startedAt: new Date(sec(10)),
+            finishedAt: new Date(sec(30)),
+          },
+          {
+            activity: "MODEL",
+            lane: "attempt",
+            startedAt: new Date(sec(16)),
+            finishedAt: new Date(sec(24)),
+          },
+        ]).map((bucket) => [bucket.activity, bucket.durationMs]),
+      ),
+    );
   });
   it("keeps TEST_ACCOUNTS_REQUIRED as mixed wait inside the browser runtime", () => {
     const spans = [
@@ -327,7 +349,6 @@ describe("exclusive runtime occupancy", () => {
       activity: "QUEUE",
       startedAt: 0,
       finishedAt: sec(10),
-      runtime: "SPEC_ANALYSIS",
     };
     const preClaim = project({
       end: sec(10),
@@ -385,7 +406,6 @@ describe("exclusive runtime occupancy", () => {
           activity: "MODEL",
           startedAt: 0,
           finishedAt: sec(10),
-          runtime: "SPEC_ANALYSIS",
         },
       ],
       usages: [
@@ -429,7 +449,6 @@ describe("exclusive runtime occupancy", () => {
       activity: "HUMAN",
       startedAt: sec(30),
       finishedAt: sec(50),
-      runtime: "SPEC_ANALYSIS",
     };
     const agent = project({
       end: sec(50),
@@ -470,6 +489,50 @@ describe("exclusive runtime occupancy", () => {
       runtime: "UNASSIGNED",
     });
     expect(part(deterministic, "SPEC_ANALYSIS").occupiedMs).toBe(0);
+    const laterDeterministic = project({
+      end: sec(40),
+      attempts: [
+        {
+          id: "agent",
+          stageType: "SPEC_ANALYSIS",
+          executor: "AGENT_RUNTIME",
+          createdAt: 0,
+          finishedAt: sec(10),
+        },
+        {
+          id: "deterministic",
+          stageType: "SPEC_ANALYSIS",
+          executor: "DETERMINISTIC",
+          createdAt: sec(20),
+          finishedAt: sec(30),
+        },
+      ],
+      spans: [
+        { ...wait, startedAt: sec(10), finishedAt: sec(20) },
+        {
+          ...wait,
+          id: "state:task_executions:task:2",
+          startedAt: sec(30),
+          finishedAt: sec(40),
+        },
+      ],
+    });
+    expect(slices(laterDeterministic)).toEqual(
+      expect.arrayContaining([
+        {
+          start: 10,
+          end: 20,
+          activity: "HUMAN",
+          runtime: "SPEC_ANALYSIS",
+        },
+        {
+          start: 30,
+          end: 40,
+          activity: "HUMAN",
+          runtime: "UNASSIGNED",
+        },
+      ]),
+    );
   });
   it("leaves the dispatch gap before the first run unassigned", () => {
     const result = project({
@@ -565,7 +628,6 @@ describe("exclusive runtime occupancy", () => {
           activity: "HUMAN",
           startedAt: 0,
           finishedAt: sec(5),
-          runtime: "BROWSER",
         },
       ],
     });

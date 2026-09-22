@@ -296,7 +296,6 @@ export interface InferenceContext {
   attemptIds: ReadonlySet<string>;
   runIds: ReadonlySet<string>;
   usages: ReadonlyMap<string, InferenceUsage>;
-  interventionIds: ReadonlySet<string>;
   deterministicAnalysis: boolean;
 }
 
@@ -312,7 +311,7 @@ export function inferSpanRuntime(
   ctx: InferenceContext,
 ): TaskRuntimeKind | null {
   if (span.scope === "ACCEPTANCE_REVIEW") return null;
-  if (span.intervention || ctx.interventionIds.has(span.id)) return "BROWSER";
+  if (span.intervention) return "BROWSER";
   if (span.id === "initial" || span.id.startsWith("state:task_executions:"))
     return null;
   // Case rows stay browser even when the reason is PROFILE_RESERVED.
@@ -361,8 +360,6 @@ export interface RuntimeSpanFact {
   startedAt: number;
   finishedAt: number | null;
   intervention?: boolean;
-  /** Stored column. Inference does not read it. */
-  runtime?: string | null;
 }
 export interface RuntimeUsageFact extends InferenceUsage {
   id: string;
@@ -472,15 +469,23 @@ function tagShares(elapsed: number, occupied: Record<RuntimeTag, number>) {
   return shares;
 }
 
-function emptyResidual(): TaskRuntimeResidual {
-  return {
-    occupiedMs: 0,
-    percentage: null,
-    activeMs: 0,
-    waitingMs: 0,
-    unknownMs: 0,
-    buckets: [],
-  };
+function pausedByAgent(
+  span: RuntimeSpanFact,
+  attempts: RuntimeAttemptFact[],
+  agentIds: ReadonlySet<string>,
+) {
+  if (span.label !== "ANALYSIS_INPUT_REQUIRED") return false;
+  const ended = attempts.filter(
+    (attempt) =>
+      attempt.finishedAt !== null && attempt.finishedAt <= span.startedAt,
+  );
+  const latest = ended.reduce(
+    (max, attempt) => Math.max(max, attempt.finishedAt ?? 0),
+    Number.NEGATIVE_INFINITY,
+  );
+  return ended.some(
+    (attempt) => attempt.finishedAt === latest && agentIds.has(attempt.id),
+  );
 }
 
 function classifyRuntime(
@@ -529,9 +534,6 @@ export function projectRuntimeTiming(
     attemptIds: new Set(attempts.map((attempt) => attempt.id)),
     runIds,
     usages: new Map(input.usages.map((usage) => [usage.id, usage])),
-    interventionIds: new Set(
-      input.spans.filter((span) => span.intervention).map((span) => span.id),
-    ),
     deterministicAnalysis: deterministic,
   };
   const execution = input.spans.filter(
@@ -558,14 +560,14 @@ export function projectRuntimeTiming(
         from: attempt.createdAt,
         to: close(attempt.finishedAt),
       });
-    if (agent.length)
-      for (const span of execution)
-        if (span.label === "ANALYSIS_INPUT_REQUIRED")
-          masks.push({
-            runtime: "SPEC_ANALYSIS",
-            from: span.startedAt,
-            to: close(span.finishedAt),
-          });
+    const agentIds = new Set(agent.map((attempt) => attempt.id));
+    for (const span of execution)
+      if (pausedByAgent(span, attempts, agentIds))
+        masks.push({
+          runtime: "SPEC_ANALYSIS",
+          from: span.startedAt,
+          to: close(span.finishedAt),
+        });
     for (const run of input.runs)
       masks.push({
         runtime: "BROWSER",
@@ -594,10 +596,9 @@ export function projectRuntimeTiming(
       ? "MEASURED"
       : "NOT_STARTED") as RuntimeApplicability,
   };
-  const buckets =
-    elapsedMs === null ? [] : timingBuckets(input.start, input.end, timed);
   const segments =
     elapsedMs === null ? [] : sweep(input.start, input.end, timed, masks);
+  const activityTotals = new Map<TaskActivity, number>();
   const occupied = {
     SPEC_ANALYSIS: 0,
     BROWSER: 0,
@@ -618,6 +619,10 @@ export function projectRuntimeTiming(
   };
   for (const segment of segments) {
     const dt = segment.end - segment.start;
+    activityTotals.set(
+      segment.activity,
+      (activityTotals.get(segment.activity) ?? 0) + dt,
+    );
     occupied[segment.runtime] = (occupied[segment.runtime] ?? 0) + dt;
     const totals = activities[segment.runtime];
     totals?.set(segment.activity, (totals.get(segment.activity) ?? 0) + dt);
@@ -627,6 +632,10 @@ export function projectRuntimeTiming(
     else if (waits.has(segment.activity)) part.waitingMs += dt;
     else part.unknownMs += dt;
   }
+  const buckets =
+    elapsedMs === null || elapsedMs === 0
+      ? []
+      : bucketShares(elapsedMs, [...activityTotals]);
   const shares =
     elapsedMs === null
       ? tagShares(0, occupied)

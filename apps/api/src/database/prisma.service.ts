@@ -13,6 +13,8 @@ export class PrismaService
   constructor() {
     const adapter = new PrismaPg({
       connectionString: env().DATABASE_URL,
+      // adapter-pg rewrites a timestamptz offset to +00 without converting.
+      options: "-c TimeZone=UTC",
       connectionTimeoutMillis: 10_000,
       idleTimeoutMillis: 30_000,
       max: 10,

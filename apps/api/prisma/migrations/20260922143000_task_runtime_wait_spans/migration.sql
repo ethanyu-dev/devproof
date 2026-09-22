@@ -30,10 +30,14 @@ BEGIN
     reason := NEW.scheduling->>'reason';
     IF NEW.run_id IS NULL AND NEW.scheduling->>'state' IN ('WAITING','READY','ADMITTED','RECOVERING') THEN
       category := CASE reason WHEN 'CASE_DEPENDENCY' THEN 'DEPENDENCY' WHEN 'RETRY_BACKOFF' THEN 'BACKOFF' ELSE 'QUEUE' END;
-    ELSIF NEW.run_id IS NOT NULL AND (
-      NEW.scheduling->>'state' = 'RECOVERING'
-      OR reason IN ('LEASE_RECOVERY', 'DATA_LOCK')
-    ) THEN
+    -- A finished recovery is TERMINAL + LEASE_RECOVERY. Close the open span
+    -- and do not start another, or time after the run stays queued.
+    ELSIF NEW.run_id IS NOT NULL
+      AND NEW.scheduling->>'state' IS DISTINCT FROM 'TERMINAL'
+      AND (
+        NEW.scheduling->>'state' = 'RECOVERING'
+        OR reason IN ('LEASE_RECOVERY', 'DATA_LOCK')
+      ) THEN
       category := 'QUEUE';
     END IF;
   END IF;
