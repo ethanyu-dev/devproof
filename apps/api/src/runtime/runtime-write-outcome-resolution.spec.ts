@@ -28,6 +28,10 @@ function fixture() {
   const now = new Date();
   const owner = {
     id: "task-1",
+    runId: "run-1",
+    attemptId: "attempt-1",
+    leaseLostAt: null as Date | null,
+    leaseExpiresAt: null as Date | null,
     status: "FAILED",
     recoveryStatus: "WRITE_OUTCOME_UNKNOWN" as string | null,
     fencingToken: 3n,
@@ -130,6 +134,7 @@ function fixture() {
       }),
       create: vi.fn(),
     },
+    runEvent: { findFirst: vi.fn().mockResolvedValue(null) },
     executionResourceLease: {
       findMany: vi.fn().mockImplementation(async () => (lease ? [lease] : [])),
       deleteMany: vi.fn().mockImplementation(async ({ where }) => {
@@ -284,6 +289,63 @@ describe("explicit Case retry authorization", () => {
 });
 
 describe("manual reconciliation through durable session recovery", () => {
+  it("allows an explicitly revoked owner to authorize continuation and later reconcile without replay", async () => {
+    const { service, owner, recovery, session, tx, getLease } = fixture();
+    owner.fencingToken = session.ownerFencingToken + 1n;
+    owner.leaseLostAt = new Date();
+    tx.runEvent.findFirst.mockResolvedValue({
+      id: "lease-loss-event",
+    } as never);
+    await service.authorizeRetry(current, recovery.id, {
+      expectedVersion: recovery.version,
+      idempotencyKey: "revoke-retry",
+      acknowledgeUnknownWrite: true,
+    });
+    expect(recovery.writeOutcomeState).toBe("RETRY_AUTHORIZED");
+    expect(getLease()).toBeNull();
+    expect(tx.runEvent.findFirst).toHaveBeenCalledWith({
+      where: {
+        teamId: "team-1",
+        runId: "run-1",
+        taskId: "task-1",
+        attemptId: "attempt-1",
+        actor: "CONTROL_PLANE",
+        kind: "runtime.lease_lost",
+        payload: { path: ["lostFencingToken"], equals: "3" },
+      },
+      select: { id: true },
+    });
+    expect(tx.agentRuntimeTask.create).not.toHaveBeenCalled();
+    expect(tx.runAttempt.create).not.toHaveBeenCalled();
+    await service.resolveWriteOutcome(current, recovery.id, {
+      ...input,
+      expectedVersion: recovery.version,
+    });
+    expect(recovery.writeOutcomeState).toBe("RESOLVED");
+  });
+  it.each([
+    "missing-event",
+    "multiple-epochs",
+    "active-lease",
+    "missing-loss-time",
+  ])("rejects a changed owner fence with %s", async (condition) => {
+    const { service, owner, session, tx } = fixture();
+    owner.fencingToken = session.ownerFencingToken + 1n;
+    owner.leaseLostAt = new Date();
+    tx.runEvent.findFirst.mockResolvedValue({
+      id: "lease-loss-event",
+    } as never);
+    if (condition === "missing-event")
+      tx.runEvent.findFirst.mockResolvedValue(null);
+    if (condition === "multiple-epochs") owner.fencingToken += 1n;
+    if (condition === "active-lease")
+      owner.leaseExpiresAt = new Date(Date.now() + 60000);
+    if (condition === "missing-loss-time") owner.leaseLostAt = null;
+    await expect(
+      service.resolveWriteOutcome(current, "recovery-1", input),
+    ).rejects.toThrow("must stop");
+    expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalled();
+  });
   it("requires recovery ownership by the current team", async () => {
     const { service, tx } = fixture();
     tx.runtimeSessionRecovery.findFirst.mockResolvedValue(null as never);
@@ -480,3 +542,31 @@ describe("manual reconciliation through durable session recovery", () => {
     },
   );
 });
+
+it.each([
+  "verified-revocation",
+  "missing-event",
+  "multiple-epochs",
+  "live-lease",
+])(
+  "settles a late no-write audit only for the original revoked owner: %s",
+  async (condition) => {
+    const { tx, owner, session, recovery } = fixture();
+    recovery.writeOutcomeState = "NO_WRITE_VERIFIED";
+    owner.fencingToken = session.ownerFencingToken + 1n;
+    owner.leaseLostAt = new Date();
+    tx.runEvent.findFirst.mockResolvedValue({ id: "lease-loss-event" });
+    if (condition === "missing-event")
+      tx.runEvent.findFirst.mockResolvedValue(null);
+    if (condition === "multiple-epochs") owner.fencingToken += 1n;
+    if (condition === "live-lease")
+      owner.leaseExpiresAt = new Date(Date.now() + 60_000);
+    await releaseVerifiedSessionResources(tx as never, session.id);
+    expect(owner.recoveryStatus).toBe(
+      condition === "verified-revocation"
+        ? "RESOLVED"
+        : "WRITE_OUTCOME_UNKNOWN",
+    );
+    expect(owner.status).toBe("FAILED");
+  },
+);

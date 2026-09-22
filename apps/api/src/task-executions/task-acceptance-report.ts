@@ -126,11 +126,34 @@ function executionIssue(
   lifecycle: string,
   error: unknown,
 ): AcceptanceIssue | null {
-  const failure = obj(error);
+  const storedFailure = obj(error);
+  const currentAttempt = run?.attempts.find(
+    (a) => a.number === run.currentAttemptNumber,
+  );
+  const recoveryResolved =
+    storedFailure.code === "WRITE_OUTCOME_UNKNOWN" &&
+    run?.tasks.some(
+      (t) =>
+        t.attemptId === currentAttempt?.id && t.recoveryStatus === "RESOLVED",
+    );
+  const originalFailure = obj(obj(storedFailure.details).originalError);
+  const failure = recoveryResolved
+    ? typeof originalFailure.code === "string"
+      ? originalFailure
+      : {
+          code: "RUNTIME_EXECUTION_INTERRUPTED",
+          message: "执行已中断，写入核实已完成；未完成的验收点需重新验证。",
+        }
+    : storedFailure;
   const code = text(failure.code);
   const original = obj(obj(failure.details).originalError);
+  const environmentMessage: Record<string, string> = {
+    RUNTIME_LEASE_LOST: "执行节点租约丢失，验证中断，未形成验收结论。",
+    WRITE_OUTCOME_UNKNOWN:
+      "执行中断后无法确认业务写入结果；请先只读核对相关数据，再决定是否重试。",
+  };
   const message = [
-    text(failure.message),
+    environmentMessage[code] ?? text(failure.message),
     text(original.code)
       ? `${text(original.code)}: ${text(original.message)}`
       : "",
@@ -153,14 +176,18 @@ function executionIssue(
     );
   if (!run || run.executionDisposition !== "EXECUTED") {
     const prerequisite =
-      /^(TEST_ACCOUNT|AUTH_|PROFILE_|DEPLOYMENT_|ANALYSIS_INPUT)/u.test(code);
+      /^(TEST_ACCOUNT|AUTH_|PROFILE_|DEPLOYMENT_|DATA_PRECONDITION|ENVIRONMENT_)/u.test(
+        code,
+      );
     return issue(
       prerequisite ? "PRECONDITION" : "EXECUTION",
       code || run?.executionDisposition || "NOT_RUN",
       message || "执行未完成，当前没有足够的验收结论。",
       prerequisite
         ? "补齐说明中的账号、登录、环境或需求条件后重新验证。"
-        : "查看执行记录并处理阻塞；存在未确认写入时先核对实际业务结果。",
+        : recoveryResolved
+          ? "写入核实已完成；处理上述原始执行问题后重新验证。"
+          : "查看执行记录并处理阻塞；存在未确认写入时先核对实际业务结果。",
     );
   }
   return null;
@@ -227,6 +254,25 @@ function criterionReport(
         "根据对应证据修复产品行为，再验证该验收点。",
       ),
     );
+  // A classification alone is insufficient: require evidence from this attempt.
+  if (
+    verdict === "INCONCLUSIVE" &&
+    result?.status === "INCONCLUSIVE" &&
+    ["DATA_PRECONDITION", "ENVIRONMENT_UNAVAILABLE"].includes(
+      result.blockingReason ?? "",
+    ) &&
+    evidence.length > 0 &&
+    result.evidenceRefs.every((ref) => evidence.some((e) => e.ref === ref))
+  ) {
+    issues.push(
+      issue(
+        "PRECONDITION",
+        result.blockingReason!,
+        text(result.summary),
+        "核对并准备符合前置条件的测试数据、权限或环境后重跑；既有数据需经授权处置，写入结果未确认时先只读核对。",
+      ),
+    );
+  }
   return {
     id,
     requirementId: text(def.requirementId) || null,
@@ -291,7 +337,9 @@ function caseReport(
   );
   const required = criteria.filter((c) => c.required);
   const errors =
-    run?.tasks[0]?.error ?? run?.attempts[0]?.error ?? dispatchError;
+    run?.tasks.find((t) => t.attemptId === attempt?.id)?.error ??
+    attempt?.error ??
+    dispatchError;
   const blocker = executionIssue(run, lifecycle, errors);
   const issues = blocker && (final || terminal(lifecycle)) ? [blocker] : [];
   if (!required.length)

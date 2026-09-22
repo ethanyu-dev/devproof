@@ -1,4 +1,8 @@
-import type { BrowserRuntimeSession, Prisma } from "@prisma/client";
+import type {
+  AgentRuntimeTask,
+  BrowserRuntimeSession,
+  Prisma,
+} from "@prisma/client";
 import {
   leaseDigest,
   writeSettled,
@@ -17,6 +21,39 @@ export function hasConfirmedBrowserOutcome(task: {
     typeof task.result === "object" &&
     "kind" in task.result &&
     task.result.kind === "VERIFICATION_COMPLETED",
+  );
+}
+
+/** Recognize only the control plane's single-fence lease revocation, never a new owner. */
+export async function isRevokedSessionOwner(
+  tx: Prisma.TransactionClient,
+  session: Pick<BrowserRuntimeSession, "teamId" | "ownerFencingToken">,
+  owner: AgentRuntimeTask,
+) {
+  if (
+    owner.status !== "FAILED" ||
+    !owner.leaseLostAt ||
+    owner.leaseExpiresAt !== null ||
+    session.ownerFencingToken === null ||
+    owner.fencingToken !== session.ownerFencingToken + 1n
+  )
+    return false;
+  return Boolean(
+    await tx.runEvent.findFirst({
+      where: {
+        teamId: session.teamId,
+        runId: owner.runId,
+        taskId: owner.id,
+        attemptId: owner.attemptId,
+        actor: "CONTROL_PLANE",
+        kind: "runtime.lease_lost",
+        payload: {
+          path: ["lostFencingToken"],
+          equals: session.ownerFencingToken.toString(),
+        },
+      },
+      select: { id: true },
+    }),
   );
 }
 
@@ -129,6 +166,22 @@ export async function releaseVerifiedSessionResources(
   const settled = writeSettled(recovery.writeOutcomeState);
   if (settled) {
     await tx.executionResourceLease.deleteMany({ where: { sessionId } });
+    if (
+      owner &&
+      (owner.fencingToken === session.ownerFencingToken ||
+        (await isRevokedSessionOwner(tx, session, owner))) &&
+      owner.recoveryStatus === "WRITE_OUTCOME_UNKNOWN" &&
+      ["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(owner.status)
+    )
+      await tx.agentRuntimeTask.updateMany({
+        where: {
+          id: owner.id,
+          fencingToken: owner.fencingToken,
+          status: owner.status,
+          recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+        },
+        data: { recoveryStatus: "RESOLVED", recoveryNextAttemptAt: null },
+      });
   } else {
     await tx.executionResourceLease.updateMany({
       where: { sessionId, mode: "WRITE" },

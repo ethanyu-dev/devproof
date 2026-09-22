@@ -144,6 +144,7 @@ function fixture(origin = "NORMAL") {
       count: vi.fn(async () => (lease?.quarantined ? 1 : 0)),
     },
     browserRuntimeCommand: {
+      findFirst: vi.fn().mockResolvedValue(null),
       count: vi.fn().mockResolvedValue(0),
       findUnique: vi.fn().mockResolvedValue({
         id: "command-1",
@@ -158,6 +159,8 @@ function fixture(origin = "NORMAL") {
     },
     sessionClosureEvidence: {
       findUnique: vi.fn(async () => evidence),
+      findFirst: vi.fn(async () => evidence),
+      update: vi.fn(async ({ data }) => Object.assign(evidence!, data)),
       create: vi.fn(
         async ({ data }) => (evidence = { id: "proof-row-1", ...data }),
       ),
@@ -319,4 +322,44 @@ it("releases an inconclusive session after the close audit becomes durable, with
   await closure.acceptRuntimeEvidence(context, proof);
   expect(recovery.writeOutcomeState).toBe("NO_WRITE_VERIFIED");
   expect(getLease()).toBeNull();
+});
+
+it("settles a late complete no-write audit after closure-only proof and clears the owner's stale recovery status", async () => {
+  const f = fixture();
+  Object.assign(f.session, {
+    protocolMinor: 21,
+    controlGeneration: 0,
+    launchIdentityVersion: 1,
+    launchIdentity: { id: "launch-1" },
+  });
+  Object.assign(f.owner, {
+    status: "FAILED",
+    completionId: "done",
+    recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+  });
+  const current = { ...context, negotiatedMinor: 21 };
+  await f.closure.acceptRuntimeEvidence(current, proof);
+  expect(f.recovery.writeOutcomeState).toBe("UNKNOWN");
+  const audit = {
+    version: 1,
+    launchIdentityId: "launch-1",
+    complete: true,
+    coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+    requestCount: 73,
+    potentialWrites: 0,
+  };
+  await f.closure.acceptRuntimeEvidence(current, proof, {
+    ...audit,
+    launchIdentityId: "wrong-launch",
+  });
+  expect(f.recovery.writeOutcomeState).toBe("UNKNOWN");
+  await f.closure.acceptRuntimeEvidence(current, proof, audit);
+  expect(f.recovery.writeOutcomeState).toBe("NO_WRITE_VERIFIED");
+  expect(f.getLease()).toBeNull();
+  expect(f.tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: { recoveryStatus: "RESOLVED", recoveryNextAttemptAt: null },
+    }),
+  );
+  expect(f.owner.status).toBe("FAILED");
 });

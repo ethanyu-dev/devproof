@@ -125,6 +125,22 @@ function fixture(type = "session.open") {
   };
 }
 
+function result(
+  f: ReturnType<typeof fixture>,
+  output: Record<string, unknown>,
+) {
+  return {
+    type: "command.result" as const,
+    commandId: f.command.id,
+    sessionId: f.session.id,
+    leaseToken: f.session.leaseToken,
+    fencingToken: "7",
+    ok: true,
+    artifacts: [],
+    result: output,
+  };
+}
+
 describe("Command delivery and closure evidence", () => {
   it("registers a stable launch identity and command payload before sending OPEN", async () => {
     const f = fixture();
@@ -196,21 +212,6 @@ describe("Command delivery and closure evidence", () => {
       2n,
     );
   });
-  function result(
-    f: ReturnType<typeof fixture>,
-    output: Record<string, unknown>,
-  ) {
-    return {
-      type: "command.result" as const,
-      commandId: f.command.id,
-      sessionId: f.session.id,
-      leaseToken: f.session.leaseToken,
-      fencingToken: "7",
-      ok: true,
-      artifacts: [],
-      result: output,
-    };
-  }
   it("does not turn a successful bare close ACK into closure proof", async () => {
     const f = fixture("session.close");
     await f.dispatcher.acceptResult(result(f, {}), f.context);
@@ -293,4 +294,42 @@ describe("Command delivery and closure evidence", () => {
     );
     expect(f.closure.acceptRuntimeEvidence).not.toHaveBeenCalled();
   });
+});
+
+it("forwards the sealed audit with late closure proof without rewriting a timeout", async () => {
+  const f = fixture("session.close");
+  f.command.status = "TIMED_OUT";
+  const proof = {
+    evidenceId: randomUUID(),
+    recoveryId: randomUUID(),
+    requestId: f.command.id,
+    sessionId: f.session.id,
+    leaseToken: f.session.leaseToken,
+    fencingToken: "7",
+    hostInstanceId: f.context.hostInstanceId,
+    daemonInstanceId: f.context.daemonInstanceId,
+    launchIdentityVersion: 1,
+    method: "LIVE_SESSION_TERMINATED",
+    networkRevoked: true,
+    closureCompletedAt: new Date().toISOString(),
+  };
+  const writeAudit = {
+    version: 1,
+    launchIdentityId: randomUUID(),
+    complete: true,
+    coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+    requestCount: 73,
+    potentialWrites: 0,
+  };
+  await f.dispatcher.acceptResult(
+    result(f, { closed: true, closureEvidence: proof, writeAudit }),
+    f.context,
+  );
+  expect(f.closure.acceptRuntimeEvidence).toHaveBeenCalledWith(
+    f.context,
+    proof,
+    writeAudit,
+  );
+  expect(f.prisma.browserRuntimeCommand.updateMany).not.toHaveBeenCalled();
+  expect(f.command.status).toBe("TIMED_OUT");
 });

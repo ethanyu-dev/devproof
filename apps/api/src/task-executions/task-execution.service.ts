@@ -718,7 +718,8 @@ export class TaskExecutionService {
         reportRow.updatedAt.getTime() === row.updatedAt.getTime();
       const report = sameRevision ? buildTaskAcceptanceReport(reportRow) : null;
       const acceptanceScore = report?.final
-        ? (({ findings: _findings, ...score }) => score)(report.assessment)
+        ? (({ findings: _findings, exclusions: _exclusions, ...score }) =>
+            score)(report.assessment)
         : null;
       return {
         ...taskVerificationPresentation(toTaskSummary(row), report),
@@ -800,9 +801,9 @@ export class TaskExecutionService {
         if (!candidate)
           throw new NotFoundException("Case execution was not found.");
         if (
-          candidate.runId ||
-          !["PENDING", "FAILED"].includes(candidate.dispatchStatus) ||
-          candidate.dispatchAttempts >= CASE_DISPATCH_MAX_ATTEMPTS ||
+          (!candidate.runId &&
+            (!["PENDING", "FAILED"].includes(candidate.dispatchStatus) ||
+              candidate.dispatchAttempts >= CASE_DISPATCH_MAX_ATTEMPTS)) ||
           candidate.taskExecution.cancelRequestedAt ||
           !["RUNNING", "QUEUED", "WAITING_INPUT"].includes(
             candidate.taskExecution.lifecycle,
@@ -811,6 +812,34 @@ export class TaskExecutionService {
           throw new ConflictException(
             "Only an unstarted Case can change its execution policy.",
           );
+        }
+        let queuedRun = null;
+        if (candidate.runId) {
+          await acquireAdvisoryTransactionLock(
+            tx,
+            "browser-execution-resources",
+          );
+          queuedRun = await tx.executionRun.findUnique({
+            where: { id: candidate.runId },
+            include: { tasks: true, browserExecutions: true },
+          });
+          if (
+            !queuedRun ||
+            queuedRun.lifecycle !== "QUEUED" ||
+            queuedRun.startedAt ||
+            queuedRun.tasks.some(
+              (task) =>
+                task.status !== "PENDING" || task.startedAt || task.leaseOwner,
+            ) ||
+            queuedRun.browserExecutions.some(
+              (execution) =>
+                execution.runtimeSessionId ||
+                !["REQUESTED", "WAITING_CAPACITY"].includes(execution.status),
+            )
+          )
+            throw new ConflictException(
+              "Only an unstarted Case can change its execution policy.",
+            );
         }
         const executions = await tx.taskCaseExecution.findMany({
           where: {
@@ -849,7 +878,7 @@ export class TaskExecutionService {
           },
           where: {
             id: executionId,
-            runId: null,
+            runId: candidate.runId,
             updatedAt: candidate.updatedAt,
             dispatchStatus: candidate.dispatchStatus,
           },
@@ -858,6 +887,45 @@ export class TaskExecutionService {
           throw new ConflictException(
             "Case dispatch already started; refresh its status.",
           );
+        if (queuedRun) {
+          const reviewed = {
+            ...policy,
+            provenance: "CONSOLE_REVIEWED",
+            version: 1,
+          };
+          await tx.executionRun.update({
+            where: { id: queuedRun.id },
+            data: {
+              concurrencyPolicy: json(reviewed),
+              executionPolicy: json({
+                ...record(queuedRun.executionPolicy),
+                concurrency: reviewed,
+              }),
+            },
+          });
+          for (const task of queuedRun.tasks) {
+            const snapshot = record(task.snapshot);
+            await tx.agentRuntimeTask.update({
+              where: { id: task.id },
+              data: {
+                snapshot: json({
+                  ...snapshot,
+                  executionPolicy: {
+                    ...record(snapshot.executionPolicy),
+                    concurrency: reviewed,
+                  },
+                }),
+              },
+            });
+          }
+          await tx.browserExecution.updateMany({
+            where: { runId: queuedRun.id, runtimeSessionId: null },
+            data: {
+              nextAdmissionAt: new Date(),
+              blockingRecoveryId: null,
+            },
+          });
+        }
         await tx.taskExecution.update({
           where: { id: taskId },
           data: { projectionNeededAt: new Date() },

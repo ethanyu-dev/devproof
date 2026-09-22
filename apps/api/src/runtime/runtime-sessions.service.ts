@@ -316,9 +316,11 @@ export class RuntimeSessionsService {
                 },
               });
               if (busy)
-                throw new ConflictException(
-                  "The login identity is in use; wait for its sessions to close before maintenance.",
-                );
+                throw new ConflictException({
+                  code: "PROFILE_SESSIONS_IN_USE",
+                  message: `该登录身份仍被 ${busy} 个浏览器会话占用。任务取消后需等待会话关闭确认，完成后即可重新登录，请稍候重试。`,
+                  activeSessionCount: busy,
+                });
             }
             await acquireAdvisoryTransactionLock(
               tx,

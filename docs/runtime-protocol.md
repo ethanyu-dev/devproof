@@ -60,6 +60,7 @@ business state to be modified concurrently. Account coordination remains active.
 | v1.16    | DOM observations and screenshot-bound visual interaction (`dom-vision-v1`)                            |
 | v1.17    | Measured container scroll feedback and focused observations (`scroll-feedback-v1`)                    |
 | v1.18    | Optional host CPU / memory telemetry on existing heartbeats                                           |
+| v1.22    | Optional scoped DOM capture root identity for complete-region absence proofs                          |
 
 The source of truth for the currently implemented version is `RUNTIME_PROTOCOL` in [`packages/runtime-protocol/src/index.ts`](../packages/runtime-protocol/src/index.ts).
 

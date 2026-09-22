@@ -8,6 +8,7 @@ import {
 } from "./session-recovery.state.js";
 import {
   hasVerifiedObservationOnlyHistory,
+  hasVerifiedOfflineStartup,
   potentialWriteCommandWhere,
 } from "./session-write-audit.js";
 
@@ -89,6 +90,98 @@ function fixture() {
 }
 
 afterEach(() => vi.unstubAllEnvs());
+
+describe("closed offline startup recovery", () => {
+  function startup() {
+    const value = fixture();
+    Object.assign(value.session, {
+      ownerTaskId: null,
+      ownerFencingToken: null,
+      openedAt: null,
+      profileMode: "EPHEMERAL",
+      status: "CLOSED",
+      createdAt: new Date(),
+      closureVerifiedAt: new Date(),
+      closureEvidenceId: "evidence",
+    });
+    Object.assign(value.recovery, { sourceRunId: "run" });
+    return value;
+  }
+
+  it("settles a timed-out startup after closure even when retry detached its browser", async () => {
+    const { tx, session, recovery } = startup();
+    expect(
+      await refreshRecoveryWriteOutcome(
+        tx as never,
+        session,
+        recovery as never,
+      ),
+    ).toMatchObject({
+      writeOutcomeState: "NO_WRITE_VERIFIED",
+      resolvedAt: expect.any(Date),
+    });
+    expect(tx.browserExecution.findFirst).toHaveBeenCalledWith({
+      where: { runId: "run", createdAt: { lte: session.createdAt } },
+      select: { id: true },
+    });
+    expect(tx.browserRuntimeCommand.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { commandType: { notIn: ["session.open", "session.close"] } },
+            { ownerTaskId: { not: null } },
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    { ownerTaskId: "claimed" },
+    { ownerFencingToken: 1n },
+    { openedAt: new Date() },
+    { controlGeneration: 1 },
+    { profileMode: "PERSISTENT" },
+    { status: "LOST" },
+    { closureVerifiedAt: null },
+    { closureEvidenceId: null },
+    { protocolMinor: 13 },
+    { launchIdentity: null },
+    { launchHostInstanceId: null },
+    { launchConnectionGeneration: null },
+  ])(
+    "retains the guard for incomplete or started history: %#",
+    async (change) => {
+      const { tx, session } = startup();
+      expect(
+        await hasVerifiedOfflineStartup(
+          tx as never,
+          { ...session, ...change } as BrowserRuntimeSession,
+          "run",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("requires a historical execution, exact launch, and no other submitted commands", async () => {
+    const { tx, session } = startup();
+    expect(await hasVerifiedOfflineStartup(tx as never, session, null)).toBe(
+      false,
+    );
+    tx.browserExecution.findFirst.mockResolvedValueOnce(null);
+    expect(await hasVerifiedOfflineStartup(tx as never, session, "run")).toBe(
+      false,
+    );
+    tx.browserRuntimeCommand.findFirst.mockResolvedValueOnce(null);
+    expect(await hasVerifiedOfflineStartup(tx as never, session, "run")).toBe(
+      false,
+    );
+    tx.browserRuntimeCommand.count.mockResolvedValueOnce(1);
+    expect(await hasVerifiedOfflineStartup(tx as never, session, "run")).toBe(
+      false,
+    );
+  });
+});
 
 describe("audited observation-only recovery", () => {
   it("persists a no-write assessment for a fenced blank launch with only observations", async () => {

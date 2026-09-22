@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { hasObservedInitialNavigation } from "./session-navigation-outcome.js";
+import { hasConfirmedCleanupOutcome } from "./session-cleanup-outcome.js";
 import { Prisma } from "@prisma/client";
 import type {
   BrowserRuntimeSession,
@@ -13,6 +15,7 @@ import { sessionExecutionPermit } from "./session-permit.js";
 import {
   hasVerifiedObservationOnlyHistory,
   hasVerifiedNoWriteNetworkAudit,
+  hasVerifiedOfflineStartup,
 } from "./session-write-audit.js";
 import {
   RESOLVED_WRITE_STATES,
@@ -160,31 +163,52 @@ async function hasConfirmedWriteOutcome(
     owner.status !== "SUCCEEDED" ||
     !owner.completionId ||
     owner.recoveryStatus === "WRITE_OUTCOME_UNKNOWN" ||
-    result?.kind !== "VERIFICATION_COMPLETED" ||
-    !["PASSED", "FAILED"].includes(result.verdict ?? "")
+    result?.kind !== "VERIFICATION_COMPLETED"
   )
     return false;
+  if (
+    !["PASSED", "FAILED"].includes(result.verdict ?? "") &&
+    !(
+      result.verdict === "INCONCLUSIVE" &&
+      (await hasConfirmedCleanupOutcome(tx, owner))
+    )
+  )
+    return false;
+  const unsettled = await tx.browserRuntimeCommand.count({
+    where: {
+      sessionId: session.id,
+      leaseToken: session.leaseToken,
+      fencingToken: session.fencingToken,
+      status: { not: "SUCCEEDED" },
+      commandType: {
+        notIn: [
+          "session.open",
+          "session.close",
+          "page.snapshot",
+          "page.get_text",
+          "page.get_url",
+          "page.get_title",
+          "page.screenshot",
+          "page.wait",
+        ],
+      },
+    },
+  });
+  if (unsettled === 0) return true;
+  if (unsettled !== 1 || !(await hasObservedInitialNavigation(tx, session)))
+    return false;
+  // The sole unresolved operation must be that initial navigation, not a
+  // later click, save, or a command still in flight.
   return (
     (await tx.browserRuntimeCommand.count({
       where: {
         sessionId: session.id,
         leaseToken: session.leaseToken,
         fencingToken: session.fencingToken,
-        status: { not: "SUCCEEDED" },
-        commandType: {
-          notIn: [
-            "session.open",
-            "session.close",
-            "page.snapshot",
-            "page.get_text",
-            "page.get_url",
-            "page.get_title",
-            "page.screenshot",
-            "page.wait",
-          ],
-        },
+        commandType: "page.navigate",
+        status: "TIMED_OUT",
       },
-    })) === 0
+    })) === 1
   );
 }
 
@@ -223,16 +247,12 @@ export async function refreshRecoveryWriteOutcome(
   session: BrowserRuntimeSession,
   recovery: RuntimeSessionRecovery,
 ) {
-  if (
-    writeSettled(recovery.writeOutcomeState) ||
-    !session.ownerTaskId ||
-    session.ownerFencingToken === null
-  )
-    return recovery;
+  if (writeSettled(recovery.writeOutcomeState)) return recovery;
   const state = (await hasConfirmedWriteOutcome(tx, session))
     ? "CONFIRMED"
     : (await hasVerifiedObservationOnlyHistory(tx, session)) ||
-        (await hasVerifiedNoWriteNetworkAudit(tx, session))
+        (await hasVerifiedNoWriteNetworkAudit(tx, session)) ||
+        (await hasVerifiedOfflineStartup(tx, session, recovery.sourceRunId))
       ? "NO_WRITE_VERIFIED"
       : null;
   if (!state) return recovery;

@@ -18,6 +18,7 @@ import {
 } from "@devproof/runtime-protocol";
 
 import { env } from "../config/env.js";
+import { activateOpenedSession } from "../runtime/session-activation.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
 import {
@@ -333,22 +334,12 @@ export class BrowserExecutionRunner implements ExecutionRunner {
 
       await this.prisma.$transaction(async (tx) => {
         await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
-        const activated = await tx.browserRuntimeSession.updateMany({
-          data: { openedAt: new Date(), status: "ACTIVE" },
-          where: {
-            id: session.id,
-            leaseToken: session.leaseToken,
-            fencingToken: session.fencingToken,
-            status: "OPENING",
-            quarantinedAt: null,
-            closureVerifiedAt: null,
-            leaseExpiresAt: { gt: new Date() },
-          },
-        });
-        if (activated.count !== 1)
+        const activated = await activateOpenedSession(tx, session, new Date());
+        if (!activated)
           throw new ConflictException(
             "Session ownership changed before browser activation.",
           );
+        session.leaseExpiresAt = activated;
         await tx.verificationRun.update({
           data: { runnerId: runtime.id, runtimeSessionId: session.id },
           where: { id: runId },
@@ -644,6 +635,9 @@ export class BrowserExecutionRunner implements ExecutionRunner {
 
       const opened = await this.commands.execute({
         commandType: "session.open",
+        // Cold Chromium startup plus authentication restoration can exceed the
+        // ordinary action timeout. Stay within the already granted startup lease.
+        timeoutSeconds: env().RUNTIME_LEASE_SECONDS,
         payload: {
           allowedOrigins: [],
           profileKey,
@@ -667,22 +661,16 @@ export class BrowserExecutionRunner implements ExecutionRunner {
         continue;
       }
 
-      const now = new Date();
       await this.prisma.$transaction(async (tx) => {
         await acquireAdvisoryTransactionLock(tx, "browser-execution-resources");
-        const activated = await tx.browserRuntimeSession.updateMany({
-          data: { openedAt: now, status: "ACTIVE" },
-          where: {
-            id: session.id,
-            status: "OPENING",
-            leaseExpiresAt: { gt: now },
-          },
-        });
-        if (activated.count !== 1)
+        const now = new Date();
+        const activated = await activateOpenedSession(tx, session, now);
+        if (!activated)
           throw new ExecutionAdmissionBlocked(
             "LEASE_RECOVERY",
             "The browser open acknowledgment arrived after its session was revoked.",
           );
+        session.leaseExpiresAt = activated;
         const bound = await tx.browserExecution.updateMany({
           data: {
             error: Prisma.JsonNull,

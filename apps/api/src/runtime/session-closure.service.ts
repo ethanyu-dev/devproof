@@ -1,3 +1,4 @@
+import { closedSessionWriteAuditSchema } from "./session-write-audit.js";
 import { randomUUID } from "node:crypto";
 import { ConflictException, Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -33,6 +34,7 @@ export class SessionClosureService {
   async acceptRuntimeEvidence(
     context: AuthenticatedRuntimeContext,
     proof: RuntimeClosureProof,
+    writeAudit?: unknown,
   ) {
     requireRecoveryEnabled();
     if (
@@ -166,6 +168,42 @@ export class SessionClosureService {
           },
         });
       }
+      const parsedAudit = closedSessionWriteAuditSchema.safeParse(writeAudit);
+      const audit =
+        parsedAudit.success &&
+        context.negotiatedMinor >= 21 &&
+        session.protocolMinor >= 21 &&
+        proof.method === "LIVE_SESSION_TERMINATED" &&
+        parsedAudit.data.launchIdentityId ===
+          (session.launchIdentity as { id?: string } | null)?.id
+          ? parsedAudit.data
+          : undefined;
+      // A closure-only frame can arrive before the command result. Enrich its
+      // existing proof under the same epoch lock without altering RPC history.
+      if (audit && session.closureEvidenceId) {
+        const existing = await tx.sessionClosureEvidence.findUnique({
+          where: { id: session.closureEvidenceId },
+        });
+        const summary = existing?.summary as {
+          closureCompletedAt?: string;
+          writeAudit?: unknown;
+        } | null;
+        if (
+          existing?.sessionId === session.id &&
+          existing.sessionFence === session.fencingToken &&
+          existing.recoveryId === recovery.id &&
+          existing.method === "LIVE_SESSION_TERMINATED" &&
+          summary?.closureCompletedAt === proof.closureCompletedAt &&
+          !summary.writeAudit
+        ) {
+          await tx.sessionClosureEvidence.update({
+            where: { id: existing.id },
+            data: {
+              summary: recoveryJson({ ...summary, writeAudit: audit }),
+            },
+          });
+        }
+      }
       return this.commitEvidence(tx, session, recovery, {
         evidenceId: proof.evidenceId,
         requestId: proof.requestId,
@@ -181,6 +219,7 @@ export class SessionClosureService {
         summary: {
           networkRevoked: true,
           closureCompletedAt: proof.closureCompletedAt,
+          ...(audit ? { writeAudit: audit } : {}),
         },
       });
     });

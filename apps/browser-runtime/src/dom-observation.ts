@@ -982,6 +982,15 @@ export class DomObservations {
             // Rendered regions remain open outside the viewport. Scrolling or
             // clipping must not create a new opening epoch or erase edits.
             const renderedIds = new Set(nodes.map((n) => n.nodeId));
+            // React dialogs may unmount on close. Preserve their opening count
+            // only after an earlier complete capture witnessed closure, and only
+            // for one unambiguous named dialog in this document.
+            const dialogKey = (node: ObservedNode) =>
+              (node.tag === "dialog" ||
+                ["dialog", "alertdialog"].includes(node.role ?? "")) &&
+              node.name?.trim()
+                ? `${node.role ?? node.tag}:${node.name.trim()}`
+                : undefined;
             // Replacing an edited scope between captures is not a confirmed
             // close/open cycle. Do not certify replacement containers as fresh.
             const replacesEditedScope = [...state.regions.entries()].some(
@@ -1000,7 +1009,21 @@ export class DomObservations {
                   n.tag,
                 ),
             )) {
-              const previous = state.regions.get(node.nodeId);
+              const phaseKey = dialogKey(node);
+              let previous = state.regions.get(node.nodeId);
+              if (
+                !previous &&
+                phaseKey &&
+                nodes.filter((n) => dialogKey(n) === phaseKey).length === 1
+              ) {
+                const history = [...state.regions.entries()].filter(
+                  ([, region]: [string, any]) => region.phaseKey === phaseKey,
+                );
+                if (history.length === 1 && !history[0][1].open) {
+                  previous = history[0][1];
+                  state.regions.delete(history[0][0]);
+                }
+              }
               const opened = !previous?.open;
               const region = opened
                 ? {
@@ -1014,6 +1037,7 @@ export class DomObservations {
                     modified: new Set<string>(),
                     open: true,
                     element: state.elements.get(node.nodeId),
+                    phaseKey,
                   }
                 : previous;
               region.open = true;
@@ -1087,6 +1111,7 @@ export class DomObservations {
               epoch: state.epoch as string,
               mutationRevision: state.mutationRevision as number,
               commandId: state.commandId as string | undefined,
+              rootNodeId: nodeId(body),
             };
           },
           {
@@ -1146,6 +1171,7 @@ export class DomObservations {
           mutationRevision: captured.mutationRevision,
         });
         structured.nodes.push(...captured.nodes);
+        if (target) structured.coverage.rootNodeId = captured.rootNodeId;
         structured.regions.push(...captured.regions);
         if (captured.commandId) structured.sourceCommandId = captured.commandId;
         sections.push(

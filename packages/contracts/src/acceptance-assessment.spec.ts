@@ -40,6 +40,128 @@ const input = (statuses: AcceptanceVerdict[]) => ({
   ] as AcceptanceCase[],
 });
 describe("evidence scoring and release gates", () => {
+  const environmentIssue = {
+    category: "PRECONDITION" as const,
+    code: "DATA_PRECONDITION",
+    message: "MinerU cacheRead 当前价格低于红线，无法创建测试记录。",
+    nextStep: "准备可用的测试 SKU 后补验。",
+  };
+  it("excludes environmental blockers from scores and findings while retaining a warning", () => {
+    const report = input(["INCONCLUSIVE"]);
+    report.cases[0]!.criteria[0]!.issues = [environmentIssue];
+    expect(assessAcceptance(report)).toMatchObject({
+      method: "REQUIRED_CRITERIA_V2",
+      score: null,
+      total: 0,
+      excluded: 1,
+      unknown: 0,
+      findings: [],
+      recommendation: "NEEDS_VALIDATION",
+      exclusions: [
+        { code: "DATA_PRECONDITION", reason: environmentIssue.message },
+      ],
+    });
+  });
+  it("preserves proven passes and failures alongside environmental blockers", () => {
+    const report = input(["PASSED", "FAILED", "INCONCLUSIVE"]);
+    report.cases[0]!.issues = [environmentIssue];
+    expect(assessAcceptance(report)).toMatchObject({
+      score: 50,
+      total: 2,
+      passed: 1,
+      failed: 1,
+      excluded: 1,
+      recommendation: "NOT_RECOMMENDED",
+      findings: [{ kind: "PRODUCT" }],
+    });
+    report.cases[0]!.criteria.splice(1, 1);
+    expect(assessAcceptance({ ...report, aiAccepted: true })).toMatchObject({
+      score: 100,
+      total: 1,
+      excluded: 1,
+      recommendation: "NEEDS_VALIDATION",
+    });
+  });
+  it.each([
+    "RUNTIME_LEASE_LOST",
+    "RUNTIME_SESSION_UNAVAILABLE",
+    "SESSION_OPEN_FAILED",
+    "WRITE_OUTCOME_UNKNOWN",
+    "PROVIDER_UNAVAILABLE",
+  ])(
+    "excludes unverified criteria for explicit execution environment failure %s",
+    (code) => {
+      const report = input(["INCONCLUSIVE"]);
+      report.cases[0]!.issues = [
+        { ...environmentIssue, category: "EXECUTION", code },
+      ];
+      expect(assessAcceptance(report)).toMatchObject({
+        score: null,
+        excluded: 1,
+      });
+    },
+  );
+  it.each([
+    "BLOCKED",
+    "REPEATED_OPERATIONS",
+    "LOCATOR_RECOVERY_EXHAUSTED",
+    "ANALYSIS_INPUT_MISSING",
+  ])("does not infer environment exclusion for %s", (code) => {
+    const report = input(["INCONCLUSIVE"]);
+    report.cases[0]!.issues = [
+      { ...environmentIssue, category: "EXECUTION", code },
+    ];
+    expect(assessAcceptance(report)).toMatchObject({
+      score: null,
+      total: 1,
+      excluded: 0,
+    });
+  });
+  it("does not exclude missing evidence for a recorded failure or an active case", () => {
+    const report = input(["INCONCLUSIVE"]);
+    const c = report.cases[0]!;
+    c.issues = [environmentIssue];
+    c.criteria[0]!.recordedVerdict = "FAILED";
+    expect(assessAcceptance(report)).toMatchObject({
+      score: null,
+      excluded: 0,
+    });
+    c.criteria[0]!.recordedVerdict = "INCONCLUSIVE";
+    c.lifecycle = "RUNNING";
+    expect(assessAcceptance(report)).toMatchObject({
+      score: null,
+      excluded: 0,
+    });
+  });
+  it("keeps unverified scopes unscored while retaining confirmed failure scores", () => {
+    for (const statuses of [
+      ["PENDING"],
+      ["INCONCLUSIVE"],
+      ["PENDING", "INCONCLUSIVE"],
+    ] as AcceptanceVerdict[][]) {
+      expect(assessAcceptance(input(statuses))).toMatchObject({
+        score: null,
+        total: statuses.length,
+        excluded: 0,
+      });
+    }
+    expect(assessAcceptance(input(["FAILED"]))).toMatchObject({
+      score: 0,
+      failed: 1,
+      recommendation: "NOT_RECOMMENDED",
+    });
+  });
+  it("does not count optional environment checks as excluded required criteria", () => {
+    const report = input(["PASSED", "INCONCLUSIVE"]);
+    const k = report.cases[0]!.criteria[1]!;
+    k.required = false;
+    k.issues = [environmentIssue];
+    expect(assessAcceptance(report)).toMatchObject({
+      score: 100,
+      total: 1,
+      excluded: 0,
+    });
+  });
   it("preserves four proven criteria when one Case is partly blocked", () => {
     const report = input([
       "PASSED",

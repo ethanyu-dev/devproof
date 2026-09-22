@@ -12,9 +12,23 @@ import {
   runtimeServerMessageSchema,
   runtimeSessionPermitSchema,
   runtimeClosureEvidenceSchema,
+  structuredObservationSchema,
 } from "./index.js";
 
 describe("Runtime protocol", () => {
+  it("accepts legacy coverage and preserves an optional scoped capture root", () => {
+    const coverage = {
+      scope: "REGION",
+      completeWithinScope: true,
+      truncated: false,
+      unavailableFrames: [],
+    };
+    const schema = structuredObservationSchema.shape.coverage;
+    expect(schema.parse(coverage).rootNodeId).toBeUndefined();
+    expect(
+      schema.parse({ ...coverage, rootNodeId: "dialog-1" }).rootNodeId,
+    ).toBe("dialog-1");
+  });
   it("accepts bounded preview pixel ratios while preserving legacy subscriptions", () => {
     const message = {
       type: "human.preview.subscribe",
@@ -206,7 +220,7 @@ describe("Runtime protocol", () => {
       type: "command.result",
     });
 
-    expect(RUNTIME_PROTOCOL.minor).toBe(21);
+    expect(RUNTIME_PROTOCOL.minor).toBe(22);
     expect(result.type).toBe("command.result");
     if (result.type !== "command.result") {
       throw new Error("Expected a command result.");

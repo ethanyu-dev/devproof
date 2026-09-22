@@ -436,6 +436,7 @@ export class ExecutionRunService {
           select: {
             attemptId: true,
             capability: true,
+            recoveryStatus: true,
             createdAt: true,
             deadlineAt: true,
             finishedAt: true,
@@ -538,6 +539,7 @@ export class ExecutionRunService {
             createdAt: true,
             deadlineAt: true,
             error: true,
+            recoveryStatus: true,
             result: true,
             finishedAt: true,
             id: true,

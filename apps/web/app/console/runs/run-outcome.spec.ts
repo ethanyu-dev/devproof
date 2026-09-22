@@ -2,6 +2,49 @@ import { describe, expect, it } from "vitest";
 import { runOutcome } from "./run-outcome";
 
 describe("Run lifecycle outcome", () => {
+  it("does not label an entire case unscored when only one criterion has an environmental blocker", () => {
+    const criteria = [
+      {
+        status: "INCONCLUSIVE",
+        description: "保存后列表展示",
+        environmentBlocked: true,
+      },
+      {
+        status: "INCONCLUSIVE",
+        description: "默认值",
+        environmentBlocked: false,
+      },
+    ];
+    expect(
+      runOutcome(
+        { lifecycle: "COMPLETED", verdict: "INCONCLUSIVE" },
+        "EXECUTED",
+        [],
+        criteria,
+      ),
+    ).toMatchObject({
+      unscored: false,
+      scoringNote: expect.stringContaining("不参与评分"),
+    });
+    expect(
+      runOutcome(
+        { lifecycle: "COMPLETED", verdict: "INCONCLUSIVE" },
+        "EXECUTED",
+        [],
+        criteria.slice(0, 1),
+      ),
+    ).toMatchObject({ unscored: true });
+  });
+  it("explains that unverified results after lease loss do not enter scoring", () => {
+    expect(
+      runOutcome(
+        { lifecycle: "COMPLETED", verdict: null },
+        "BLOCKED",
+        [{ causeCode: "RUNTIME_LEASE_LOST", message: "执行节点租约丢失" }],
+        [],
+      ),
+    ).toMatchObject({ scoringNote: expect.stringContaining("不参与评分") });
+  });
   it.each([
     ["QUEUED", "neutral"],
     ["PREPARING", "info"],
@@ -107,4 +150,24 @@ describe("Run lifecycle outcome", () => {
       ).label,
     ).toBe("已超时");
   });
+});
+
+it("excludes unverified session-loss criteria without hiding a recorded failure", () => {
+  const failure = [
+    { causeCode: "RUNTIME_SESSION_UNAVAILABLE", message: "浏览器会话已失效。" },
+  ];
+  const detail = { lifecycle: "COMPLETED", verdict: null };
+  const criterion = { status: "INCONCLUSIVE", description: "重叠校验" };
+  expect(
+    runOutcome(detail, "RUNTIME_LOST", failure, [criterion]),
+  ).toMatchObject({
+    unscored: true,
+    reasonCode: "RUNTIME_SESSION_UNAVAILABLE",
+  });
+  expect(
+    runOutcome(detail, "RUNTIME_LOST", failure, [
+      criterion,
+      { ...criterion, status: "FAILED" },
+    ]),
+  ).toMatchObject({ unscored: false });
 });

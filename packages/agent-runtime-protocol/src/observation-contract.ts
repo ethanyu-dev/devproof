@@ -143,7 +143,7 @@ export const businessCheckSchema = z
     identityMatchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
     state: z
       .object({
-        property: z.enum(["TEXT", "CHECKED", "VALUE"]).optional(),
+        property: z.enum(["TEXT", "CHECKED", "VALUE", "VISIBLE"]).optional(),
         matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
         label: z.string().trim().min(1).max(80),
         equals: z
@@ -170,13 +170,14 @@ export const businessCheckSchema = z
       });
     if (
       check.state.property &&
-      (check.state.property === "CHECKED") !==
+      ["CHECKED", "VISIBLE"].includes(check.state.property) !==
         (typeof check.state.equals === "boolean")
     )
       ctx.addIssue({
         code: "custom",
         path: ["state", "equals"],
-        message: "CHECKED requires a boolean; TEXT/VALUE require a string.",
+        message:
+          "CHECKED/VISIBLE require a boolean; TEXT/VALUE require a string.",
       });
     if (new Set(check.subjects).size !== check.subjects.length)
       ctx.addIssue({
@@ -211,7 +212,9 @@ export const observationTargetV3Schema = z
         z
           .object({
             assertionId: id,
-            property: z.enum(["TEXT", "CHECKED", "VALUE"]).optional(),
+            property: z
+              .enum(["TEXT", "CHECKED", "VALUE", "VISIBLE"])
+              .optional(),
             matchMode: z.enum(["EXACT", "DISPLAY_TEXT"]).optional(),
             label,
             expected: z.union([z.boolean(), z.string().max(500)]).optional(),
@@ -346,7 +349,7 @@ export function compileBusinessCheck(
 }
 export const BUSINESS_CHECK_GUIDANCE = `对象状态验收只填写 businessCheck：subjects（必须分别覆盖的业务对象）、state（label 与 equals）、when（仅默认值、操作后、重新打开时需要指定）。不同对象可以有相同状态值。不要填写 DOM 区域、控件类型、定位器、引用 ID 或 observationContract，执行阶段根据实际页面选择取证位置。
 示例：{"subjects":["合规模型映射","旧版对公转账白名单"],"state":{"label":"配置值","equals":"启用"}}。默认启用使用 equals=true、when="INITIAL_AFTER_OPEN"，不得手动开启来证明默认值。视觉对比才填写 compareWith 和 dimensions，参照对象不是新增测试需求。
-列表显示文字使用 state.property=TEXT；开关选中状态使用 CHECKED；输入值使用 VALUE。操作提到“开关”不代表列表断言是布尔值。
+列表显示文字使用 state.property=TEXT；开关选中状态使用 CHECKED；输入值使用 VALUE；显示/隐藏使用 VISIBLE 和布尔预期，subjects 绑定仍存在的业务对象（例如实际选中的产品分类），断言 label 使用目标控件名称。隐藏取证要求完整目标区域根节点的 DOM，视口未出现不能证明隐藏。操作提到“开关”不代表列表断言是布尔值。
 网络请求只供 Agent 参考，不生成 observationTargets[].network、不要求 NETWORK 证据，也不把请求方法、路径、参数或响应字段改写为 businessCheck。验收保留用户可见的业务结果；接口细节按需放在 testData。
 必须显式填写 identityMatchMode：普通按钮名称设置 DISPLAY_TEXT，忽略汉字间排版空格；ID、SKU、账号仍使用 EXACT。
 多选按钮的选中状态同样使用 CHECKED。每个星期是独立 subject，不能把周一到周日写成 alternatives；要求“仅选中”时，还要验证其他对象为 false。工作日、全选、周末分开定义 AFTER_ACTION 检查，再次打开使用 REOPENED；不要用最终列表文字代替按钮状态。

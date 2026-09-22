@@ -44,6 +44,8 @@ const PROFILE_CONTROL_PURPOSES = [
   "PROFILE_VERIFICATION",
 ] as const;
 const PROFILE_COMMAND_TIMEOUT_SECONDS = 15;
+// Login navigation can include several SSO redirects and a cold page load.
+const PROFILE_NAVIGATION_TIMEOUT_SECONDS = 60;
 
 const profileInclude = {
   assignedRuntime: {
@@ -1600,11 +1602,11 @@ export class UserBrowserProfilesService {
         url: verificationUrl,
         waitUntil: "domcontentloaded",
       },
-      timeoutSeconds: PROFILE_COMMAND_TIMEOUT_SECONDS,
+      timeoutSeconds: PROFILE_NAVIGATION_TIMEOUT_SECONDS,
     });
     if (navigation?.status !== "SUCCEEDED") {
       throw new ConflictException(
-        "Browser Runtime could not open the profile login page.",
+        "登录页面未能在时限内打开。浏览器会话已保留，请重试打开登录页。",
       );
     }
   }

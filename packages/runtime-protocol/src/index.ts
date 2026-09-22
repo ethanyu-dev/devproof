@@ -10,7 +10,7 @@ import { z } from "zod";
 
 export const RUNTIME_PROTOCOL = {
   major: 1,
-  minor: 21,
+  minor: 22,
   name: "devproof-browser-runtime",
 } as const;
 export const RUNTIME_SESSION_PERMIT_MINOR = 13;

@@ -15,7 +15,10 @@ import { Prisma } from "@prisma/client";
 import type { AuthContext } from "../auth/auth.types.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { acquireAdvisoryTransactionLock } from "../database/advisory-lock.js";
-import { releaseVerifiedSessionResources } from "./session-resource-cleanup.js";
+import {
+  releaseVerifiedSessionResources,
+  isRevokedSessionOwner,
+} from "./session-resource-cleanup.js";
 import {
   MAX_CLOSURE_ATTEMPTS,
   emitRecoveryChanged,
@@ -638,8 +641,15 @@ export class SessionRecoveryService {
             include: { run: true },
           })
         : null;
+      // Lease recovery revokes the old owner by incrementing its fence once.
+      // The closed browser retains its original owner fence. Accept that exact
+      // transition only with the control plane's durable lease-loss event.
+      const revokedOwner =
+        owner && (await isRevokedSessionOwner(tx, session, owner));
       if (
-        (owner && owner.fencingToken !== session.ownerFencingToken) ||
+        (owner &&
+          owner.fencingToken !== session.ownerFencingToken &&
+          !revokedOwner) ||
         (owner &&
           (!terminalAgent(owner.status) ||
             !terminalRun(owner.run.lifecycle))) ||

@@ -203,6 +203,10 @@ export async function persistCriterionResults(
       attemptId: snapshot.attemptId,
       criterionId: criterion.criterionId,
       status: criterion.status,
+      blockingReason:
+        criterion.status === "INCONCLUSIVE"
+          ? (criterion.blockingReason ?? null)
+          : null,
       summary: criterion.summary,
       evidenceRefs: criterion.evidenceRefs,
     };
@@ -216,6 +220,7 @@ export async function persistCriterionResults(
       create: data,
       update: {
         status: data.status,
+        blockingReason: data.blockingReason,
         summary: data.summary,
         evidenceRefs: data.evidenceRefs,
       },

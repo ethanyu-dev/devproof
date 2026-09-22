@@ -21,12 +21,18 @@ function fixture() {
     criteriaSnapshot: [{ ...criterion, requirementId: undefined }],
     environmentSnapshot: { targetUrl: "https://test.example/whitelist" },
     attempts: [{ id: "attempt-1", number: 1, error: null }],
-    tasks: [] as Array<{ attemptId: string; error: unknown; result: unknown }>,
+    tasks: [] as Array<{
+      attemptId: string;
+      error: unknown;
+      result: unknown;
+      recoveryStatus?: string;
+    }>,
     criterionResults: [
       {
         attemptId: "attempt-1",
         criterionId: "check-1",
         status: "PASSED",
+        blockingReason: null as string | null,
         summary: "已观察到启用状态",
         evidenceRefs: ["dom-1", "screen-1"],
       },
@@ -109,6 +115,126 @@ const report = (row: ReturnType<typeof fixture>) =>
   buildTaskAcceptanceReport(row as never, at);
 
 describe("AI acceptance report", () => {
+  it("excludes the interrupted no-result case without classifying it as a product defect", () => {
+    const row = fixture();
+    const run = row.executionRuns[0]!;
+    run.executionDisposition = "BLOCKED";
+    run.verdict = null;
+    run.criterionResults = [];
+    run.tasks = [
+      {
+        attemptId: "attempt-1",
+        error: { code: "WRITE_OUTCOME_UNKNOWN", message: "写入结果待核对" },
+        result: null,
+      },
+    ];
+    expect(report(row)).toMatchObject({
+      verdict: "INCONCLUSIVE",
+      aiAccepted: false,
+      assessment: {
+        score: null,
+        total: 0,
+        excluded: 1,
+        findings: [],
+        exclusions: [{ code: "WRITE_OUTCOME_UNKNOWN" }],
+      },
+    });
+  });
+  it.each([
+    "SESSION_OPEN_FAILED",
+    "RUNTIME_SESSION_UNAVAILABLE",
+    "LOCATOR_RECOVERY_EXHAUSTED",
+  ])("shows the original %s after write verification resolves", (code) => {
+    const row = fixture();
+    const run = row.executionRuns[0]!;
+    run.executionDisposition = "BLOCKED";
+    run.verdict = null;
+    run.criterionResults = [];
+    run.tasks = [
+      {
+        attemptId: "attempt-1",
+        recoveryStatus: "RESOLVED",
+        result: null,
+        error: {
+          code: "WRITE_OUTCOME_UNKNOWN",
+          message: "写入结果待核对",
+          details: { originalError: { code, message: "原始执行问题" } },
+        },
+      },
+    ];
+    const result = report(row);
+    expect(result.cases[0]!.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code,
+          message: "原始执行问题",
+          nextStep: expect.stringContaining("写入核实已完成"),
+        }),
+      ]),
+    );
+    expect(result.assessment).toMatchObject({
+      score: null,
+      excluded: code === "LOCATOR_RECOVERY_EXHAUSTED" ? 0 : 1,
+    });
+    run.tasks[0]!.recoveryStatus = "WRITE_OUTCOME_UNKNOWN";
+    expect(report(row).cases[0]!.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "WRITE_OUTCOME_UNKNOWN" }),
+      ]),
+    );
+  });
+  it("requires current-attempt evidence before excluding a structured data precondition", () => {
+    const row = fixture();
+    const run = row.executionRuns[0]!;
+    const result = run.criterionResults[0]!;
+    run.verdict = "INCONCLUSIVE";
+    result.status = "INCONCLUSIVE";
+    result.blockingReason = "DATA_PRECONDITION";
+    result.summary =
+      "MinerU cacheRead 当前价格 ¥1，红线价 ¥2，仅产品经理可保存。";
+    expect(report(row)).toMatchObject({
+      assessment: { score: null, total: 0, excluded: 1, findings: [] },
+      cases: [
+        {
+          criteria: [
+            {
+              issues: expect.arrayContaining([
+                expect.objectContaining({
+                  category: "PRECONDITION",
+                  code: "DATA_PRECONDITION",
+                }),
+              ]),
+            },
+          ],
+        },
+      ],
+    });
+    run.evidences = [];
+    expect(report(row).assessment).toMatchObject({
+      score: null,
+      excluded: 0,
+      total: 1,
+    });
+  });
+  it("does not inherit an environmental error from an older attempt", () => {
+    const row = fixture();
+    const run = row.executionRuns[0]!;
+    run.executionDisposition = "BLOCKED";
+    run.verdict = null;
+    run.criterionResults = [];
+    run.tasks = [
+      {
+        attemptId: "old-attempt",
+        error: { code: "WRITE_OUTCOME_UNKNOWN" },
+        result: null,
+      },
+    ];
+    expect(report(row).assessment).toMatchObject({
+      score: null,
+      total: 1,
+      excluded: 0,
+    });
+  });
   it("preserves historical verified results and exposes cleanup as a reminder", () => {
     const row = fixture();
     const run = row.executionRuns[0]!;
@@ -474,7 +600,7 @@ describe("task list acceptance scores", () => {
     });
   });
 
-  it("uses evidence validation for zero scores and keeps unscored tasks null", async () => {
+  it("keeps tasks without verified evidence unscored", async () => {
     const row = listRow();
     row.caseExecutions[0]!.run.evidences = [];
     const empty = {
@@ -491,7 +617,7 @@ describe("task list acceptance scores", () => {
     );
     const result = await service.list(current);
     expect(result[0]!.acceptanceScore).toMatchObject({
-      score: 0,
+      score: null,
       passed: 0,
       unknown: 1,
     });
@@ -553,4 +679,31 @@ describe("task list acceptance scores", () => {
       });
     },
   );
+});
+
+it("excludes session-loss gaps while preserving verified product results", () => {
+  const row = fixture();
+  const run = row.caseExecutions[0]!.run;
+  run.executionDisposition = "RUNTIME_LOST";
+  run.verdict = null;
+  run.tasks = [
+    {
+      attemptId: "attempt-1",
+      result: null,
+      error: {
+        code: "RUNTIME_SESSION_UNAVAILABLE",
+        message: "浏览器会话已失效。",
+      },
+    },
+  ];
+  run.criterionResults[0]!.status = "INCONCLUSIVE";
+  run.criterionResults[0]!.evidenceRefs = [];
+  expect(report(row).assessment).toMatchObject({ score: null, excluded: 1 });
+  run.criterionResults[0]!.status = "FAILED";
+  run.criterionResults[0]!.evidenceRefs = ["dom-1", "screen-1"];
+  expect(report(row).assessment).toMatchObject({
+    failed: 1,
+    excluded: 0,
+    score: 0,
+  });
 });

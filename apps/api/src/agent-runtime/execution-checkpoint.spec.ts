@@ -1,6 +1,9 @@
 import { expect, it, vi } from "vitest";
 import { runtimeTaskSnapshotSchema } from "@devproof/agent-runtime-protocol";
-import { saveExecutionCheckpoint } from "./execution-checkpoint.js";
+import {
+  saveExecutionCheckpoint,
+  persistCriterionResults,
+} from "./execution-checkpoint.js";
 const runId = "285146a8-5230-4b02-832a-5eef19e8dc8a",
   attemptId = "cc61de8d-cf29-4561-b2cd-c67c304668a5";
 const snapshot = runtimeTaskSnapshotSchema.parse({
@@ -46,6 +49,30 @@ const criterion = {
   summary: "页面可见",
   evidenceRefs: ["proof"],
 };
+it("persists the environmental cause and clears it when the criterion is later verified", async () => {
+  const { tx, stored } = setup();
+  await persistCriterionResults(tx as never, snapshot, [
+    {
+      ...criterion,
+      status: "INCONCLUSIVE",
+      blockingReason: "DATA_PRECONDITION",
+    },
+  ]);
+  expect(stored.get("c")).toMatchObject({
+    blockingReason: "DATA_PRECONDITION",
+  });
+  await persistCriterionResults(tx as never, snapshot, [
+    { ...criterion, status: "PASSED" },
+  ]);
+  expect(tx.runCriterionResult.upsert).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      update: expect.objectContaining({
+        status: "PASSED",
+        blockingReason: null,
+      }),
+    }),
+  );
+});
 it("persists accepted criteria independently of cleanup and idempotently across repeated checkpoints", async () => {
   const { tx, stored } = setup();
   const input = {

@@ -123,6 +123,7 @@ export const structuredObservationSchema = z.object({
     .optional(),
   coverage: z.object({
     scope: z.enum(["VIEWPORT", "REGION"]),
+    rootNodeId: id.optional(),
     completeWithinScope: z.boolean(),
     truncated: z.boolean(),
     unavailableFrames: z.array(id).max(100),

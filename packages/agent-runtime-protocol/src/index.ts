@@ -826,6 +826,12 @@ export const runtimeCriterionResultSchema = z.object({
     .max(20)
     .optional(),
   status: criterionStatusSchema,
+  blockingReason: z
+    .enum(["DATA_PRECONDITION", "ENVIRONMENT_UNAVAILABLE"])
+    .optional()
+    .describe(
+      "仅 INCONCLUSIVE 使用：有实际证据证明测试数据、权限或环境前置条件阻止验证时填写。summary 说明具体阻塞与处理建议，并引用实际证据。不能用于产品缺陷、普通证据不足或定位失败。",
+    ),
   summary: z.string().trim().min(1).max(4_000),
 });
 
@@ -836,6 +842,7 @@ export const runtimeVerificationTerminationReasonSchema = z.enum([
   "TEXT_ONLY_LOOP",
   "TOOL_LIMIT_REACHED",
   "LOCATOR_RECOVERY_EXHAUSTED",
+  "RUNTIME_SESSION_UNAVAILABLE",
 ]);
 
 export const EVIDENCE_CATALOG_CAPABILITY = "attempt-evidence-catalog-v1";

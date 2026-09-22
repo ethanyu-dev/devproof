@@ -367,3 +367,25 @@ it("stops recapturing malformed state contracts after the first type diagnostic"
     retryable: false,
   });
 });
+
+it("explains how to establish a missing reopen phase without endless screenshots", () => {
+  const { memory, binding, contract } = fixture();
+  contract.targets[0]!.phase = "REOPENED";
+  binding.phase = "REOPENED";
+  binding.phaseProven = false;
+  binding.readiness = "PARTIAL";
+  binding.reasons = ["PHASE_UNPROVEN"];
+  const result = memory.bindingResult(binding.targetId, "same-page", {
+    bindings: [binding],
+  });
+  expect(result).toMatchObject({ retryable: true });
+  if (!("nextAction" in result)) throw new Error("Expected phase guidance");
+  expect(result.nextAction).toContain("完整观察页面确认弹窗已关闭");
+  expect(result.nextAction).toContain("同一业务记录");
+  memory.bindingResult(binding.targetId, "same-page", { bindings: [binding] });
+  expect(
+    memory.bindingResult(binding.targetId, "same-page", {
+      bindings: [binding],
+    }),
+  ).toMatchObject({ retryable: false });
+});

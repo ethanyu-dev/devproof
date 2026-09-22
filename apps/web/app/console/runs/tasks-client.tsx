@@ -492,6 +492,15 @@ function TaskRow({
               </span>
             </div>
           )}
+          {acceptanceScore?.score === null &&
+            (acceptanceScore.excluded ?? 0) > 0 && (
+              <span
+                className="dp-task-score-coverage"
+                title={acceptanceScore.reason}
+              >
+                环境受阻 · 暂不评分
+              </span>
+            )}
           <span className="dp-task-progress-count">
             <b>
               {displayed.counts.total > 0

@@ -70,6 +70,23 @@ function fixture(kinds = ["DOM", "SCREENSHOT"], observedContent = content) {
 }
 
 describe("criterion citations", () => {
+  it("preserves a structured environmental blocker with its observed evidence", () => {
+    const { resolve } = fixture();
+    const result = resolve({
+      ...input,
+      status: "INCONCLUSIVE",
+      blockingReason: "DATA_PRECONDITION",
+      summary: "测试数据前置条件不满足，尚未进入验收步骤。",
+      citations: [],
+      evidenceRefs: ["artifact://evidence-0"],
+    });
+    expect(result.error).toBeUndefined();
+    expect("result" in result ? result.result : undefined).toMatchObject({
+      status: "INCONCLUSIVE",
+      blockingReason: "DATA_PRECONDITION",
+      evidenceRefs: ["artifact://evidence-0"],
+    });
+  });
   it("normalizes display comparison while retaining the exact citation and rejecting rewritten quotations", () => {
     const actual = '- <button aria-pressed="true"> "周 一" [ref=f262e201]';
     const { observations, evidence } = fixture(undefined, actual);

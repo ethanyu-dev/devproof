@@ -1,4 +1,5 @@
 import { displayLabel } from "../../../lib/display-text";
+import { isAcceptanceEnvironmentBlocker } from "@devproof/contracts";
 
 interface RunOutcome {
   description: string;
@@ -7,6 +8,8 @@ interface RunOutcome {
   tone: "neutral" | "info" | "warning" | "danger" | "success";
   reasonCode?: string | undefined;
   nextStep?: string | undefined;
+  scoringNote?: string;
+  unscored?: boolean;
 }
 
 export function runOutcome(
@@ -17,9 +20,35 @@ export function runOutcome(
     status: string | null;
     summary?: string | null;
     description: string;
+    environmentBlocked?: boolean;
   }[],
 ): RunOutcome {
   const cause = failures[0];
+  const executionEnvironmentBlocked =
+    cause?.causeCode &&
+    isAcceptanceEnvironmentBlocker({
+      category:
+        /^(DATA_PRECONDITION|ENVIRONMENT_|TEST_ACCOUNT|AUTH_|PROFILE_|DEPLOYMENT_)/u.test(
+          cause.causeCode,
+        )
+          ? "PRECONDITION"
+          : "EXECUTION",
+      code: cause.causeCode,
+      message: cause.message,
+      nextStep: "",
+    });
+  const scoringNote =
+    executionEnvironmentBlocked || criteria.some((c) => c.environmentBlocked)
+      ? "环境或前置条件受阻的未验证项不参与评分，仅保留提示；恢复条件后补验。"
+      : undefined;
+  const unscored =
+    criteria.length > 0 &&
+    criteria.every(
+      (c) =>
+        c.environmentBlocked ||
+        (executionEnvironmentBlocked &&
+          (!c.status || c.status === "INCONCLUSIVE")),
+    );
   if (detail.lifecycle === "QUEUED") {
     return {
       description: "等待执行资源或前置条件满足，浏览器尚未开始验证。",
@@ -81,6 +110,7 @@ export function runOutcome(
   }
   if (executionDisposition === "BLOCKED") {
     return {
+      ...(scoringNote ? { scoringNote, unscored } : {}),
       description:
         cause?.message ??
         "本次执行被阻塞，未得到可信的验收结论；当前记录未提供具体中断原因。",
@@ -127,6 +157,7 @@ export function runOutcome(
     ].includes(executionDisposition)
   ) {
     return {
+      ...(scoringNote ? { scoringNote, unscored } : {}),
       description:
         failures[0]?.message ?? "执行环境异常，尚未得到可信的验收结论。",
       label: "执行异常",
@@ -139,6 +170,7 @@ export function runOutcome(
   if (detail.verdict === "INCONCLUSIVE") {
     const incomplete = criteria.find((item) => item.status === "INCONCLUSIVE");
     return {
+      ...(scoringNote ? { scoringNote, unscored } : {}),
       description:
         cause?.message ||
         incomplete?.summary ||
@@ -153,6 +185,7 @@ export function runOutcome(
   }
   if (executionDisposition === "NOT_RUN") {
     return {
+      ...(scoringNote ? { scoringNote, unscored } : {}),
       description: cause?.message ?? "验证未开始，当前记录未提供具体原因。",
       label: "未执行",
       title: "验证尚未执行",

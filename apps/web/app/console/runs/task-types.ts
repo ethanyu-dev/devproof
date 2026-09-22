@@ -115,7 +115,10 @@ export interface TaskDetail {
     pullRequests: string[];
     environments: Array<{ name: string; url: string }>;
   };
-  acceptanceScore?: Omit<AcceptanceAssessment, "findings"> | null;
+  acceptanceScore?: Omit<
+    AcceptanceAssessment,
+    "findings" | "exclusions"
+  > | null;
   testAccountPreparation?: TaskAccountPreparation;
   analysisInputRequest?:
     (SpecAnalysisInputRequest & { attemptId: string }) | null;

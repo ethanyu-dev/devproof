@@ -9,12 +9,22 @@ at most six native text fields from one observed form and does not submit it.
 Canonical observations preserve capture identity, frame/document identity,
 region lifecycle, relationships, state, coverage, and screenshot consistency.
 
-The working branch advertises minor 21, including the observation budget and
+The working branch advertises minor 22, including the observation budget and
 closure write-audit extensions below. Older daemon builds do not contain these
 extensions. Publish and upgrade the independently installed Browser Runtime
 before relying on them.
 See [Browser observation V2](../../docs/browser-observation-v2.md) for the current
 implementation, known blockers, migration, and rollback constraints.
+
+## Protocol 1.22 (local Browser Runtime builds)
+
+Structured observations add optional `coverage.rootNodeId`, identifying the
+actual root of a scoped DOM capture. A negative visibility assertion requires
+this root to match the bound business region, complete coverage, and no missing
+frames or truncated labels. A viewport or a capture from a smaller region cannot
+prove that a control is absent. Older observations without the field remain
+valid but cannot establish this absence proof. Upgrade the API and Agent before
+the independently installed Browser Runtime to retain the new metadata.
 
 ## Protocol 1.20 (local Browser Runtime builds)
 

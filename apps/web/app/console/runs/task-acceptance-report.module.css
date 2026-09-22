@@ -211,6 +211,9 @@
   color: var(--muted-foreground);
   font-size: 14px;
 }
+.score strong.unscored {
+  font-size: 28px;
+}
 .recommendation p {
   margin: 12px 0;
   font-size: 14px;

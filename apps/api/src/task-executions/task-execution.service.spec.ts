@@ -1905,3 +1905,114 @@ describe("stable Case dispatch snapshots", () => {
     ).toEqual({});
   });
 });
+
+describe("queued case policy changes", () => {
+  function queuedFixture() {
+    const run = {
+      id: "run",
+      lifecycle: "QUEUED",
+      startedAt: null,
+      executionPolicy: {},
+      tasks: [
+        {
+          id: "agent",
+          status: "PENDING",
+          startedAt: null,
+          leaseOwner: null,
+          snapshot: { executionPolicy: { keep: true } },
+        },
+      ],
+      browserExecutions: [
+        {
+          status: "WAITING_CAPACITY",
+          runtimeSessionId: null,
+          allocationToken: "waiting-permit",
+        },
+      ],
+    };
+    const candidate = {
+      id: "case-execution",
+      runId: "run",
+      caseId: "case",
+      deploymentId: "deploy",
+      executionOrdinal: 1,
+      dispatchStatus: "LINKED",
+      dispatchAttempts: 1,
+      updatedAt: new Date(),
+      testCase: { snapshotId: "snapshot" },
+      taskExecution: { lifecycle: "RUNNING", cancelRequestedAt: null },
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      taskCaseExecution: {
+        findFirst: vi.fn().mockResolvedValue(candidate),
+        findMany: vi.fn().mockResolvedValue([candidate]),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      executionRun: {
+        findUnique: vi.fn().mockResolvedValue(run),
+        update: vi.fn(),
+      },
+      agentRuntimeTask: { update: vi.fn() },
+      browserExecution: { updateMany: vi.fn() },
+      taskExecution: { update: vi.fn() },
+      taskExecutionEvent: { create: vi.fn() },
+    };
+    const service = new TaskExecutionService(
+      { $transaction: (fn: (value: typeof tx) => unknown) => fn(tx) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    vi.spyOn(service, "detail").mockResolvedValue({} as never);
+    const change = () =>
+      service.setCaseExecutionPolicy(
+        { team: { id: "team" } } as never,
+        "task",
+        candidate.id,
+        { accessMode: "MUTATING", resourceScopes: ["product-discount/case-1"] },
+      );
+    return { tx, run, change };
+  }
+  it("updates the waiting run and its unclaimed snapshot atomically", async () => {
+    const f = queuedFixture();
+    await f.change();
+    expect(f.tx.$queryRaw).toHaveBeenCalled();
+    expect(f.tx.executionRun.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          concurrencyPolicy: expect.objectContaining({
+            accessMode: "MUTATING",
+            resourceScopes: ["product-discount/case-1"],
+          }),
+        }),
+      }),
+    );
+    expect(f.tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          snapshot: {
+            executionPolicy: {
+              keep: true,
+              concurrency: expect.objectContaining({ accessMode: "MUTATING" }),
+            },
+          },
+        },
+      }),
+    );
+  });
+  it.each(["RUNNING", "ALLOCATING", "CLAIMED"])(
+    "rejects policy changes after admission starts: %s",
+    async (phase) => {
+      const f = queuedFixture();
+      if (phase === "RUNNING") f.run.lifecycle = "RUNNING";
+      if (phase === "ALLOCATING")
+        f.run.browserExecutions[0]!.status = "ALLOCATING";
+      if (phase === "CLAIMED") f.run.tasks[0]!.status = "RUNNING";
+      await expect(f.change()).rejects.toThrow("unstarted");
+      expect(f.tx.executionRun.update).not.toHaveBeenCalled();
+    },
+  );
+});

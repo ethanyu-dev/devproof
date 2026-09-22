@@ -4,10 +4,39 @@ import {
   boundedJsonArray,
   boundedUtf8Buffer,
   redactText,
+  redactValue,
   sanitizeDom,
 } from "./index.js";
 
 describe("Browser content safety", () => {
+  it("redacts structured observations without corrupting JSON or losing sibling nodes", () => {
+    const observation = {
+      version: 2,
+      nodes: [
+        {
+          id: "one",
+          text: 'https://example.test/?token=private&next="quoted"',
+        },
+        { id: "two", text: "authorization: Bearer private" },
+        { id: "three", text: "cookie: sessionid=private" },
+        { id: "four", text: '点击「保存」 \\ "完成"\n下一行', selected: false },
+      ],
+      nested: { password: "private", count: 4, empty: null },
+    };
+    const serialized = JSON.stringify(redactValue(observation));
+    expect(serialized).not.toContain("private");
+    expect(JSON.parse(serialized)).toMatchObject({
+      version: 2,
+      nodes: [
+        { id: "one" },
+        { id: "two" },
+        { id: "three" },
+        observation.nodes[3],
+      ],
+      nested: { password: "[REDACTED]", count: 4, empty: null },
+    });
+    expect(observation.nested.password).toBe("private");
+  });
   it("redacts password values regardless of attribute order", () => {
     const sanitized = sanitizeDom(
       '<input value="super-secret" type="password"><textarea name="api-token">token-value</textarea>',
