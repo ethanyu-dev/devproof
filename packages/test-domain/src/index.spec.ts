@@ -343,6 +343,91 @@ describe("projectTaskExecution", () => {
     ).toMatchObject({ lifecycle: "WAITING_HUMAN", verdict: null });
   });
 
+  it("completes a task whose unchanged Cases are carried over", () => {
+    expect(
+      projectTaskExecution({
+        ...base,
+        caseExecutions: [
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "CARRIED_OVER" as const,
+            run: {
+              executionDisposition: "EXECUTED" as const,
+              lifecycle: "COMPLETED" as const,
+              verdict: "PASSED" as const,
+            },
+          },
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "LINKED" as const,
+            run: {
+              executionDisposition: "EXECUTED" as const,
+              lifecycle: "COMPLETED" as const,
+              verdict: "PASSED" as const,
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({
+      executionDisposition: "EXECUTED",
+      executionStageStatus: "SUCCEEDED",
+      lifecycle: "COMPLETED",
+      verdict: "PASSED",
+    });
+  });
+
+  it("counts carried verdicts toward the task verdict", () => {
+    expect(
+      projectTaskExecution({
+        ...base,
+        caseExecutions: [
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "CARRIED_OVER" as const,
+            run: {
+              executionDisposition: "EXECUTED" as const,
+              lifecycle: "COMPLETED" as const,
+              verdict: "FAILED" as const,
+            },
+          },
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "LINKED" as const,
+            run: {
+              executionDisposition: "EXECUTED" as const,
+              lifecycle: "COMPLETED" as const,
+              verdict: "PASSED" as const,
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({ lifecycle: "COMPLETED", verdict: "FAILED" });
+  });
+
+  it("treats a carried Case without a previous run as not executed", () => {
+    expect(
+      projectTaskExecution({
+        ...base,
+        caseExecutions: [
+          {
+            dispatchAttempts: 1,
+            dispatchMaxAttempts: 3,
+            dispatchStatus: "CARRIED_OVER" as const,
+            run: null,
+          },
+        ],
+      }),
+    ).toMatchObject({
+      executionDisposition: "NOT_RUN",
+      lifecycle: "COMPLETED",
+      verdict: null,
+    });
+  });
+
   it("keeps a transient Case dispatch failure active while retries remain", () => {
     expect(
       projectTaskExecution({

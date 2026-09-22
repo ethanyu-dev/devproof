@@ -17,6 +17,9 @@ import {
   taskExecutionCreateInputSchema,
   taskStageRetryInputSchema,
   taskCaseRerunInputSchema,
+  taskCasesRerunInputSchema,
+  taskCasesRerunTaskInputSchema,
+  taskAcceptanceReviewRerunInputSchema,
   taskAnalysisInputSchema,
 } from "@devproof/contracts";
 
@@ -160,6 +163,49 @@ export class TaskExecutionController {
       id,
       stage,
       parseBody(taskStageRetryInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/rerun-task")
+  @HttpCode(202)
+  rerunCasesAsTask(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunCasesAsTask(
+      current,
+      id,
+      parseBody(taskCasesRerunTaskInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/rerun")
+  rerunCases(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunCases(
+      current,
+      id,
+      parseBody(taskCasesRerunInputSchema, body),
+    );
+  }
+
+  @Post(":id/acceptance-review/rerun")
+  rerunAcceptanceReview(
+    @CurrentToolAuth() current: ToolAuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    requireToolScope(current, "run:write");
+    return this.tasks.rerunAcceptanceReview(
+      current,
+      id,
+      parseBody(taskAcceptanceReviewRerunInputSchema, body),
     );
   }
 

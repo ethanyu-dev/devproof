@@ -7,6 +7,9 @@ import {
   taskListQuerySchema,
   taskDeploymentsInputSchema,
   taskCaseRerunInputSchema,
+  taskCasesRerunInputSchema,
+  taskCasesRerunTaskInputSchema,
+  taskAcceptanceReviewRerunInputSchema,
   taskTestAccountsInputSchema,
   runInterventionResolveInputSchema,
   taskDeploymentTargetInputSchema,
@@ -43,6 +46,9 @@ const TASK_TOOL_GUIDE = {
     "provide_task_test_accounts",
     "rerun_task",
     "rerun_task_case",
+    "rerun_task_cases",
+    "rerun_task_cases_as_task",
+    "rerun_task_acceptance_review",
     "list_authorized_profiles",
   ],
   rules: [
@@ -62,6 +68,9 @@ const MCP_TOOL_SCOPES: Readonly<Partial<Record<string, ToolCredentialScope>>> =
     provide_task_test_accounts: "run:write",
     rerun_task: "run:write",
     rerun_task_case: "run:write",
+    rerun_task_cases: "run:write",
+    rerun_task_cases_as_task: "run:write",
+    rerun_task_acceptance_review: "run:write",
     cancel_task: "run:cancel",
     create_task: "run:write",
     get_run: "run:read",
@@ -105,6 +114,10 @@ const MCP_OUTPUT_SCHEMAS: Record<string, z.ZodType> = {
   create_task: taskOutputSchema,
   get_task: taskOutputSchema,
   rerun_task: taskOutputSchema,
+  rerun_task_case: taskOutputSchema,
+  rerun_task_cases: taskOutputSchema,
+  rerun_task_cases_as_task: taskOutputSchema,
+  rerun_task_acceptance_review: taskOutputSchema,
   list_tasks: taskListOutputSchema,
   list_task_events: z.object({
     value: z.array(
@@ -561,6 +574,67 @@ export class VerificationMcpService {
             taskId,
             caseId,
             deploymentId,
+            input,
+          ),
+        );
+      },
+    );
+    server.registerTool(
+      "rerun_task_cases",
+      {
+        description:
+          "Rerun several cases in place under the same task with one idempotency key. Cases that depend on other cases must be rerun in the same batch.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          deploymentId: z.string().uuid().optional(),
+          ...taskCasesRerunInputSchema.shape,
+        },
+      },
+      async ({ taskId, deploymentId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().rerunCases(
+            current,
+            taskId,
+            input,
+            deploymentId,
+          ),
+        );
+      },
+    );
+    server.registerTool(
+      "rerun_task_cases_as_task",
+      {
+        description:
+          "Create a new task that reruns the selected cases with their original Spec, skipping Spec analysis.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskCasesRerunTaskInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().rerunCasesAsTask(current, taskId, input),
+        );
+      },
+    );
+    server.registerTool(
+      "rerun_task_acceptance_review",
+      {
+        description:
+          "Regenerate the AI acceptance review for a terminal task. Evidence scores and release gates are preserved by the control plane.",
+        inputSchema: {
+          taskId: z.string().uuid(),
+          ...taskAcceptanceReviewRerunInputSchema.shape,
+        },
+      },
+      async ({ taskId, ...input }) => {
+        requireToolScope(current, "run:write");
+        return result(
+          await this.taskService().rerunAcceptanceReview(
+            current,
+            taskId,
             input,
           ),
         );

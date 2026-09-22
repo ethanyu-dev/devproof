@@ -82,6 +82,8 @@ function downloadJson(value: unknown, filename: string) {
 
 export function TaskDetailContent({
   onRerunCase,
+  onRerunCases,
+  onRerunCasesAsTask,
   onCaseRetried,
   busy,
   detail,
@@ -95,6 +97,8 @@ export function TaskDetailContent({
   taskHref,
 }: {
   onRerunCase: (caseId: string) => Promise<void>;
+  onRerunCases: (caseIds: string[]) => Promise<void>;
+  onRerunCasesAsTask: (caseIds: string[]) => Promise<void>;
   onCaseRetried: (task: TaskDetail) => void;
   busy: boolean;
   detail: TaskDetail;
@@ -107,6 +111,7 @@ export function TaskDetailContent({
   onRetryEvents: () => void;
   taskHref: string;
 }) {
+  const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([]);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -562,6 +567,45 @@ export function TaskDetailContent({
                 ? `执行用例 · ${detail.cases.length}`
                 : `执行记录 · ${detail.runs.length}`}
             </h2>
+            {selectedCaseIds.length > 0 && (
+              <div className={styles.batchRerunBar} role="toolbar">
+                <span>已选 {selectedCaseIds.length} 个用例</span>
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `在当前任务下重跑选中的 ${selectedCaseIds.length} 个用例？将复用原规格和验证环境，保留历次执行记录与证据。`,
+                      )
+                    ) {
+                      const caseIds = [...selectedCaseIds];
+                      setSelectedCaseIds([]);
+                      void onRerunCases(caseIds);
+                    }
+                  }}
+                  size="sm"
+                  variant="secondary"
+                >
+                  <RotateCcw /> 重跑选中(本任务)
+                </Button>
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `为选中的 ${selectedCaseIds.length} 个用例创建独立重跑任务？将复用原规格、跳过 Spec 分析。`,
+                      )
+                    ) {
+                      void onRerunCasesAsTask([...selectedCaseIds]);
+                    }
+                  }}
+                  size="sm"
+                  variant="secondary"
+                >
+                  <PlayCircle /> 重跑选中(新任务)
+                </Button>
+              </div>
+            )}
             {isSpecTask(detail) && detail.cases.length === 0 && (
               <p className="dp-task-empty-copy">
                 {analysis?.status === "FAILED"
@@ -592,12 +636,21 @@ export function TaskDetailContent({
                       new Date(detail.deadlineAt).getTime() - Date.now() >=
                         30_000
                     }
+                    isSelected={selectedCaseIds.includes(testCase.id)}
                     key={testCase.id}
                     onRerun={() => void onRerunCase(testCase.id)}
                     onRetried={onCaseRetried}
                     onSavePolicy={(executionId, policy) =>
                       onMutate(`/cases/${executionId}/policy`, policy)
                     }
+                    onToggleSelect={() =>
+                      setSelectedCaseIds((current) =>
+                        current.includes(testCase.id)
+                          ? current.filter((id) => id !== testCase.id)
+                          : [...current, testCase.id],
+                      )
+                    }
+                    selectable={!busy}
                     testCase={testCase}
                     taskId={detail.id}
                     taskHref={taskHref}
@@ -630,7 +683,13 @@ function summarizeCaseExecution(testCase: TaskCase) {
     (execution) =>
       execution.run && !terminalLifecycles.has(execution.run.lifecycle),
   );
-  const pending = executions.find((execution) => !execution.run);
+  const carried = executions.find(
+    (execution) => execution.dispatch.status === "CARRIED_OVER",
+  );
+  const pending = executions.find(
+    (execution) =>
+      !execution.run && execution.dispatch.status !== "CARRIED_OVER",
+  );
   const outcomes = executions.flatMap((execution) =>
     execution.run ? [taskOutcomeDisplay(execution.run)] : [],
   );
@@ -640,12 +699,15 @@ function summarizeCaseExecution(testCase: TaskCase) {
     outcomes[0];
   const status =
     active?.run?.lifecycle ??
-    pending?.dispatch.status ??
-    aggregateOutcome?.toneStatus ??
-    "PENDING";
+    (carried
+      ? "CARRIED_OVER"
+      : (pending?.dispatch.status ??
+        aggregateOutcome?.toneStatus ??
+        "PENDING"));
   return {
     active,
     aggregateOutcome,
+    carried,
     executions,
     pending,
     status,
@@ -726,9 +788,12 @@ function CaseCard({
   allCases,
   busy,
   canEditPolicy,
+  isSelected,
   onRerun,
   onRetried,
   onSavePolicy,
+  onToggleSelect,
+  selectable,
   testCase,
   taskId,
   taskHref,
@@ -736,17 +801,20 @@ function CaseCard({
   allCases: TaskCase[];
   busy: boolean;
   canEditPolicy: boolean;
+  isSelected?: boolean;
   onRerun: () => void;
   onRetried: (task: TaskDetail) => void;
   onSavePolicy: (
     executionId: string,
     policy: ExecutionConcurrencyPolicy,
   ) => Promise<unknown>;
+  onToggleSelect?: () => void;
+  selectable?: boolean;
   testCase: TaskCase;
   taskId: string;
   taskHref: string;
 }) {
-  const { active, aggregateOutcome, executions, pending, status } =
+  const { active, aggregateOutcome, carried, executions, pending, status } =
     summarizeCaseExecution(testCase);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected =
@@ -778,13 +846,24 @@ function CaseCard({
       aria-labelledby={`case-${testCase.id}`}
     >
       <div className={styles.caseHeader}>
+        {selectable && onToggleSelect && (
+          <input
+            aria-label={`选择用例 ${testCase.name}`}
+            checked={isSelected ?? false}
+            disabled={busy}
+            onChange={onToggleSelect}
+            type="checkbox"
+          />
+        )}
         <h3 id={`case-${testCase.id}`}>
           {testCase.position + 1}. {testCase.name}
         </h3>
         <Badge tone={tone(status)}>
           {active || pending
             ? executionSchedulingLabel(active ?? pending!)
-            : (aggregateOutcome?.label ?? displayLabel(status))}
+            : carried
+              ? "沿用上次结果"
+              : (aggregateOutcome?.label ?? displayLabel(status))}
         </Badge>
       </div>
       <p className={styles.caseDescription}>
@@ -878,7 +957,12 @@ function CaseCard({
       )}
       {selected && !selected.run && (
         <div className={styles.pendingExecution}>
-          <p>{executionSchedulingLabel(selected)}，执行创建后可查看详情。</p>
+          <p>
+            {selected.dispatch.status === "CARRIED_OVER"
+              ? "本用例规格未变化，结果沿用上一轮执行。"
+              : executionSchedulingLabel(selected)}
+            ，执行创建后可查看详情。
+          </p>
           <SchedulingExplanation scheduling={selected.scheduling} />
           {selectedFailure && <p>{selectedFailure}</p>}
           {["PENDING", "FAILED"].includes(selected.dispatch.status) &&

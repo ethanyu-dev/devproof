@@ -43,6 +43,7 @@ export function TaskAcceptanceReportView({
   const [report, setReport] = useState<TaskAcceptanceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
@@ -66,6 +67,28 @@ export function TaskAcceptanceReportView({
     const timer = window.setTimeout(() => setRefresh((r) => r + 1), 10_000);
     return () => window.clearTimeout(timer);
   }, [report]);
+  async function rerunReview() {
+    if (!report?.final || busy) return;
+    if (
+      !window.confirm(
+        "重新生成 AI 综合评述？原有评述将被覆盖，证据评分与上线建议保持不变。",
+      )
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      await consoleApi(`/tasks/${id}/acceptance-review/rerun`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Manual review rerun from console" }),
+      });
+      setRefresh((r) => r + 1);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   if (error)
     return (
       <ErrorState message={error} onRetry={() => setRefresh((r) => r + 1)} />
@@ -73,8 +96,10 @@ export function TaskAcceptanceReportView({
   if (!report || report.taskId !== id) return <LoadingState />;
   return (
     <TaskAcceptanceReportContent
-      report={report}
+      busy={busy}
       onRefresh={() => setRefresh((r) => r + 1)}
+      onRerunReview={() => void rerunReview()}
+      report={report}
     />
   );
 }
@@ -82,9 +107,13 @@ export function TaskAcceptanceReportView({
 export function TaskAcceptanceReportContent({
   report,
   onRefresh,
+  onRerunReview,
+  busy = false,
 }: {
   report: TaskAcceptanceReport;
   onRefresh?: () => void;
+  onRerunReview?: () => void;
+  busy?: boolean;
 }) {
   const id = report.taskId;
   const assessment = reportAssessment(report);
@@ -231,6 +260,16 @@ export function TaskAcceptanceReportContent({
         )}
         <div className={styles.aiReview}>
           <strong>AI 综合评述</strong>
+          {onRerunReview && report.final && (
+            <Button
+              disabled={busy || report.review?.status === "RUNNING"}
+              onClick={onRerunReview}
+              size="sm"
+              variant="ghost"
+            >
+              <RefreshCw /> 重新生成
+            </Button>
+          )}
           {report.review?.status === "COMPLETED" ? (
             <>
               <p>{report.review.summary}</p>
@@ -434,9 +473,12 @@ export function TaskAcceptanceReportContent({
               <span>
                 {c.name} · {c.deployment}
               </span>
-              <Badge tone={tone(c.verdict)}>
-                {acceptanceLabels[c.verdict]}
-              </Badge>
+              <span className={styles.caseBadges}>
+                {c.carriedOver && <Badge tone="info">沿用上次结果</Badge>}
+                <Badge tone={tone(c.verdict)}>
+                  {acceptanceLabels[c.verdict]}
+                </Badge>
+              </span>
             </summary>
             <div className={styles.caseBody}>
               <p className={styles.caption}>

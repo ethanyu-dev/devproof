@@ -127,6 +127,12 @@
 .case summary > span:first-child {
   flex: 1;
 }
+.caseBadges {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .caseBody {
   padding-bottom: 16px;
 }
@@ -263,6 +269,10 @@
   font-size: 13px;
   line-height: 1.8;
   overflow-wrap: anywhere;
+}
+
+.aiReview > .dp-button {
+  justify-self: start;
 }
 .aiReview p {
   margin: 0;

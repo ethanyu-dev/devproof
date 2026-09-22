@@ -1202,11 +1202,28 @@ export {
 
 export const taskStageRetryInputSchema = z.object({
   reason: z.string().trim().max(1_000).default("manual retry"),
+  // SPEC_ANALYSIS re-analysis scheduling: DIFF dispatches only changed Cases.
+  dispatchMode: z.enum(["DIFF", "FULL"]).default("DIFF").optional(),
 });
 
 export const taskCaseRerunInputSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(200),
   reuseTestAccounts: z.boolean().optional(),
+});
+
+export const taskCasesRerunInputSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200),
+  caseIds: z.array(z.string().uuid()).min(1).max(100),
+  reuseTestAccounts: z.boolean().optional(),
+});
+
+export const taskCasesRerunTaskInputSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(200),
+  caseIds: z.array(z.string().uuid()).min(1).max(100),
+});
+
+export const taskAcceptanceReviewRerunInputSchema = z.object({
+  reason: z.string().trim().max(1_000).default("manual review rerun"),
 });
 
 export const taskCaseRerunSourceSchema = z.object({
@@ -1957,6 +1974,13 @@ export type TaskDeploymentTargetInput = z.infer<
 export type TaskDeployment = z.infer<typeof taskDeploymentSchema>;
 export type TaskDeploymentsInput = z.infer<typeof taskDeploymentsInputSchema>;
 export type TaskStageRetryInput = z.infer<typeof taskStageRetryInputSchema>;
+export type TaskCasesRerunInput = z.infer<typeof taskCasesRerunInputSchema>;
+export type TaskCasesRerunTaskInput = z.infer<
+  typeof taskCasesRerunTaskInputSchema
+>;
+export type TaskAcceptanceReviewRerunInput = z.infer<
+  typeof taskAcceptanceReviewRerunInputSchema
+>;
 export type AgentRuntimeProvider = z.infer<typeof agentRuntimeProviderSchema>;
 export type VerificationRunStatus = z.infer<typeof verificationRunStatusSchema>;
 export type VerificationRequest = z.infer<typeof verificationRequestSchema>;

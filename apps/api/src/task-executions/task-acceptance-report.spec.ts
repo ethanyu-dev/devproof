@@ -115,6 +115,31 @@ const report = (row: ReturnType<typeof fixture>) =>
   buildTaskAcceptanceReport(row as never, at);
 
 describe("AI acceptance report", () => {
+  it("resolves carried-over Case results from the previous round", () => {
+    const row = fixture();
+    const carriedRun = row.executionRuns[0]!;
+    row.caseExecutions[0] = {
+      caseId: "case-1",
+      deploymentId: "env-1",
+      executionOrdinal: 1,
+      dispatchStatus: "CARRIED_OVER",
+      dispatchLastError: null,
+      run: null,
+      carriedFrom: {
+        run: carriedRun,
+      },
+    };
+    const value = report(row);
+    expect(value.cases).toHaveLength(1);
+    expect(value.cases[0]).toMatchObject({
+      carriedOver: true,
+      lifecycle: "COMPLETED",
+      runId: "run-1",
+      verdict: "PASSED",
+    });
+    expect(value.cases[0]?.criteria[0]?.verdict).toBe("PASSED");
+  });
+
   it("excludes the interrupted no-result case without classifying it as a product defect", () => {
     const row = fixture();
     const run = row.executionRuns[0]!;

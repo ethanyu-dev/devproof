@@ -18,6 +18,9 @@ import {
   taskProfileSelectionInputSchema,
   taskStageRetryInputSchema,
   taskCaseRerunInputSchema,
+  taskCasesRerunInputSchema,
+  taskCasesRerunTaskInputSchema,
+  taskAcceptanceReviewRerunInputSchema,
   taskAnalysisInputSchema,
   taskTestAccountsInputSchema,
   executionConcurrencyPolicySchema,
@@ -219,6 +222,46 @@ export class TaskExecutionConsoleController {
       id,
       stage,
       parseBody(taskStageRetryInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/rerun-task")
+  @HttpCode(202)
+  rerunCasesAsTask(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.rerunCasesAsTask(
+      taskToolContext(current),
+      id,
+      parseBody(taskCasesRerunTaskInputSchema, body),
+    );
+  }
+
+  @Post(":id/cases/rerun")
+  rerunCases(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.rerunCases(
+      taskToolContext(current),
+      id,
+      parseBody(taskCasesRerunInputSchema, body),
+    );
+  }
+
+  @Post(":id/acceptance-review/rerun")
+  rerunAcceptanceReview(
+    @CurrentAuth() current: AuthContext,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    return this.tasks.rerunAcceptanceReview(
+      taskToolContext(current),
+      id,
+      parseBody(taskAcceptanceReviewRerunInputSchema, body),
     );
   }
 

@@ -103,6 +103,7 @@ export function caseExecutionPhase(
   }
   if (
     item.dispatchStatus === "CANCELLED" ||
+    item.dispatchStatus === "CARRIED_OVER" ||
     item.dispatchStatus === "LINKED" ||
     (item.dispatchStatus === "FAILED" &&
       (item.dispatchAttempts ?? 0) >= (item.dispatchMaxAttempts ?? 3)) ||

@@ -400,6 +400,7 @@ enum TaskCaseDispatchStatus {
   PENDING
   DISPATCHING
   LINKED
+  CARRIED_OVER
   FAILED
   CANCELLED
 }
@@ -1399,6 +1400,7 @@ model TaskStageAttempt {
   status                TaskStageAttemptStatus     @default(PENDING)
   contextSnapshot       Json                       @default("{}") @map("context_snapshot")
   inputSnapshot         Json                       @map("input_snapshot")
+  retryPolicy           Json?                      @map("retry_policy")
   result                Json?
   error                 Json?
   leaseOwner            String?                    @map("lease_owner")
@@ -1497,12 +1499,15 @@ model TaskCaseExecution {
   scheduling          Json?
   executionPolicy     Json?                  @map("execution_policy")
   dispatchRequestedAt DateTime?              @map("dispatch_requested_at") @db.Timestamptz
+  carriedFromExecutionId String?             @map("carried_from_execution_id") @db.Uuid
   createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz
   updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz
   taskExecution       TaskExecution          @relation(fields: [taskExecutionId], references: [id], onDelete: Cascade)
   testCase            TaskGeneratedTestCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
   deployment          TaskDeployment         @relation(fields: [deploymentId, taskExecutionId], references: [id, taskExecutionId], onDelete: Cascade, map: "task_case_executions_deployment_id_fkey")
   run                 ExecutionRun?          @relation("TaskCaseExecutionRun", fields: [runId], references: [id], onDelete: SetNull)
+  carriedFrom         TaskCaseExecution?     @relation("CaseExecutionCarry", fields: [carriedFromExecutionId], references: [id], onDelete: SetNull)
+  carriedTo           TaskCaseExecution[]    @relation("CaseExecutionCarry")
 
   @@unique([taskExecutionId, caseId, deploymentId, executionOrdinal], map: "task_case_executions_task_case_deployment_ordinal_key")
   @@index([taskExecutionId, dispatchStatus])
