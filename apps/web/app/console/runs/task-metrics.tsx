@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type {
-  RuntimeApplicability,
   TaskActivity,
   TaskMetrics,
   TaskRuntimeKind,
@@ -83,20 +82,6 @@ function runtimeLabel(runtime: TaskRuntimeKind | null | undefined) {
   if (runtime === "SPEC_ANALYSIS") return "Spec 分析";
   if (runtime === "BROWSER") return "浏览器";
   return "未归属";
-}
-function runtimeStatus(
-  runtime: TaskRuntimeKind,
-  applicability: RuntimeApplicability,
-) {
-  if (applicability === "PARTIAL")
-    return "执行者未记录，边界来自已有模型/工具调用";
-  if (applicability === "NOT_APPLICABLE")
-    return runtime === "SPEC_ANALYSIS"
-      ? "分析阶段已跳过、阶段不存在，或只有确定性生成"
-      : "不适用";
-  if (applicability === "NOT_STARTED")
-    return runtime === "BROWSER" ? "尚未进入浏览器执行" : "尚未开始 Spec 分析";
-  return "按执行者记录";
 }
 function share(percentage: number | null) {
   return percentage === null ? "—" : `${percentage}%`;
@@ -188,15 +173,30 @@ export function TaskRuntimeSplit({ metrics }: { metrics: TaskMetrics }) {
     !metrics.overlap
   )
     return null;
-  const block = (timing: TaskRuntimeTiming, title: string) => (
-    <OccupancyShare
-      title={title}
-      occupiedMs={timing.occupiedMs}
-      percentage={timing.percentage}
-      buckets={timing.buckets}
-      status={runtimeStatus(timing.runtime, timing.applicability)}
-    />
-  );
+  const block = (timing: TaskRuntimeTiming, title: string) => {
+    const { applicability, runtime } = timing;
+    const status =
+      applicability === "PARTIAL"
+        ? "执行者未记录，边界来自已有模型/工具调用"
+        : applicability === "NOT_APPLICABLE"
+          ? runtime === "SPEC_ANALYSIS"
+            ? "分析阶段已跳过、阶段不存在，或只有确定性生成"
+            : "不适用"
+          : applicability === "NOT_STARTED"
+            ? runtime === "BROWSER"
+              ? "尚未进入浏览器执行"
+              : "尚未开始 Spec 分析"
+            : "按执行者记录";
+    return (
+      <OccupancyShare
+        title={title}
+        occupiedMs={timing.occupiedMs}
+        percentage={timing.percentage}
+        buckets={timing.buckets}
+        status={status}
+      />
+    );
+  };
   return (
     <div className={styles.runtimes}>
       <p>阶段起止不是 Runtime 占用。</p>
