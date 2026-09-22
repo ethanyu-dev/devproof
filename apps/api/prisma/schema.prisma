@@ -1931,6 +1931,7 @@ model RunCriterionResult {
   attemptId    String            @map("attempt_id") @db.Uuid
   criterionId  String            @map("criterion_id")
   status       RunProductVerdict
+  blockingReason String?         @map("blocking_reason")
   summary      String
   evidenceRefs String[]          @default([]) @map("evidence_refs")
   createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz

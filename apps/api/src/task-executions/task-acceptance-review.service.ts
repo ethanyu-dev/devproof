@@ -23,7 +23,7 @@ export function acceptanceReviewContext(report: TaskAcceptanceReport) {
     recommendation: report.assessment.recommendation,
     acceptanceVerdict: report.verdict,
     scoringRule:
-      "必需验收点等权；有完整证据的通过项计分；未知、失败和待完成项不计分但保留在分母。不得改分、将未知当通过，或把受阻当产品失败。cleanup 是独立的后续收尾提醒，不改变验证判定或上线建议；不要将其描述为验收未完成。",
+      "必需验收点等权；有完整证据的通过项计分；有明确环境或前置条件阻塞的未验证项排除分子和分母，只给出原因与处理提示；其他未知、失败和待完成项不计分但保留在分母。排除项不代表通过，不能把局部满分描述为完整需求通过。不得改分、将未知当通过，或把受阻当产品失败。cleanup 是独立的后续收尾提醒，不改变验证判定或上线建议；不要将其描述为验收未完成。",
     assessment: report.assessment,
     requirements: report.requirements,
     cases: report.cases.map((c) => ({

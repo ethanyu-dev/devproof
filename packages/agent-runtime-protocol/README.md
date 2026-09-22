@@ -231,3 +231,19 @@ See [runtime reliability implementation](../../docs/runtime-reliability-first-fo
 Deploy the updated protocol packages, API and Agent workers together. The
 Browser's capture and closure-audit changes additionally require a protocol 1.21
 Runtime build; no database migration is introduced by these extensions.
+
+## Protocol v2.27
+
+- Inconclusive criterion results may include `blockingReason`
+  (`DATA_PRECONDITION` or `ENVIRONMENT_UNAVAILABLE`) when evidence from the
+  same attempt shows that test data, permission, or environment prevented the
+  check. Product defects, missing evidence, and locator failures omit it.
+- Verification may terminate with `RUNTIME_SESSION_UNAVAILABLE` when the
+  browser session or its lease is gone. The API keeps the partial criterion
+  results and does not replay the session's writes.
+- Workers below minor 27 do not send either field. Historical results remain
+  readable.
+
+Deploy migration `20260921100000_criterion_blocking_reason` and the API before
+the Agent. Browser protocol 1.22 is independent and follows in its own Runtime
+upgrade.

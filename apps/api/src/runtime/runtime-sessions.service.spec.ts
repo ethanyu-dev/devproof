@@ -325,6 +325,24 @@ describe("RuntimeSessionsService preparation admission", () => {
     },
   );
 
+  it("explains pending closure and admits reauthentication once sessions are released", async () => {
+    const { service, tx, commands, claim } = fixture();
+    tx.browserRuntimeSession.count.mockResolvedValue(2);
+    await expect(service.create(current, input, claim)).rejects.toMatchObject({
+      response: {
+        code: "PROFILE_SESSIONS_IN_USE",
+        activeSessionCount: 2,
+        message: expect.stringContaining("任务取消后需等待会话关闭确认"),
+      },
+    });
+    expect(commands.execute).not.toHaveBeenCalled();
+    tx.browserRuntimeSession.count.mockResolvedValue(0);
+    await expect(service.create(current, input, claim)).resolves.toMatchObject({
+      status: "ACTIVE",
+    });
+    expect(commands.execute).toHaveBeenCalledOnce();
+  });
+
   it("does not let a preparation claim bypass execution admission", async () => {
     const { service, prisma, claim } = fixture();
     await expect(

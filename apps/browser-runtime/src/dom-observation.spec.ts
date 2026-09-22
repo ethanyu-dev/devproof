@@ -79,6 +79,8 @@ describe("DOM + visual observation without ARIA", () => {
       scope: "REGION",
       truncated: false,
       completeWithinScope: true,
+      rootNodeId: observed.structured.nodes.find((n) => n.role === "dialog")!
+        .nodeId,
     });
     expect(observed.structured.coverage.limitEvents?.[0]).toMatchObject({
       action: "SCOPED_RECAPTURE",

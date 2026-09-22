@@ -1540,16 +1540,19 @@ function checkpointPayload() {
 }
 
 describe("finalization checkpoints", () => {
-  it("retains locator recovery exhaustion through fenced recovery", () => {
-    const checkpoint = checkpointPayload();
-    checkpoint.reason = "LOCATOR_RECOVERY_EXHAUSTED";
-    checkpoint.pendingOutcome.termination.reason = checkpoint.reason;
-    expect(readFinalizationCheckpoint(checkpoint, 1n)).toEqual({
-      reason: checkpoint.reason,
-      outcome: checkpoint.pendingOutcome,
-    });
-    expect(readFinalizationCheckpoint(checkpoint, 2n)).toBeNull();
-  });
+  it.each(["LOCATOR_RECOVERY_EXHAUSTED", "RUNTIME_SESSION_UNAVAILABLE"])(
+    "retains %s through fenced recovery",
+    (reason) => {
+      const checkpoint = checkpointPayload();
+      checkpoint.reason = reason;
+      checkpoint.pendingOutcome.termination.reason = checkpoint.reason;
+      expect(readFinalizationCheckpoint(checkpoint, 1n)).toEqual({
+        reason: checkpoint.reason,
+        outcome: checkpoint.pendingOutcome,
+      });
+      expect(readFinalizationCheckpoint(checkpoint, 2n)).toBeNull();
+    },
+  );
 
   it("retains pending criteria only for the lost fence and matching termination", () => {
     expect(readFinalizationCheckpoint(checkpointPayload(), 1n)?.reason).toBe(

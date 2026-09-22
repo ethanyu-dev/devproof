@@ -131,6 +131,7 @@ describe("forced finalization write audit", () => {
     "EVIDENCE_SUBMISSION_FAILED",
     "TEXT_ONLY_LOOP",
     "LOCATOR_RECOVERY_EXHAUSTED",
+    "RUNTIME_SESSION_UNAVAILABLE",
   ])(
     "keeps partial criteria and the original %s reason when writes are unknown",
     async (reason) => {
@@ -300,4 +301,39 @@ it("seals the entire persisted evidence catalog rather than only inline metadata
       }),
     }),
   );
+});
+
+it("retains partial results but reports a settled lost session as runtime failure", async () => {
+  const { tx, outcome, submit } = fixture(0);
+  await submit(
+    runtimeOutcomeSchema.parse({
+      ...outcome,
+      termination: { reason: "RUNTIME_SESSION_UNAVAILABLE" },
+    }),
+  );
+  expect(tx.executionResourceLease.updateMany).not.toHaveBeenCalled();
+  expect(tx.executionRun.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({
+        executionDisposition: "RUNTIME_LOST",
+        verdict: null,
+        lifecycle: "COMPLETED",
+      }),
+    }),
+  );
+  expect(tx.agentRuntimeTask.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({
+        result: expect.objectContaining({
+          kind: "FATAL_FAILURE",
+          error: expect.objectContaining({
+            code: "RUNTIME_SESSION_UNAVAILABLE",
+          }),
+        }),
+      }),
+    }),
+  );
+  expect(
+    tx.runCriterionResult.upsert.mock.calls.map(([args]) => args.create.status),
+  ).toEqual(["PASSED", "INCONCLUSIVE"]);
 });

@@ -152,3 +152,32 @@ describe("bounded model tool corrections", () => {
     expect(result.suggestions).not.toContain("session.close");
   });
 });
+
+it("recovers misplaced observation options without changing the click target or accepting conflicts", () => {
+  const after = { observe: "ACTIVE_REGION", timeoutMs: 1500 };
+  const raw = {
+    commandType: "page.click",
+    payload: { target: { ref: "f194e273" }, after, timeoutSeconds: 60 },
+  };
+  const result = parseBrowserCommand(raw);
+  expect(result).toMatchObject({
+    success: true,
+    command: {
+      after,
+      timeoutSeconds: 60,
+      payload: { target: { ref: "f194e273" } },
+    },
+  });
+  if (result.success)
+    expect(result.command.payload).not.toHaveProperty("after");
+  expect(raw.payload).toHaveProperty("after");
+  expect(parseBrowserCommand({ ...raw, timeoutSeconds: 10 }).success).toBe(
+    false,
+  );
+  expect(
+    parseBrowserCommand({
+      ...raw,
+      payload: { ...raw.payload, after: { observe: "made-up" } },
+    }).success,
+  ).toBe(false);
+});

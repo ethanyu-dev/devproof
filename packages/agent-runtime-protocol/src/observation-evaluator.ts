@@ -322,7 +322,8 @@ export function evaluateObservationTarget(
           n.visible &&
           within(n, scope) &&
           named(n, assertion.label) &&
-          (typeof assertion.expected !== "boolean" ||
+          (assertion.property === "VISIBLE" ||
+            typeof assertion.expected !== "boolean" ||
             typeof n.checked === "boolean"),
       );
     const namedControlExists =
@@ -345,10 +346,13 @@ export function evaluateObservationTarget(
           n.nodeId === ownerControl.nodeId ||
           within(n, ownerControl)) &&
         (modern
-          ? (selection && !labeledStateExists
+          ? (selection &&
+            !labeledStateExists &&
+            assertion.property !== "VISIBLE"
               ? Boolean(n.ref)
               : named(n, assertion.label)) &&
-            (typeof assertion.expected === "boolean"
+            (typeof assertion.expected === "boolean" &&
+            assertion.property !== "VISIBLE"
               ? typeof n.checked === "boolean"
               : assertion.expected === undefined && namedControlExists
                 ? n.checked !== undefined ||
@@ -381,6 +385,39 @@ export function evaluateObservationTarget(
         candidates: candidates.flatMap((n) => (n.ref ? [n.ref] : [])),
       };
     if (candidates.length !== 1) {
+      // Absence is witnessed by a complete named region with its existing
+      // business identity, never inferred from a clipped viewport or missing entity.
+      if (
+        assertion.property === "VISIBLE" &&
+        assertion.expected === false &&
+        candidates.length === 0 &&
+        observation.coverage.scope === "REGION" &&
+        observation.coverage.rootNodeId === scope.nodeId &&
+        observation.coverage.completeWithinScope &&
+        !observation.coverage.truncated &&
+        observation.coverage.unavailableFrames.length === 0 &&
+        !nodes.some(
+          (n) =>
+            n.visible &&
+            within(n, scope) &&
+            named(n, modern ? assertion.label : assertion.subject.label),
+        ) &&
+        !nodes.some(
+          (n) =>
+            within(n, scope) &&
+            (n.truncatedProperties?.includes("NAME") ||
+              n.truncatedProperties?.includes("TEXT")),
+        )
+      ) {
+        facts.push({
+          assertionId: assertion.assertionId,
+          nodeId: scope.nodeId,
+          property: "VISIBLE",
+          actual: false,
+          evaluation: "MATCHED",
+        });
+        continue;
+      }
       reasons.push(`STATE_UNREADABLE:${assertion.assertionId}`);
       continue;
     }

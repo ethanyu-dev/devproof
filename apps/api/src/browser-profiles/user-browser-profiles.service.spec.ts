@@ -919,7 +919,7 @@ describe("UserBrowserProfilesService", () => {
           url: "https://app.example.com/login",
           waitUntil: "domcontentloaded",
         },
-        timeoutSeconds: 15,
+        timeoutSeconds: 60,
       });
       if (status === "ACTIVE") {
         expect(takeover).toHaveBeenCalledOnce();

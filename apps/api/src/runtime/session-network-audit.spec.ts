@@ -26,11 +26,12 @@ function fixture() {
     potentialWrites: 0,
   };
   const tx = {
+    sessionClosureEvidence: { findFirst: vi.fn().mockResolvedValue(null) },
     browserRuntimeCommand: {
       findFirst: vi.fn(async () => ({
         result: { closed: true, writeAudit: audit },
       })),
-      count: vi.fn(async () => 0),
+      count: vi.fn(async (_query: unknown) => 0),
     },
   };
   return {
@@ -71,7 +72,6 @@ describe("closed session no-write proof", () => {
   });
   it.each([
     { protocolMinor: 20 },
-    { controlGeneration: 1 },
     { closureVerifiedAt: null },
     { closureEvidenceId: null },
     { status: "OPEN" },
@@ -85,6 +85,39 @@ describe("closed session no-write proof", () => {
     f.tx.browserRuntimeCommand.count.mockResolvedValue(1);
     expect(await f.check()).toBe(false);
   });
+  it.each([1, 2, 4])(
+    "accepts complete no-write proof after human control generation %i",
+    async (controlGeneration) => {
+      const f = fixture();
+      f.session.controlGeneration = controlGeneration;
+      expect(await f.check()).toBe(true);
+      const filter = f.tx.browserRuntimeCommand.count.mock
+        .calls[0]?.[0] as unknown as {
+        where: { OR: Array<{ commandType?: { notIn: string[] } }> };
+      };
+      const audited = filter.where.OR.find((clause) => clause.commandType)!
+        .commandType!.notIn;
+      expect(audited).toEqual(
+        expect.arrayContaining([
+          "human.takeover",
+          "human.release",
+          "page.type",
+          "page.reload",
+          "page.resize",
+        ]),
+      );
+      expect(audited).not.toContain("http.request");
+    },
+  );
+  it.each([{ complete: false }, { potentialWrites: 1 }])(
+    "keeps a cancelled human-controlled session quarantined without no-write proof %j",
+    async (patch) => {
+      const f = fixture();
+      f.session.controlGeneration = 2;
+      Object.assign(f.audit, patch);
+      expect(await f.check()).toBe(false);
+    },
+  );
 });
 
 it("settles an inconclusive verification only when an independent closed-session audit proves no HTTP writes", async () => {
@@ -117,4 +150,15 @@ it("settles an inconclusive verification only when an independent closed-session
       f.session,
     ),
   ).toBe("UNKNOWN");
+});
+
+it("uses the authenticated closure audit when the close RPC timed out", async () => {
+  const f = fixture();
+  f.tx.browserRuntimeCommand.findFirst.mockResolvedValue(null as never);
+  f.tx.sessionClosureEvidence.findFirst.mockResolvedValue({
+    summary: { writeAudit: f.audit },
+  });
+  expect(await f.check()).toBe(true);
+  f.audit.potentialWrites = 1;
+  expect(await f.check()).toBe(false);
 });

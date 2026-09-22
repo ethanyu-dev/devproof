@@ -1,4 +1,5 @@
 interface ErrorSource {
+  recoveryStatus?: string | null;
   error?: unknown;
   cleanup?: { status: string; note: string } | null;
 }
@@ -19,6 +20,10 @@ const reasons: Record<string, [string, string]> = {
   EVIDENCE_SUBMISSION_FAILED: [
     "验收证据在两次纠正后仍未通过校验，验证结果未确认。",
     "检查节点引用和必需证据类型；核对业务状态后再重跑。",
+  ],
+  RUNTIME_SESSION_UNAVAILABLE: [
+    "浏览器会话已过期或失效，验证已中断；未完成项不参与评分。",
+    "检查浏览器节点及会话状态，确认旧会话已关闭、写入已核实后重新验证。",
   ],
   REPEATED_OPERATIONS: [
     "重复操作未产生新的页面观察或验收进展，自动执行已停止。",
@@ -89,8 +94,15 @@ export function summarizeTaskFailures(
         : typeof root === "string"
           ? root
           : "未记录具体错误原因。";
+    const resolved =
+      task.recoveryStatus === "RESOLVED" &&
+      outer.code === "WRITE_OUTCOME_UNKNOWN";
     const code =
-      typeof outer.code === "string" ? outer.code : "RUNTIME_TASK_FAILED";
+      resolved && typeof error.code === "string"
+        ? error.code
+        : typeof outer.code === "string"
+          ? outer.code
+          : "RUNTIME_TASK_FAILED";
     const causeCode = typeof error.code === "string" ? error.code : code;
     const invalidSchema =
       /invalid schema for function|is not a valid format/iu.test(detail);
@@ -115,6 +127,9 @@ export function summarizeTaskFailures(
       nextStep: invalidSchema
         ? "检查 Agent 工具定义与模型接口的兼容性，修复后再重试。"
         : (known?.[1] ?? "查看失败步骤和技术详情，确认原因后再重试。"),
+      ...(resolved
+        ? { recoveryMessage: "写入恢复流程已完成，无需重复核实。" }
+        : {}),
       ...(code === "WRITE_OUTCOME_UNKNOWN" && causeCode !== code
         ? {
             recoveryMessage:
@@ -141,8 +156,13 @@ export function currentRunFailures(
   )?.id,
 ) {
   if (!attemptId) return [];
+  const recoveryStatus = detail.tasks
+    .filter((item) => item.attemptId === attemptId)
+    .at(-1)?.recoveryStatus;
   return summarizeTaskFailures([
-    ...detail.attempts.filter((item) => item.id === attemptId),
+    ...detail.attempts
+      .filter((item) => item.id === attemptId)
+      .map((item) => ({ ...item, recoveryStatus: recoveryStatus ?? null })),
     ...detail.tasks.filter((item) => item.attemptId === attemptId).reverse(),
     ...(detail.browserExecutions ?? [])
       .filter((item) => item.attemptId === attemptId)

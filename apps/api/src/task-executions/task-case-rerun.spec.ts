@@ -1,7 +1,10 @@
 import { specificationDefinitionHash } from "@devproof/test-domain";
 import { resolveCaseExecutionDefinition } from "./case-account-definition.js";
 import { describe, expect, it, vi } from "vitest";
-import { caseRerunBlockReason } from "./task-case-rerun.js";
+import {
+  caseRerunBlockReason,
+  insertCaseRerunTask,
+} from "./task-case-rerun.js";
 import { TaskExecutionService } from "./task-execution.service.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
@@ -170,6 +173,48 @@ function fixture() {
 }
 
 describe("case rerun task creation", () => {
+  it("creates a reviewed multi-case suite in one snapshot with a shared deployment and distinct policies", async () => {
+    const { source, tx, execution } = fixture();
+    const second = structuredClone(execution);
+    second.id = "88888888-8888-4888-8888-888888888888";
+    second.caseId = "99999999-9999-4999-8999-999999999999";
+    second.testCase.id = second.caseId;
+    second.testCase.name = "第二用例";
+    second.executionPolicy = {
+      accessMode: "MUTATING",
+      resourceScopes: ["records/second"],
+    } as never;
+    const before = structuredClone(source);
+    await insertCaseRerunTask(
+      tx as never,
+      source as never,
+      [execution, second] as never,
+      "reviewed-suite",
+      actor,
+      { suite: true },
+    );
+    expect(source).toEqual(before);
+    expect(tx.taskSpecificationSnapshot.create).toHaveBeenCalledOnce();
+    const snapshot = tx.taskSpecificationSnapshot.create.mock.calls[0]![0].data;
+    expect(snapshot.cases.create).toHaveLength(2);
+    expect(snapshot.cases.create[0].id).not.toBe(snapshot.cases.create[1].id);
+    const task = tx.taskExecution.create.mock.calls[0]![0].data;
+    expect(task.deployments.create).toHaveLength(1);
+    expect(task.environmentSnapshot.caseRerunSource).toBeUndefined();
+    expect(task.environmentSnapshot.reviewedSuiteSource.caseIds).toEqual([
+      caseId,
+      second.caseId,
+    ]);
+    const runs = tx.taskCaseExecution.createMany.mock.calls[0]![0].data;
+    expect(runs.map((r: { caseId: string }) => r.caseId)).toEqual(
+      snapshot.cases.create.map((c: { id: string }) => c.id),
+    );
+    expect(runs[0].deploymentId).toBe(runs[1].deploymentId);
+    expect(runs[1].executionPolicy).toEqual(second.executionPolicy);
+    expect(
+      tx.taskStageAttempt.create.mock.calls[0]![0].data.result.caseCount,
+    ).toBe(2);
+  });
   it("reuses only the selected Case after expiry, with new references, deadline, identity and no original-record edits", async () => {
     const { source, tx, rerun } = fixture();
     const before = structuredClone(source);

@@ -102,3 +102,45 @@ describe("execution failure reason", () => {
     );
   });
 });
+
+it("shows session loss as the cause separately from pending write reconciliation", () => {
+  const [failure] = summarizeTaskFailures([
+    {
+      error: {
+        code: "WRITE_OUTCOME_UNKNOWN",
+        details: {
+          originalError: {
+            code: "RUNTIME_SESSION_UNAVAILABLE",
+            message: "SESSION_PERMIT_EXPIRED: permit expired",
+          },
+        },
+      },
+    },
+  ]);
+  expect(failure).toMatchObject({ causeCode: "RUNTIME_SESSION_UNAVAILABLE" });
+  expect(failure!.message).toContain("会话已过期或失效");
+  expect(failure!.recoveryMessage).toContain("核实写入状态");
+});
+
+it("clears stale write-reconciliation prompts for the resolved attempt, retaining its original failure", () => {
+  const error = {
+    code: "WRITE_OUTCOME_UNKNOWN",
+    details: {
+      originalError: {
+        code: "RUNTIME_SESSION_UNAVAILABLE",
+        message: "会话失效",
+      },
+    },
+  };
+  const failures = currentRunFailures({
+    currentAttemptNumber: 1,
+    attempts: [{ id: "a", number: 1, error }],
+    tasks: [{ attemptId: "a", recoveryStatus: "RESOLVED", error }],
+  });
+  expect(failures).toHaveLength(1);
+  expect(failures[0]).toMatchObject({
+    code: "RUNTIME_SESSION_UNAVAILABLE",
+    causeCode: "RUNTIME_SESSION_UNAVAILABLE",
+  });
+  expect(failures[0]!.recoveryMessage).toContain("无需重复核实");
+});

@@ -64,6 +64,80 @@ function fixture() {
 }
 
 describe("verified browser resource release", () => {
+  it.each([0, 1])(
+    "reconciles cancellation after human takeover using audited writes (%i)",
+    async (potentialWrites) => {
+      const tx = fixture();
+      Object.assign(tx.session, {
+        protocolMinor: 21,
+        controlGeneration: 2,
+        ownerTaskId: "owner",
+        ownerFencingToken: 7n,
+        launchIdentityVersion: 1,
+        launchIdentity: { id: "launch" },
+      });
+      const owner = {
+        id: "owner",
+        status: "CANCELLED",
+        fencingToken: 7n,
+        recoveryStatus: "WRITE_OUTCOME_UNKNOWN",
+        completionId: null,
+      };
+      tx.agentRuntimeTask.findUnique.mockResolvedValue(owner);
+      Object.assign(tx.sessionClosureEvidence, {
+        findFirst: vi.fn().mockResolvedValue({
+          summary: {
+            writeAudit: {
+              version: 1,
+              launchIdentityId: "launch",
+              coverage: "ISOLATED_CONTEXT_UNTIL_CLOSE",
+              complete: true,
+              requestCount: 142,
+              potentialWrites,
+            },
+          },
+        }),
+      });
+      Object.assign(tx.browserRuntimeCommand, {
+        findFirst: vi.fn().mockResolvedValue(null),
+      });
+      Object.assign(tx.runtimeSessionRecovery, {
+        updateMany: vi.fn(async ({ data }) => {
+          Object.assign(tx.recovery, data);
+          return { count: 1 };
+        }),
+        findUniqueOrThrow: vi.fn(async () => tx.recovery),
+      });
+      tx.executionResourceLease.count.mockResolvedValue(
+        potentialWrites ? 1 : 0,
+      );
+      await releaseVerifiedSessionResources(tx as never, tx.session.id);
+      if (potentialWrites === 0) {
+        expect(tx.recovery.writeOutcomeState).toBe("NO_WRITE_VERIFIED");
+        expect(tx.executionResourceLease.deleteMany).toHaveBeenCalledWith({
+          where: { sessionId: tx.session.id },
+        });
+        expect(tx.agentRuntimeTask.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: { recoveryStatus: "RESOLVED", recoveryNextAttemptAt: null },
+          }),
+        );
+        expect(tx.browserRuntimeSession.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ quarantinedAt: null }),
+          }),
+        );
+      } else {
+        expect(tx.recovery.writeOutcomeState).toBe("UNKNOWN");
+        expect(tx.executionResourceLease.deleteMany).not.toHaveBeenCalledWith({
+          where: { sessionId: tx.session.id },
+        });
+      }
+      expect(tx.browserRuntimeSlot.deleteMany).toHaveBeenCalled();
+      expect(tx.browserRuntimeProfileLease.deleteMany).toHaveBeenCalled();
+    },
+  );
+
   it.each(["CLOSED", "LOST", "FAILED"])(
     "never manufactures proof from status %s",
     async (status) => {

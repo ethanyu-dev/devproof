@@ -334,7 +334,7 @@ export const taskApiResponseSchemas: Record<string, Schema> = {
         coverageComplete: bool,
         counts: object({ cases: countByVerdict, criteria: countByVerdict }),
         assessment: object({
-          method: { const: "REQUIRED_CRITERIA_V1" },
+          method: { enum: ["REQUIRED_CRITERIA_V1", "REQUIRED_CRITERIA_V2"] },
           score: { type: ["number", "null"], minimum: 0, maximum: 100 },
           recommendation: {
             type: "string",
@@ -352,6 +352,8 @@ export const taskApiResponseSchemas: Record<string, Schema> = {
           unknown: count,
           pending: count,
           total: count,
+          excluded: count,
+          exclusions: array(freeObject),
           findings: array(freeObject),
         }),
         requirements: array(
@@ -436,7 +438,7 @@ export const taskApiResponseSchemas: Record<string, Schema> = {
       aiAccepted: false,
       coverageComplete: false,
       assessment: {
-        method: "REQUIRED_CRITERIA_V1",
+        method: "REQUIRED_CRITERIA_V2",
         score: null,
         recommendation: "PENDING",
         reason: "执行尚未结束。",
@@ -445,6 +447,8 @@ export const taskApiResponseSchemas: Record<string, Schema> = {
         unknown: 0,
         pending: 0,
         total: 0,
+        excluded: 0,
+        exclusions: [],
         findings: [],
       },
       counts: {

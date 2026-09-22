@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 export function normalizeObservationContent(content: string) {
   return content
     .replace(/[ \t]*\[ref=(?:f\d+)?e\d+\]/gu, "")
+    .replace(/(^[ \t]*- <[^>\n]*?\s)scopeRef="(?:f\d+)?e\d+"(?=[\s>])/gmu, "$1")
     .replace(/DOM viewport scope f\d+/gu, "DOM viewport scope");
 }
 

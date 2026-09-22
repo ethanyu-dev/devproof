@@ -15,6 +15,7 @@ export class BrowserControlConnection {
   private closed = false;
   private renewal: ReturnType<typeof setTimeout> | undefined;
   private reconnect: ReturnType<typeof setTimeout> | undefined;
+  private frameDeadline: ReturnType<typeof setTimeout> | undefined;
   private readonly pending = new Map<
     string,
     {
@@ -56,12 +57,36 @@ export class BrowserControlConnection {
       this.mode = connection.transport;
       this.options.onTransportChange?.(connection.transport);
       if (connection.transport === "relay") {
-        this.source = new EventSource(this.options.streamUrl, {
+        const source = new EventSource(this.options.streamUrl, {
           withCredentials: true,
         });
-        this.ready = true;
-        this.source.onmessage = (event) => this.onmessage?.(event);
-        this.source.onerror = () => this.onerror?.();
+        this.source = source;
+        this.watchRelayFrames(source);
+        source.onmessage = (event) => {
+          if (this.closed || this.source !== source) return;
+          try {
+            const value = JSON.parse(event.data);
+            if (value.type === "error") {
+              this.onmessage?.(event);
+              this.reconnectRelay(source);
+              return;
+            }
+            if (
+              value.type === "frame" &&
+              value.dataBase64 &&
+              value.width &&
+              value.height
+            ) {
+              this.ready = true;
+              this.watchRelayFrames(source);
+            }
+          } catch {
+            this.reconnectRelay(source);
+            return;
+          }
+          this.onmessage?.(event);
+        };
+        source.onerror = () => this.reconnectRelay(source);
         return;
       }
       if (new URL(connection.url).protocol !== "wss:")
@@ -109,6 +134,23 @@ export class BrowserControlConnection {
         this.reconnect = setTimeout(() => void this.connect(), 2000);
       }
     }
+  }
+
+  private watchRelayFrames(source: EventSource) {
+    clearTimeout(this.frameDeadline);
+    this.frameDeadline = setTimeout(() => this.reconnectRelay(source), 6000);
+  }
+
+  private reconnectRelay(source: EventSource) {
+    if (this.closed || this.source !== source) return;
+    // The API may drop its runtime subscription while the SSE socket stays open.
+    // Recreate the subscription; never resend browser input after a disconnect.
+    this.source = undefined;
+    this.ready = false;
+    clearTimeout(this.frameDeadline);
+    source.close();
+    this.onerror?.();
+    this.reconnect = setTimeout(() => void this.connect(), 2000);
   }
 
   private scheduleRenewal(socket: WebSocket) {
@@ -167,6 +209,7 @@ export class BrowserControlConnection {
     this.ready = false;
     clearTimeout(this.renewal);
     clearTimeout(this.reconnect);
+    clearTimeout(this.frameDeadline);
     this.source?.close();
     this.socket?.close();
     this.rejectPending();

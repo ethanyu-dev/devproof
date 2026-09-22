@@ -895,7 +895,18 @@ function CaseCard({
         </div>
       )}
       {selected?.run && (
-        <SchedulingExplanation scheduling={selected.scheduling} />
+        <>
+          <SchedulingExplanation scheduling={selected.scheduling} />
+          {selected.run.lifecycle === "QUEUED" && canEditPolicy && (
+            <CasePolicyEditor
+              key={selected.id}
+              busy={busy}
+              execution={selected}
+              otherCases={allCases.filter((peer) => peer.id !== testCase.id)}
+              onSave={(policy) => onSavePolicy(selected.id, policy)}
+            />
+          )}
+        </>
       )}
     </article>
   );

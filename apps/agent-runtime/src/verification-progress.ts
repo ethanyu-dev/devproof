@@ -33,6 +33,7 @@ const VOLATILE_KEYS = new Set([
   "dataBase64",
   "visualObservationId",
   "observationId",
+  "stepIntent",
 ]);
 const OBSERVATION_KEYS = new Set([
   "content",
@@ -303,7 +304,13 @@ function progressFacts(output: unknown, includeVisual = false): unknown[] {
       metadata,
       ...normalizeObservationContent(content)
         .split("\n")
-        .map((line) => line.trim().replace(/\s*\[box=[^\]]*\]/gu, ""))
+        .map((line) =>
+          line
+            .trim()
+            .replace(/\s*\[box=[^\]]*\]/gu, "")
+            // React regenerates radio-group names when the same dialog reopens.
+            .replace(/\sname="_r_[\w-]+_"/gu, ""),
+        )
         .filter((line) => line.startsWith("- "))
         .map((line) => ({ url: observation.url, node: line })),
     ];
@@ -332,6 +339,10 @@ function pageObservations(output: unknown, includeVisual = true): unknown[] {
   // Action screenshots contain animations and cursor changes, not proof of progress.
   if (
     includeVisual &&
+    // With DOM available, cursor/animation hashes cannot reset a semantic loop.
+    !observations.some(
+      (value) => typeof (value as Record<string, unknown>).content === "string",
+    ) &&
     !(result as Record<string, unknown> | undefined)?.interaction &&
     Array.isArray(record.artifacts)
   ) {

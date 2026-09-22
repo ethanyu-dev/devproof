@@ -132,6 +132,7 @@ interface RunDetail extends RunSummary {
   }>;
   criteriaSnapshot: unknown;
   criterionResults: Array<{
+    blockingReason?: string | null;
     criterionId: string;
     evidenceRefs: string[];
     status: string;
@@ -168,6 +169,7 @@ interface RunDetail extends RunSummary {
     status: string;
   }>;
   tasks: Array<{
+    recoveryStatus?: string | null;
     attemptId: string;
     cleanup?: { status: string; note: string } | null;
     error: unknown;
@@ -664,12 +666,14 @@ function RunDetailClient({ id }: { id: string }) {
               </Button>
             ) : null}
             {detail && (
-              <Link
-                className="dp-back-link"
-                href={`/console/execution-contexts/${id}/${detail.currentAttemptNumber || 1}`}
-              >
-                Step Context
-              </Link>
+              <Button asChild variant="secondary">
+                <Link
+                  href={`/console/execution-contexts/${id}/${detail.currentAttemptNumber || 1}`}
+                >
+                  <Activity />
+                  Step Context
+                </Link>
+              </Button>
             )}
             <Button
               disabled={refreshing}
@@ -720,6 +724,7 @@ function RunDetailClient({ id }: { id: string }) {
                     <Badge tone={outcome.tone}>{outcome.label}</Badge>
                     <h2>{outcome.title}</h2>
                     <p>{outcome.description}</p>
+                    {outcome.scoringNote && <p>{outcome.scoringNote}</p>}
                     {outcome.reasonCode && (
                       <code className="dp-run-reason-code">
                         {outcome.reasonCode}
@@ -734,9 +739,11 @@ function RunDetailClient({ id }: { id: string }) {
                 <div className="dp-run-outcome-metrics" aria-label="结果摘要">
                   <span>
                     <b>
-                      {passedCriteria}/{criteria.length}
+                      {outcome.unscored
+                        ? "不计分"
+                        : `${passedCriteria}/${criteria.length}`}
                     </b>
-                    <small>验收通过</small>
+                    <small>{outcome.unscored ? "评分状态" : "验收通过"}</small>
                   </span>
                   <span>
                     <b>
@@ -951,7 +958,9 @@ function RunDetailClient({ id }: { id: string }) {
                     <b>关键验证信息</b>
                   </span>
                   <Badge tone={outcome?.tone ?? "neutral"}>
-                    {passedCriteria}/{criteria.length} 通过
+                    {outcome?.unscored
+                      ? "未验证 · 不计分"
+                      : `${passedCriteria}/${criteria.length} 通过`}
                   </Badge>
                 </div>
                 <div className="dp-run-key-info-scroll">

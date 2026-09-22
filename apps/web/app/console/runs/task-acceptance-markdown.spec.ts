@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TaskAcceptanceReport } from "@devproof/contracts";
+import { assessAcceptance } from "@devproof/contracts";
 import {
   acceptanceTitle,
   taskAcceptanceMarkdown,
@@ -77,6 +78,24 @@ function fixture(): TaskAcceptanceReport {
   };
 }
 describe("acceptance report export", () => {
+  it("exports environmental cases as unscored warnings instead of product findings", () => {
+    const row = fixture();
+    row.cases[0]!.criteria[0]!.issues = [
+      {
+        category: "PRECONDITION",
+        code: "DATA_PRECONDITION",
+        message: "测试 SKU 价格低于红线，无法创建。",
+        nextStep: "准备可用数据后重试。",
+      },
+    ];
+    row.assessment = assessAcceptance(row);
+    const markdown = taskAcceptanceMarkdown(row, "http://localhost:3344");
+    expect(markdown).toContain("证据评分：**暂不评分**");
+    expect(markdown).toContain("环境与前置条件提示 · 不参与评分");
+    expect(markdown).toContain("测试 SKU 价格低于红线");
+    expect(markdown).not.toContain("### 1. 待验证风险");
+    expect(markdown).not.toContain("证据评分：**0/100**");
+  });
   it("exports cleanup as follow-up work without changing the report verdict", () => {
     const row = fixture();
     row.verdict = "PASSED";

@@ -496,8 +496,12 @@ export class RuntimeCommandDispatcher {
       const proof = runtimeClosureEvidenceSchema.safeParse(
         record(result.result).closureEvidence,
       );
-      if (proof.success && this.closure && context)
-        await this.closure.acceptRuntimeEvidence(context, proof.data);
+      if (proof.success && this.closure && context) {
+        const audit = record(result.result).writeAudit;
+        if (audit !== undefined)
+          await this.closure.acceptRuntimeEvidence(context, proof.data, audit);
+        else await this.closure.acceptRuntimeEvidence(context, proof.data);
+      }
     }
     if (TERMINAL_STATUSES.has(command.status)) return;
     if (command.ownerTaskId && command.commandType !== "session.close") {

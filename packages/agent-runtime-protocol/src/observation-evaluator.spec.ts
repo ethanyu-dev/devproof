@@ -7,6 +7,7 @@ import type {
 import {
   observationContractSchema,
   type ObservationBinding,
+  type ObservationTargetV2,
   type VisualComparisonReview,
 } from "./observation-contract.js";
 import {
@@ -363,3 +364,160 @@ describe("bound object evidence", () => {
     expect(observationContractSchema.safeParse(invalid).success).toBe(false);
   });
 });
+
+describe("scoped visibility absence", () => {
+  const hidden = {
+    ...(contract.targets[0]! as ObservationTargetV2),
+    phase: "CURRENT" as const,
+    assertions: [
+      {
+        assertionId: "hidden",
+        subject: { kind: "CONTROL" as const, label: "分时折扣" },
+        property: "VISIBLE" as const,
+        operator: "EQ" as const,
+        expected: false,
+      },
+    ],
+    requiredEvidenceKinds: ["DOM" as const],
+  };
+  it("proves absence only with the existing selected entity in a complete region", () => {
+    const obs = capture();
+    obs.coverage.scope = "REGION";
+    obs.coverage.rootNodeId = "dialog";
+    expect(
+      evaluateObservationTarget(hidden, obs, ["DOM"]).binding,
+    ).toMatchObject({
+      readiness: "READY",
+      evaluation: "MATCHED",
+      facts: [{ actual: false }],
+    });
+    obs.nodes.push(
+      node("period", { ref: "e8", parentId: "dialog", text: "分时折扣" }),
+    );
+    expect(
+      evaluateObservationTarget(hidden, obs, ["DOM"]).binding,
+    ).toMatchObject({ evaluation: "MISMATCHED" });
+  });
+  it.each([
+    "viewport",
+    "truncated",
+    "incomplete",
+    "frame",
+    "text",
+    "busy",
+    "identity",
+    "wrongRoot",
+  ])("does not prove absence from %s evidence", (kind) => {
+    const obs = capture();
+    obs.coverage.scope = "REGION";
+    obs.coverage.rootNodeId = "dialog";
+    if (kind === "wrongRoot") obs.coverage.rootNodeId = "switch";
+    if (kind === "viewport") obs.coverage.scope = "VIEWPORT";
+    if (kind === "truncated") obs.coverage.truncated = true;
+    if (kind === "incomplete") obs.coverage.completeWithinScope = false;
+    if (kind === "frame") obs.coverage.unavailableFrames.push("missing");
+    if (kind === "text")
+      obs.nodes.find((n) => n.nodeId === "switch")!.truncatedProperties = [
+        "TEXT",
+      ];
+    if (kind === "busy")
+      obs.nodes.find((n) => n.nodeId === "dialog")!.attributes["aria-busy"] =
+        "true";
+    if (kind === "identity")
+      obs.nodes.find((n) => n.nodeId === "type")!.selectedLabel = "其他类型";
+    const result = evaluateObservationTarget(hidden, obs, ["DOM"]);
+    expect(
+      result.binding?.readiness === "READY" &&
+        result.binding?.evaluation === "MATCHED",
+    ).toBe(false);
+  });
+});
+
+it("binds business visibility to the selected category instead of the missing control", () => {
+  const obs = capture();
+  obs.coverage.scope = "REGION";
+  obs.coverage.rootNodeId = "dialog";
+  const target = {
+    targetId: "visibility",
+    label: "分时配置",
+    identity: { text: "合规模型映射" },
+    phase: "CURRENT" as const,
+    assertions: [
+      {
+        assertionId: "visible",
+        label: "分时折扣",
+        property: "VISIBLE" as const,
+        expected: false,
+      },
+    ],
+    requiredEvidenceKinds: ["DOM" as const],
+  };
+  expect(evaluateObservationTarget(target, obs, ["DOM"]).binding).toMatchObject(
+    { readiness: "READY", evaluation: "MATCHED" },
+  );
+  obs.nodes.push(
+    node("period", { ref: "e90", parentId: "dialog", text: "分时折扣" }),
+  );
+  expect(evaluateObservationTarget(target, obs, ["DOM"]).binding).toMatchObject(
+    { evaluation: "MISMATCHED" },
+  );
+  target.assertions[0]!.expected = true;
+  expect(evaluateObservationTarget(target, obs, ["DOM"]).binding).toMatchObject(
+    { readiness: "READY", evaluation: "MATCHED" },
+  );
+});
+
+it.each([false, true])(
+  "cannot bind an unnamed dialog wrapper as VISIBLE=%s",
+  (expected) => {
+    const obs = capture();
+    obs.nodes.find((n) => n.nodeId === "dialog")!.ref = "scope";
+    obs.nodes.find((n) => n.nodeId === "type")!.ref = "identity";
+    obs.nodes.push(node("wrapper", { parentId: "dialog", ref: "wrapper" }));
+    const target = {
+      targetId: "visibility",
+      label: "分时配置",
+      identity: { text: "合规模型映射" },
+      phase: "CURRENT" as const,
+      assertions: [
+        {
+          assertionId: "visible",
+          label: "分时折扣",
+          property: "VISIBLE" as const,
+          expected,
+        },
+      ],
+      requiredEvidenceKinds: ["DOM" as const],
+    };
+    const selection = {
+      scopeRef: "scope",
+      entityRef: "identity",
+      assertionRefs: { visible: "wrapper" },
+    };
+    const viewport = evaluateObservationTarget(target, obs, ["DOM"], selection);
+    expect(viewport.binding).toMatchObject({
+      readiness: "PARTIAL",
+      evaluation: "UNKNOWN",
+      facts: [],
+    });
+    obs.coverage.scope = "REGION";
+    obs.coverage.rootNodeId = "dialog";
+    const complete = evaluateObservationTarget(target, obs, ["DOM"], selection);
+    expect(complete.binding).toMatchObject(
+      expected
+        ? { readiness: "PARTIAL", evaluation: "UNKNOWN", facts: [] }
+        : {
+            readiness: "READY",
+            evaluation: "MATCHED",
+            facts: [{ nodeId: "dialog", actual: false }],
+          },
+    );
+    // Selecting the wrong wrapper must not conceal a real visible target either.
+    obs.nodes.push(
+      node("period", { ref: "period", parentId: "dialog", text: "分时折扣" }),
+    );
+    expect(
+      evaluateObservationTarget(target, obs, ["DOM"], selection).binding,
+    ).toMatchObject({ readiness: "PARTIAL", evaluation: "UNKNOWN", facts: [] });
+  },
+);

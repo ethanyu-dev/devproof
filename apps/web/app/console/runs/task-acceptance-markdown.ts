@@ -1,4 +1,7 @@
-import { assessAcceptance } from "@devproof/contracts";
+import {
+  assessAcceptance,
+  criterionScoringExclusion,
+} from "@devproof/contracts";
 import type {
   TaskAcceptanceReport,
   AcceptanceVerdict,
@@ -101,10 +104,21 @@ export function taskAcceptanceMarkdown(
     "",
     "## 评分与上线建议",
     "",
-    `- ${report.final ? "证据评分" : "当前进度评分"}：**${assessment.score ?? "—"}/100**（必需验收点通过 ${assessment.passed}/${assessment.total}）`,
+    `- ${report.final ? "证据评分" : "当前进度评分"}：**${assessment.score === null ? "暂不评分" : `${assessment.score}/100`}**（计分验收点通过 ${assessment.passed}/${assessment.total}；环境受阻不计分 ${assessment.excluded ?? 0}）`,
     `- 上线建议：**${releaseLabels[assessment.recommendation]}**`,
     `- ${md(assessment.reason)}`,
-    "- 评分口径：通过的必需验收点 ÷ 全部必需验收点，向下取整；失败和未知项均保留在分母，补充检查不影响分数。分数不是上线成功概率。",
+    "- 评分口径：通过的必需验收点 ÷ 参与评分的必需验收点，向下取整；有明确环境或前置条件阻塞的未验证项排除评分，仅保留提示。已确认的通过和失败仍计分，其他未知项保留在分母，补充检查不影响分数。全部必需项被排除时暂不评分，排除项恢复条件后仍需补验。分数不是上线成功概率。",
+    ...(assessment.exclusions?.length
+      ? [
+          "",
+          "## 环境与前置条件提示 · 不参与评分",
+          "",
+          ...assessment.exclusions.map(
+            (e) =>
+              `- **${md(e.caseName)} · ${md(e.deployment)}**：${md(e.reason)} 下一步：${md(e.nextStep)}${e.runId ? ` ${link("查看执行记录", `/console/executions/${e.runId}`, origin)}` : ""}`,
+          ),
+        ]
+      : []),
     ...(report.review?.status === "COMPLETED"
       ? [
           "",
@@ -171,7 +185,12 @@ export function taskAcceptanceMarkdown(
     }),
     ...(assessment.findings.length
       ? []
-      : ["当前没有已确认的产品偏差或待确认验收点。", ""]),
+      : [
+          assessment.exclusions?.length
+            ? "当前没有已确认的产品偏差；环境受阻项见上方提示，恢复条件后补验。"
+            : "当前没有已确认的产品偏差或待确认验收点。",
+          "",
+        ]),
     "## 需求覆盖",
     "",
     "| 需求 | 判定 | 关联 Case 数 | 未覆盖原因 |",
@@ -218,7 +237,7 @@ export function taskAcceptanceMarkdown(
       "| --- | --- | --- | --- | --- |",
       ...c.criteria.map(
         (k) =>
-          `| ${md(k.description)} | ${k.required ? "是" : "否"} | ${acceptanceLabels[k.verdict]} | ${md(k.summary)}${k.issues
+          `| ${md(k.description)} | ${k.required ? "是" : "否"} | ${criterionScoringExclusion(c, k) ? "环境或前置条件受阻 · 不计分" : acceptanceLabels[k.verdict]} | ${md(k.summary)}${k.issues
             .filter((i) => i.category !== "PRODUCT")
             .map((i) => `；${md(i.message)}`)
             .join(

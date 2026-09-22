@@ -141,6 +141,23 @@ export function parseBrowserCommand(raw: Record<string, unknown>):
       }),
     };
   }
+  // Models sometimes nest command-envelope options beside the action target.
+  // Hoist only these documented options; conflicts and all other extras still
+  // go through the strict command schema instead of silently changing intent.
+  if (
+    command.payload &&
+    typeof command.payload === "object" &&
+    !Array.isArray(command.payload)
+  ) {
+    const payload = { ...(command.payload as Record<string, unknown>) };
+    for (const key of ["after", "timeoutSeconds"] as const) {
+      if (payload[key] !== undefined && command[key] === undefined) {
+        command[key] = payload[key];
+        delete payload[key];
+      }
+    }
+    command.payload = payload;
+  }
   const parsed = schema.safeParse(command);
   if (!parsed.success)
     return { success: false, correction: schemaCorrection(parsed.error) };

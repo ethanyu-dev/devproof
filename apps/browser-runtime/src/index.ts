@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { SessionWriteAudit } from "./session-write-audit.js";
+import { SessionWakeLock } from "./session-wake-lock.js";
 import {
   uploadSnapshot,
   snapshotEncryptionKey,
@@ -757,7 +758,7 @@ export function redactText(value: string): string {
     .replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => redactUrl(candidate));
 }
 
-function redactValue(value: unknown): unknown {
+export function redactValue(value: unknown): unknown {
   if (typeof value === "string") return redactText(value);
   if (Array.isArray(value)) return value.map(redactValue);
   if (value && typeof value === "object") {
@@ -1205,6 +1206,9 @@ export function atomicPointerClick(events: BrowserHumanInputEvent[]) {
 }
 
 export class BrowserSessionManager {
+  private readonly wakeLock = new SessionWakeLock((error) =>
+    runtimeLog("warn", "runtime.sleep_inhibitor_failed", {}, error),
+  );
   private scrollFeedbackEnabled = true;
   private readonly domObservations = new DomObservations();
   private readonly activeCommands = new Map<string, string>();
@@ -2255,9 +2259,7 @@ export class BrowserSessionManager {
             ),
           ],
           result: {
-            structuredObservation: JSON.parse(
-              redactText(JSON.stringify(snapshot.structured)),
-            ) as unknown,
+            structuredObservation: redactValue(snapshot.structured),
             format: snapshot.format,
             ...(this.scrollFeedbackEnabled && snapshot.focusRef
               ? { focusRef: snapshot.focusRef }
@@ -3398,6 +3400,7 @@ export class BrowserSessionManager {
       );
     }
     this.sessions.delete(sessionId);
+    this.wakeLock.release(sessionId);
     this.activeCommands.delete(sessionId);
     await this.store.removeSession(sessionId);
     if (!this.sessions.size && this.leaseWatchdog) {
@@ -3520,6 +3523,7 @@ export class BrowserSessionManager {
       descriptor.profileMode === "PERSISTENT" &&
       descriptor.profileRetention?.kind === "USER";
     this.openingSessions.add(descriptor.sessionId);
+    this.wakeLock.acquire(descriptor.sessionId);
     const snapshotKey = descriptor.authSnapshot?.profileKey;
     let ownsProfileReservation = false;
     let ownsSnapshotReservation = false;
@@ -3794,8 +3798,11 @@ export class BrowserSessionManager {
             : "IDENTIFIED_PROCESS_SET_TERMINATED",
         );
       }
+      this.wakeLock.release(descriptor.sessionId);
       throw error;
     } finally {
+      if (!browserLaunchStarted && !this.sessions.has(descriptor.sessionId))
+        this.wakeLock.release(descriptor.sessionId);
       this.openingSessions.delete(descriptor.sessionId);
       if (snapshotKey && ownsSnapshotReservation) {
         const count = (this.openingSnapshotProfiles.get(snapshotKey) ?? 1) - 1;

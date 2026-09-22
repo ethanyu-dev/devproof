@@ -262,7 +262,10 @@ export function ProfilesClient() {
           <>
             <Button
               disabled={busy}
-              onClick={() => void load().catch(() => undefined)}
+              onClick={() => {
+                setMessage(null);
+                void load().catch(() => undefined);
+              }}
               variant="secondary"
               size="sm"
             >

@@ -114,6 +114,7 @@ export async function insertCaseRerunTask(
   executions: CaseRerunTask["caseExecutions"],
   idempotencyKey: string,
   actor: TaskRequestActor,
+  options: { suite?: boolean } = {},
 ) {
   const reason = caseRerunBlockReason(executions, source);
   if (reason) throw new ConflictException(reason);
@@ -145,7 +146,14 @@ export async function insertCaseRerunTask(
 
   const now = new Date();
   const taskId = randomUUID();
-  const caseId = randomUUID();
+  const originals = [
+    ...new Map(executions.map((item) => [item.caseId, item.testCase])).values(),
+  ];
+  if (!options.suite && originals.length !== 1)
+    throw new ConflictException(
+      "Multiple cases require an explicit suite rerun.",
+    );
+  const caseIds = new Map(originals.map((item) => [item.id, randomUUID()]));
   const snapshotId = randomUUID();
   const analysisStageId = randomUUID();
   const attemptId = randomUUID();
@@ -158,7 +166,17 @@ export async function insertCaseRerunTask(
       `analysis-source://${attemptId}/${randomUUID()}`,
     ]),
   );
-  const definition = remapSourceReferences(originalCase.definition, references);
+  const copies = originals.map((item, position) => {
+    const definition = remapSourceReferences(item.definition, references);
+    return {
+      id: caseIds.get(item.id)!,
+      name: item.name,
+      position,
+      definition: json(definition),
+      definitionHash: specificationDefinitionHash(definition),
+      generatedAt: now,
+    };
+  });
   const context = remapSourceReferences(snapshot.context, references);
   const provenance: TaskCaseRerunSource = {
     taskId: source.id,
@@ -167,11 +185,11 @@ export async function insertCaseRerunTask(
     snapshotId: snapshot.id,
     executionIds: executions.map((item) => item.id),
   };
-  const deployments = executions.map((item) => ({
-    ...item.deployment,
-    id: randomUUID(),
-    executionPolicy: item.executionPolicy,
-  }));
+  const deployments = [
+    ...new Map(
+      executions.map((item) => [item.deploymentId, item.deployment]),
+    ).values(),
+  ].map((item) => ({ ...item, originalId: item.id, id: randomUUID() }));
   // The current deployment targets and reviewed policies may differ from the
   // original create request. Preserve what was actually selected for this Case.
   const rerunInput = {
@@ -186,13 +204,23 @@ export async function insertCaseRerunTask(
     })),
     caseExecutionPolicies: undefined,
   };
-  const title = `${source.sourceRef ?? source.title} · ${originalCase.name}（重跑）`;
+  const title = options.suite
+    ? `${source.title}（隔离并行优化）`
+    : `${source.sourceRef ?? source.title} · ${originalCase.name}（重跑）`;
   const environment = {
     ...asRecord(source.environmentSnapshot),
     allowedHosts: [new URL(deployments[0]!.targetUrl).hostname],
     targetUrl: deployments[0]!.targetUrl,
     specificationSnapshotId: snapshotId,
-    caseRerunSource: provenance,
+    ...(options.suite
+      ? {
+          reviewedSuiteSource: {
+            taskId: source.id,
+            snapshotId: snapshot.id,
+            caseIds: originals.map((item) => item.id),
+          },
+        }
+      : { caseRerunSource: provenance }),
   };
   await tx.taskExecution.create({
     data: {
@@ -254,7 +282,7 @@ export async function insertCaseRerunTask(
         reused: true,
         sourceSnapshotId: snapshot.id,
         snapshotId,
-        caseCount: 1,
+        caseCount: copies.length,
       }),
     },
   });
@@ -271,19 +299,10 @@ export async function insertCaseRerunTask(
       generatorVersion: snapshot.generatorVersion,
       generatedAt: snapshot.generatedAt,
       primaryPullRequestUrl: snapshot.primaryPullRequestUrl,
-      summary: `单用例重跑：${originalCase.name}。复用原任务规格，仅验证本用例的验收标准。`,
-      cases: {
-        create: [
-          {
-            id: caseId,
-            name: originalCase.name,
-            position: 0,
-            definition: json(definition),
-            definitionHash: specificationDefinitionHash(definition),
-            generatedAt: originalCase.generatedAt,
-          },
-        ],
-      },
+      summary: options.suite
+        ? `复用 ${copies.length} 个用例的验收标准与来源，使用已核对的数据隔离和执行步骤。`
+        : `单用例重跑：${originalCase.name}。复用原任务规格，仅验证本用例的验收标准。`,
+      cases: { create: copies },
     },
   });
   if (sources.length)
@@ -304,22 +323,26 @@ export async function insertCaseRerunTask(
       })),
     });
   await tx.taskCaseExecution.createMany({
-    data: deployments.map((item, index) => ({
+    data: executions.map((item) => ({
       taskExecutionId: taskId,
-      caseId,
-      deploymentId: item.id,
+      caseId: caseIds.get(item.caseId)!,
+      deploymentId: deployments.find((d) => d.originalId === item.deploymentId)!
+        .id,
       executionOrdinal: 1,
-      dispatchOrder: 0,
+      dispatchOrder: copies.find((c) => c.id === caseIds.get(item.caseId))!
+        .position,
       executionPolicy: item.executionPolicy ?? Prisma.JsonNull,
       ...(() => {
-        const previous = executions[index]!;
+        const previous = item;
         const plan = readAccountPlan(previous.testAccountPlan);
         if (plan?.version !== 2) return {};
-        resolveCaseExecutionDefinition(originalCase.definition, plan);
+        resolveCaseExecutionDefinition(item.testCase.definition, plan);
         return {
           testAccountPlan: json({
             ...(remapSourceReferences(plan, references) as object),
-            definitionHash: specificationDefinitionHash(definition),
+            definitionHash: copies.find(
+              (c) => c.id === caseIds.get(item.caseId),
+            )!.definitionHash,
             revision: randomUUID(),
             requestedAt: now.toISOString(),
             expiresAt: new Date(
@@ -355,7 +378,7 @@ export async function insertCaseRerunTask(
     data: [
       {
         taskExecutionId: source.id,
-        kind: "task.case.rerun.created",
+        kind: options.suite ? "task.rerun.created" : "task.case.rerun.created",
         actor: "HUMAN",
         payload: json({ rerunTaskId: taskId, caseId: originalCase.id }),
       },
@@ -372,7 +395,11 @@ export async function insertCaseRerunTask(
         taskExecutionId: taskId,
         kind: "task.spec.reused",
         actor: "CONTROL_PLANE",
-        payload: json({ ...provenance, stage: "SPEC_ANALYSIS", caseCount: 1 }),
+        payload: json({
+          ...provenance,
+          stage: "SPEC_ANALYSIS",
+          caseCount: copies.length,
+        }),
       },
     ].map((item) => ({ ...item, teamId: source.teamId })),
   });

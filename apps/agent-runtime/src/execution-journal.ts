@@ -12,9 +12,21 @@ import {
   businessTestAccountSchema,
   testAccountBindingsSchema,
   readExecutionState,
+  completeReadCoversRecord,
+  executionRecordKey,
+  executionResourceUrl,
+  EXECUTION_READ_QUERY_FIELDS,
+  requestedRecordId,
+  responseRecordId,
+  successfulExecutionWrite,
+  writeMatchesRecord,
   type ExecutionState,
   type RuntimeEvidenceRef,
 } from "@devproof/agent-runtime-protocol";
+const resource = executionResourceUrl;
+const recordKey = executionRecordKey;
+const queryFields = EXECUTION_READ_QUERY_FIELDS;
+const successful = successfulExecutionWrite;
 const object = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
@@ -27,26 +39,6 @@ const parse = (v: unknown): unknown => {
     return undefined;
   }
 };
-const resource = (url: string) => {
-  try {
-    const u = new URL(url);
-    return (
-      u.origin +
-      u.pathname
-        .replace(/\/list\/?$/, "")
-        .replace(/\/[^/]+$/, (match) =>
-          /^\/(?:\d+|[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12})$/iu.test(match)
-            ? ""
-            : match,
-        )
-        .replace(/\/$/, "")
-    );
-  } catch {
-    return url;
-  }
-};
-const recordKey = (id: unknown, type: unknown, url?: string) =>
-  `${url ? resource(url) : ""}:${String(type ?? "")}:${String(id)}`;
 const stableRecordRef = (r: {
   id: string;
   type?: string | undefined;
@@ -63,32 +55,6 @@ const stableRecordRef = (r: {
       ]),
     )
     .digest("hex")}`;
-/** Prefer explicit identity, and reject contradictory body/path/query identities. */
-export function requestedRecordId(
-  url: string,
-  request: Record<string, unknown>,
-) {
-  try {
-    const u = new URL(url);
-    const tail = u.pathname.split("/").filter(Boolean).at(-1);
-    const ids = [
-      request.id,
-      ...u.searchParams.getAll("id"),
-      ...(tail &&
-      /^(?:\d+|[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12})$/iu.test(tail)
-        ? [tail]
-        : []),
-    ]
-      .filter((v) => v !== undefined && v !== null)
-      .map(String);
-    return {
-      id: ids[0],
-      conflict: new Set(ids).size > 1 || u.searchParams.getAll("id").length > 1,
-    };
-  } catch {
-    return { id: undefined, conflict: true };
-  }
-}
 function completeList(body: unknown, url: string): boolean {
   const v = object(body);
   const lists = Array.isArray(body)
@@ -129,118 +95,6 @@ function listRows(body: unknown, depth = 0): unknown[] | undefined {
   return nested.length === 1 ? nested[0] : undefined;
 }
 
-const queryFields = [
-  "account",
-  "type",
-  "page",
-  "pageSize",
-  "pageNum",
-  "pageIndex",
-  "page_size",
-  "page_num",
-  "page_index",
-  "limit",
-  "offset",
-];
-
-/** An empty list is relevant only if its query scope includes this record. */
-function completeReadCoversRecord(
-  read: ExecutionState["readReceipts"][number],
-  record: Pick<
-    ExecutionState["records"][number],
-    | "id"
-    | "type"
-    | "resourceUrl"
-    | "resourceName"
-    | "account"
-    | "accountAliases"
-  >,
-) {
-  if (
-    !read.complete ||
-    !read.identitiesComplete ||
-    !record.resourceUrl ||
-    resource(read.url) !== resource(record.resourceUrl)
-  )
-    return false;
-  const identity = requestedRecordId(read.url, {});
-  if (
-    identity.conflict ||
-    (identity.id !== undefined && identity.id !== record.id)
-  )
-    return false;
-  const params = new URL(read.url).searchParams;
-  if (
-    ["id", "type", "account"].some((field) => params.getAll(field).length > 1)
-  )
-    return false;
-  if (params.has("id") && params.get("id") !== record.id) return false;
-  if (
-    params.has("name") &&
-    (params.getAll("name").length !== 1 ||
-      params.get("name") !== record.resourceName)
-  )
-    return false;
-  if (params.has("type") && params.get("type") !== record.type) return false;
-  if (
-    params.has("account") &&
-    ![record.account, ...record.accountAliases].includes(params.get("account")!)
-  )
-    return false;
-  return [...params.keys()].every(
-    (field) =>
-      field === "id" ||
-      (field === "name" && Boolean(record.resourceName)) ||
-      queryFields.includes(field),
-  );
-}
-
-function responseRecordId(response: unknown): string | undefined {
-  const body = object(response);
-  const id = body.id ?? object(body.data).id ?? object(body.result).id;
-  return typeof id === "string" || typeof id === "number"
-    ? String(id)
-    : undefined;
-}
-function writeMatchesRecord(
-  w: ExecutionState["writes"][number],
-  r: ExecutionState["records"][number],
-) {
-  if (!r.resourceUrl || resource(w.url) !== resource(r.resourceUrl))
-    return false;
-  const request = object(parse(w.request));
-  const identity = requestedRecordId(w.url, request);
-  if (identity.conflict) return false;
-  if (w.method === "POST") {
-    const createdId = responseRecordId(parse(w.response));
-    if (createdId !== undefined && createdId !== r.id) return false;
-    if (r.creationWriteKey) return w.key === r.creationWriteKey;
-  }
-  if (identity.id !== undefined)
-    return (
-      identity.id === r.id &&
-      (request.type === undefined || request.type === r.type) &&
-      (request.account === undefined ||
-        [r.account, ...r.accountAliases].includes(String(request.account)))
-    );
-  return (
-    request.type === r.type &&
-    typeof request.account === "string" &&
-    [r.account, ...r.accountAliases].includes(request.account)
-  );
-}
-
-function successful(status: unknown, body: unknown) {
-  const r = object(body);
-  return (
-    typeof status === "number" &&
-    status >= 200 &&
-    status < 300 &&
-    r.success !== false &&
-    (r.code === undefined ||
-      [0, 200, "0", "200", "OK", "SUCCESS"].includes(r.code as never))
-  );
-}
 function rejectedWrite(w: ExecutionState["writes"][number]) {
   return (
     [400, 401, 403, 404, 405, 409, 415, 422].includes(w.status ?? 0) ||

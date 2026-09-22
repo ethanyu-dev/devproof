@@ -2,6 +2,8 @@ interface CriterionResult {
   criterionId: string;
   status: string;
   summary: string;
+  blockingReason?: string | null;
+  evidenceRefs?: string[];
 }
 
 export interface DisplayCriterion {
@@ -11,6 +13,7 @@ export interface DisplayCriterion {
   status: string | null;
   summary: string | null;
   basis: string[];
+  environmentBlocked?: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -86,6 +89,12 @@ export function displayCriteria(detail: {
             required: value.required !== false,
             status: result?.status ?? null,
             summary: result?.summary ?? null,
+            environmentBlocked:
+              result?.status === "INCONCLUSIVE" &&
+              ["DATA_PRECONDITION", "ENVIRONMENT_UNAVAILABLE"].includes(
+                result.blockingReason ?? "",
+              ) &&
+              Boolean(result.evidenceRefs?.length),
             basis: [...new Set(basis)],
           },
         ];
@@ -99,6 +108,12 @@ export function displayCriteria(detail: {
         required: true,
         status: result.status,
         summary: null,
+        environmentBlocked:
+          result.status === "INCONCLUSIVE" &&
+          ["DATA_PRECONDITION", "ENVIRONMENT_UNAVAILABLE"].includes(
+            result.blockingReason ?? "",
+          ) &&
+          Boolean(result.evidenceRefs?.length),
         basis: [],
       }));
 }

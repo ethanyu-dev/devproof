@@ -77,6 +77,15 @@ export class BoundEvidence {
       b.reasons.some((r) => r.startsWith("STATE_TYPE_MISMATCH")),
     );
     const terminal = response.retryable === false;
+    const unprovenReopen = bindings.some(
+      (b) =>
+        b.reasons.includes("PHASE_UNPROVEN") &&
+        this.criteria.some((c) =>
+          c.observationContract?.targets.some(
+            (t) => t.targetId === targetId && t.phase === "REOPENED",
+          ),
+        ),
+    );
     const exhausted = terminal || invalidStateType || count >= 3;
     const diagnostic = (
       Array.isArray(response.coverage) ? response.coverage : []
@@ -105,7 +114,9 @@ export class BoundEvidence {
           ? "Spec 的文本预期与实际开关类型不一致，重新截图不能修正契约。该项记录为 INCONCLUSIVE，继续独立项；重新生成 Spec 时使用布尔预期。"
           : exhausted
             ? "同一页面的对象绑定已失败三次，受影响标准将保存为 INCONCLUSIVE。继续独立验收项，不再反复截图或更换 ref；若后续得到有效证据，可更新该标准。"
-            : "检查 coverage 中的候选控件与缺失关系；entityRef 必须指向真实控件。标签关联缺失时重新观察其完整表单区域；一致性失败时读取具体原因。不要重复相同绑定。",
+            : unprovenReopen
+              ? "尚未证明重新打开阶段。保持同一业务记录，不修改字段：关闭弹窗，完整观察页面确认弹窗已关闭，再打开该记录并取证。最多补做一次关闭/打开；仍无阶段证据则保存 INCONCLUSIVE，继续独立项或清理。不要反复截取同一已打开弹窗。"
+              : "检查 coverage 中的候选控件与缺失关系；entityRef 必须指向真实控件。标签关联缺失时重新观察其完整表单区域；一致性失败时读取具体原因。不要重复相同绑定。",
     };
   }
   ingest(value: unknown) {

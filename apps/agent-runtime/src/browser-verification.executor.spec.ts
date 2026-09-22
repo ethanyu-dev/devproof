@@ -5,6 +5,7 @@ import type { RuntimeTaskLease } from "@devproof/agent-runtime-protocol";
 
 import { BrowserVerificationExecutor } from "./browser-verification.executor.js";
 import { jsonBytes } from "./model-context.js";
+import { ControlPlaneError } from "./control-plane.client.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -1802,7 +1803,7 @@ describe("runtime navigation and combined finalization", () => {
     });
     expect(controlPlane.browserCommand.mock.calls[0]![1]).toEqual({
       commandType: "page.navigate",
-      payload: { url },
+      payload: { url, waitUntil: "commit" },
     });
     expect(
       controlPlane.browserCommand.mock.invocationCallOrder[0],
@@ -6129,3 +6130,168 @@ describe("durable finalization regressions", () => {
     },
   );
 });
+
+describe("terminal browser session failures", () => {
+  const expired = {
+    status: "FAILED",
+    error: {
+      code: "SESSION_PERMIT_EXPIRED",
+      message: "Session permit expired.",
+    },
+  };
+  it.each([
+    "initial navigation",
+    "automatic observation",
+    "model command",
+    "locator recovery",
+  ])("stops immediately during %s and closes the session", async (phase) => {
+    const create = vi.fn().mockResolvedValue({
+      id: "session-failure-response",
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          functionCall(
+            "browser_command",
+            {
+              commandType: "page.click",
+              payload: { target: { selector: "#save" } },
+            },
+            0,
+          ),
+        ],
+      },
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    if (phase === "initial navigation")
+      runTask.snapshot.environment = { targetUrl: "https://example.com" };
+    let calls = 0;
+    controlPlane.browserCommand.mockImplementation(async () => {
+      calls++;
+      if (
+        (phase === "model command" && calls === 1) ||
+        (phase === "locator recovery" && calls === 1)
+      )
+        return {
+          status: "SUCCEEDED",
+          result: { content: '- <button> "保存" [ref=e1]' },
+        };
+      if (phase === "locator recovery" && calls === 2)
+        return {
+          status: "FAILED",
+          error: { code: "LOCATOR_AMBIGUOUS" },
+        } as never;
+      return expired as never;
+    });
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+      termination: { reason: "RUNTIME_SESSION_UNAVAILABLE" },
+      criteria: [expect.objectContaining({ status: "INCONCLUSIVE" })],
+    });
+    expect(outcome.summary).toContain("SESSION_PERMIT_EXPIRED");
+    expect(controlPlane.browserCommand).toHaveBeenCalledTimes(
+      phase === "locator recovery" ? 3 : phase === "model command" ? 2 : 1,
+    );
+    expect(create).toHaveBeenCalledTimes(
+      ["model command", "locator recovery"].includes(phase) ? 1 : 0,
+    );
+    expect(controlPlane.releaseBrowser).toHaveBeenCalledOnce();
+    expect(controlPlane.appendEvent).toHaveBeenCalledWith(
+      lease,
+      "executor.session.finalized",
+      expect.objectContaining({ reason: "RUNTIME_SESSION_UNAVAILABLE" }),
+    );
+  });
+  it.each([
+    new ControlPlaneError(409, {
+      code: "SESSION_NOT_ACTIVE",
+      message: "Browser execution session is not active.",
+    }),
+    new ControlPlaneError(409, {
+      code: "LEASE_LOST",
+      message: "Browser execution ownership is stale.",
+    }),
+    Object.assign(new Error("Session permit expired."), {
+      code: "SESSION_PERMIT_EXPIRED",
+    }),
+  ])(
+    "recognizes terminal transport failures without sending them back to the model",
+    async (error) => {
+      const create = vi.fn();
+      const { executor, controlPlane, runTask } = convergenceHarness(create);
+      controlPlane.browserCommand.mockRejectedValue(error);
+      expect(
+        await executor.execute(runTask, lease, new AbortController().signal),
+      ).toMatchObject({
+        termination: { reason: "RUNTIME_SESSION_UNAVAILABLE" },
+      });
+      expect(create).not.toHaveBeenCalled();
+      expect(controlPlane.browserCommand).toHaveBeenCalledOnce();
+    },
+  );
+});
+
+it.each([
+  { status: "SUCCEEDED", result: { content: "SESSION_PERMIT_EXPIRED" } },
+  {
+    status: "FAILED",
+    error: { code: "COMMAND_TIMEOUT", message: "Session permit expired." },
+  },
+  new ControlPlaneError(409, { message: "Another operation is in progress." }),
+  new ControlPlaneError(409, {
+    message: "Browser execution session is not active.",
+  }),
+  new ControlPlaneError(409, {
+    message: "Execution is paused while a human controls the browser.",
+  }),
+])(
+  "does not turn page text, a transient timeout, or unrelated conflicts into session loss",
+  async (response) => {
+    const create = vi.fn().mockResolvedValue({
+      id: "ordinary-failure-response",
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          functionCall(
+            "finish_verification",
+            {
+              verdict: "INCONCLUSIVE",
+              summary: "尚未确认页面状态。",
+              criteria: [
+                {
+                  criterionId: "page-visible",
+                  status: "INCONCLUSIVE",
+                  summary: "尚未确认页面状态。",
+                  evidenceRefs: [],
+                },
+              ],
+            },
+            0,
+          ),
+        ],
+      },
+    });
+    const { executor, controlPlane, runTask } = convergenceHarness(create);
+    if (response instanceof Error)
+      controlPlane.browserCommand.mockRejectedValue(response);
+    else controlPlane.browserCommand.mockResolvedValue(response as never);
+    const outcome = await executor.execute(
+      runTask,
+      lease,
+      new AbortController().signal,
+    );
+    expect(create).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      kind: "VERIFICATION_COMPLETED",
+      verdict: "INCONCLUSIVE",
+    });
+    expect(outcome).not.toHaveProperty("termination");
+  },
+);

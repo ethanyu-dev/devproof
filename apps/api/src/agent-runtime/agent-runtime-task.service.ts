@@ -578,6 +578,7 @@ export class AgentRuntimeTaskService {
                     "executor.deadline.finalized",
                     "executor.budget.finalized",
                     "executor.stagnation.finalized",
+                    "executor.session.finalized",
                   ],
                 },
                 payload: {
@@ -1702,6 +1703,31 @@ export class AgentRuntimeTaskService {
               },
             });
           }
+        }
+        // Preserve partial verification, but never present a lost session as a
+        // completed product test or schedule an automatic replay of its writes.
+        if (
+          outcome.kind === "VERIFICATION_COMPLETED" &&
+          outcome.termination?.reason === "RUNTIME_SESSION_UNAVAILABLE"
+        ) {
+          outcome = {
+            kind: "FATAL_FAILURE",
+            executionDisposition: "RUNTIME_LOST",
+            error: {
+              code: "RUNTIME_SESSION_UNAVAILABLE",
+              failureClass: "RUNTIME_LOST",
+              message: outcome.summary,
+              phase: "browser_verification",
+              details: {
+                verification: {
+                  criteria: outcome.criteria,
+                  verdict: outcome.verdict,
+                  evidenceCatalog: outcome.evidenceCatalog,
+                },
+              },
+            },
+            summary: outcome.summary,
+          };
         }
         if (!(["RUNNING", "WAITING_HUMAN"] as string[]).includes(task.status)) {
           throw new ConflictException("The Runtime task is already terminal.");

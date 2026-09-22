@@ -419,3 +419,88 @@ it("does not let unrelated page progress reset another criterion's correction bu
   expect(reject()).toBe(true);
   expect(progress.evidenceSubmissionCriterionId).toBe("blocked");
 });
+
+it("bounds alternating dialog scrolls despite refreshed scope refs and automatic captures", () => {
+  let now = 0;
+  const progress = new VerificationProgress(() => now);
+  let stopped = false;
+  for (let i = 0; i < 20 && !stopped; i++) {
+    now += 10_000;
+    const content = `DOM viewport scope f${i}:\n- <div scrollY=${i % 2 ? 523 : 0}/523 scopeRef="f${i}e198"> "折扣" [ref=f${i}e206]\n- <span scopeRef="f${i}e198" title="GPU Instance"> "GPU Instance" [ref=f${i}e229]`;
+    progress.observe(snapshot(content, i).output);
+    stopped = progress.tool({
+      name: "browser_command",
+      arguments: JSON.stringify({
+        commandType: "page.scroll",
+        payload: { target: { ref: `f${i}e206` }, deltaY: i % 2 ? -523 : 523 },
+      }),
+      criteria: [],
+      output: { status: "SUCCEEDED", result: { scrolled: true } },
+    });
+  }
+  expect(stopped).toBe(true);
+  expect(progress.state().sequence).toBe(2);
+  progress.observe(
+    snapshot('- <span scopeRef="f99e198"> "Model API" [ref=f99e229]', 99)
+      .output,
+  );
+  expect(progress.state()).toMatchObject({
+    meaningful: true,
+    sequence: 3,
+    repeatedSteps: 0,
+  });
+});
+
+it("stops scroll cycles with changing intents, deltas and screenshot hashes", () => {
+  let now = 0;
+  const progress = new VerificationProgress(() => now);
+  let stopped = false;
+  for (let i = 0; i < 20 && !stopped; i++) {
+    now += 15_000;
+    stopped = progress.tool({
+      ...snapshot(
+        `- <div scopeRef="f${i}e1"> "${i % 2 ? "顶部字段" : "底部字段"}" [ref=f${i}e2]`,
+        i,
+      ),
+      arguments: JSON.stringify({
+        commandType: "page.scroll",
+        stepIntent: `核对字段 ${i}`,
+        payload: { target: { ref: `f${i}e1` }, deltaY: i % 2 ? -986 : 986 },
+      }),
+      output: {
+        result: {
+          content: `- <div> "${i % 2 ? "顶部字段" : "底部字段"}" [ref=f${i}e2]`,
+          url: "https://example.com",
+        },
+        artifacts: [{ kind: "SCREENSHOT", sha256: `cursor-${i}` }],
+      },
+    });
+  }
+  expect(stopped).toBe(true);
+  expect(progress.state().sequence).toBe(2);
+  expect(progress.tool(snapshot('- <div> "保存成功" [ref=f99e1]', 99))).toBe(
+    false,
+  );
+});
+
+it("reopening an unchanged radio form does not manufacture progress", () => {
+  let now = 0;
+  const progress = new VerificationProgress(() => now);
+  let stopped = false;
+  for (let i = 0; i < 20 && !stopped; i++) {
+    now += 15_000;
+    stopped = progress.tool({
+      ...snapshot(
+        `- <input name="_r_${i}_" checked=false> "按量计费" [ref=f${i}e2]`,
+        i,
+      ),
+      arguments: JSON.stringify({
+        commandType: "page.click",
+        stepIntent: `重新打开 ${i}`,
+        payload: { target: { ref: `f${i}e1` } },
+      }),
+    });
+  }
+  expect(stopped).toBe(true);
+  expect(progress.state().sequence).toBe(1);
+});

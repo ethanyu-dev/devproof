@@ -8,6 +8,48 @@ import type { ObservationTargetV2 } from "../../../packages/agent-runtime-protoc
 import { DomObservations } from "./dom-observation.js";
 import { focusedObservation } from "../../agent-runtime/src/observation-view.js";
 
+it.each(["complete", "scoped", "replacement", "ambiguous"])(
+  "requires witnessed closure before recognizing a remounted dialog (%s)",
+  async (mode) => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent("<main>List</main>");
+      const dom = new DomObservations();
+      await dom.snapshot(page);
+      const open = () =>
+        page.evaluate(() => {
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            '<div role="dialog" aria-label="Edit record"><label>Value<input value="Saved"></label></div>',
+          );
+        });
+      await dom.markAction(page, randomUUID());
+      await open();
+      if (mode === "ambiguous") await open();
+      await dom.snapshot(page);
+      await page
+        .locator('[role="dialog"]')
+        .evaluateAll((els) => els.forEach((el) => el.remove()));
+      if (mode === "scoped") await dom.snapshot(page, page.locator("main"));
+      else if (mode !== "replacement") await dom.snapshot(page);
+      await dom.markAction(page, randomUUID());
+      await open();
+      const capture = (await dom.snapshot(page)).structured;
+      const dialog = capture.nodes.find((n) => n.role === "dialog")!;
+      expect(
+        capture.regions.find((r) => r.nodeId === dialog.nodeId)?.reopened,
+      ).toBe(mode === "complete");
+      if (mode === "complete")
+        expect(
+          capture.regions.find((r) => r.nodeId === dialog.nodeId)?.phaseProven,
+        ).toBe(true);
+    } finally {
+      await browser.close();
+    }
+  },
+);
+
 it("preserves established reopening history across a scoped read and exposes row membership", async () => {
   const browser = await chromium.launch({ headless: true });
   try {

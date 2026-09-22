@@ -6,6 +6,7 @@ import type {
   TaskAcceptanceReport,
   AcceptanceVerdict,
 } from "@devproof/contracts";
+import { criterionScoringExclusion } from "@devproof/contracts";
 import { consoleApi } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -136,11 +137,17 @@ export function TaskAcceptanceReportContent({
           <div className={styles.score}>
             <span>{report.final ? "证据评分" : "当前进度评分"}</span>
             <div>
-              <strong>{assessment.score ?? "—"}</strong>
-              <span>/ 100</span>
+              <strong
+                className={
+                  assessment.score === null ? styles.unscored : undefined
+                }
+              >
+                {assessment.score ?? "暂不评分"}
+              </strong>
+              {assessment.score !== null && <span>/ 100</span>}
             </div>
             <span>
-              必需验收点通过 {assessment.passed}/{assessment.total}
+              计分验收点通过 {assessment.passed}/{assessment.total}
             </span>
           </div>
           <div className={styles.recommendation}>
@@ -181,6 +188,8 @@ export function TaskAcceptanceReportContent({
             <small>
               通过 {assessment.passed} · 产品问题 {assessment.failed} · 待确认{" "}
               {assessment.unknown + assessment.pending}
+              {(assessment.excluded ?? 0) > 0 &&
+                ` · 环境受阻不计分 ${assessment.excluded}`}
             </small>
           </div>
         </div>
@@ -193,10 +202,33 @@ export function TaskAcceptanceReportContent({
         <details className={styles.scoringRules}>
           <summary>评分与验收规则</summary>
           <p>
-            分数 = 有完整证据的通过项 ÷ 全部必需验收点 ×
-            100，向下取整。受阻用例中已通过的验收点仍计分；未知项保留在分母，补充检查不参与评分。该分数表示已验证的程度，不代表上线成功概率。必需项存在产品问题时暂缓上线；存在验证缺口时补验后再决定。
+            分数 = 有完整证据的通过项 ÷ 参与评分的必需验收点 ×
+            100，向下取整。有明确环境或前置条件阻塞的未验证项排除评分，仅保留提示；已确认的通过和失败仍计分，其他未知项保留在分母，补充检查不参与评分。全部必需项被排除时暂不评分。排除项不代表通过，恢复条件后仍需补验。
           </p>
         </details>
+        {(assessment.exclusions?.length ?? 0) > 0 && (
+          <div className={styles.aiReview}>
+            <strong>环境与前置条件提示 · 不参与评分</strong>
+            <ul className={styles.issues}>
+              {assessment.exclusions!.map((item) => (
+                <li
+                  key={`${item.runId ?? item.caseId}:${item.deployment}:${item.criterionId}`}
+                >
+                  <strong>
+                    {item.caseName} · {item.deployment}
+                  </strong>
+                  <span>{item.reason}</span>
+                  <small>{item.nextStep}</small>
+                  {item.runId && (
+                    <Link href={`/console/executions/${item.runId}`}>
+                      查看执行记录
+                    </Link>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className={styles.aiReview}>
           <strong>AI 综合评述</strong>
           {report.review?.status === "COMPLETED" ? (
@@ -434,6 +466,9 @@ export function TaskAcceptanceReportContent({
                     </Badge>
                     <strong>{k.description}</strong>
                     {!k.required && <small>补充检查</small>}
+                    {criterionScoringExclusion(c, k) && (
+                      <small>环境或前置条件受阻 · 不计分</small>
+                    )}
                   </div>
                   <p>{k.summary}</p>
                   {k.issues
