@@ -2,9 +2,11 @@
 
 The task list shows elapsed time and known token totals. Open a Task's **消耗与耗时**
 tab for model usage, exclusive activity percentages, request history, and a paginated
-timeline. While mounted, the view refreshes summaries and all loaded detail pages
-five seconds after each refresh completes. Existing content stays visible during
-requests and on failures; expanded pages, filters, and scroll position are retained.
+timeline. That detail also shows Spec analysis and browser runtime occupancy when
+the summary is version 2. The task list does not. While mounted, the view refreshes
+summaries and all loaded detail pages five seconds after each refresh completes.
+Existing content stays visible during requests and on failures; expanded pages,
+filters, and scroll position are retained.
 The refresh button uses the same background flow. Refresh and pagination requests
 are serialized to prevent stale responses from discarding newly loaded pages.
 
@@ -44,6 +46,38 @@ estimated/partial rather than exact. Unclosed worker spans do not acquire an inv
 duration at Task completion. Uninstrumented platform/recovery work remains unknown;
 dedicated platform/recovery spans and full hierarchical browser-command attribution
 are further instrumentation work, not inferred overhead.
+
+## Runtime occupancy
+
+Version 2 task detail splits exclusive wall-clock into Spec analysis, browser
+execution, unassigned time, and overlap. Those four parts sum to task elapsed
+time. Overlap is shown only when its occupied time is non-zero. The task list
+and `GET /console/api/tasks/metrics/batch` stay on elapsed time and token totals.
+
+Percentages on the activity bar use task elapsed time. Percentages inside a
+runtime, unassigned, or overlap block use that block's occupied time. They are
+not added to the activity bar.
+
+Historical analysis can be `PARTIAL`. When an attempt has no stored executor,
+residency is inferred from existing model or tool calls, and the detail says
+the executor was not recorded. That badge is not the task timing-quality label.
+A skipped analysis stage, a missing analysis stage, or only deterministic
+attempts is `NOT_APPLICABLE`, and that time stays unassigned. Browser execution
+does not use `NOT_APPLICABLE`. `NOT_STARTED` means that runtime has not been
+entered.
+
+In-run recovery before the new waiting span is `UNKNOWN` inside the browser
+union. It is not unassigned time and it is not queue time. After the trigger
+records in-run `RECOVERING`, `LEASE_RECOVERY`, or `DATA_LOCK`, that wait is
+queue time still inside the browser union.
+
+Phase start and finish are not runtime occupancy. Acceptance review stays in
+its own block and does not extend task elapsed time.
+
+A version below 2, or a failed runtime attribution, omits the split. The detail
+does not fill that gap with zeros. A version 1 snapshot remains valid after
+rollback: restoring the previous projection leaves the version 1 summary in
+place, and the detail keeps the activity bar without inventing runtime rows.
 
 ## Persistence and recovery
 
@@ -87,7 +121,10 @@ authenticated Console routes:
 
 - `GET /v2/tasks/:id/metrics`: summary, model rows, coverage, timing buckets, and phases.
 - `GET /v2/tasks/:id/metrics/model-calls?after=...`: up to fifty requests per page.
-- `GET /v2/tasks/:id/metrics/timeline?after=...`: up to one hundred spans per page.
+- `GET /v2/tasks/:id/metrics/timeline?after=...&runtime=SPEC_ANALYSIS|BROWSER`: up to
+  one hundred matching spans per page. Changing `runtime` drops `after`. Reusing a
+  cursor from the previous filter skips spans, and a cursor that is not a span of
+  this Task is a 404.
 - `GET /console/api/tasks/metrics/batch?ids=...`: up to fifty task-list summaries.
 
 The Console scope selector filters execution/review model rows locally; the summary
