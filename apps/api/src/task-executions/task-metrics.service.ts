@@ -595,6 +595,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
         startedAt: row.createdAt,
         finishedAt: row.startedAt,
         estimated: true,
+        runtime: null,
       });
     for (const run of row.executionRuns)
       for (const h of run.interventions)
@@ -610,6 +611,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
           finishedAt:
             h.resolvedAt ?? (terminal(run.lifecycle) ? run.finishedAt : null),
           estimated: false,
+          runtime: null,
         });
     const buckets = timingBuckets(
       row.createdAt.getTime(),
