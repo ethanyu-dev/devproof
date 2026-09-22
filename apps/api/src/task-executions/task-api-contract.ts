@@ -179,6 +179,12 @@ export function taskApiContract() {
       in: "query",
       schema: { type: "string", maxLength: 500 },
     });
+    if (suffix === "timeline")
+      (paths[path]!.get as { parameters: unknown[] }).parameters.push({
+        name: "runtime",
+        in: "query",
+        schema: { type: "string", enum: ["SPEC_ANALYSIS", "BROWSER"] },
+      });
   }
   const eventOp = paths["/v2/tasks/{id}/events"]!.get as {
     parameters: unknown[];

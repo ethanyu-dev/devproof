@@ -27,6 +27,7 @@ import {
 import { parseBody } from "../common/validation.js";
 import { TaskMetricsService } from "./task-metrics.service.js";
 const cursor = z.string().max(500).optional();
+const runtimeFilter = z.enum(["SPEC_ANALYSIS", "BROWSER"]).optional();
 const batchIds = z
   .string()
   .max(2000)
@@ -61,8 +62,14 @@ export class TaskMetricsConsoleController {
     @CurrentAuth() current: AuthContext,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Query("after") after?: string,
+    @Query("runtime") runtime?: string,
   ) {
-    return this.metrics.timeline(current.team.id, id, parseBody(cursor, after));
+    return this.metrics.timeline(
+      current.team.id,
+      id,
+      parseBody(cursor, after),
+      parseBody(runtimeFilter, runtime),
+    );
   }
 }
 @Controller("v2/tasks")
@@ -91,9 +98,15 @@ export class TaskMetricsController {
     @CurrentToolAuth() current: ToolAuthContext,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Query("after") after?: string,
+    @Query("runtime") runtime?: string,
   ) {
     requireToolScope(current, "run:read");
-    return this.metrics.timeline(current.team.id, id, parseBody(cursor, after));
+    return this.metrics.timeline(
+      current.team.id,
+      id,
+      parseBody(cursor, after),
+      parseBody(runtimeFilter, runtime),
+    );
   }
 }
 @Controller("internal/v2/runtime/model-calls")

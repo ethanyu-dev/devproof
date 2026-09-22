@@ -150,6 +150,11 @@ describe("TaskExecutionService deterministic Issue titles", () => {
         ],
       }),
     );
+    const paused = tx.taskStageAttempt.update.mock.calls
+      .map((call) => call[0].data)
+      .find((data) => data.status === "SUCCEEDED");
+    expect(paused).toBeDefined();
+    expect(paused).not.toHaveProperty("executor");
   });
 });
 
@@ -2207,4 +2212,146 @@ describe("queued case policy changes", () => {
       expect(f.tx.executionRun.update).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("TaskExecutionService spec analysis executor", () => {
+  it("persists DETERMINISTIC on claim and keeps it when analysis finishes", async () => {
+    const leaseToken = "lease-1";
+    const attempt = {
+      id: "attempt-1",
+      number: 1,
+      stageId: "stage-1",
+      leaseOwner: `task-analysis:${process.pid}`,
+      leaseToken,
+      inputSnapshot: {
+        idempotencyKey: "executor-deterministic",
+        issueRef: "https://linear.app/acme/issue/ENG-123",
+        kind: "ISSUE_SPEC",
+        targetUrl: "https://preview.example.com",
+      },
+      stage: {
+        id: "stage-1",
+        maxAttempts: 3,
+        startedAt: new Date(),
+        taskExecutionId: "task-1",
+        taskExecution: {
+          id: "task-1",
+          teamId: "team-1",
+          title: "ENG-123",
+          sourceRef: "ENG-123",
+          startedAt: new Date(),
+          cancelRequestedAt: null,
+          deadlineAt: new Date(Date.now() + 60_000),
+          lifecycle: "RUNNING",
+          environmentSnapshot: {},
+          notificationContext: {},
+          inputSnapshot: {
+            idempotencyKey: "executor-deterministic",
+            issueRef: "https://linear.app/acme/issue/ENG-123",
+            kind: "ISSUE_SPEC",
+            targetUrl: "https://preview.example.com",
+          },
+          team: { id: "team-1", name: "Team", slug: "team" },
+        },
+      },
+    };
+    const tx = {
+      taskCaseExecution: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskDeployment: {
+        create: vi.fn().mockResolvedValue({ id: "deployment-1" }),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      taskExecution: { update: vi.fn().mockResolvedValue({}) },
+      taskExecutionEvent: { create: vi.fn().mockResolvedValue({}) },
+      taskExecutionSpan: {
+        create: vi.fn(),
+        update: vi.fn(),
+        updateMany: vi.fn(),
+      },
+      taskExecutionStage: {
+        update: vi.fn().mockResolvedValue({}),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      taskSpecificationSnapshot: {
+        create: vi.fn().mockResolvedValue({
+          cases: [{ id: "case-1", position: 0 }],
+          id: "snapshot-1",
+        }),
+      },
+      taskStageAttempt: {
+        create: vi.fn().mockResolvedValue({ id: "attempt-2" }),
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce({ id: attempt.id, startedAt: null }),
+        findUnique: vi.fn().mockResolvedValue(attempt),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(attempt),
+        update: vi.fn().mockResolvedValue({}),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    const service = new TaskExecutionService(
+      {
+        ...tx,
+        $transaction: async (operation: (client: typeof tx) => unknown) =>
+          operation(tx),
+      } as never,
+      {
+        resolve: vi.fn().mockResolvedValue({
+          completeness: "COMPLETE",
+          context: {
+            issue: {
+              description: "验收标准：\n- 页面应该显示 UTC 时间。",
+              id: "issue-1",
+              identifier: "ENG-123",
+              title: "Refund flow",
+              url: "https://linear.app/acme/issue/ENG-123",
+            },
+            pullRequests: [],
+          },
+          diagnostics: [],
+          manifest: {},
+        }),
+      } as never,
+      {} as never,
+      { resolve: vi.fn().mockResolvedValue({ status: "PENDING" }) } as never,
+      {} as never,
+      {} as never,
+    );
+    const claimed = await (
+      service as unknown as {
+        claimAnalysisAttempt: () => Promise<{ id: string } | null>;
+      }
+    ).claimAnalysisAttempt();
+    expect(claimed?.id).toBe(attempt.id);
+    expect(tx.taskStageAttempt.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          executor: "DETERMINISTIC",
+          leaseOwner: expect.stringMatching(/^task-analysis:/u),
+          status: "RUNNING",
+        }),
+      }),
+    );
+
+    await (
+      service as unknown as {
+        executeAnalysis: (id: string, lease: string) => Promise<void>;
+      }
+    ).executeAnalysis(attempt.id, leaseToken);
+
+    const finished = tx.taskStageAttempt.update.mock.calls
+      .map((call) => call[0].data)
+      .find((data) => data.status === "SUCCEEDED");
+    expect(finished).toMatchObject({
+      leaseOwner: null,
+      leaseToken: null,
+      status: "SUCCEEDED",
+    });
+    expect(finished).not.toHaveProperty("executor");
+    expect(tx.taskExecutionSpan.create).not.toHaveBeenCalled();
+    expect(tx.taskExecutionSpan.update).not.toHaveBeenCalled();
+    expect(tx.taskExecutionSpan.updateMany).not.toHaveBeenCalled();
+  });
 });
