@@ -355,7 +355,13 @@ describe("PostgreSQL profile preparation admission", () => {
     const before = await storedProfile();
     await expect(
       services().profiles.reauth(current, profile.id, { ttlSeconds: 60 }),
-    ).rejects.toThrow(/identity is in use/u);
+    ).rejects.toMatchObject({
+      response: {
+        code: "PROFILE_SESSIONS_IN_USE",
+        activeSessionCount: 1,
+        message: expect.stringContaining("任务取消后需等待会话关闭确认"),
+      },
+    });
     expect(await storedProfile()).toEqual(before);
     expect(await inventory()).toEqual({
       sessions: 1,
