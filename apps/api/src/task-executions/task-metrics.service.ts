@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import type { OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { createHash } from "node:crypto";
@@ -17,14 +18,21 @@ import type {
   TaskMetricCall,
   TaskMetricSpan,
   TaskActivity,
+  TaskRuntimeKind,
 } from "@devproof/contracts";
 import { PrismaService } from "../database/prisma.service.js";
 import { env } from "../config/env.js";
+import { MetricsService } from "../observability/metrics.service.js";
 import {
+  inferSpanRuntime,
   normalizeUsage,
+  projectRuntimeTiming,
+  runtimeAttributionFailed,
   summarizeModels,
-  timingBuckets,
   usageTotals,
+  type InferenceContext,
+  type InferenceUsage,
+  type RuntimeProjectionInput,
 } from "./task-metrics.js";
 
 type Tx = Prisma.TransactionClient;
@@ -47,13 +55,22 @@ const key = (worker: string, token: string) =>
     .digest("hex");
 const terminal = (state: string) =>
   ["COMPLETED", "CANCELLED", "TIMED_OUT"].includes(state);
+const storedRuntime = (stage: string) =>
+  stage === "SPEC_ANALYSIS"
+    ? "SPEC_ANALYSIS"
+    : stage === "SPEC_EXECUTION"
+      ? "BROWSER"
+      : null;
 
 @Injectable()
 export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private polling = false;
   private readonly logger = new Logger(TaskMetricsService.name);
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly observability?: MetricsService,
+  ) {}
 
   onModuleInit() {
     if (!env().BACKGROUND_WORKERS_ENABLED) return;
@@ -386,6 +403,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
           label: input.telemetry.responseModel ?? call.requestedModel,
           activity,
           scope: call.scope,
+          runtime: storedRuntime(call.stage),
           startedAt: alignedStart,
           finishedAt: new Date(
             alignedStart.getTime() + input.telemetry.durationMs,
@@ -393,6 +411,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
         },
         update: {
           activity,
+          runtime: storedRuntime(call.stage),
           startedAt: alignedStart,
           finishedAt: new Date(
             alignedStart.getTime() + input.telemetry.durationMs,
@@ -442,6 +461,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
             ? "初始导航"
             : "自动页面观察",
           activity: "TOOL",
+          runtime: storedRuntime(owner.stage),
           startedAt: new Date(event.occurredAt.getTime() - p.durationMs),
           finishedAt: event.occurredAt,
         },
@@ -531,10 +551,14 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
                 : model
                   ? "MODEL"
                   : "TOOL",
+            runtime: storedRuntime(owner.stage),
             startedAt: start,
             finishedAt: finished,
           },
-          update: { finishedAt: finished },
+          update: {
+            runtime: storedRuntime(owner.stage),
+            finishedAt: finished,
+          },
         });
     }
     await this.dirty(tx, owner.taskExecutionId);
@@ -547,14 +571,28 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
     });
     if (!row) throw new NotFoundException("Task not found.");
     const cached = row.metrics;
+    const stored = cached?.summary;
+    const revision = cached?.revision ?? 0n;
+    // A failed attribution for this revision must not rebuild on every read.
     if (
-      !cached?.computedAt ||
-      cached.dirty ||
-      (!terminal(row.lifecycle) &&
-        Date.now() - cached.computedAt.getTime() > 5000)
+      cached?.computedAt &&
+      !cached.dirty &&
+      runtimeAttributionFailed(stored, revision)
     )
-      return this.rebuild(teamId, id);
-    return cached.summary as unknown as TaskMetrics;
+      return stored as unknown as TaskMetrics;
+    const version =
+      stored && typeof stored === "object" && "version" in stored
+        ? Number((stored as { version?: unknown }).version)
+        : 0;
+    if (
+      cached?.computedAt &&
+      !cached.dirty &&
+      version >= 2 &&
+      (terminal(row.lifecycle) ||
+        Date.now() - cached.computedAt.getTime() <= 5000)
+    )
+      return stored as unknown as TaskMetrics;
+    return this.rebuild(teamId, id);
   }
 
   async rebuild(teamId: string, id: string): Promise<TaskMetrics> {
@@ -564,7 +602,7 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       where: { id, teamId },
       include: {
         metrics: true,
-        stages: true,
+        stages: { include: { attempts: true } },
         acceptanceReviews: { orderBy: { createdAt: "desc" } },
         executionRuns: { include: { interventions: true } },
       },
@@ -581,54 +619,86 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
         where: { taskExecutionId: id, teamId, scope: "EXECUTION" },
       }),
     ]);
-    const spans = [...stored];
+    const spans: RuntimeProjectionInput["spans"] = stored.map((span) => ({
+      id: span.id,
+      lane: span.lane,
+      label: span.label,
+      activity: span.activity,
+      scope: span.scope,
+      startedAt: span.startedAt.getTime(),
+      finishedAt: span.finishedAt?.getTime() ?? null,
+    }));
     // Known historical boundaries are useful without inventing gaps as platform work.
     if (row.startedAt && row.startedAt > row.createdAt)
       spans.push({
         id: "initial",
-        teamId,
-        taskExecutionId: id,
         lane: id,
         label: "首次启动等待",
         activity: "QUEUE",
         scope: "EXECUTION",
-        startedAt: row.createdAt,
-        finishedAt: row.startedAt,
-        estimated: true,
-        runtime: null,
+        startedAt: row.createdAt.getTime(),
+        finishedAt: row.startedAt.getTime(),
       });
     for (const run of row.executionRuns)
-      for (const h of run.interventions)
+      for (const intervention of run.interventions)
         spans.push({
-          id: h.id,
-          teamId,
-          taskExecutionId: id,
+          id: intervention.id,
           lane: run.id,
           label: "人工等待",
           activity: "HUMAN",
           scope: "EXECUTION",
-          startedAt: h.requestedAt,
+          intervention: true,
+          startedAt: intervention.requestedAt.getTime(),
           finishedAt:
-            h.resolvedAt ?? (terminal(run.lifecycle) ? run.finishedAt : null),
-          estimated: false,
-          runtime: null,
+            (
+              intervention.resolvedAt ??
+              (terminal(run.lifecycle) ? run.finishedAt : null)
+            )?.getTime() ?? null,
         });
-    const buckets = timingBuckets(
-      row.createdAt.getTime(),
-      end.getTime(),
+    const projection = projectRuntimeTiming({
+      taskId: id,
+      start: row.createdAt.getTime(),
+      end: end.getTime(),
+      analysisStageStatus:
+        row.stages.find((stage) => stage.type === "SPEC_ANALYSIS")?.status ??
+        null,
+      attempts: row.stages.flatMap((stage) =>
+        stage.attempts.map((attempt) => ({
+          id: attempt.id,
+          stageType: stage.type,
+          executor: attempt.executor,
+          createdAt: attempt.createdAt.getTime(),
+          finishedAt: attempt.finishedAt?.getTime() ?? null,
+        })),
+      ),
+      runs: row.executionRuns.map((run) => ({
+        id: run.id,
+        createdAt: run.createdAt.getTime(),
+        finishedAt: run.finishedAt?.getTime() ?? null,
+      })),
       spans,
-    );
+      usages: calls.map((call) => ({
+        id: call.id,
+        ownerId: call.ownerId,
+        stage: call.stage,
+        scope: call.scope,
+        runId: call.runId,
+      })),
+    });
+    const buckets = projection.buckets;
     const total = usageTotals(calls);
     const unknown =
       buckets.find((b) => b.activity === "UNKNOWN")?.durationMs ?? 0;
-    const summary: TaskMetrics = {
+    const summary: TaskMetrics & {
+      runtimeAttribution?: "FAILED";
+      runtimeAttributionRevision?: string;
+    } = {
       taskId: id,
       asOf: asOf.toISOString(),
       computedAt: asOf.toISOString(),
       refreshPending: !row.metrics?.historyBackfilled,
-      version: 1,
-      elapsedMs:
-        end >= row.createdAt ? end.getTime() - row.createdAt.getTime() : null,
+      version: projection.ok ? 2 : 1,
+      elapsedMs: projection.elapsedMs,
       activeMs: buckets
         .filter((b) =>
           ["MODEL", "TOOL", "PLATFORM", "RECOVERY", "PARALLEL"].includes(
@@ -662,6 +732,18 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
         status: s.status,
       })),
     };
+    if (projection.ok) {
+      summary.runtimes = projection.runtimes;
+      summary.unassigned = projection.unassigned;
+      summary.overlap = projection.overlap;
+    } else {
+      summary.runtimeAttribution = "FAILED";
+      summary.runtimeAttributionRevision = revision.toString();
+      const delta = projection.occupiedMs - (projection.elapsedMs ?? 0);
+      this.logger.warn(
+        `task metrics runtime invariant failed taskExecutionId=${id} elapsedMs=${projection.elapsedMs} occupiedMs=${projection.occupiedMs} delta=${delta}`,
+      );
+    }
     await this.prisma.taskExecutionMetrics.upsert({
       where: { taskExecutionId: id },
       create: {
@@ -683,6 +765,37 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       },
     });
     summary.refreshPending = !saved.count || !row.metrics?.historyBackfilled;
+    if (!projection.ok) {
+      if (
+        saved.count &&
+        !runtimeAttributionFailed(row.metrics?.summary, revision)
+      )
+        this.observability?.increment(
+          "devproof_task_metrics_runtime_invariant_failures_total",
+          "Task metrics runtime attribution invariant failures.",
+        );
+      return summary;
+    }
+    const priorOverlap = object(
+      object(row.metrics?.summary).overlap,
+    ).occupiedMs;
+    if (
+      (projection.overlap.occupiedMs ?? 0) > 0 &&
+      saved.count &&
+      !(
+        row.metrics?.projectedRevision === revision &&
+        typeof priorOverlap === "number" &&
+        priorOverlap > 0
+      )
+    ) {
+      this.logger.log(
+        `task metrics runtime overlap taskExecutionId=${id} overlapMs=${projection.overlap.occupiedMs}`,
+      );
+      this.observability?.increment(
+        "devproof_task_metrics_runtime_overlap_total",
+        "Task metrics projections that contain cross-runtime overlap.",
+      );
+    }
     if (!row.metrics?.historyBackfilled)
       await this.prisma.taskExecutionMetrics.update({
         where: { taskExecutionId: id },
@@ -709,7 +822,15 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       orderBy: [{ startedAt: { sort: "asc", nulls: "last" } }, { id: "asc" }],
       take: 51,
     });
-    const items: TaskMetricCall[] = rows.slice(0, 50).map((c) => ({
+    const page = rows.slice(0, 50);
+    const ctx = await this.spanInferenceContext(teamId, id, []);
+    for (const call of page)
+      ctx.usages.set(call.id, {
+        stage: call.stage,
+        scope: call.scope,
+        runId: call.runId,
+      });
+    const items: TaskMetricCall[] = page.map((c) => ({
       id: c.id,
       runId: c.runId,
       attemptNumber: c.attemptNumber,
@@ -726,10 +847,24 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       issues: Array.isArray(c.issues)
         ? c.issues.filter((v): v is string => typeof v === "string")
         : [],
+      runtime: inferSpanRuntime(
+        {
+          id: `model:${c.id}`,
+          lane: c.runId ?? c.ownerId,
+          label: c.responseModel ?? c.requestedModel,
+          scope: c.scope,
+        },
+        ctx,
+      ),
     }));
     return { items, nextCursor: rows.length > 50 ? items.at(-1)!.id : null };
   }
-  async timeline(teamId: string, id: string, after?: string) {
+  async timeline(
+    teamId: string,
+    id: string,
+    after?: string,
+    runtime?: TaskRuntimeKind,
+  ) {
     await this.requireTask(teamId, id);
     if (
       after &&
@@ -738,25 +873,53 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       }))
     )
       throw new NotFoundException("Metrics cursor not found.");
+    const take = runtime ? 1000 : 101;
     const rows = await this.prisma.taskExecutionSpan.findMany({
-      where: {
-        teamId,
-        taskExecutionId: id,
-      },
+      where: { teamId, taskExecutionId: id },
       ...(after ? { cursor: { id: after }, skip: 1 } : {}),
       orderBy: [{ startedAt: "asc" }, { id: "asc" }],
-      take: 101,
+      take,
     });
-    const items: TaskMetricSpan[] = rows.slice(0, 100).map((s) => ({
-      id: s.id,
-      lane: s.lane,
-      label: s.label,
-      activity: s.activity as TaskActivity,
-      startedAt: s.startedAt.toISOString(),
-      finishedAt: s.finishedAt?.toISOString() ?? null,
-      estimated: s.estimated,
-    }));
-    return { items, nextCursor: rows.length > 100 ? items.at(-1)!.id : null };
+    const ctx = await this.spanInferenceContext(
+      teamId,
+      id,
+      rows
+        .filter((span) => span.id.startsWith("model:"))
+        .map((span) => span.id.slice("model:".length)),
+    );
+    const present = (span: (typeof rows)[number]): TaskMetricSpan => ({
+      id: span.id,
+      lane: span.lane,
+      label: span.label,
+      activity: span.activity as TaskActivity,
+      startedAt: span.startedAt.toISOString(),
+      finishedAt: span.finishedAt?.toISOString() ?? null,
+      estimated: span.estimated,
+      runtime: inferSpanRuntime(span, ctx),
+    });
+    if (!runtime) {
+      const items = rows.slice(0, 100).map(present);
+      return {
+        items,
+        nextCursor: rows.length > 100 ? items.at(-1)!.id : null,
+      };
+    }
+    const items: TaskMetricSpan[] = [];
+    let scanned = 0;
+    for (const span of rows) {
+      scanned++;
+      const item = present(span);
+      if (item.runtime === runtime) items.push(item);
+      if (items.length === 100) break;
+    }
+    const more =
+      items.length === 100
+        ? scanned < rows.length || rows.length === 1000
+        : rows.length === 1000;
+    return {
+      items,
+      nextCursor: more ? rows[scanned - 1]!.id : null,
+    };
   }
   async batch(teamId: string, ids: string[]) {
     const rows = await this.prisma.taskExecution.findMany({
@@ -778,6 +941,49 @@ export class TaskMetricsService implements OnModuleInit, OnModuleDestroy {
       totals: object(r.metrics?.summary).totals ?? null,
       refreshPending: !r.metrics?.computedAt || r.metrics.dirty,
     }));
+  }
+  private async spanInferenceContext(
+    teamId: string,
+    taskId: string,
+    modelIds: string[],
+  ): Promise<
+    Omit<InferenceContext, "usages"> & { usages: Map<string, InferenceUsage> }
+  > {
+    const [task, usages] = await Promise.all([
+      this.prisma.taskExecution.findFirst({
+        where: { id: taskId, teamId },
+        select: {
+          id: true,
+          stages: {
+            where: { type: "SPEC_ANALYSIS" },
+            select: { attempts: { select: { id: true, executor: true } } },
+          },
+          executionRuns: { select: { id: true } },
+        },
+      }),
+      modelIds.length
+        ? this.prisma.taskModelCallUsage.findMany({
+            where: { teamId, taskExecutionId: taskId, id: { in: modelIds } },
+            select: { id: true, stage: true, scope: true, runId: true },
+          })
+        : [],
+    ]);
+    if (!task) throw new NotFoundException("Task not found.");
+    const attempts = task.stages.flatMap((stage) => stage.attempts);
+    return {
+      taskId: task.id,
+      attemptIds: new Set(attempts.map((attempt) => attempt.id)),
+      runIds: new Set(task.executionRuns.map((run) => run.id)),
+      deterministicAnalysis:
+        attempts.length > 0 &&
+        attempts.every((attempt) => attempt.executor === "DETERMINISTIC"),
+      usages: new Map(
+        usages.map((usage) => [
+          usage.id,
+          { stage: usage.stage, scope: usage.scope, runId: usage.runId },
+        ]),
+      ),
+    };
   }
   private async requireTask(teamId: string, id: string) {
     if (
