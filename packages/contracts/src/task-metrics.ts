@@ -39,6 +39,35 @@ export interface TaskTimingBucket {
   durationMs: number;
   percentage: number | null;
 }
+export type TaskRuntimeKind = "SPEC_ANALYSIS" | "BROWSER";
+export type RuntimeApplicability =
+  "MEASURED" | "PARTIAL" | "NOT_APPLICABLE" | "NOT_STARTED";
+/** Exclusive wall clock for one runtime. `percentage` uses task elapsedMs; `buckets` use `occupiedMs`. */
+export interface TaskRuntimeTiming {
+  runtime: TaskRuntimeKind;
+  applicability: RuntimeApplicability;
+  occupiedMs: number;
+  percentage: number | null;
+  activeMs: number;
+  waitingMs: number;
+  unknownMs: number;
+  buckets: TaskTimingBucket[];
+  cumulative: {
+    modelMs: number;
+    toolMs: number;
+    platformMs: number;
+    recoveryMs: number;
+  };
+}
+/** Time in neither runtime, or time counted once because both runtimes apply. */
+export interface TaskRuntimeResidual {
+  occupiedMs: number;
+  percentage: number | null;
+  activeMs: number;
+  waitingMs: number;
+  unknownMs: number;
+  buckets: TaskTimingBucket[];
+}
 export interface TaskMetrics {
   taskId: string;
   asOf: string;
@@ -67,6 +96,10 @@ export interface TaskMetrics {
     finishedAt: string | null;
     status: string;
   }>;
+  /** Omitted when version is below 2. Order is SPEC_ANALYSIS, BROWSER. */
+  runtimes?: TaskRuntimeTiming[];
+  unassigned?: TaskRuntimeResidual;
+  overlap?: TaskRuntimeResidual;
 }
 export interface TaskMetricCall {
   id: string;
@@ -83,6 +116,8 @@ export interface TaskMetricCall {
   outputTokens: string | null;
   cacheReadTokens: string | null;
   issues: string[];
+  /** Derived from `stage`, not from a span column. Review calls stay null. */
+  runtime: TaskRuntimeKind | null;
 }
 export interface TaskMetricSpan {
   id: string;
@@ -92,4 +127,6 @@ export interface TaskMetricSpan {
   startedAt: string;
   finishedAt: string | null;
   estimated: boolean;
+  /** `inferSpanRuntime` result. Null is unassigned, including review spans. */
+  runtime: TaskRuntimeKind | null;
 }

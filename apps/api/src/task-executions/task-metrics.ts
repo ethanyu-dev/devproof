@@ -1,7 +1,11 @@
 import { numericModelUsage } from "@devproof/agent-runtime-protocol";
 import type {
   ModelUsageSummary,
+  RuntimeApplicability,
   TaskActivity,
+  TaskRuntimeKind,
+  TaskRuntimeResidual,
+  TaskRuntimeTiming,
   TaskTimingBucket,
   TokenMetric,
 } from "@devproof/contracts";
@@ -176,6 +180,7 @@ export interface TimingSpan {
   lane: string;
   startedAt: Date;
   finishedAt: Date | null;
+  runtime?: TaskRuntimeKind | null;
 }
 const waits = new Set([
   "QUEUE",
@@ -185,6 +190,66 @@ const waits = new Set([
   "MIXED_WAIT",
 ]);
 const work = new Set(["MODEL", "TOOL", "PLATFORM", "RECOVERY"]);
+const activeActivities = new Set([
+  "MODEL",
+  "TOOL",
+  "PLATFORM",
+  "RECOVERY",
+  "PARALLEL",
+]);
+export type RuntimeTag = TaskRuntimeKind | "OVERLAP" | "UNASSIGNED";
+const runtimeOrder: RuntimeTag[] = [
+  "SPEC_ANALYSIS",
+  "BROWSER",
+  "UNASSIGNED",
+  "OVERLAP",
+];
+
+function exclusiveActivity(active: Iterable<TimingSpan>): TaskActivity {
+  const lanes = new Map<string, Set<string>>();
+  for (const span of active) {
+    if (!lanes.has(span.lane)) lanes.set(span.lane, new Set());
+    lanes.get(span.lane)!.add(span.activity);
+  }
+  const activities = new Set<string>();
+  for (const kinds of lanes.values()) {
+    // Structural preparation spans contain model/tool activity in the same lane.
+    if (kinds.has("MODEL") || kinds.has("TOOL")) kinds.delete("PLATFORM");
+    for (const kind of kinds) activities.add(kind);
+  }
+  const running = [...activities].filter((item) => work.has(item));
+  const waiting = [...activities].filter((item) => waits.has(item));
+  return (
+    activities.has("UNKNOWN")
+      ? "UNKNOWN"
+      : running.length > 1
+        ? "PARALLEL"
+        : (running[0] ??
+          (waiting.length > 1 ? "MIXED_WAIT" : (waiting[0] ?? "UNKNOWN")))
+  ) as TaskActivity;
+}
+
+function bucketShares(
+  total: number,
+  entries: Array<[TaskActivity, number]>,
+): TaskTimingBucket[] {
+  const positive = entries.filter(([, duration]) => duration > 0);
+  let remaining = 1000;
+  return positive.map(([activity, durationMs], index) => {
+    const tenths = !(total > 0)
+      ? 0
+      : index === positive.length - 1
+        ? remaining
+        : Math.min(remaining, Math.round((durationMs / total) * 1000));
+    remaining -= tenths;
+    return {
+      activity,
+      durationMs,
+      percentage: total > 0 ? tenths / 10 : null,
+    };
+  });
+}
+
 export function timingBuckets(
   start: number,
   end: number,
@@ -214,45 +279,561 @@ export function timingBuckets(
       if (count) active.set(span, count);
       else active.delete(span);
     }
-    const lanes = new Map<string, Set<string>>();
-    for (const span of active.keys()) {
-      if (!lanes.has(span.lane)) lanes.set(span.lane, new Set());
-      lanes.get(span.lane)!.add(span.activity);
-    }
-    const activities = new Set<string>();
-    for (const kinds of lanes.values()) {
-      // Structural preparation spans contain model/tool activity in the same lane.
-      if (kinds.has("MODEL") || kinds.has("TOOL")) kinds.delete("PLATFORM");
-      for (const kind of kinds) activities.add(kind);
-    }
-    const running = [...activities].filter((a) => work.has(a));
-    const waiting = [...activities].filter((a) => waits.has(a));
-    const category = (
-      activities.has("UNKNOWN")
-        ? "UNKNOWN"
-        : running.length > 1
-          ? "PARALLEL"
-          : (running[0] ??
-            (waiting.length > 1 ? "MIXED_WAIT" : (waiting[0] ?? "UNKNOWN")))
-    ) as TaskActivity;
+    const category = exclusiveActivity(active.keys());
     totals.set(category, (totals.get(category) ?? 0) + sorted[i + 1]! - at);
   }
+  if (end === start) return [];
+  return bucketShares(end - start, [...totals]);
+}
+
+export interface InferenceUsage {
+  stage: string;
+  scope: string;
+  runId: string | null;
+}
+export interface InferenceContext {
+  taskId: string;
+  attemptIds: ReadonlySet<string>;
+  runIds: ReadonlySet<string>;
+  usages: ReadonlyMap<string, InferenceUsage>;
+  interventionIds: ReadonlySet<string>;
+  deterministicAnalysis: boolean;
+}
+
+/** Sole span attribution used by rebuild, timeline, and call detail. */
+export function inferSpanRuntime(
+  span: {
+    id: string;
+    lane: string;
+    label: string;
+    scope?: string;
+    intervention?: boolean;
+  },
+  ctx: InferenceContext,
+): TaskRuntimeKind | null {
+  if (span.scope === "ACCEPTANCE_REVIEW") return null;
+  if (span.intervention || ctx.interventionIds.has(span.id)) return "BROWSER";
+  if (span.id === "initial" || span.id.startsWith("state:task_executions:"))
+    return null;
+  // Case rows stay browser even when the reason is PROFILE_RESERVED.
+  if (
+    span.id.startsWith("state:execution_runs:") ||
+    span.id.startsWith("state:task_case_executions:")
+  )
+    return "BROWSER";
+  if (
+    span.label === "DEPLOYMENT_TARGET_REQUIRED" ||
+    span.label.startsWith("PROFILE_")
+  )
+    return null;
+  if (span.id.startsWith("model:")) {
+    const usage = ctx.usages.get(span.id.slice("model:".length));
+    if (usage?.scope === "EXECUTION" && usage.stage === "SPEC_ANALYSIS")
+      return ctx.deterministicAnalysis ? null : "SPEC_ANALYSIS";
+    if (usage && (usage.runId != null || usage.stage === "SPEC_EXECUTION"))
+      return "BROWSER";
+  }
+  // Compatibility runs set task.id = run.id, so a bare lane match is not browser.
+  if (span.lane !== ctx.taskId && ctx.attemptIds.has(span.lane))
+    return ctx.deterministicAnalysis ? null : "SPEC_ANALYSIS";
+  if (span.lane !== ctx.taskId && ctx.runIds.has(span.lane)) return "BROWSER";
+  return null;
+}
+
+export interface RuntimeAttemptFact {
+  id: string;
+  stageType: string;
+  executor: string | null;
+  createdAt: number;
+  finishedAt: number | null;
+}
+export interface RuntimeRunFact {
+  id: string;
+  createdAt: number;
+  finishedAt: number | null;
+}
+export interface RuntimeSpanFact {
+  id: string;
+  lane: string;
+  label: string;
+  activity: string;
+  scope?: string;
+  startedAt: number;
+  finishedAt: number | null;
+  intervention?: boolean;
+  /** Stored column. Inference does not read it. */
+  runtime?: string | null;
+}
+export interface RuntimeUsageFact extends InferenceUsage {
+  id: string;
+  ownerId: string;
+}
+export interface RuntimeProjectionInput {
+  taskId: string;
+  start: number;
+  end: number;
+  analysisStageStatus: string | null;
+  attempts: RuntimeAttemptFact[];
+  runs: RuntimeRunFact[];
+  spans: RuntimeSpanFact[];
+  usages: RuntimeUsageFact[];
+}
+export interface RuntimeSegment {
+  start: number;
+  end: number;
+  activity: TaskActivity;
+  runtime: RuntimeTag;
+}
+export interface RuntimeProjection {
+  elapsedMs: number | null;
+  buckets: TaskTimingBucket[];
+  segments: RuntimeSegment[];
+  runtimes: TaskRuntimeTiming[];
+  unassigned: TaskRuntimeResidual;
+  overlap: TaskRuntimeResidual;
+  ok: boolean;
+  occupiedMs: number;
+}
+
+function analysisAttempts(input: RuntimeProjectionInput) {
+  return input.attempts.filter(
+    (attempt) => attempt.stageType === "SPEC_ANALYSIS",
+  );
+}
+
+function historicalAgentIds(input: RuntimeProjectionInput) {
+  const ids = new Set<string>();
+  for (const attempt of analysisAttempts(input)) {
+    if (attempt.executor != null) continue;
+    const spanned = input.spans.some(
+      (span) =>
+        span.lane === attempt.id &&
+        span.lane !== input.taskId &&
+        span.scope !== "ACCEPTANCE_REVIEW" &&
+        (span.activity === "MODEL" ||
+          span.activity === "TOOL" ||
+          span.id.startsWith("model:") ||
+          span.id.startsWith("tool:")),
+    );
+    const linked = input.usages.some(
+      (usage) =>
+        usage.ownerId === attempt.id &&
+        usage.stage === "SPEC_ANALYSIS" &&
+        usage.scope === "EXECUTION",
+    );
+    if (spanned || linked) ids.add(attempt.id);
+  }
+  return ids;
+}
+
+function analysisApplicability(
+  input: RuntimeProjectionInput,
+  historical: ReadonlySet<string>,
+): RuntimeApplicability {
+  const attempts = analysisAttempts(input);
+  if (attempts.some((attempt) => attempt.executor === "AGENT_RUNTIME"))
+    return "MEASURED";
+  if (attempts.some((attempt) => historical.has(attempt.id))) return "PARTIAL";
+  if (
+    attempts.length > 0 &&
+    attempts.every((attempt) => attempt.executor === "DETERMINISTIC")
+  )
+    return "NOT_APPLICABLE";
+  if (
+    input.analysisStageStatus === "SKIPPED" ||
+    input.analysisStageStatus == null
+  )
+    return "NOT_APPLICABLE";
+  return "NOT_STARTED";
+}
+
+function tagShares(elapsed: number, occupied: Record<RuntimeTag, number>) {
+  const shares = {} as Record<RuntimeTag, number | null>;
+  if (!(elapsed > 0)) {
+    for (const tag of runtimeOrder) shares[tag] = null;
+    return shares;
+  }
+  const positive = runtimeOrder.filter((tag) => (occupied[tag] ?? 0) > 0);
   let remaining = 1000;
-  return [...totals].map(([activity, durationMs], i, all) => {
+  const lastPositive = positive[positive.length - 1];
+  for (const tag of runtimeOrder) {
+    const duration = occupied[tag] ?? 0;
+    if (duration <= 0 || lastPositive === undefined) {
+      shares[tag] = 0;
+      continue;
+    }
     const tenths =
-      end === start
-        ? 0
-        : i === all.length - 1
-          ? remaining
-          : Math.min(
-              remaining,
-              Math.round((durationMs / (end - start)) * 1000),
-            );
+      tag === lastPositive
+        ? remaining
+        : Math.min(remaining, Math.round((duration / elapsed) * 1000));
     remaining -= tenths;
-    return {
-      activity,
-      durationMs,
-      percentage: end === start ? null : tenths / 10,
-    };
+    shares[tag] = tenths / 10;
+  }
+  return shares;
+}
+
+function emptyResidual(): TaskRuntimeResidual {
+  return {
+    occupiedMs: 0,
+    percentage: null,
+    activeMs: 0,
+    waitingMs: 0,
+    unknownMs: 0,
+    buckets: [],
+  };
+}
+
+function classifyRuntime(
+  active: TimingSpan[],
+  masks: TaskRuntimeKind[],
+): RuntimeTag {
+  const working = new Set<TaskRuntimeKind>();
+  const waiting = new Set<TaskRuntimeKind>();
+  for (const span of active) {
+    if (span.runtime !== "SPEC_ANALYSIS" && span.runtime !== "BROWSER")
+      continue;
+    if (work.has(span.activity)) working.add(span.runtime);
+    else waiting.add(span.runtime);
+  }
+  const covered = new Set(masks);
+  if (working.size > 1) return "OVERLAP";
+  if (working.size === 1) {
+    const [runtime] = working;
+    if ([...waiting, ...covered].some((item) => item !== runtime))
+      return "OVERLAP";
+    return runtime!;
+  }
+  const idle = new Set<TaskRuntimeKind>([...waiting, ...covered]);
+  if (idle.size > 1) return "OVERLAP";
+  if (idle.size === 1) return [...idle][0]!;
+  return "UNASSIGNED";
+}
+
+export function projectRuntimeTiming(
+  input: RuntimeProjectionInput,
+): RuntimeProjection {
+  const elapsedMs =
+    Number.isFinite(input.start) &&
+    Number.isFinite(input.end) &&
+    input.end >= input.start
+      ? input.end - input.start
+      : null;
+  const attempts = analysisAttempts(input);
+  const historical = historicalAgentIds(input);
+  const deterministic =
+    attempts.length > 0 &&
+    attempts.every((attempt) => attempt.executor === "DETERMINISTIC");
+  const runIds = new Set(input.runs.map((run) => run.id));
+  const ctx: InferenceContext = {
+    taskId: input.taskId,
+    attemptIds: new Set(attempts.map((attempt) => attempt.id)),
+    runIds,
+    usages: new Map(input.usages.map((usage) => [usage.id, usage])),
+    interventionIds: new Set(
+      input.spans.filter((span) => span.intervention).map((span) => span.id),
+    ),
+    deterministicAnalysis: deterministic,
+  };
+  const execution = input.spans.filter(
+    (span) => span.scope !== "ACCEPTANCE_REVIEW",
+  );
+  const timed: TimingSpan[] = execution.map((span) => ({
+    activity: span.activity,
+    lane: span.lane,
+    startedAt: new Date(span.startedAt),
+    finishedAt: span.finishedAt === null ? null : new Date(span.finishedAt),
+    runtime: inferSpanRuntime(span, ctx),
+  }));
+  const agent = attempts.filter(
+    (attempt) =>
+      attempt.executor === "AGENT_RUNTIME" || historical.has(attempt.id),
+  );
+  const masks: Array<{ runtime: TaskRuntimeKind; from: number; to: number }> =
+    [];
+  const close = (finishedAt: number | null) => finishedAt ?? input.end;
+  if (elapsedMs !== null) {
+    for (const attempt of agent)
+      masks.push({
+        runtime: "SPEC_ANALYSIS",
+        from: attempt.createdAt,
+        to: close(attempt.finishedAt),
+      });
+    if (agent.length)
+      for (const span of execution)
+        if (span.label === "ANALYSIS_INPUT_REQUIRED")
+          masks.push({
+            runtime: "SPEC_ANALYSIS",
+            from: span.startedAt,
+            to: close(span.finishedAt),
+          });
+    for (const run of input.runs)
+      masks.push({
+        runtime: "BROWSER",
+        from: run.createdAt,
+        to: close(run.finishedAt),
+      });
+    for (const span of execution)
+      if (
+        span.id.startsWith("state:task_case_executions:") &&
+        !runIds.has(span.lane)
+      )
+        masks.push({
+          runtime: "BROWSER",
+          from: span.startedAt,
+          to: close(span.finishedAt),
+        });
+  }
+  const caseWait = execution.some(
+    (span) =>
+      span.id.startsWith("state:task_case_executions:") &&
+      !runIds.has(span.lane),
+  );
+  const applicability = {
+    SPEC_ANALYSIS: analysisApplicability(input, historical),
+    BROWSER: (input.runs.length > 0 || caseWait
+      ? "MEASURED"
+      : "NOT_STARTED") as RuntimeApplicability,
+  };
+  const buckets =
+    elapsedMs === null ? [] : timingBuckets(input.start, input.end, timed);
+  const segments =
+    elapsedMs === null ? [] : sweep(input.start, input.end, timed, masks);
+  const occupied = {
+    SPEC_ANALYSIS: 0,
+    BROWSER: 0,
+    UNASSIGNED: 0,
+    OVERLAP: 0,
+  } as Record<RuntimeTag, number>;
+  const activities = {
+    SPEC_ANALYSIS: new Map<TaskActivity, number>(),
+    BROWSER: new Map<TaskActivity, number>(),
+    UNASSIGNED: new Map<TaskActivity, number>(),
+    OVERLAP: new Map<TaskActivity, number>(),
+  };
+  const partition = {
+    SPEC_ANALYSIS: { activeMs: 0, waitingMs: 0, unknownMs: 0 },
+    BROWSER: { activeMs: 0, waitingMs: 0, unknownMs: 0 },
+    UNASSIGNED: { activeMs: 0, waitingMs: 0, unknownMs: 0 },
+    OVERLAP: { activeMs: 0, waitingMs: 0, unknownMs: 0 },
+  };
+  for (const segment of segments) {
+    const dt = segment.end - segment.start;
+    occupied[segment.runtime] = (occupied[segment.runtime] ?? 0) + dt;
+    const totals = activities[segment.runtime];
+    totals?.set(segment.activity, (totals.get(segment.activity) ?? 0) + dt);
+    const part = partition[segment.runtime];
+    if (!part) continue;
+    if (activeActivities.has(segment.activity)) part.activeMs += dt;
+    else if (waits.has(segment.activity)) part.waitingMs += dt;
+    else part.unknownMs += dt;
+  }
+  const shares =
+    elapsedMs === null
+      ? tagShares(0, occupied)
+      : tagShares(elapsedMs, occupied);
+  const residual = (tag: "UNASSIGNED" | "OVERLAP"): TaskRuntimeResidual => ({
+    occupiedMs: occupied[tag] ?? 0,
+    percentage: shares[tag] ?? null,
+    ...(partition[tag] ?? { activeMs: 0, waitingMs: 0, unknownMs: 0 }),
+    buckets: bucketShares(occupied[tag] ?? 0, [...(activities[tag] ?? [])]),
   });
+  const cumulative = {
+    SPEC_ANALYSIS: { modelMs: 0, toolMs: 0, platformMs: 0, recoveryMs: 0 },
+    BROWSER: { modelMs: 0, toolMs: 0, platformMs: 0, recoveryMs: 0 },
+  };
+  if (elapsedMs !== null)
+    for (const span of timed) {
+      if (!span.runtime || !work.has(span.activity) || !span.finishedAt)
+        continue;
+      const from = Math.max(input.start, span.startedAt.getTime());
+      const to = Math.min(input.end, span.finishedAt.getTime());
+      if (to <= from) continue;
+      const key = `${span.activity.toLowerCase()}Ms` as
+        "modelMs" | "toolMs" | "platformMs" | "recoveryMs";
+      const counts = cumulative[span.runtime];
+      if (counts) counts[key] += to - from;
+    }
+  const runtimes: TaskRuntimeTiming[] = (
+    ["SPEC_ANALYSIS", "BROWSER"] as const
+  ).map((runtime) => ({
+    runtime,
+    applicability: applicability[runtime],
+    occupiedMs: occupied[runtime] ?? 0,
+    percentage: shares[runtime] ?? null,
+    ...(partition[runtime] ?? { activeMs: 0, waitingMs: 0, unknownMs: 0 }),
+    buckets: bucketShares(occupied[runtime] ?? 0, [
+      ...(activities[runtime] ?? []),
+    ]),
+    cumulative: cumulative[runtime] ?? {
+      modelMs: 0,
+      toolMs: 0,
+      platformMs: 0,
+      recoveryMs: 0,
+    },
+  }));
+  const unassigned = residual("UNASSIGNED");
+  const overlap = residual("OVERLAP");
+  const occupiedMs = runtimeOrder.reduce(
+    (sum, tag) => sum + (occupied[tag] ?? 0),
+    0,
+  );
+  return {
+    elapsedMs,
+    buckets,
+    segments: mergeSegments(segments),
+    runtimes,
+    unassigned,
+    overlap,
+    occupiedMs,
+    ok: invariantHolds(elapsedMs, buckets, runtimes, unassigned, overlap),
+  };
+}
+
+function mergeSegments(segments: RuntimeSegment[]) {
+  const merged: RuntimeSegment[] = [];
+  for (const segment of segments) {
+    const last = merged.at(-1);
+    if (
+      last &&
+      last.end === segment.start &&
+      last.activity === segment.activity &&
+      last.runtime === segment.runtime
+    )
+      last.end = segment.end;
+    else merged.push({ ...segment });
+  }
+  return merged;
+}
+
+function sweep(
+  start: number,
+  end: number,
+  spans: TimingSpan[],
+  masks: Array<{ runtime: TaskRuntimeKind; from: number; to: number }>,
+): RuntimeSegment[] {
+  const points = new Map<
+    number,
+    Array<
+      | { kind: "span"; span: TimingSpan; delta: number }
+      | { kind: "mask"; runtime: TaskRuntimeKind; delta: number }
+    >
+  >();
+  const add = (
+    at: number,
+    event:
+      | { kind: "span"; span: TimingSpan; delta: number }
+      | {
+          kind: "mask";
+          runtime: TaskRuntimeKind;
+          delta: number;
+        },
+  ) => points.set(at, [...(points.get(at) ?? []), event]);
+  points.set(start, []);
+  points.set(end, []);
+  for (const span of spans) {
+    if (!span.finishedAt && !waits.has(span.activity)) continue;
+    const from = Math.max(start, span.startedAt.getTime());
+    const to = Math.min(end, span.finishedAt?.getTime() ?? end);
+    if (to <= from) continue;
+    add(from, { kind: "span", span, delta: 1 });
+    add(to, { kind: "span", span, delta: -1 });
+  }
+  for (const mask of masks) {
+    const from = Math.max(start, mask.from);
+    const to = Math.min(end, mask.to);
+    if (to <= from) continue;
+    add(from, { kind: "mask", runtime: mask.runtime, delta: 1 });
+    add(to, { kind: "mask", runtime: mask.runtime, delta: -1 });
+  }
+  const active = new Map<TimingSpan, number>();
+  const covered = new Map<TaskRuntimeKind, number>();
+  const segments: RuntimeSegment[] = [];
+  const sorted = [...points.keys()].sort((a, b) => a - b);
+  for (let index = 0; index < sorted.length - 1; index++) {
+    const at = sorted[index]!;
+    for (const event of points.get(at)!) {
+      if (event.kind === "span") {
+        const count = (active.get(event.span) ?? 0) + event.delta;
+        if (count) active.set(event.span, count);
+        else active.delete(event.span);
+      } else {
+        const count = (covered.get(event.runtime) ?? 0) + event.delta;
+        if (count > 0) covered.set(event.runtime, count);
+        else covered.delete(event.runtime);
+      }
+    }
+    const next = sorted[index + 1]!;
+    if (next <= at) continue;
+    segments.push({
+      start: at,
+      end: next,
+      activity: exclusiveActivity(active.keys()),
+      // A mask counts only when it covers this whole half-open slice.
+      runtime: classifyRuntime([...active.keys()], [...covered.keys()]),
+    });
+  }
+  return segments;
+}
+
+function invariantHolds(
+  elapsedMs: number | null,
+  buckets: TaskTimingBucket[],
+  runtimes: TaskRuntimeTiming[],
+  unassigned: TaskRuntimeResidual,
+  overlap: TaskRuntimeResidual,
+) {
+  if (!(elapsedMs !== null && elapsedMs > 0)) return true;
+  const parts = [...runtimes, unassigned, overlap];
+  if (buckets.reduce((sum, bucket) => sum + bucket.durationMs, 0) !== elapsedMs)
+    return false;
+  if (parts.reduce((sum, part) => sum + part.occupiedMs, 0) !== elapsedMs)
+    return false;
+  for (const part of parts) {
+    if (
+      part.buckets.reduce((sum, bucket) => sum + bucket.durationMs, 0) !==
+      part.occupiedMs
+    )
+      return false;
+    if (part.activeMs + part.waitingMs + part.unknownMs !== part.occupiedMs)
+      return false;
+  }
+  const names = new Set<TaskActivity>();
+  for (const bucket of buckets) names.add(bucket.activity);
+  for (const part of parts)
+    for (const bucket of part.buckets) names.add(bucket.activity);
+  for (const activity of names) {
+    const global =
+      buckets.find((bucket) => bucket.activity === activity)?.durationMs ?? 0;
+    const split = parts.reduce(
+      (sum, part) =>
+        sum +
+        (part.buckets.find((bucket) => bucket.activity === activity)
+          ?.durationMs ?? 0),
+      0,
+    );
+    if (global !== split) return false;
+  }
+  const sumBy = (pick: (part: TaskRuntimeResidual) => number) =>
+    parts.reduce((sum, part) => sum + pick(part), 0);
+  const globalBy = (activities: Set<string>) =>
+    buckets
+      .filter((bucket) => activities.has(bucket.activity))
+      .reduce((sum, bucket) => sum + bucket.durationMs, 0);
+  return (
+    sumBy((part) => part.activeMs) === globalBy(activeActivities) &&
+    sumBy((part) => part.waitingMs) === globalBy(waits) &&
+    sumBy((part) => part.unknownMs) === globalBy(new Set(["UNKNOWN"]))
+  );
+}
+
+export function runtimeAttributionFailed(
+  summary: unknown,
+  revision: bigint | number | string,
+) {
+  if (!summary || typeof summary !== "object") return false;
+  const row = summary as Record<string, unknown>;
+  return (
+    row.runtimeAttribution === "FAILED" &&
+    String(row.runtimeAttributionRevision) === String(revision)
+  );
 }
