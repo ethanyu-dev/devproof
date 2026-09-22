@@ -637,6 +637,10 @@ export const runtimeTraceEventSchema = z.discriminatedUnion("kind", [
       inputPreview: z.unknown(),
       model: z.string().trim().min(1).max(160),
       provider: z.string().trim().min(1).max(80),
+      promptSections: z
+        .array(z.string().trim().min(1).max(120))
+        .max(200)
+        .optional(),
     }),
   }),
   z.object({
